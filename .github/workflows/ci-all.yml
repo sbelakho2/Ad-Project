@@ -161,7 +161,7 @@ jobs:
         working-directory: console
         run: npm run bundle-size
       - name: Upload bundle size report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: bundle-size-report
@@ -177,7 +177,7 @@ jobs:
         working-directory: console
         run: npm run e2e
       - name: Upload Playwright screenshots on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: playwright-screenshots
@@ -222,7 +222,7 @@ jobs:
         working-directory: console
         run: npx @lhci/cli autorun --config=./lighthouse.config.cjs || true
       - name: Upload Lighthouse reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: console-lighthouse-reports
@@ -266,7 +266,7 @@ jobs:
         working-directory: quality
         run: npx playwright test e2e/billing/usage-to-invoice.spec.ts --reporter=list || true
       - name: Upload E2E artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: billing-e2e-artifacts
@@ -295,7 +295,7 @@ jobs:
             echo "No OpenAPI baseline found. Skipping drift guard."
           fi
       - name: Upload Playwright videos on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: playwright-videos
@@ -337,7 +337,7 @@ jobs:
         working-directory: .
         run: npx @lhci/cli autorun --config=quality/lighthouse/website.config.cjs || true
       - name: Upload Lighthouse reports (website)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: website-lighthouse-reports
@@ -352,7 +352,7 @@ jobs:
           ANALYZE=true npm run build || true
           cd ..
       - name: Upload bundle analyzer reports (website)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: website-bundle-analyzer
@@ -396,7 +396,7 @@ jobs:
         working-directory: quality
         run: npx playwright test e2e/website/visual.spec.ts --reporter=list || true
       - name: Upload visual regression artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: website-visual-regression
@@ -452,7 +452,7 @@ jobs:
       
       - name: Upload size report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-sdk-size-report
           path: sdk/core/android/build/reports/sdk-size/size-report.json
@@ -460,7 +460,7 @@ jobs:
       
       - name: Upload Dokka HTML docs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-sdk-api-docs
           path: sdk/core/android/build/dokka/html/
@@ -507,7 +507,7 @@ jobs:
       
       - name: Upload DocC documentation
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ios-sdk-docc-docs
           path: sdk/core/ios/docs/
@@ -544,7 +544,7 @@ jobs:
           fi
       - name: Upload iOS API diff
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ios-api-diff
           path: sdk/core/ios/api-diff.txt
@@ -715,7 +715,7 @@ jobs:
       
       - name: Upload tvOS size report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: tvos-sdk-size-report
           path: sdk/ctv/tvos/build/reports/size-report.json
@@ -798,7 +798,7 @@ jobs:
           output: 'sbom-${{ matrix.image.name }}.json'
       
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: sbom-${{ matrix.image.name }}

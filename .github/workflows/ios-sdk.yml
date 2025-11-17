@@ -95,7 +95,7 @@ jobs:
             }
 
       - name: Upload xcodebuild log (${{ matrix.platform }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: ios-xcodebuild-logs-${{ matrix.platform }}
@@ -103,7 +103,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload xcresult bundle (${{ matrix.platform }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: ios-xcresult-${{ matrix.platform }}
@@ -131,7 +131,7 @@ jobs:
           bash ../../../scripts/ios-docs.sh
 
       - name: Upload iOS docs archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ios-sdk-docs
           path: sdk/core/ios/build/ios-docs.zip

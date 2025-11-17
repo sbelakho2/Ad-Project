@@ -61,7 +61,7 @@ jobs:
           githubToken: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: test-results-${{ matrix.unityVersion }}
@@ -122,7 +122,7 @@ jobs:
           done
       
       - name: Upload Build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-${{ matrix.targetPlatform }}
           path: builds
@@ -174,7 +174,7 @@ jobs:
             .
       
       - name: Upload Package Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unity-package
           path: apex-mediation-sdk-*.tgz
@@ -199,7 +199,7 @@ jobs:
           echo "Documentation generation would run here"
       
       - name: Upload Documentation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: api-documentation
           path: Documentation~/*.md

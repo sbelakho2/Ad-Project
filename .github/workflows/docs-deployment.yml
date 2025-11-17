@@ -51,7 +51,7 @@ jobs:
             --theme default
 
       - name: Upload backend docs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: backend-docs
           path: backend/docs/
@@ -85,7 +85,7 @@ jobs:
             --readme README.md
 
       - name: Upload iOS docs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: ios-docs
           path: sdks/ios/docs/
@@ -111,7 +111,7 @@ jobs:
         run: ./gradlew dokkaHtml
 
       - name: Upload Android docs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: android-docs
           path: sdks/android/build/dokka/html/
@@ -142,7 +142,7 @@ jobs:
             --template node_modules/docdash
 
       - name: Upload Unity docs
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: unity-docs
           path: sdks/unity/docs/
@@ -370,7 +370,7 @@ jobs:
           EOF
 
       - name: Upload docs site
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: docs-site
           path: dist/

@@ -80,7 +80,7 @@ jobs:
       
       - name: Upload Test Results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-results-${{ matrix.unityVersion }}-${{ matrix.targetPlatform }}
           path: artifacts/
@@ -136,7 +136,7 @@ jobs:
           buildsPath: builds
       
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-${{ matrix.targetPlatform }}
           path: builds/${{ matrix.targetPlatform }}
@@ -230,13 +230,13 @@ jobs:
           echo "{\n  \"artifact\": \"$TAR\",\n  \"sizeBytes\": $SIZE_BYTES,\n  \"sizeKB\": $SIZE_KB,\n  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n}" > unity-upm-size-report.json
           cat unity-upm-size-report.json
       - name: Upload size report artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unity-upm-size-report
           path: unity-upm-size-report.json
           retention-days: 30
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unity-upm-tarball
           path: com.rivalapexmediation.sdk-*.tgz

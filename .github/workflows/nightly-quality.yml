@@ -61,7 +61,7 @@ jobs:
           fi
       
       - name: Upload load test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: load-test-results-${{ matrix.test.name }}
@@ -203,7 +203,7 @@ jobs:
           echo "✅ Health check passed: $RESPONSE"
       
       - name: Upload chaos test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: chaos-results-${{ matrix.scenario.name }}

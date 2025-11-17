@@ -71,21 +71,21 @@ jobs:
           sdk/core/android/gradlew -p sdk/ctv/android-tv checkCtvSdkSize validateSdkConfig --no-daemon --stacktrace
 
       - name: Upload AAR artifact (CTV)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ctv-android-aar
           path: sdk/ctv/android-tv/build/outputs/aar/*-release.aar
           if-no-files-found: error
 
       - name: Upload SDK size report (CTV)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ctv-android-size-report
           path: sdk/ctv/android-tv/build/reports/sdk-size/size-report.json
           if-no-files-found: error
 
       - name: Upload unit test results (CTV)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: ctv-android-test-results

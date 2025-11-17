@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Upload changelog artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: changelog
           path: CHANGELOG.md
@@ -143,7 +143,7 @@ jobs:
             -output build/ApexMediation.xcframework
 
       - name: Upload iOS artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: ios-sdk
           path: sdks/ios/build/ApexMediation.xcframework
@@ -180,7 +180,7 @@ jobs:
         run: ./gradlew test
 
       - name: Upload Android artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v5
         with:
           name: android-sdk
           path: sdks/android/build/outputs/aar/*.aar
@@ -269,14 +269,14 @@ jobs:
           cat unity-package-manifest.json
 
       - name: Upload Unity UPM tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unity-sdk
           path: com.rivalapexmediation.sdk-*.tgz
           retention-days: 90
       
       - name: Upload package manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unity-package-manifest
           path: unity-package-manifest.json

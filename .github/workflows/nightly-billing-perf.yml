@@ -31,7 +31,7 @@ jobs:
         run: |
           k6 run quality/perf/billing/invoices-api.js || true
       - name: Upload k6 artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: k6-billing-perf

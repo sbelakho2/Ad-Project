@@ -49,28 +49,28 @@ jobs:
         run: npm run gen:mock-trace
 
       - name: Upload dist bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: web-sdk-dist
           path: packages/web-sdk/dist
           if-no-files-found: error
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: web-sdk-coverage
           path: packages/web-sdk/coverage
           if-no-files-found: error
 
       - name: Upload mock trace
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: web-sdk-mock-trace
           path: packages/web-sdk/artifacts/mock-success-trace.json
           if-no-files-found: error
 
       - name: Upload typedoc site
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: web-sdk-typedoc
           path: packages/web-sdk/typedoc
