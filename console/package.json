@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@floating-ui/react-dom": "^2.0.5",
-    "@hookform/resolvers": "^3.3.2",
+    "@hookform/resolvers": "^5.2.2",
     "@tanstack/react-query": "^5.8.4",
     "@tanstack/react-table": "^8.10.7",
     "axios": "^1.6.2",
