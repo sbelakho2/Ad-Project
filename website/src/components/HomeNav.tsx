@@ -22,6 +22,9 @@ export default function HomeNav() {
     <nav className="relative z-20">
       {/* Desktop Navigation */}
       <div className="hidden md:flex items-center justify-center gap-8 py-6">
+        <Link href="/" className="mr-4">
+          <img src="/logo.jpg" alt="ApexMediation" className="h-10 w-auto" />
+        </Link>
         {navItems.map((item) => (
           <Link
             key={item.href}

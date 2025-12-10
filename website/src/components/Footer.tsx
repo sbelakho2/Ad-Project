@@ -21,6 +21,11 @@ export default function Footer() {
               <li><a href="/careers" className="text-brand-600 hover:text-brand-700 hover:underline">Careers</a></li>
               <li><a href="/press" className="text-brand-600 hover:text-brand-700 hover:underline">Press Kit</a></li>
             </ul>
+            <div className="mt-6 text-xs text-gray-500">
+              <p>Harju maakond, Tallinn</p>
+              <p>Kesklinna linnaosa, Sakala tn 7-2</p>
+              <p>10141, Estonia</p>
+            </div>
           </div>
 
           {/* Product */}
@@ -73,7 +78,7 @@ export default function Footer() {
                   <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
                 </svg>
               </SocialIconLink>
-              <SocialIconLink href="https://github.com/apexmediation" label="GitHub">
+              <SocialIconLink href="https://github.com/sbelakho2/apex-mediation-platform" label="GitHub">
                 <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
                   <path
                     fillRule="evenodd"

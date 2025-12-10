@@ -176,8 +176,8 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
           {/* Logo */}
           <div className="p-6 border-b">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-primary-600 flex items-center justify-center">
-                <span className="text-white font-bold">A</span>
+              <div className="h-10 w-10 rounded-lg bg-primary-600 flex items-center justify-center overflow-hidden">
+                <img src="/logo.jpg" alt="ApexMediation Logo" className="h-full w-full object-cover" />
               </div>
               <div>
                 <h1 className="font-semibold text-gray-900">ApexMediation</h1>

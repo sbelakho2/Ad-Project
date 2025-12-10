@@ -107,11 +107,10 @@ services:
       - backend
     ports:
       - "${NGINX_PORT:-8080}:80"
-      # - "443:443" # Enable only after certificates exist and SSL config is mounted
+      - "443:443"
     volumes:
       - ./nginx/apexmediation.conf:/etc/nginx/conf.d/apexmediation.conf:ro
-      # Optional: enable HTTPS only after certs exist on the droplet
-      # - ./nginx/apexmediation.ssl.conf:/etc/nginx/conf.d/apexmediation.ssl.conf:ro
+      - ./nginx/apexmediation.ssl.conf:/etc/nginx/conf.d/apexmediation.ssl.conf:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
       # Optional: Basic Auth for /metrics — mount htpasswd directory
       - ./nginx/htpasswd:/etc/nginx/htpasswd:ro
