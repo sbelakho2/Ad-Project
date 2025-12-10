@@ -36,9 +36,24 @@ def train_and_export():
     # Mapping to feature_1, feature_2, feature_3 as expected by inference service
     # feature_1: Network entropy -> using auction_bid_count as proxy
     # feature_2: CTIT -> using ctit_seconds
-    # feature_3: IP score -> using omsdk_viewable_ratio as proxy
+    # feature_3: IP score -> using Tor exit node match (1.0 if Tor, 0.0 otherwise)
     
-    features = df[['auction_bid_count', 'ctit_seconds', 'omsdk_viewable_ratio']].copy()
+    # Load Tor exit nodes
+    tor_dir = Path("data/enrichment/v1/tor")
+    # Find latest date directory
+    if tor_dir.exists():
+        latest_date_dir = sorted([d for d in tor_dir.iterdir() if d.is_dir()])[-1]
+        tor_list_path = latest_date_dir / "torbulkexitlist.txt"
+        print(f"Loading Tor exit nodes from {tor_list_path}...")
+        with open(tor_list_path, "r") as f:
+            tor_ips = set(line.strip() for line in f if line.strip())
+    else:
+        print("Warning: Tor enrichment data not found. Using empty set.")
+        tor_ips = set()
+
+    df['is_tor'] = df['ip'].apply(lambda x: 1.0 if x in tor_ips else 0.0)
+
+    features = df[['auction_bid_count', 'ctit_seconds', 'is_tor']].copy()
     features = features.fillna(0)
     
     X = torch.tensor(features.values, dtype=torch.float32)

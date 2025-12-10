@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "content_type": "text/plain",
+      "fetched_at": "2025-12-10T23:09:11Z",
+      "file": "torbulkexitlist.txt",
+      "license": "Tor Project License (https://check.torproject.org/api/terms)",
+      "metadata": {},
+      "name": "torbulkexitlist",
+      "sha256": "a9491cdfc291a1f6691cdf0419696f27a9d9e71094f4f53d1c29cd9c43956f61",
+      "url": "https://check.torproject.org/torbulkexitlist"
+    },
+    {
+      "content_type": "application/json",
+      "fetched_at": "2025-12-10T23:09:11Z",
+      "file": "onionoo.json",
+      "license": "CC-BY-3.0 (Tor Project Onionoo API terms)",
+      "metadata": {
+        "relayCount": 2997
+      },
+      "name": "onionoo-details",
+      "sha256": "1ee64313a53a66bbadafbfa92992b061915078a6217f363c3130c937237d466b",
+      "url": "https://onionoo.torproject.org/details?type=relay&flag=Exit"
+    }
+  ],
+  "generatedAt": "2025-12-10T23:09:12Z",
+  "runDate": "2025-12-10",
+  "source": "tor",
+  "version": "v1"
+}

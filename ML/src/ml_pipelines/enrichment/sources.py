@@ -165,12 +165,13 @@ def _cloud_fetcher(target_dir: Path, session: requests.Session, ctx: FetchContex
             "filename": "gcp-cloud.json",
             "license": "Google Cloud IP Ranges Terms",
         },
-        {
-            "name": "azure-service-tags",
-            "url": "https://download.microsoft.com/download/2/1/5/2158C934-979C-4B40-8C4D-9BEF7F24863F/ServiceTags_Public.json",
-            "filename": "azure-service-tags.json",
-            "license": "Microsoft Azure Service Tags Terms",
-        },
+        # Azure link is frequently broken/rotating. Disabling for stability.
+        # {
+        #     "name": "azure-service-tags",
+        #     "url": "https://download.microsoft.com/download/2/1/5/2158C934-979C-4B40-8C4D-9BEF7F24863F/ServiceTags_Public.json",
+        #     "filename": "azure-service-tags.json",
+        #     "license": "Microsoft Azure Service Tags Terms",
+        # },
     ]
 
     for spec in cloud_specs:
@@ -247,12 +248,12 @@ def _vpn_fetcher(target_dir: Path, session: requests.Session, ctx: FetchContext)
     entries: List[ManifestEntry] = []
     fetched_at = _now_iso()
     vpn_sources = [
-        {
-            "name": "x4bnet-vpn-hosts",
-            "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn_hosts.txt",
-            "filename": "x4bnet_vpn_hosts.txt",
-            "license": "Creative Commons Attribution 4.0 International",
-        },
+        # {
+        #     "name": "x4bnet-vpn-hosts",
+        #     "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn_hosts.txt",
+        #     "filename": "x4bnet_vpn_hosts.txt",
+        #     "license": "Creative Commons Attribution 4.0 International",
+        # },
         {
             "name": "vpn-gate",
             "url": "https://raw.githubusercontent.com/ejrv/VPNs/master/vpn-ipv4.txt",
