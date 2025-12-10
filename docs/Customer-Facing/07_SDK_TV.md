@@ -8,10 +8,10 @@ The Apex Mediation SDK supports Connected TV (CTV) platforms, specifically Andro
 
 ### 1. Dependencies
 
-Use the same dependencies as the standard Android SDK.
+Add the CTV module to your `build.gradle`.
 
 ```groovy
-implementation 'com.apexmediation.sdk:core:1.0.0'
+implementation 'com.rivalapexmediation.ctv:android-tv:0.1.0'
 ```
 
 ### 2. UI & Navigation
@@ -43,12 +43,21 @@ Declare touchscreen as not required in `AndroidManifest.xml`:
 
 ### 1. Dependencies
 
-Add the tvOS specific pod or target in your Podfile:
+Add the tvOS specific package via Swift Package Manager.
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/sbelakho2/apex-mediation-platform", from: "1.0.0")
+]
+```
+
+Or via CocoaPods:
 
 ```ruby
-platform :tvos, '12.0'
+platform :tvos, '14.0'
 target 'MyAppTV' do
-  pod 'ApexMediation', '~> 1.0.0'
+  pod 'CTVSDK', '~> 1.0.0'
 end
 ```
 

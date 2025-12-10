@@ -7,18 +7,24 @@ The Mediation Debugger is a built-in tool in the SDK that helps you verify your 
 ### How to Open
 
 **Android:**
-```java
-ApexMediation.openDebugger(context);
+```kotlin
+// Shows the in-app debug panel
+BelAds.showDebugPanel(activity)
 ```
 
 **iOS:**
 ```swift
-ApexMediation.presentDebugger(from: self)
+// iOS currently supports programmatic debug info only
+let info = BelAds.getDebugInfo()
+print("SDK Debug Info: \(info)")
 ```
 
 **Unity:**
 ```csharp
-ApexMediation.OpenDebugger();
+// Validate specific adapters programmatically
+ApexMediation.ValidateAdapter("admob", credentials, result => {
+    Debug.Log($"Adapter Status: {result.IsValid}");
+});
 ```
 
 ### Features
@@ -36,8 +42,8 @@ During development, you should always use Test Mode to avoid flagging your accou
 You can enable test mode programmatically or via the Console.
 
 **Programmatically:**
-```java
-ApexMediation.setTestMode(true);
+```kotlin
+BelAds.setTestMode(true)
 ```
 
 **Console:**

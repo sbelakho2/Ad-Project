@@ -4,7 +4,7 @@
 
 ### 1. Import SDK
 
-1.  Download the `ApexMediation.unitypackage` from the [Releases Page](#).
+1.  Download the `ApexMediation.unitypackage` from the [Releases Page](https://github.com/sbelakho2/apex-mediation-platform/releases).
 2.  In Unity, go to **Assets > Import Package > Custom Package**.
 3.  Select the downloaded file and click **Import**.
 
@@ -20,12 +20,12 @@ The SDK uses the External Dependency Manager for Unity (EDM4U) to handle Android
 Create a script (e.g., `AdsManager.cs`) and attach it to a GameObject in your first scene.
 
 ```csharp
-using RivalApex.Mediation;
+using Apex.Mediation;
 using UnityEngine;
 
 public class AdsManager : MonoBehaviour
 {
-    [SerializeField] private SDKConfig sdkConfig; // Assign in Inspector
+    [SerializeField] private ApexConfig sdkConfig; // Assign in Inspector
 
     void Start()
     {

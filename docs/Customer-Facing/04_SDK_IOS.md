@@ -26,7 +26,7 @@ Run `pod install`.
 #### Swift Package Manager
 
 1.  File > Add Packages...
-2.  Enter URL: `https://github.com/apexmediation/ios-sdk`
+2.  Enter URL: `https://github.com/sbelakho2/apex-mediation-platform`
 3.  Select version `1.0.0`
 
 ### 2. Initialize SDK

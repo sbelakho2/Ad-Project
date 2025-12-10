@@ -36,7 +36,7 @@ export default async function Home() {
             Go to Login
           </Link>
           <a
-            href="https://github.com/sbelakho2/Ad-Project/blob/main/docs/QUICK_START.md"
+            href="https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/QUICK_START.md"
             target="_blank"
             rel="noreferrer"
             className="btn btn-outline px-8 py-3 text-base font-semibold"

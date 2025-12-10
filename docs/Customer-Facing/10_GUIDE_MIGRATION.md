@@ -32,9 +32,10 @@ IronSource.loadInterstitial();
 ```
 
 **After (Apex):**
-```java
-ApexMediation.initialize(this, "APP_ID", ...);
-ApexMediation.loadInterstitial("PLACEMENT_ID");
+```kotlin
+BelAds.initialize(context, "APP_ID")
+// Load calls are handled via the specific ad format controllers
+// e.g., BelInterstitial.load("PLACEMENT_ID")
 ```
 
 ### 3. Configure Networks (BYO)
