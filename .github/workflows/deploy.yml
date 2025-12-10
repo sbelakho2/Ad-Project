@@ -33,6 +33,6 @@ jobs:
               cd /opt/apex && git fetch --all && git reset --hard origin/main
             fi
             cd /opt/apex
-            NGINX_PORT=80 docker compose -f infrastructure/docker-compose.prod.yml pull || true
-            NGINX_PORT=80 docker compose -f infrastructure/docker-compose.prod.yml up -d
+            NGINX_PORT=80 COMPOSE_PROFILES=ui docker compose -f infrastructure/docker-compose.prod.yml pull || true
+            NGINX_PORT=80 COMPOSE_PROFILES=ui docker compose -f infrastructure/docker-compose.prod.yml up -d
           '
