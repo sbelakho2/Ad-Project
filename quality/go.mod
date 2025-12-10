@@ -1,4 +1,4 @@
-module github.com/sbelakho2/Ad-Project/quality
+module github.com/sbelakho2/apex-mediation-platform/quality
 
 go 1.21
 

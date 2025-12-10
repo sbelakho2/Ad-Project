@@ -32,7 +32,7 @@ You can also add the package by Git URL in `Packages/manifest.json`:
 ```jsonc
 {
   "dependencies": {
-    "com.apex.mediation": "file:../Ad-Project/sdk/core/unity"
+    "com.apex.mediation": "file:../apex-mediation-platform/sdk/core/unity"
   }
 }
 ```

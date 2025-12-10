@@ -31,12 +31,18 @@ jobs:
           find . -maxdepth 1 -not -name '.git' -not -name '.' -exec rm -rf {} +
           cd ..
 
-          # Copy SDKs
+          # Copy SDKs using rsync to exclude unwanted files
           mkdir -p public-repo/sdk
-          cp -r private-repo/sdk/* public-repo/sdk/
-          # Remove any internal build artifacts if they exist
-          find public-repo/sdk -name ".build" -type d -exec rm -rf {} +
-          find public-repo/sdk -name "build" -type d -exec rm -rf {} +
+          rsync -av --exclude='node_modules' \
+                    --exclude='.gradle' \
+                    --exclude='.gradle-home' \
+                    --exclude='.gradle-dist' \
+                    --exclude='build' \
+                    --exclude='.build' \
+                    --exclude='.DS_Store' \
+                    --exclude='*.jar' \
+                    --exclude='*.aar' \
+                    private-repo/sdk/ public-repo/sdk/
 
           # Copy Documentation
           mkdir -p public-repo/docs
@@ -48,6 +54,10 @@ jobs:
 
           # Copy Meta Files
           cp private-repo/CHANGELOG.md public-repo/
+          # Ensure README is copied if it exists in private repo root, otherwise use the one in docs/Public
+          if [ -f private-repo/docs/Public/README.md ]; then
+            cp private-repo/docs/Public/README.md public-repo/README.md
+          fi
           cp private-repo/docs/Public/README.md public-repo/
 
       - name: Commit and Push

@@ -253,8 +253,8 @@ export class InvoiceService {
         .text('ApexMediation', 50, 150)
         .fontSize(10)
         .text('Bel Consulting OÜ', 50, 165)
-        .text('Registry Code: [TBD]', 50, 180)
-        .text('VAT: [TBD]', 50, 195)
+        .text('Harju maakond, Tallinn, Kesklinna linnaosa', 50, 180)
+        .text('Sakala tn 7-2, 10141', 50, 195)
         .moveDown();
 
       // Customer info

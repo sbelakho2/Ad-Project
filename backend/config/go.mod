@@ -1,4 +1,4 @@
-module github.com/sbelakho2/Ad-Project/backend/config
+module github.com/sbelakho2/apex-mediation-platform/backend/config
 
 go 1.21
 

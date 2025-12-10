@@ -65,8 +65,8 @@ Delivery status lives in the snapshot below and in `docs/Internal/Deployment/PRO
 
 ```bash
 # Clone repository
-git clone https://github.com/sbelakho2/Ad-Project.git
-cd Ad-Project
+git clone https://github.com/sbelakho2/apex-mediation-platform.git
+cd apex-mediation-platform
 
 # Install dependencies
 npm install

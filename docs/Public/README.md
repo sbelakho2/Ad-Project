@@ -19,7 +19,8 @@ Apex Mediation is an enterprise-grade, "Bring Your Own" (BYO) ad mediation platf
 | **iOS** | [`sdk/core/ios`](sdk/core/ios) | [iOS Guide](docs/04_SDK_IOS.md) |
 | **Unity** | [`sdk/core/unity`](sdk/core/unity) | [Unity Guide](docs/05_SDK_UNITY.md) |
 | **Web** | [`sdk/web`](sdk/web) | [Web Guide](docs/06_SDK_WEB.md) |
-| **TV (Android/tvOS)** | [`sdk/ctv`](sdk/ctv) | [TV Guide](docs/07_SDK_TV.md) |
+| **Android TV** | [`sdk/ctv/android-tv`](sdk/ctv/android-tv) | [TV Guide](docs/07_SDK_TV.md) |
+| **tvOS** | [`sdk/ctv/tvos`](sdk/ctv/tvos) | [TV Guide](docs/07_SDK_TV.md) |
 
 ## 📚 Documentation
 

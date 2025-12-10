@@ -8,10 +8,10 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
-	"github.com/sbelakho2/Ad-Project/backend/config/internal/killswitch"
-	"github.com/sbelakho2/Ad-Project/backend/config/internal/rollout"
-	"github.com/sbelakho2/Ad-Project/backend/config/internal/signing"
-	"github.com/sbelakho2/Ad-Project/backend/config/internal/validation"
+	"github.com/sbelakho2/apex-mediation-platform/backend/config/internal/killswitch"
+	"github.com/sbelakho2/apex-mediation-platform/backend/config/internal/rollout"
+	"github.com/sbelakho2/apex-mediation-platform/backend/config/internal/signing"
+	"github.com/sbelakho2/apex-mediation-platform/backend/config/internal/validation"
 	log "github.com/sirupsen/logrus"
 )
 
