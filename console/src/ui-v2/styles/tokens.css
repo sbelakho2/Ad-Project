@@ -9,28 +9,29 @@
   --color-brand-foreground: #ffffff;
 
   /* foreground/background */
-  --color-bg: #ffffff;
-  --color-fg: #0a0a0a;
-  --color-muted: #6b7280; /* zinc-500 */
-  --color-muted-foreground: #374151; /* gray-700 */
+  --color-bg: #f9fafb;
+  --color-fg: #0f172a;
+  --color-muted: #6b7280; /* gray-500 */
+  --color-muted-foreground: #1f2937; /* gray-800 */
 
   /* surface */
   --color-surface: #ffffff;
-  --color-surface-subtle: #f8fafc; /* slate-50 */
+  --color-surface-subtle: #f3f4f6; /* gray-100 */
   --color-border: #e5e7eb; /* gray-200 */
 
   /* semantic */
   --color-success: #16a34a; /* green-600 */
-  --color-warning: #ca8a04; /* yellow-600 */
+  --color-warning: #f59e0b; /* amber-500 */
   --color-danger: #dc2626; /* red-600 */
 
   /* typography */
   --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
     "Apple Color Emoji", "Segoe UI Emoji";
-  --text-xs: 0.75rem;
-  --text-sm: 0.875rem;
-  --text-md: 1rem;
-  --text-lg: 1.125rem;
+  --text-xs: 0.75rem;   /* 12px */
+  --text-sm: 0.875rem;  /* 14px */
+  --text-md: 1rem;      /* 16px */
+  --text-lg: 1.125rem;  /* 18px */
+  --text-xl: 1.5rem;    /* 24px */
 
   /* spacing & radius */
   --space-1: 0.25rem;
@@ -40,6 +41,7 @@
   --radius-sm: 0.375rem; /* 6px */
   --radius-md: 0.5rem;   /* 8px */
   --radius-lg: 0.75rem;  /* 12px */
+  --radius-xl: 1rem;     /* 16px */
 
   /* elevation */
   --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);

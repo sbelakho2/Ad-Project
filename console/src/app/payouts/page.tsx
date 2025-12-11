@@ -249,11 +249,12 @@ export default function PayoutsPage() {
 
   if (sessionLoading) {
     return (
-      <div className="p-8">
+      <div className="min-h-screen bg-[#f9fafb] px-6 py-12" role="status" aria-live="polite">
         <div className="max-w-4xl mx-auto">
-          <div className="animate-pulse space-y-4" role="status" aria-live="polite">
-            <div className="h-8 bg-gray-200 rounded w-1/3" />
-            <div className="h-48 bg-gray-200 rounded" />
+          <div className="animate-pulse space-y-4">
+            <div className="h-6 w-40 rounded bg-gray-200" />
+            <div className="h-32 rounded bg-gray-200" />
+            <p className="text-sm text-gray-500">Loading payouts…</p>
           </div>
         </div>
       </div>
@@ -262,12 +263,12 @@ export default function PayoutsPage() {
 
   if (!canView) {
     return (
-      <div className="p-8">
+      <div className="min-h-screen bg-[#f9fafb] px-6 py-12">
         <div className="max-w-4xl mx-auto">
-          <div className="bg-white border border-gray-200 rounded-lg p-6" role="alert">
+          <div className="rounded-xl border border-gray-200 bg-white p-6" role="alert">
             <h2 className="text-lg font-semibold text-gray-900">Access restricted</h2>
-            <p className="text-sm text-gray-600 mt-2">
-              You do not have permission to view payouts. Contact an administrator if you believe this is a mistake.
+            <p className="mt-2 text-sm text-gray-600">
+              You don&apos;t have permission to view payouts. Contact an administrator if this seems wrong.
             </p>
           </div>
         </div>
@@ -277,12 +278,12 @@ export default function PayoutsPage() {
 
   if (!publisherId) {
     return (
-      <div className="p-8">
+      <div className="min-h-screen bg-[#f9fafb] px-6 py-12">
         <div className="max-w-4xl mx-auto">
-          <div className="bg-white border border-gray-200 rounded-lg p-6" role="alert">
+          <div className="rounded-xl border border-gray-200 bg-white p-6" role="alert">
             <h2 className="text-lg font-semibold text-gray-900">Missing publisher context</h2>
-            <p className="text-sm text-gray-600 mt-2">
-              We couldn&apos;t determine which publisher account to load payouts for. Please refresh or contact support if the problem persists.
+            <p className="mt-2 text-sm text-gray-600">
+              We couldn&apos;t determine which publisher to load payouts for. Refresh or contact support if this continues.
             </p>
           </div>
         </div>
@@ -291,7 +292,7 @@ export default function PayoutsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#f9fafb]">
       <PageHeader
         kicker="Finance"
         title="Payouts"

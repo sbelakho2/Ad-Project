@@ -1,5 +1,6 @@
  'use client'
 
+import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import { getCurrentUsage, type UsageData } from '@/lib/billing'
 import { getPlatformTierDisplay } from '@/lib/platformTiers'
@@ -133,10 +134,11 @@ export default function BillingUsagePage() {
 
   if (!usage) {
     return (
-      <div className="p-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center py-12">
-            <p className="text-gray-600">No usage data available</p>
+      <div className="min-h-screen bg-gray-50 px-6 py-12">
+        <div className="mx-auto max-w-4xl text-center">
+          <div className="rounded-xl border border-dashed border-gray-200 bg-white/70 px-6 py-10 shadow-sm">
+            <p className="text-sm font-semibold text-gray-900">No usage for this period yet.</p>
+            <p className="mt-2 text-sm text-gray-600">Adjust filters or refresh to check again.</p>
             <div className="mt-4 inline-flex items-center gap-3">
               <Select aria-label="Date range" value={range} onChange={handleRangeChange}>
                 <option value="7d">Last 7 days</option>
@@ -154,39 +156,115 @@ export default function BillingUsagePage() {
 
   const subscriptionTier = getPlatformTierDisplay(usage.subscription.plan_type)
 
-  const calculatePercentage = (used: number, limit: number) => {
-    if (limit === 0) return 0
-    return Math.min((used / limit) * 100, 100)
+  const getUsageState = (used: number, limit: number) => {
+    const safeLimit = Math.max(limit, 1)
+    const percentage = Math.min((used / safeLimit) * 100, 999)
+    if (percentage > 100) {
+      return {
+        percentage,
+        badgeText: 'Over limit',
+        badgeClass: 'text-red-700 bg-red-50 border-red-200',
+        barClass: 'bg-red-500',
+        textClass: 'text-red-700',
+      }
+    }
+    if (percentage >= 70) {
+      return {
+        percentage,
+        badgeText: 'Approaching limit',
+        badgeClass: 'text-amber-700 bg-amber-50 border-amber-200',
+        barClass: 'bg-amber-500',
+        textClass: 'text-amber-700',
+      }
+    }
+    return {
+      percentage,
+      badgeText: 'Within limit',
+      badgeClass: 'text-green-700 bg-green-50 border-green-200',
+      barClass: 'bg-green-500',
+      textClass: 'text-green-700',
+    }
   }
 
-  const getUsageColor = (percentage: number) => {
-    if (percentage >= 90) return 'text-red-600'
-    if (percentage >= 75) return 'text-yellow-600'
-    return 'text-green-600'
-  }
-
-  const getBarColor = (percentage: number) => {
-    if (percentage >= 90) return 'bg-red-500'
-    if (percentage >= 75) return 'bg-yellow-500'
-    return 'bg-green-500'
-  }
+  const usageCards = [
+    {
+      key: 'impressions',
+      label: 'Impressions',
+      caption: 'Ad views this period',
+      icon: TrendingUp,
+      iconBg: 'bg-blue-100',
+      iconColor: 'text-blue-600',
+      used: usage.current_period.impressions,
+      limit: usage.subscription.included_impressions,
+      overageAmount: usage.overages.impressions.amount,
+      overageCost: usage.overages.impressions.cost,
+      formattedUsed: formatNumber(usage.current_period.impressions),
+      formattedLimit: formatNumber(usage.subscription.included_impressions),
+      unitLabel: 'impressions',
+    },
+    {
+      key: 'apiCalls',
+      label: 'API Calls',
+      caption: 'Requests this period',
+      icon: Zap,
+      iconBg: 'bg-violet-100',
+      iconColor: 'text-violet-600',
+      used: usage.current_period.api_calls,
+      limit: usage.subscription.included_api_calls,
+      overageAmount: usage.overages.api_calls.amount,
+      overageCost: usage.overages.api_calls.cost,
+      formattedUsed: formatNumber(usage.current_period.api_calls),
+      formattedLimit: formatNumber(usage.subscription.included_api_calls),
+      unitLabel: 'calls',
+    },
+    {
+      key: 'dataTransfer',
+      label: 'Data Transfer',
+      caption: 'Bandwidth this period',
+      icon: HardDrive,
+      iconBg: 'bg-emerald-100',
+      iconColor: 'text-emerald-600',
+      used: usage.current_period.data_transfer_gb,
+      limit: usage.subscription.included_data_transfer_gb,
+      overageAmount: usage.overages.data_transfer.amount,
+      overageCost: usage.overages.data_transfer.cost,
+      formattedUsed: `${usage.current_period.data_transfer_gb.toFixed(2)} GB`,
+      formattedLimit: `${formatNumber(usage.subscription.included_data_transfer_gb)} GB`,
+      unitLabel: 'GB',
+    },
+  ] as const
 
   return (
-    <div className="p-8">
-      <div className="max-w-6xl mx-auto space-y-8">
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-6xl px-6 py-10 space-y-10">
         {/* Header */}
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Usage & Billing</h1>
-          <p className="text-gray-600 mt-2">
-            Current period: {formatDate(usage.current_period.start)} - {formatDate(usage.current_period.end)}
-          </p>
-          <p className="text-sm text-gray-500 mt-1">
-            Plan: <span className="font-semibold">{subscriptionTier.label}</span>
-          </p>
-          <p className="text-xs text-gray-500">{subscriptionTier.summary}</p>
-          {/* Toolbar */}
-          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div className="space-y-2">
+              <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Billing</h1>
+              <p className="text-sm text-gray-600">Usage & invoices for your account.</p>
+              <p className="text-sm text-gray-500">
+                Current period: {formatDate(usage.current_period.start)} – {formatDate(usage.current_period.end)} ·{' '}
+                <span className="font-semibold text-gray-800">{subscriptionTier.label} plan</span>
+              </p>
+              <p className="text-xs font-medium text-gray-500">
+                2.0% platform fee (1.25% with annual prepay) · Includes RBAC, BI exports and dedicated integration support.
+              </p>
+            </div>
+            <div className="flex flex-col items-start gap-2 md:items-end">
+              <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 shadow-sm">
+                <span className="text-sm font-medium text-gray-900">{subscriptionTier.label} plan</span>
+                <Link className="text-sm font-medium text-primary-700 hover:text-primary-800" href="/billing/settings">
+                  Change plan
+                </Link>
+              </div>
+              <p className="text-xs text-gray-500">2.0% platform fee · 1.25% with annual prepay</p>
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-white/80 px-4 py-3 shadow-sm md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-gray-700">
               <label className="text-sm text-gray-600" htmlFor="usage-range">Date range</label>
               <Select id="usage-range" aria-label="Date range" value={range} onChange={handleRangeChange}>
                 <option value="7d">Last 7 days</option>
@@ -194,7 +272,7 @@ export default function BillingUsagePage() {
                 <option value="90d">Last 90 days</option>
                 <option value="all">All time</option>
               </Select>
-              <label className="ml-2 text-sm text-gray-600" htmlFor="usage-product">Product</label>
+              <label className="text-sm text-gray-600" htmlFor="usage-product">Product</label>
               <Select id="usage-product" aria-label="Product filter" value={product} onChange={handleProductChange}>
                 <option value="all">All products</option>
                 {productOptions.map((p) => (
@@ -203,299 +281,162 @@ export default function BillingUsagePage() {
               </Select>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="secondary" onClick={handleRefresh}>Refresh</Button>
-              <Button onClick={handleExportCsv}>Export CSV</Button>
+              <Button variant="ghost" size="sm" onClick={handleRefresh} aria-label="Refresh usage">
+                Refresh
+              </Button>
+              <Button variant="secondary" size="sm" onClick={handleExportCsv} aria-label="Export CSV">
+                Export CSV
+              </Button>
             </div>
           </div>
         </div>
 
         {/* Usage Metrics */}
         <section aria-labelledby="usage-overview-heading" className="space-y-4">
-          <div className="flex items-end justify-between">
-            <h2 id="usage-overview-heading" className="text-2xl font-semibold text-gray-900">
-              Usage Overview
-            </h2>
-            <span className="text-sm text-gray-500">
-              Track how you are pacing against your included limits this period.
-            </span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Impressions */}
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <TrendingUp className="h-5 w-5 text-blue-600" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-gray-900">Impressions</h3>
-                  <p className="text-xs text-gray-600">Ad views</p>
-                </div>
-              </div>
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <h2 id="usage-overview-heading" className="text-lg font-semibold text-gray-900">
+                Usage Overview
+              </h2>
+              <p className="text-sm text-gray-600">See how your usage compares to your plan limits.</p>
             </div>
-            <div className="space-y-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900">
-                  {formatNumber(usage.current_period.impressions)}
-                </span>
-                <span className="text-sm text-gray-600">
-                  / {formatNumber(usage.subscription.included_impressions)}
-                </span>
-              </div>
-              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+            <span className="hidden text-xs text-gray-500 md:inline">Updated hourly</span>
+          </div>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+            {usageCards.map((card) => {
+              const Icon = card.icon
+              const state = getUsageState(card.used, card.limit)
+              return (
                 <div
-                  className={`h-full ${getBarColor(
-                    calculatePercentage(
-                      usage.current_period.impressions,
-                      usage.subscription.included_impressions
-                    )
-                  )} transition-all duration-300`}
-                  style={{
-                    width: `${calculatePercentage(
-                      usage.current_period.impressions,
-                      usage.subscription.included_impressions
-                    )}%`,
-                  }}
-                />
-              </div>
-              <progress
-                className="sr-only"
-                value={Math.min(
-                  usage.current_period.impressions,
-                  usage.subscription.included_impressions
-                )}
-                max={Math.max(usage.subscription.included_impressions, 1)}
-                aria-label="Impressions usage"
-              />
-              <p
-                className={`text-sm font-medium ${getUsageColor(
-                  calculatePercentage(
-                    usage.current_period.impressions,
-                    usage.subscription.included_impressions
-                  )
-                )}`}
-              >
-                {calculatePercentage(
-                  usage.current_period.impressions,
-                  usage.subscription.included_impressions
-                ).toFixed(1)}
-                % used
-              </p>
-              {usage.overages.impressions.amount > 0 && (
-                <div className="pt-3 border-t border-gray-200">
-                  <p className="text-sm text-gray-600">Overage</p>
-                  <p className="text-lg font-semibold text-red-600">
-                    {formatNumber(usage.overages.impressions.amount)} impressions
-                  </p>
-                  <p className="text-sm text-gray-900">
-                    {formatCurrency(usage.overages.impressions.cost)}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
+                  key={card.key}
+                  className="flex flex-col gap-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${card.iconBg}`}>
+                        <Icon className={`h-5 w-5 ${card.iconColor}`} />
+                      </div>
+                      <div className="leading-tight">
+                        <p className="text-sm font-semibold text-gray-900">{card.label}</p>
+                        <p className="text-xs text-gray-600">{card.caption}</p>
+                      </div>
+                    </div>
+                    <span
+                      className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${state.badgeClass}`}
+                    >
+                      {state.badgeText}
+                    </span>
+                  </div>
 
-          {/* API Calls */}
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-purple-100 flex items-center justify-center">
-                  <Zap className="h-5 w-5 text-purple-600" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-gray-900">API Calls</h3>
-                  <p className="text-xs text-gray-600">Requests</p>
-                </div>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900">
-                  {formatNumber(usage.current_period.api_calls)}
-                </span>
-                <span className="text-sm text-gray-600">
-                  / {formatNumber(usage.subscription.included_api_calls)}
-                </span>
-              </div>
-              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full ${getBarColor(
-                    calculatePercentage(
-                      usage.current_period.api_calls,
-                      usage.subscription.included_api_calls
-                    )
-                  )} transition-all duration-300`}
-                  style={{
-                    width: `${calculatePercentage(
-                      usage.current_period.api_calls,
-                      usage.subscription.included_api_calls
-                    )}%`,
-                  }}
-                />
-              </div>
-              <progress
-                className="sr-only"
-                value={Math.min(usage.current_period.api_calls, usage.subscription.included_api_calls)}
-                max={Math.max(usage.subscription.included_api_calls, 1)}
-                aria-label="API calls usage"
-              />
-              <p
-                className={`text-sm font-medium ${getUsageColor(
-                  calculatePercentage(
-                    usage.current_period.api_calls,
-                    usage.subscription.included_api_calls
-                  )
-                )}`}
-              >
-                {calculatePercentage(
-                  usage.current_period.api_calls,
-                  usage.subscription.included_api_calls
-                ).toFixed(1)}
-                % used
-              </p>
-              {usage.overages.api_calls.amount > 0 && (
-                <div className="pt-3 border-t border-gray-200">
-                  <p className="text-sm text-gray-600">Overage</p>
-                  <p className="text-lg font-semibold text-red-600">
-                    {formatNumber(usage.overages.api_calls.amount)} calls
-                  </p>
-                  <p className="text-sm text-gray-900">
-                    {formatCurrency(usage.overages.api_calls.cost)}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
+                  <div className="space-y-2">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-2xl font-semibold text-gray-900">{card.formattedUsed}</span>
+                      <span className="text-sm text-gray-600">of {card.formattedLimit} included</span>
+                    </div>
+                    <progress
+                      aria-label={`${card.label} usage progress`}
+                      value={Math.min(state.percentage, 100)}
+                      max={100}
+                      className="sr-only"
+                    >
+                      {state.percentage.toFixed(1)}%
+                    </progress>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                      <div
+                        className={`h-full ${state.barClass} transition-all duration-300`}
+                        style={{ width: `${Math.min(state.percentage, 100)}%` }}
+                      />
+                    </div>
+                    <p className={`text-sm font-medium ${state.textClass}`}>
+                      {state.percentage.toFixed(1)}% of plan used
+                    </p>
+                  </div>
 
-          {/* Data Transfer */}
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-green-100 flex items-center justify-center">
-                  <HardDrive className="h-5 w-5 text-green-600" />
+                  <div className="border-t border-gray-100 pt-3 text-sm text-gray-700">
+                    {card.overageAmount > 0 ? (
+                      <p>
+                        Overage so far: {formatNumber(card.overageAmount)} {card.unitLabel} ({formatCurrency(card.overageCost)})
+                      </p>
+                    ) : (
+                      <p className="text-gray-500">No overages this period.</p>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold text-gray-900">Data Transfer</h3>
-                  <p className="text-xs text-gray-600">Bandwidth</p>
-                </div>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold text-gray-900">
-                  {usage.current_period.data_transfer_gb.toFixed(2)} GB
-                </span>
-                <span className="text-sm text-gray-600">
-                  / {formatNumber(usage.subscription.included_data_transfer_gb)} GB
-                </span>
-              </div>
-              <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className={`h-full ${getBarColor(
-                    calculatePercentage(
-                      usage.current_period.data_transfer_gb,
-                      usage.subscription.included_data_transfer_gb
-                    )
-                  )} transition-all duration-300`}
-                  style={{
-                    width: `${calculatePercentage(
-                      usage.current_period.data_transfer_gb,
-                      usage.subscription.included_data_transfer_gb
-                    )}%`,
-                  }}
-                />
-              </div>
-              <progress
-                className="sr-only"
-                value={Math.min(
-                  usage.current_period.data_transfer_gb,
-                  usage.subscription.included_data_transfer_gb
-                )}
-                max={Math.max(usage.subscription.included_data_transfer_gb, 1)}
-                aria-label="Data transfer usage"
-              />
-              <p
-                className={`text-sm font-medium ${getUsageColor(
-                  calculatePercentage(
-                    usage.current_period.data_transfer_gb,
-                    usage.subscription.included_data_transfer_gb
-                  )
-                )}`}
-              >
-                {calculatePercentage(
-                  usage.current_period.data_transfer_gb,
-                  usage.subscription.included_data_transfer_gb
-                ).toFixed(1)}
-                % used
-              </p>
-              {usage.overages.data_transfer.amount > 0 && (
-                <div className="pt-3 border-t border-gray-200">
-                  <p className="text-sm text-gray-600">Overage</p>
-                  <p className="text-lg font-semibold text-red-600">
-                    {usage.overages.data_transfer.amount.toFixed(2)} GB
-                  </p>
-                  <p className="text-sm text-gray-900">
-                    {formatCurrency(usage.overages.data_transfer.cost)}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
+              )
+            })}
           </div>
         </section>
 
         {/* Total Overage Summary */}
         {usage.overages.total_overage_cost > 0 && (
-          <section aria-labelledby="usage-overage-heading" className="space-y-4">
-            <h2 id="usage-overage-heading" className="text-2xl font-semibold text-yellow-900">
-              Overage Summary
-            </h2>
-            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
-            <div className="flex items-start gap-4">
-              <div className="h-10 w-10 rounded-lg bg-yellow-100 flex items-center justify-center flex-shrink-0">
-                <AlertCircle className="h-6 w-6 text-yellow-600" />
+          <section aria-labelledby="usage-overage-heading" className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <h2 id="usage-overage-heading" className="text-lg font-semibold text-gray-900">
+                  Overage Summary
+                </h2>
+                <p className="text-sm text-gray-600">This period you’re over your included limits by:</p>
               </div>
-              <div className="flex-1">
-                <h3 className="font-semibold text-yellow-900">Usage Overage Detected</h3>
-                <p className="text-sm text-yellow-700 mt-1">
-                  You have exceeded your plan limits this billing period. Additional charges will
-                  appear on your next invoice.
-                </p>
-                <div className="mt-4 flex items-center gap-2">
-                  <span className="text-sm text-yellow-700">Total overage cost:</span>
-                  <span className="text-2xl font-bold text-yellow-900">
-                    {formatCurrency(usage.overages.total_overage_cost)}
-                  </span>
+              <Button variant="secondary" size="sm">View invoice estimate</Button>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                  <AlertCircle className="h-5 w-5" aria-hidden />
+                </div>
+                <div className="flex-1 space-y-2 text-sm text-gray-800">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-gray-700">Impressions</span>
+                    <span className="font-semibold text-gray-900">
+                      {formatNumber(usage.overages.impressions.amount)} ({formatCurrency(usage.overages.impressions.cost)})
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-gray-700">API calls</span>
+                    <span className="font-semibold text-gray-900">
+                      {formatNumber(usage.overages.api_calls.amount)} ({formatCurrency(usage.overages.api_calls.cost)})
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-gray-700">Data transfer</span>
+                    <span className="font-semibold text-gray-900">
+                      {usage.overages.data_transfer.amount.toFixed(2)} GB ({formatCurrency(usage.overages.data_transfer.cost)})
+                    </span>
+                  </div>
+                  <div className="pt-2 text-sm font-semibold text-amber-800">
+                    Total overage: {formatCurrency(usage.overages.total_overage_cost)}
+                  </div>
                 </div>
               </div>
-            </div>
             </div>
           </section>
         )}
 
         {/* Info Box */}
         <section aria-labelledby="usage-insights-heading" className="space-y-4">
-          <h2 id="usage-insights-heading" className="text-2xl font-semibold text-blue-900">
-            Usage Guidance
+          <h2 id="usage-insights-heading" className="text-lg font-semibold text-gray-900">
+            Usage Notes
           </h2>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-          <div className="flex items-start gap-4">
-            <Database className="h-6 w-6 text-blue-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="font-semibold text-blue-900">About Usage Tracking</h3>
-              <p className="text-sm text-blue-700 mt-1">
-                Usage is calculated in real-time and updated every hour. Overages are billed at the
-                end of each billing period. View your invoices to see detailed billing history.
-              </p>
+          <div className="rounded-xl border border-blue-100 bg-blue-50 p-5">
+            <div className="flex items-start gap-4">
+              <Database className="h-6 w-6 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1 text-sm text-gray-700">
+                <p>Usage updates hourly. Overages bill at the end of each period.</p>
+                <p>Export CSV for detailed rows or switch products to narrow the view.</p>
+              </div>
             </div>
-          </div>
           </div>
         </section>
 
         {/* Usage Table (paged) — lightweight client pagination until server paging is wired) */}
-        <section className="mt-8" aria-labelledby="usage-table-heading">
-          <h2 id="usage-table-heading" className="sr-only">Usage details</h2>
-          <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <section className="mt-8 space-y-3" aria-labelledby="usage-table-heading">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <h2 id="usage-table-heading" className="text-lg font-semibold text-gray-900">Usage Details</h2>
+              <p className="text-sm text-gray-600">Line items for this period.</p>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
@@ -510,7 +451,7 @@ export default function BillingUsagePage() {
                 {pagedItems.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">
-                      No usage rows match the current filters
+                      No usage matches the current filters.
                     </td>
                   </tr>
                 ) : (

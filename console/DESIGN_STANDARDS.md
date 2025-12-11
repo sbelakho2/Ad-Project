@@ -1,8 +1,8 @@
 # Ad Platform Console Design Standards
 
 **Version:** 1.1  
-**Last Updated:** 2025-11-16  
-Tailwind config sync: 09ad78bad4d0 *(validated via `npm run design:verify`)*  
+**Last Updated:** 2025-12-11  
+Tailwind config sync: 72a748572d0f *(validated via `npm run design:verify`)*  
 **Theme:** Aurora Slate — Tailwind-powered modern console
 
 > Inspired by the TPS Co-Pilot "Neo-Industrial Nightfall" system while optimized for a data-dense SaaS console built with Next.js 14 and Tailwind CSS. This document is authoritative for all UI/UX decisions across the console.

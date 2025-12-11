@@ -55,9 +55,9 @@ export function MetricCard({
 
   const trendColor =
     resolvedTrend === 'up'
-      ? 'text-success-600'
+      ? 'text-green-700'
       : resolvedTrend === 'down'
-        ? 'text-danger-600'
+        ? 'text-red-700'
         : 'text-gray-500'
 
   const suffix = comparisonLabel?.trim() || ''
@@ -77,11 +77,11 @@ export function MetricCard({
   return (
     <div className="card">
       <div className="flex items-start justify-between mb-3">
-        <div>
-          <span className="text-sm font-medium text-gray-500 uppercase tracking-wide block">
+        <div className="leading-tight">
+          <span className="text-xs font-medium text-gray-500 block">
             {title}
           </span>
-          <span className="mt-2 text-3xl font-semibold text-gray-900 leading-tight block">
+          <span className="mt-2 text-2xl font-semibold text-gray-900 leading-tight block">
             {value}
           </span>
         </div>

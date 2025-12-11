@@ -16,6 +16,10 @@ jest.mock('@/lib/featureFlags', () => ({
   isFeatureEnabled: (flag: string) => mockIsFeatureEnabled(flag),
 }))
 
+jest.mock('@/lib/usePlanAccess', () => ({
+  usePlanAccess: () => ({ allowed: true, isLoading: false, plan: 'growth', error: null }),
+}))
+
 jest.mock('next/navigation', () => ({
   useRouter: jest.fn(),
   useSearchParams: jest.fn(),

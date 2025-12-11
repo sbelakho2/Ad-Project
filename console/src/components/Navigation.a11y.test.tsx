@@ -18,6 +18,10 @@ jest.mock('@/lib/useSession', () => ({
   }),
 }))
 
+jest.mock('@/lib/usePlanAccess', () => ({
+  usePlanAccess: () => ({ allowed: true, isLoading: false, plan: 'growth', error: null }),
+}))
+
 const mockUseFeatures = jest.fn()
 
 jest.mock('@/lib/useFeatures', () => ({

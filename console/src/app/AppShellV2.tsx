@@ -21,11 +21,12 @@ function isActive(pathname: string | null, href: string) {
 function NavLink({ href, children }: { href: string; children: ReactNode }) {
   const pathname = usePathname()
   const active = isActive(pathname, href)
-  const base = 'px-3 py-2 rounded-md text-sm font-medium transition-colors'
-  const activeCls = 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900'
+  const base = 'relative flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors'
+  const activeCls = 'bg-primary-50 text-primary-700 ring-1 ring-primary-100'
   const idleCls = 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
   return (
     <Link href={href} className={[base, active ? activeCls : idleCls].join(' ')}>
+      {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-primary-600" aria-hidden />}
       {children}
     </Link>
   )
@@ -79,8 +80,8 @@ export function AppShellV2({ children }: { children: ReactNode }) {
       >
         Skip to content
       </a>
-      <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
-        <header className="sticky top-0 z-40 w-full border-b border-zinc-200 bg-white/80 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80">
+      <div className="min-h-screen bg-[#f9fafb] text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50">
+        <header className="sticky top-0 z-40 w-full border-b border-zinc-200 bg-white/90 backdrop-blur">
           <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-2">
               <Link href="/" className="inline-flex items-center gap-2" aria-label="ApexMediation Home">
@@ -93,9 +94,9 @@ export function AppShellV2({ children }: { children: ReactNode }) {
                   className="h-7 w-7 rounded-sm shadow-sm"
                   priority
                 />
-                <span className="text-sm font-semibold tracking-tight text-zinc-700 dark:text-zinc-200">ApexMediation</span>
+                <span className="text-sm font-semibold tracking-tight text-zinc-800">ApexMediation</span>
               </Link>
-              <span className="rounded bg-emerald-600/10 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-400">Console v2</span>
+              <span className="rounded bg-emerald-600/10 px-2 py-0.5 text-xs font-medium text-emerald-700">Console v2</span>
             </div>
             <nav className="hidden items-center gap-1 md:flex">
               {navLinks.map((l) => (

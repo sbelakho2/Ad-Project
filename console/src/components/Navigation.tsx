@@ -53,7 +53,6 @@ const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert, minTier: 'growth' },
   { key: 'payouts', label: 'Payouts', href: '/payouts', icon: Wallet },
   { key: 'billing', label: 'Billing', href: '/billing/usage', icon: Receipt, featureFlag: 'billing' },
-  // Developer tools (always visible to authenticated users)
   { key: 'supply-chain', label: 'Supply Chain', href: '/supply-chain', icon: Link2 },
   { key: 'tool-supply-chain-status', label: 'Supply Chain Status', href: '/tools/supply-chain-status', icon: FileCheck },
   { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: FileSearch },
@@ -133,6 +132,22 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
     }))
   }, [plan, resolvedFeatures, user?.role])
 
+  const navSections = useMemo(() => {
+    const byKey = new Map(navigation.map((item) => [item.key, item]))
+    const build = (label: string, keys: string[]) => ({
+      label,
+      items: keys
+        .map((key) => byKey.get(key))
+        .filter(Boolean) as typeof navigation,
+    })
+    return [
+      build('Workspace', ['dashboard', 'placements', 'migration-studio', 'adapters', 'analytics', 'transparency', 'fraud', 'payouts', 'billing']),
+      build('Tools', ['supply-chain', 'tool-supply-chain-status', 'tool-app-ads-inspector', 'tool-mediation-debugger']),
+      build('Settings', ['settings']),
+      build('Admin', ['admin']),
+    ].filter((section) => section.items.length > 0)
+  }, [navigation])
+
   // Don't show navigation on login page
   if (!pathname || pathname === '/login' || pathname === '/') return <>{children}</>
 
@@ -146,7 +161,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#f9fafb]">
       {/* Mobile menu button */}
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b border-gray-100 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -182,7 +197,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       {/* Sidebar */}
       <aside
         className={`
-          fixed top-0 left-0 bottom-0 w-64 bg-white border-r border-gray-100 z-40
+          fixed top-0 left-0 bottom-0 w-[240px] bg-white border-r border-gray-100 z-40
           transition-transform duration-200 ease-in-out
           lg:translate-x-0
           ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -197,35 +212,42 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
               </div>
               <div className="min-w-0 flex-1">
                 <h1 className="text-base font-semibold text-gray-900 tracking-tight">ApexMediation</h1>
-                <p className="text-xs text-gray-400 font-medium tracking-wide">Publisher Console</p>
+                <p className="text-xs text-gray-500 font-medium tracking-tight">Publisher Console</p>
               </div>
             </div>
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 px-3 py-5 space-y-0.5 overflow-y-auto">
-            {navigation?.map((item) => {
-              const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`)
-              const Icon = item.icon as any
-              return (
-                <Link
-                  key={item.key}
-                  href={item.href}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className={`
-                    flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium tracking-tight transition-all duration-150
-                    ${
-                      isActive
-                        ? 'bg-primary-600 text-white shadow-sm'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                    }
-                  `}
-                >
-                  <Icon className={`h-[18px] w-[18px] flex-shrink-0 ${isActive ? 'text-white' : 'text-gray-400'}`} strokeWidth={1.75} aria-hidden={true} />
-                  <span className="truncate">{item.name}</span>
-                </Link>
-              )
-            })}
+          <nav className="flex-1 px-3 py-5 space-y-4 overflow-y-auto" aria-label="Main navigation">
+            {navSections.map((section) => (
+              <div key={section.label} className="space-y-1">
+                <div className="px-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-gray-400">
+                  {section.label}
+                </div>
+                {section.items.map((item) => {
+                  const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`)
+                  const Icon = item.icon as any
+                  return (
+                    <Link
+                      key={item.key}
+                      href={item.href}
+                      onClick={() => setMobileMenuOpen(false)}
+                      className={`relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium tracking-tight transition-colors duration-150
+                        ${
+                          isActive
+                            ? 'bg-primary-50 text-primary-700 ring-1 ring-primary-100'
+                            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }
+                      `}
+                    >
+                      {isActive && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-primary-600" aria-hidden />}
+                      <Icon className={`h-5 w-5 flex-shrink-0 ${isActive ? 'text-primary-700' : 'text-gray-400'}`} strokeWidth={1.75} aria-hidden={true} />
+                      <span className="truncate text-[13px] leading-5">{item.name}</span>
+                    </Link>
+                  )
+                })}
+              </div>
+            ))}
           </nav>
 
           {/* User menu */}
@@ -265,8 +287,8 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       </aside>
 
       {/* Main content */}
-      <div className="lg:pl-64">
-        <div className="pt-16 lg:pt-0 min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100">{children}</div>
+      <div className="lg:pl-[240px]">
+        <div className="pt-16 lg:pt-0 min-h-screen bg-[#f9fafb]">{children}</div>
       </div>
     </div>
   )
@@ -284,12 +306,12 @@ function resolveNavLabel(item: NavBlueprint): string {
 
 function NavigationSkeleton() {
   return (
-    <div className="min-h-screen bg-gray-50 animate-pulse" role="status" aria-live="polite">
+    <div className="min-h-screen bg-[#f9fafb] animate-pulse" role="status" aria-live="polite">
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b px-4 py-3 flex items-center justify-between">
         <div className="h-8 w-32 bg-gray-200 rounded" />
         <div className="h-8 w-8 bg-gray-200 rounded-full" />
       </div>
-      <aside className="fixed top-0 left-0 bottom-0 w-64 bg-white border-r z-40 p-6 space-y-4 hidden lg:flex lg:flex-col">
+      <aside className="fixed top-0 left-0 bottom-0 w-[240px] bg-white border-r z-40 p-6 space-y-4 hidden lg:flex lg:flex-col">
         <div className="h-10 w-full bg-gray-200 rounded" />
         <div className="space-y-2">
           {NAV_SKELETON_KEYS.map((key) => (

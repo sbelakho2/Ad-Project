@@ -2,203 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Premium Console Design System */
 :root {
-  --primary-blue: #1E3A5F;
-  --sunshine-yellow: #F59E0B;
-  --pale-yellow: #FCD34D;
-  --cream: #FAFAFA;
-  --accent-red: #DC2626;
-  --success-green: #059669;
-
-  --foreground-rgb: 30, 58, 95;
-  --background-start-rgb: 250, 250, 250;
-  --background-end-rgb: 255, 255, 255;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --foreground-rgb: 248, 250, 252;
-    --background-start-rgb: 15, 23, 42;
-    --background-end-rgb: 30, 41, 59;
-  }
+  --page-bg: #f9fafb;
+  --surface: #ffffff;
+  --surface-subtle: #f8fafc;
+  --border-subtle: rgba(15, 23, 42, 0.06);
+  --text-strong: #0f172a;
+  --text-muted: #6b7280;
+  --nav-width: 240px;
 }
 
 body {
-  color: rgb(var(--foreground-rgb));
-  background-color: rgb(var(--background-start-rgb));
+  color: var(--text-strong);
+  background-color: var(--page-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  letter-spacing: -0.011em;
+  letter-spacing: -0.01em;
 }
 
-/* Premium Typography */
-h1, h2, h3, h4, h5, h6 {
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.25;
-}
-
-h1 { font-size: 2.25rem; }
-h2 { font-size: 1.875rem; }
-h3 { font-size: 1.5rem; }
-h4 { font-size: 1.25rem; }
-
-p {
-  line-height: 1.6;
-}
-
-@layer components {
-  /* Premium Button Styles */
-  .btn {
-    @apply px-5 py-2.5 font-semibold transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 shadow-sm rounded-lg;
-    letter-spacing: -0.01em;
-  }
-
-  .btn-primary {
-    @apply bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-500;
-  }
-
-  .btn-secondary {
-    @apply bg-gray-100 text-gray-900 hover:bg-gray-200 focus:ring-gray-400;
-  }
-
-  .btn-success {
-    background-color: var(--success-green);
-    color: white;
-    @apply hover:shadow-md focus:ring-success-green;
-  }
-
-  .btn-danger {
-    background-color: var(--accent-red);
-    color: white;
-    @apply hover:shadow-md focus:ring-accent-red;
-  }
-
-  .btn-outline {
-    @apply border border-primary-blue bg-white text-primary-blue hover:bg-pale-yellow;
-  }
-
-  /* Study in Sweden Card Styles */
-  .card {
-    background: white;
-    border-radius: 0; /* Square corners */
-    padding: 2rem;
-    border: none;
-    box-shadow: 0 1px 3px rgba(0, 82, 147, 0.1);
-    @apply transition-shadow duration-200;
-  }
-
-  .card:hover {
-    box-shadow: 0 4px 12px rgba(0, 82, 147, 0.15);
-  }
-
-  .card-blue {
-    background-color: var(--primary-blue);
-    color: var(--sunshine-yellow);
-  }
-
-  .card-yellow {
-    background-color: var(--sunshine-yellow);
-    color: var(--primary-blue);
-  }
-
-  .card-cream {
-    background-color: var(--cream);
-    color: var(--primary-blue);
-  }
-
-  /* Input Styles */
-  .input {
-    @apply block w-full border border-primary-blue shadow-sm;
-    border-radius: 0;
-    padding: 0.5rem;
-    background: transparent;
-  }
-
-  .input:focus {
-    outline: none;
-    border-color: var(--sunshine-yellow);
-    box-shadow: 0 0 0 2px rgba(254, 203, 0, 0.2);
-  }
-
-  .label {
-    @apply block text-sm font-bold uppercase mb-2;
-    color: var(--primary-blue);
-    letter-spacing: 0.05em;
-  }
-
-  /* Badge Styles */
-  .badge {
-    @apply inline-flex items-center px-3 py-1 text-xs font-bold uppercase;
-    border-radius: 0;
-    letter-spacing: 0.05em;
-  }
-
-  .badge-success {
-    background-color: var(--success-green);
-    color: white;
-  }
-
-  .badge-warning {
-    background-color: var(--sunshine-yellow);
-    color: var(--primary-blue);
-  }
-
-  .badge-danger {
-    background-color: var(--accent-red);
-    color: white;
-  }
-
-  .badge-info {
-    background-color: var(--pale-yellow);
-    color: var(--primary-blue);
-  }
-
-  /* Typography */
-  h1, h2, h3, h4, h5, h6 {
-    font-weight: 700;
-    color: var(--primary-blue);
-    letter-spacing: -1.5px;
-  }
-
+@layer base {
   h1 {
-    @apply text-4xl lg:text-6xl uppercase;
+    @apply text-2xl font-semibold tracking-tight text-gray-900;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
   }
 
   h2 {
-    @apply text-3xl lg:text-4xl uppercase;
+    @apply text-lg font-semibold text-gray-900;
+    line-height: 1.35;
   }
 
   h3 {
-    @apply text-2xl lg:text-3xl;
+    @apply text-base font-semibold text-gray-900;
   }
 
-  /* Links */
+  h4 {
+    @apply text-sm font-semibold text-gray-900;
+  }
+
+  p {
+    @apply text-sm text-gray-700 leading-relaxed;
+  }
+
+  small {
+    @apply text-xs text-gray-500;
+  }
+
   a {
-    color: var(--primary-blue);
-    text-decoration: none;
-    position: relative;
+    @apply text-primary-600 hover:text-primary-700;
+  }
+}
+
+@layer components {
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-gray-900 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary-600;
   }
 
-  a:hover {
-    text-decoration: underline;
+  .btn-sm {
+    @apply h-9 px-3 text-sm;
   }
 
-  /* Dividers */
-  hr {
-    border-color: var(--sunshine-yellow);
-    border-width: 1px;
+  .btn-primary {
+    @apply bg-primary-600 text-white hover:bg-primary-700;
   }
 
-  .divider-yellow {
-    border-color: var(--sunshine-yellow);
+  .btn-secondary {
+    @apply bg-gray-100 text-gray-900 hover:bg-gray-200;
   }
 
-  .divider-blue {
-    border-color: var(--primary-blue);
+  .btn-outline {
+    @apply border border-gray-300 text-gray-800 hover:border-primary-300 hover:bg-primary-50;
+  }
+
+  .btn-soft-primary {
+    @apply bg-primary-50 text-primary-700 hover:bg-primary-100;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-700;
+  }
+
+  /* Cards */
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white px-6 py-5 shadow-sm;
+  }
+
+  .card-dense {
+    @apply rounded-lg border border-gray-200 bg-white px-4 py-4 shadow-sm;
+  }
+
+  /* Badges & labels */
+  .badge {
+    @apply inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-700;
+  }
+
+  .badge-success {
+    @apply border-green-200 bg-green-50 text-green-700;
+  }
+
+  .badge-warning {
+    @apply border-amber-200 bg-amber-50 text-amber-700;
+  }
+
+  .badge-danger {
+    @apply border-red-200 bg-red-50 text-red-700;
+  }
+
+  .muted-label {
+    @apply text-xs font-medium text-gray-500 tracking-tight;
   }
 }
 

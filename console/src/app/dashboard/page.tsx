@@ -151,16 +151,14 @@ export default function DashboardPage() {
   const canRenderOperationalWidgets = Boolean(publisherId)
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#f9fafb]">
       <header className="bg-white/90 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium text-primary-600">Performance Overview</p>
-              <h1 className="text-3xl font-semibold text-gray-900 tracking-tight">Dashboard</h1>
-              <p className="text-sm text-gray-600 mt-1">
-                Welcome back{session?.user?.name ? `, ${session.user.name}` : ''}. Stay on top of your monetization pulse.
-              </p>
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-gray-500">Overview</p>
+              <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Dashboard</h1>
+              <p className="text-sm text-gray-600">Performance across revenue and delivery.</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2">
@@ -169,7 +167,7 @@ export default function DashboardPage() {
                   aria-label="Select date range"
                   value={`${dateRange.startDate}|${dateRange.endDate}`}
                   onChange={handlePresetSelect}
-                  className="input text-sm w-48"
+                  className="h-10 w-48 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1"
                 >
                   <option value={presets.last7}>Last 7 days</option>
                   <option value={presets.last30}>Last 30 days</option>
@@ -182,7 +180,7 @@ export default function DashboardPage() {
                   Export CSV
                 </button>
                 {exportError && (
-                  <p className="text-xs text-danger-600" role="alert">
+                  <p className="text-xs text-red-600" role="alert">
                     {exportError}
                   </p>
                 )}
@@ -199,10 +197,10 @@ export default function DashboardPage() {
             {loadingRevenue ? (
               <MetricCardSkeleton count={4} />
             ) : revenueError ? (
-              <div className="card border-danger-200 bg-danger-50 text-danger-900 col-span-full">
+              <div className="card border-red-200 bg-red-50 text-red-900 col-span-full">
                 <div className="flex flex-col gap-3">
                   <div>
-                    <h3 className="text-lg font-semibold">Revenue summary unavailable</h3>
+                    <h3 className="text-lg font-semibold">We couldn&apos;t load revenue.</h3>
                     <p className="text-sm">{revenueSummaryErrorMessage}</p>
                   </div>
                   <div>
@@ -211,7 +209,7 @@ export default function DashboardPage() {
                       className="btn btn-outline btn-sm"
                       onClick={() => refetchRevenueSummary()}
                     >
-                      Retry loading data
+                      Retry
                     </button>
                   </div>
                 </div>
@@ -219,10 +217,9 @@ export default function DashboardPage() {
             ) : !revenueSummary ? (
               <div className="card border border-dashed border-gray-200 bg-white text-gray-700 col-span-full">
                 <div className="flex flex-col gap-2">
-                  <h3 className="text-lg font-semibold">No data returned</h3>
+                  <h3 className="text-lg font-semibold">No revenue yet.</h3>
                   <p className="text-sm">
-                    The revenue service didn&rsquo;t return any metrics for this window. Confirm collectors are running and
-                    try a different date range.
+                    We couldn&apos;t find revenue for this window. Adjust the date range or refresh to try again.
                   </p>
                   <div>
                     <button
@@ -230,7 +227,7 @@ export default function DashboardPage() {
                       className="btn btn-outline btn-sm"
                       onClick={() => refetchRevenueSummary()}
                     >
-                      Refresh data
+                      Refresh
                     </button>
                   </div>
                 </div>

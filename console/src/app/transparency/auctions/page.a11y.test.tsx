@@ -21,6 +21,10 @@ jest.mock('../../../lib/hooks', () => {
   }
 })
 
+jest.mock('../../../lib/usePlanAccess', () => ({
+  usePlanAccess: () => ({ allowed: true, isLoading: false, plan: 'growth', error: null }),
+}))
+
 // Mock API client
 const mockTransparencyApi = {
   list: jest.fn(),

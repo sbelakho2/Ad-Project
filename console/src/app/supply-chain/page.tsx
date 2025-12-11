@@ -7,11 +7,11 @@ import Link from 'next/link'
 
 function StatusPill({ label, tone }: { label: string; tone: 'ok' | 'warn' | 'muted' }) {
   const colors = {
-    ok: 'bg-green-100 text-green-800 border-green-200',
-    warn: 'bg-amber-100 text-amber-800 border-amber-200',
-    muted: 'bg-gray-100 text-gray-700 border-gray-200',
+    ok: 'bg-green-50 text-green-700 border-green-200',
+    warn: 'bg-amber-50 text-amber-700 border-amber-200',
+    muted: 'bg-gray-50 text-gray-700 border-gray-200',
   } as const
-  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${colors[tone]}`}>{label}</span>
+  return <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border ${colors[tone]}`}>{label}</span>
 }
 
 function AppCard({ app }: { app: SupplyChainAppSummary }) {
@@ -75,22 +75,22 @@ export default function SupplyChainPage() {
   const apps = data?.summary.apps ?? []
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="min-h-screen bg-[#f9fafb] px-6 py-10 space-y-6">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-xl font-semibold">Supply Chain</h1>
-          <p className="text-sm text-gray-600 mt-1">Per-app supply chain status from the ingested app-ads.txt corpus.</p>
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Supply Chain</h1>
+          <p className="text-sm text-gray-600">Per-app supply chain status from the ingested app-ads.txt corpus.</p>
           {data?.summary.generatedAt && (
-            <p className="text-xs text-gray-500 mt-1">Generated: {new Date(data.summary.generatedAt).toLocaleString()}</p>
+            <p className="text-xs text-gray-500">Generated: {new Date(data.summary.generatedAt).toLocaleString()}</p>
           )}
           {data?.persistedAt && (
-            <p className="text-xs text-gray-500 mt-1">Persisted: {new Date(data.persistedAt).toLocaleString()}</p>
+            <p className="text-xs text-gray-500">Persisted: {new Date(data.persistedAt).toLocaleString()}</p>
           )}
           {data?.snapshotId && (
-            <p className="text-xs text-gray-500 mt-1">Snapshot ID: {data.snapshotId}</p>
+            <p className="text-xs text-gray-500">Snapshot ID: {data.snapshotId}</p>
           )}
           {data?.snapshotPath && (
-            <p className="text-xs text-gray-500 mt-1">File snapshot: {data.snapshotPath}</p>
+            <p className="text-xs text-gray-500">File snapshot: {data.snapshotPath}</p>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -105,10 +105,10 @@ export default function SupplyChainPage() {
       </div>
 
       {isLoading && <div className="text-sm text-gray-600">Loading supply chain summary…</div>}
-      {error && <div className="text-sm text-red-700">{(error as any)?.message || 'Failed to load summary'}</div>}
+      {error && <div className="text-sm text-red-700">We couldn&apos;t load the summary. Retry.</div>}
 
       {!isLoading && apps.length === 0 && (
-        <div className="card text-sm text-gray-700">No placements found for this publisher.</div>
+        <div className="card text-sm text-gray-700">No supply chain data for this publisher yet.</div>
       )}
 
       <div className="grid grid-cols-1 gap-4">

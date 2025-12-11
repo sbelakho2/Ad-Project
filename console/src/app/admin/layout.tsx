@@ -19,24 +19,27 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const currentSegment = segments[0] ?? (pathname === '/admin' ? 'health' : undefined)
 
   return (
-    <div className="p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Admin</h1>
-          <p className="text-gray-600 mt-2">Operator controls & readouts</p>
+    <div className="min-h-screen bg-[#f9fafb] px-6 py-10">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div className="space-y-2">
+          <h1 className="text-2xl font-semibold tracking-tight text-gray-900">Admin</h1>
+          <p className="text-sm text-gray-600">Operator controls and readouts.</p>
         </div>
 
-        <div className="bg-white border rounded-lg p-2">
-          <nav className="flex gap-2" aria-label="Admin navigation">
+        <div className="rounded-xl border border-gray-200 bg-white p-2">
+          <nav className="flex gap-1" aria-label="Admin navigation">
             {ADMIN_NAV.map((tab) => {
               const active = currentSegment === tab.segment
               return (
                 <Link
                   key={tab.href}
                   href={tab.href}
-                  className={`px-3 py-2 rounded-md text-sm font-medium ${active ? 'bg-primary-50 text-primary-700' : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'}`}
+                  className={`relative flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                    active ? 'bg-primary-50 text-primary-700 ring-1 ring-primary-100' : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
+                  }`}
                   aria-current={active ? 'page' : undefined}
                 >
+                  {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-primary-600" aria-hidden />}
                   {tab.name}
                 </Link>
               )
