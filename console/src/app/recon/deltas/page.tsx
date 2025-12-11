@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReconDeltaItem, ReconDeltaQuery } from '@/lib/vra';
 import { buildDeltasCsvUrl, getDeltas } from '@/lib/vra';
+import { usePlanAccess } from '@/lib/usePlanAccess';
 
 const KIND_OPTIONS: Array<{ label: string; value: ReconDeltaItem['kind'] | '' }> = [
   { label: 'All kinds', value: '' },
@@ -16,6 +17,9 @@ const KIND_OPTIONS: Array<{ label: string; value: ReconDeltaItem['kind'] | '' }>
 
 function useQueryState() {
   const [query, setQuery] = useState<ReconDeltaQuery>(() => {
+    if (typeof window === 'undefined') {
+      return { page_size: 50 };
+    }
     const u = new URL(window.location.href);
     const q: ReconDeltaQuery = {};
     u.searchParams.forEach((v, k) => ((q as any)[k] = v));
@@ -26,6 +30,7 @@ function useQueryState() {
   });
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
     const u = new URL(window.location.href);
     // Reset existing params
     u.search = '';
@@ -40,6 +45,7 @@ function useQueryState() {
 }
 
 export default function VraDeltasPage() {
+  const { allowed, isLoading: planLoading, plan, error: planError } = usePlanAccess(['growth', 'scale', 'enterprise']);
   const { query, setQuery } = useQueryState();
   const [items, setItems] = useState<ReconDeltaItem[]>([]);
   const [page, setPage] = useState<number>(query.page || 1);
@@ -49,6 +55,11 @@ export default function VraDeltasPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
+    if (!allowed) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     getDeltas({ ...query, page, page_size: pageSize })
@@ -58,7 +69,7 @@ export default function VraDeltasPage() {
       })
       .catch((e) => setError(String(e?.message || e)))
       .finally(() => setLoading(false));
-  }, [query, page, pageSize]);
+  }, [allowed, query, page, pageSize]);
 
   useEffect(() => {
     load();
@@ -99,6 +110,20 @@ export default function VraDeltasPage() {
     <div className="p-6 space-y-6">
       <h1 className="text-xl font-semibold">Reconciliation Deltas</h1>
 
+      {planLoading && <p className="text-sm text-gray-500">Checking your plan…</p>}
+      {!planLoading && !allowed && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4" role="alert">
+          <p className="text-sm font-semibold text-amber-900">Upgrade to access reconciliation deltas</p>
+          <p className="text-sm text-amber-800 mt-1">Starter only includes core dashboards. Deltas and VRA exports are available on Growth and above. Current plan: {plan || 'unknown'}.</p>
+          <div className="mt-3 flex gap-2 flex-wrap">
+            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">Open Billing</a>
+            <a href="mailto:billing@apexmediation.ee" className="px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700">Talk to billing</a>
+          </div>
+        </div>
+      )}
+      {planError && !planLoading && <p className="text-sm text-red-600">{planError}</p>}
+
+      {allowed && (
       <section className="rounded-md border p-4 bg-white">
         <form
           className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
@@ -174,7 +199,9 @@ export default function VraDeltasPage() {
           </div>
         </form>
       </section>
+      )}
 
+      {allowed && (
       <section className="rounded-md border bg-white">
         <div className="flex items-center justify-between p-4">
           <div className="text-sm text-gray-600">Total: {total.toLocaleString()}</div>
@@ -282,6 +309,7 @@ export default function VraDeltasPage() {
           </div>
         </div>
       </section>
+      )}
     </div>
   );
 }

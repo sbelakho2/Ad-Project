@@ -8,6 +8,7 @@ import { useSession as useCookieSession } from '@/lib/useSession'
 import { useFeatures } from '@/lib/useFeatures'
 import { t } from '@/i18n'
 import type { Role } from '@/lib/rbac'
+import { usePlanAccess } from '@/lib/usePlanAccess'
 import {
   LayoutDashboard,
   Layout,
@@ -34,6 +35,7 @@ type NavBlueprint = {
   icon: typeof LayoutDashboard
   featureFlag?: FeatureFlagKey
   roles?: Role[]
+  minTier?: 'starter' | 'growth' | 'scale' | 'enterprise'
 }
 
 const NAV_BLUEPRINT: NavBlueprint[] = [
@@ -42,8 +44,8 @@ const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'migration-studio', label: 'Migration Studio', labelKey: 'migrationStudio.nav', href: '/migration-studio', icon: GitCompare, featureFlag: 'migrationStudio' },
   { key: 'adapters', label: 'Adapters', href: '/adapters', icon: Layers },
   { key: 'analytics', label: 'Analytics', href: '/analytics', icon: BarChart3 },
-  { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: ShieldCheck, featureFlag: 'transparency' },
-  { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert },
+  { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: ShieldCheck, featureFlag: 'transparency', minTier: 'growth' },
+  { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert, minTier: 'growth' },
   { key: 'payouts', label: 'Payouts', href: '/payouts', icon: DollarSign },
   { key: 'billing', label: 'Billing', href: '/billing/usage', icon: CreditCard, featureFlag: 'billing' },
   // Developer tools (always visible to authenticated users)
@@ -63,6 +65,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
   const bypassLoadingGuards = Boolean(process.env.NEXT_PUBLIC_E2E_SESSION)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+  const { plan, isLoading: planLoading } = usePlanAccess()
 
   // Prefer runtime feature flags from API, with build-time env as SSR fallback
   const featureFallbacks = useMemo(
@@ -110,17 +113,25 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       if (item.featureFlag && !resolvedFeatures[item.featureFlag]) {
         return false
       }
+      if (item.minTier && plan) {
+        const tierOrder = ['starter', 'growth', 'scale', 'enterprise'] as const
+        const currentIdx = tierOrder.indexOf(plan as any)
+        const minIdx = tierOrder.indexOf(item.minTier as any)
+        if (currentIdx > -1 && minIdx > -1 && currentIdx < minIdx) {
+          return false
+        }
+      }
       return true
     }).map((item) => ({
       ...item,
       name: resolveNavLabel(item),
     }))
-  }, [resolvedFeatures, user?.role])
+  }, [plan, resolvedFeatures, user?.role])
 
   // Don't show navigation on login page
   if (!pathname || pathname === '/login' || pathname === '/') return <>{children}</>
 
-  if (!bypassLoadingGuards && (sessionLoading || featuresLoading)) {
+  if (!bypassLoadingGuards && (sessionLoading || featuresLoading || planLoading)) {
     return <NavigationSkeleton />
   }
 

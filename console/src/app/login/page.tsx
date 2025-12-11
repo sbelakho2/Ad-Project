@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { signIn } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import { Shield } from 'lucide-react'
@@ -23,6 +24,9 @@ export default function LoginPage() {
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null)
   const [humanCheck, setHumanCheck] = useState(false)
   const [cooldownRemaining, setCooldownRemaining] = useState(0)
+  const [twofaToken, setTwofaToken] = useState<string | null>(null)
+  const [twofaCode, setTwofaCode] = useState('')
+  const [twofaError, setTwofaError] = useState('')
 
   useEffect(() => {
     if (!cooldownUntil) return
@@ -66,6 +70,10 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (twofaToken) {
+      setError('Complete two-factor verification below before re-submitting credentials.')
+      return
+    }
     if (cooldownRemaining > 0) {
       setError('Login temporarily locked after repeated attempts. Please wait and try again.')
       return
@@ -91,6 +99,18 @@ export default function LoginPage() {
       })
 
       if (result?.error) {
+        try {
+          const parsed = JSON.parse(result.error)
+          if (parsed?.code === 'TWOFA_REQUIRED') {
+            setTwofaToken(parsed.tempToken || null)
+            setTwofaCode('')
+            setTwofaError('')
+            setError('Two-factor authentication required. Enter your 6-digit code or a backup code to continue.')
+            return
+          }
+        } catch (parseError) {
+          void parseError
+        }
         setError('Invalid credentials. Please try again.')
         setFailedAttempts((prev) => {
           const next = prev + 1
@@ -115,6 +135,52 @@ export default function LoginPage() {
     }
   }
 
+  const handleTwofaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!twofaToken) {
+      setError('Please submit your credentials first.')
+      return
+    }
+    if (!twofaCode.trim()) {
+      setTwofaError('Enter the 6-digit code from your authenticator or a backup code.')
+      return
+    }
+
+    setIsLoading(true)
+    setTwofaError('')
+    setError('')
+
+    try {
+      const result = await signIn('credentials', {
+        email,
+        tempToken: twofaToken,
+        twofaCode: twofaCode.trim(),
+        csrfToken,
+        redirect: false,
+      })
+
+      if (result?.error) {
+        setTwofaError('Invalid or expired code. Try again or use a backup code.')
+      } else if (result?.ok) {
+        router.push('/dashboard')
+        router.refresh()
+      } else {
+        setTwofaError('Unable to complete verification. Please try again.')
+      }
+    } catch (err) {
+      setTwofaError('Verification failed. Please try again.')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const resetTwofa = () => {
+    setTwofaToken(null)
+    setTwofaCode('')
+    setTwofaError('')
+    setError('')
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary-50 via-white to-accent-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
@@ -129,117 +195,170 @@ export default function LoginPage() {
 
         {/* Login Card */}
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 p-8">
-          <form onSubmit={handleSubmit} className="space-y-6" autoComplete="on" noValidate>
-            {error && (
-              <div className="p-4 bg-danger-50 border border-danger-200 text-danger-700 rounded-lg text-sm" role="alert" aria-live="assertive">
-                {error}
-              </div>
-            )}
+          {!twofaToken ? (
+            <form onSubmit={handleSubmit} className="space-y-6" autoComplete="on" noValidate>
+              {error && (
+                <div className="p-4 bg-danger-50 border border-danger-200 text-danger-700 rounded-lg text-sm" role="alert" aria-live="assertive">
+                  {error}
+                </div>
+              )}
 
-            {csrfError && (
-              <div className="p-4 bg-warning-50 border border-warning-200 text-warning-800 rounded-lg text-sm" role="alert">
-                {csrfError}
-              </div>
-            )}
+              {csrfError && (
+                <div className="p-4 bg-warning-50 border border-warning-200 text-warning-800 rounded-lg text-sm" role="alert">
+                  {csrfError}
+                </div>
+              )}
 
-            {/* Demo Notice */}
-            {CAN_SHOW_DEMO_MODE && (
-              <div className="p-4 bg-blue-50 border border-blue-200 text-blue-700 rounded-lg text-sm">
-                <p className="font-medium mb-1">Demo Mode</p>
-                <p>
-                  Use <strong>demo@apexmediation.ee</strong> with any password to login in sandbox
-                  environments.
-                </p>
-              </div>
-            )}
+              {/* Demo Notice */}
+              {CAN_SHOW_DEMO_MODE && (
+                <div className="p-4 bg-blue-50 border border-blue-200 text-blue-700 rounded-lg text-sm">
+                  <p className="font-medium mb-1">Demo Mode</p>
+                  <p>
+                    Use <strong>demo@apexmediation.ee</strong> with any password to login in sandbox
+                    environments.
+                  </p>
+                </div>
+              )}
 
-            {!CAN_SHOW_DEMO_MODE && DEMO_LOGIN_ENABLED && IS_PRODUCTION_BUILD && (
-              <div className="p-4 bg-warning-50 border border-warning-200 text-warning-800 rounded-lg text-sm">
-                <p className="font-medium mb-1">Demo login disabled</p>
-                <p>
-                  Demo credentials are blocked in production builds even if the flag is set. Contact an
-                  administrator if you need sandbox access.
-                </p>
-              </div>
-            )}
+              {!CAN_SHOW_DEMO_MODE && DEMO_LOGIN_ENABLED && IS_PRODUCTION_BUILD && (
+                <div className="p-4 bg-warning-50 border border-warning-200 text-warning-800 rounded-lg text-sm">
+                  <p className="font-medium mb-1">Demo login disabled</p>
+                  <p>
+                    Demo credentials are blocked in production builds even if the flag is set. Contact an
+                    administrator if you need sandbox access.
+                  </p>
+                </div>
+              )}
 
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                name="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="input w-full"
-                placeholder="you@example.com"
-                required
-                autoComplete="email"
-                inputMode="email"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                name="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="input w-full"
-                placeholder="Enter your password"
-                required
-                autoComplete="current-password"
-                spellCheck={false}
-              />
-            </div>
-
-            {failedAttempts >= 2 && (
-              <div className="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2">
+              <div>
+                <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+                  Email
+                </label>
                 <input
-                  id="human-check"
-                  type="checkbox"
-                  checked={humanCheck}
-                  onChange={(event) => setHumanCheck(event.target.checked)}
-                  className="h-4 w-4"
+                  id="email"
+                  type="email"
+                  name="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="input w-full"
+                  placeholder="you@example.com"
+                  required
+                  autoComplete="email"
+                  inputMode="email"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+                  Password
+                </label>
+                <input
+                  id="password"
+                  type="password"
+                  name="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="input w-full"
+                  placeholder="Enter your password"
+                  required
+                  autoComplete="current-password"
+                  spellCheck={false}
+                />
+              </div>
+
+              {failedAttempts >= 2 && (
+                <div className="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2">
+                  <input
+                    id="human-check"
+                    type="checkbox"
+                    checked={humanCheck}
+                    onChange={(event) => setHumanCheck(event.target.checked)}
+                    className="h-4 w-4"
+                    required
+                  />
+                  <label htmlFor="human-check" className="text-sm text-gray-700">
+                    I&apos;m not a bot
+                  </label>
+                </div>
+              )}
+
+              {cooldownRemaining > 0 && (
+                <p className="text-sm text-warning-700 bg-warning-50 border border-warning-200 rounded-lg p-3">
+                  Too many attempts. Please wait {cooldownRemaining} seconds before trying again.
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={
+                  isLoading || cooldownRemaining > 0 || !!csrfError || !csrfToken || (failedAttempts >= 2 && !humanCheck)
+                }
+                className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? 'Signing in...' : 'Sign In'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleTwofaSubmit} className="space-y-6" autoComplete="one-time-code" noValidate>
+              <div className="p-4 bg-primary-50 border border-primary-200 text-primary-900 rounded-lg text-sm" role="alert" aria-live="assertive">
+                <p className="font-semibold">Two-factor verification required</p>
+                <p className="mt-1 text-primary-800">
+                  Enter the 6-digit code from your authenticator app or a backup code to finish signing in.
+                </p>
+              </div>
+
+              {twofaError && (
+                <div className="p-4 bg-danger-50 border border-danger-200 text-danger-700 rounded-lg text-sm" role="alert" aria-live="assertive">
+                  {twofaError}
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="twofa" className="block text-sm font-medium text-gray-700 mb-2">
+                  2FA Code or Backup Code
+                </label>
+                <input
+                  id="twofa"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  value={twofaCode}
+                  onChange={(e) => setTwofaCode(e.target.value)}
+                  className="input w-full tracking-[0.3em]"
+                  placeholder="123456 or backup code"
                   required
                 />
-                <label htmlFor="human-check" className="text-sm text-gray-700">
-                  I&apos;m not a bot
-                </label>
+                <p className="mt-2 text-xs text-gray-500">Lost access? Use one of your backup codes to continue.</p>
               </div>
-            )}
 
-            {cooldownRemaining > 0 && (
-              <p className="text-sm text-warning-700 bg-warning-50 border border-warning-200 rounded-lg p-3">
-                Too many attempts. Please wait {cooldownRemaining} seconds before trying again.
-              </p>
-            )}
-
-            <button
-              type="submit"
-              disabled={
-                isLoading || cooldownRemaining > 0 || !!csrfError || !csrfToken || (failedAttempts >= 2 && !humanCheck)
-              }
-              className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isLoading ? 'Signing in...' : 'Sign In'}
-            </button>
-          </form>
+              <div className="flex items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={isLoading || !!csrfError || !csrfToken}
+                  className="btn-primary flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isLoading ? 'Verifying...' : 'Verify and continue'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetTwofa}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Back to credentials
+                </button>
+              </div>
+            </form>
+          )}
 
           <div className="mt-6 text-center text-sm text-gray-600">
             <p>
               Don&apos;t have an account?{' '}
-              <a
-                href="mailto:sales@apexmediation.ee"
-                className="text-primary-600 hover:text-primary-700 font-medium"
-              >
-                Contact sales
+              <Link href="/signup" className="text-primary-600 hover:text-primary-700 font-medium">
+                Create one
+              </Link>
+              {' '}or{' '}
+              <a href="mailto:sales@apexmediation.ee" className="text-primary-600 hover:text-primary-700 font-medium">
+                contact sales
               </a>
             </p>
           </div>

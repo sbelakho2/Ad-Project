@@ -1,11 +1,8 @@
 import { AuctionsClient } from './AuctionsClient'
-import { handleApiError } from '@/lib/api-client'
-import { transparencyApi } from '@/lib/transparency'
 import {
   TRANSPARENCY_AUCTION_PAGE_SIZE,
   type TransparencyFilterParams,
   sanitizeFilters,
-  type AuctionsResponse,
 } from './filterUtils'
 import { Section, Container, PageHeader } from '@/components/ui'
 
@@ -34,18 +31,6 @@ export default async function TransparencyAuctionsPage(props: PageProps) {
 
   const sanitizedFilters = sanitizeFilters(rawFilters)
 
-  let initialData: AuctionsResponse | null = null
-  let initialError: string | null = null
-  try {
-    initialData = await transparencyApi.list({
-      page: safePage,
-      limit: TRANSPARENCY_AUCTION_PAGE_SIZE,
-      ...sanitizedFilters,
-    })
-  } catch (error) {
-    initialError = handleApiError(error)
-  }
-
   return (
     <>
       <PageHeader
@@ -58,8 +43,8 @@ export default async function TransparencyAuctionsPage(props: PageProps) {
           <AuctionsClient
             initialPage={safePage}
             initialFilters={sanitizedFilters}
-            initialData={initialData}
-            initialError={initialError}
+            initialData={null}
+            initialError={null}
           />
         </Container>
       </Section>

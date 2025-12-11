@@ -37,18 +37,26 @@ export const authOptions: NextAuthOptions = {
       credentials: {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
+        twofaCode: { label: '2FA Code', type: 'text' },
+        tempToken: { label: 'Temp Token', type: 'text' },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) {
+        const email = credentials?.email
+        const password = credentials?.password
+        const twofaCode = credentials?.twofaCode
+        const tempToken = credentials?.tempToken
+        const isCompletingTwofa = Boolean(tempToken && twofaCode)
+
+        if (!isCompletingTwofa && (!email || !password)) {
           return null
         }
 
         try {
-          if (allowMockAuth) {
-            if (credentials.email.includes('demo') || credentials.password === 'demo') {
+          if (allowMockAuth && !isCompletingTwofa) {
+            if (credentials?.email?.includes('demo') || credentials?.password === 'demo') {
               return {
                 id: 'user_1',
-                email: credentials.email,
+                email: credentials?.email,
                 name: 'Demo Publisher',
                 role: 'publisher' as const,
                 publisherId: 'pub_demo_123',
@@ -58,18 +66,49 @@ export const authOptions: NextAuthOptions = {
             return null
           }
 
+          if (isCompletingTwofa) {
+            const response = await apiClient.post('/auth/login2fa', {
+              tempToken,
+              code: twofaCode,
+            })
+
+            const payload = response.data?.data || response.data
+            const { user, token } = payload || {}
+
+            if (user && token) {
+              return {
+                id: user.id,
+                email: user.email,
+                name: user.name || user.companyName || user.email,
+                role: user.role,
+                publisherId: user.publisherId,
+                accessToken: token,
+              }
+            }
+
+            return null
+          }
+
           const response = await apiClient.post('/auth/login', {
-            email: credentials.email,
-            password: credentials.password,
+            email,
+            password,
           })
 
-          const { user, token } = response.data
+          const payload = response.data?.data || response.data
+
+          if (payload?.twofaRequired) {
+            throw new Error(
+              JSON.stringify({ code: 'TWOFA_REQUIRED', tempToken: payload.tempToken, email })
+            )
+          }
+
+          const { user, token } = payload || {}
 
           if (user && token) {
             return {
               id: user.id,
               email: user.email,
-              name: user.name,
+              name: user.name || user.companyName || user.email,
               role: user.role,
               publisherId: user.publisherId,
               accessToken: token,

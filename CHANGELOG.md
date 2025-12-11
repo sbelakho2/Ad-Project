@@ -1,3 +1,105 @@
+# Changelog — Billing Strategy & Tier Gating (2025-12-11)
+
+## E2E Testing Complete (2025-12-11)
+
+### Full Playwright Test Suite
+Added production-level end-to-end tests for both Console and Website.
+
+**Console E2E Tests (35 tests, all passing):**
+- `tests/e2e/tiers-roles.spec.ts`: Tier-based feature gating (Starter/Growth/Scale/Enterprise) and role access (Publisher/Admin)
+- `tests/e2e/vra.spec.ts`: VRA Reconciliation overview, deltas filtering, invoice generation with customer/Apex info and logo
+- `tests/e2e/migration-studio.spec.ts`: Migration Studio experiments, import wizard, parity simulator, guardrails
+
+**Website E2E Tests (12 tests, all passing):**
+- `tests/e2e.spec.ts`: Homepage, pricing page, navigation, accessibility, performance validation
+
+### Screenshots Captured (36 total)
+Located in `console/test-results/screenshots/`:
+- Tier gating: `starter-transparency-gated.png`, `starter-vra-gated.png`, `starter-fraud-gated.png`
+- Growth access: `growth-transparency.png`, `growth-vra.png`, `growth-fraud.png`
+- VRA flows: `vra-overview.png`, `vra-deltas.png`, `invoice-list.png`, `invoice-detail.png`
+- Migration Studio: `migration-studio-main.png`, `migration-experiments.png`, `migration-guardrails.png`
+- Role verification: `publisher-billing.png`, `admin-full-access.png`, `publisher-settings.png`
+
+### Bug Fixes
+- **SSR fix in `console/src/app/recon/deltas/page.tsx`**: Wrapped `window.location.href` access in `typeof window === 'undefined'` check to prevent server-side rendering errors.
+
+### Test Infrastructure
+- API route mocking with proper `**/api/v1/**` patterns to avoid intercepting page navigation
+- Mock data matching actual TypeScript interfaces (`UsageData`, `ReconDeltaItem`, `InvoicesListResponse`)
+- NEXT_PUBLIC_E2E_SESSION bypass for session in tests
+
+---
+
+## Summary
+- Enforced BYO-only billing model and tier-based feature gating across Console, website, and documentation.
+- Starter tier (0% up to $10k/app/mo) limited to basic dashboards; Transparency Auctions, VRA Reconciliation, Fraud dashboards gated to Growth+ (2.5%).
+- Added `usePlanAccess` hook in Console for centralized plan detection and tier gating.
+- Updated website `/pricing` page and Console `/signup` to reflect BYO pricing tiers and feature gates.
+- Created `docs/Developer-Facing/Billing-and-Tiers.md` documenting pricing model, tier definitions, access controls, and required secrets.
+
+## Console Changes
+
+### Plan Access Hook (`console/src/lib/usePlanAccess.ts`)
+- New `usePlanAccess()` hook queries `/api/billing/usage` to determine current plan type.
+- Returns `planAllows(minTier)` helper for tier-based access control.
+- Tiers ordered: Starter < Growth < Scale < Enterprise.
+
+### Feature Gating
+- **Transparency Auctions** (`console/src/app/transparency/auctions/`): Client-side gated; Starter users see upgrade CTA instead of auction data.
+- **VRA Reconciliation** (`console/src/app/recon/`): Overview and Deltas pages gated to Growth+; data fetch skipped for Starter.
+- **Fraud Dashboard** (`console/src/app/fraud/page.tsx`): Gated to Growth+ with upgrade messaging; queries disabled for Starter.
+- **Navigation** (`console/src/components/Navigation.tsx`): Added `minTier` filtering; Transparency/Fraud links hidden for Starter users.
+
+### Billing & Settings UI
+- **Tier Summaries** (`console/src/lib/platformTiers.ts`): Updated descriptions to reflect gating (Starter basic only; Growth unlocks transparency/VRA/fraud).
+- **Billing Settings** (`console/src/app/billing/settings/page.tsx`): Added tier capability grid showing what each tier unlocks; CTA to upgrade.
+
+### Signup Page
+- Updated copy to describe BYO pricing model and feature gating by tier.
+
+## Website Changes
+
+### Pricing Page (`website/src/app/pricing/page.tsx`)
+- Updated to reflect four-tier BYO pricing model with feature breakdown.
+- Clear gating: Starter = basic dashboards; Growth = transparency/VRA/fraud; Scale = RBAC/exports; Enterprise = custom SLAs.
+
+## Documentation
+
+### Billing and Tiers (`docs/Developer-Facing/Billing-and-Tiers.md`)
+- Comprehensive documentation of BYO-only billing policy.
+- Tier definitions, fee schedules, and feature access controls.
+- Required environment variables and secrets (including `TWOFA_ISSUER` for backend 2FA).
+
+## Backend Secrets
+- Noted `TWOFA_ISSUER` requirement for 2FA branding; to be added to backend helm values.
+
+## Validation
+```bash
+# Console plan gating
+# Navigate to /transparency/auctions, /recon, /fraud as Starter user → see upgrade CTAs
+# Navigate as Growth+ user → see full data
+
+# Website pricing
+# Visit /pricing → verify tier breakdown and feature gating text
+```
+
+## Files Changed/Created
+- `console/src/lib/usePlanAccess.ts` - Plan access hook
+- `console/src/app/transparency/auctions/page.tsx` - Gated to Growth+
+- `console/src/app/transparency/auctions/AuctionsClient.tsx` - Client-side gating
+- `console/src/app/recon/overview/page.tsx` - Gated to Growth+
+- `console/src/app/recon/deltas/page.tsx` - Gated to Growth+
+- `console/src/app/fraud/page.tsx` - Gated to Growth+
+- `console/src/components/Navigation.tsx` - minTier filtering
+- `console/src/lib/platformTiers.ts` - Updated tier summaries
+- `console/src/app/billing/settings/page.tsx` - Tier capability grid
+- `console/src/app/signup/page.tsx` - Updated copy
+- `website/src/app/pricing/page.tsx` - Updated pricing breakdown
+- `docs/Developer-Facing/Billing-and-Tiers.md` - Billing documentation
+
+---
+
 # Changelog — Networked Sandbox Execution (2025-12-10)
 
 Summary

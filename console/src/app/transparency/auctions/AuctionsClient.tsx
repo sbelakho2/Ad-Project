@@ -7,6 +7,7 @@ import { transparencyApi, type TransparencyAuction } from '@/lib/transparency'
 import { useDebouncedValue, useUrlQueryParams } from '@/lib/hooks'
 import { VerifyBadge, Skeleton, CopyButton } from '@/components/ui'
 import { isFeatureEnabled } from '@/lib/featureFlags'
+import { usePlanAccess } from '@/lib/usePlanAccess'
 import {
   TRANSPARENCY_AUCTION_PAGE_SIZE,
   type AuctionsResponse,
@@ -36,6 +37,7 @@ export type AuctionsClientProps = {
 
 export function AuctionsClient({ initialPage, initialFilters, initialData, initialError }: AuctionsClientProps) {
   const canManuallyRefresh = isFeatureEnabled('transparencyRefresh')
+  const { allowed, isLoading: planLoading, plan, error: planError } = usePlanAccess(['growth', 'scale', 'enterprise'])
   const { params: urlParams, updateParams } = useUrlQueryParams()
   const [page, setPage] = useState(Number.isFinite(initialPage) ? initialPage : 1)
   const [from, setFrom] = useState(initialFilters.from ?? urlParams?.get('from') ?? '')
@@ -100,7 +102,7 @@ export function AuctionsClient({ initialPage, initialFilters, initialData, initi
     return page === initialPage && filtersEqual(initialFiltersRef.current, filterParams)
   }, [page, initialPage, filterParams])
 
-  const queryEnabled = !fromError && !toError && !geoError
+  const queryEnabled = !fromError && !toError && !geoError && allowed
 
   const {
     data: auctionsResponse,
@@ -113,7 +115,7 @@ export function AuctionsClient({ initialPage, initialFilters, initialData, initi
     queryFn: ({ signal }) => transparencyApi.list(params, { signal }),
     placeholderData: keepPreviousData,
     enabled: queryEnabled,
-    initialData: isInitialState && initialData ? initialData : undefined,
+    initialData: allowed && isInitialState && initialData ? initialData : undefined,
   })
 
   useEffect(() => {
@@ -135,6 +137,8 @@ export function AuctionsClient({ initialPage, initialFilters, initialData, initi
   const validationAlertMessage = fromError ?? toError ?? geoError ?? null
   const fetchAlertMessage = !validationAlertMessage ? stickyError : null
 
+  const upgradeCta = !allowed && !planLoading
+
   return (
     <div className="p-6" role="main" aria-labelledby="page-title">
       <div className="flex items-center justify-between mb-4">
@@ -154,6 +158,37 @@ export function AuctionsClient({ initialPage, initialFilters, initialData, initi
           </span>
         )}
       </div>
+
+      {planLoading && (
+        <div className="border border-gray-200 rounded-lg bg-white px-4 py-3 mb-4" role="status">
+          <p className="text-sm text-gray-700">Checking your plan…</p>
+        </div>
+      )}
+
+      {upgradeCta && (
+        <div className="border border-amber-200 rounded-lg bg-amber-50 px-4 py-3 mb-4" role="alert">
+          <p className="text-sm font-semibold text-amber-900">Upgrade to access transparency</p>
+          <p className="text-sm text-amber-800 mt-1">
+            Transparency auctions, VRA-backed logs, and reconciliation exports are available on Growth and above.
+            Starter is limited to basic dashboards. Current plan: {plan || 'unknown'}.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <a href="mailto:billing@apexmediation.ee" className="px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700">
+              Talk to billing
+            </a>
+            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">
+              Open Billing Settings
+            </a>
+          </div>
+        </div>
+      )}
+
+      {planError && !planLoading && (
+        <div className="border border-red-200 rounded-lg bg-red-50 px-4 py-3 mb-4" role="alert">
+          <p className="text-sm font-semibold text-red-900">Unable to confirm your plan</p>
+          <p className="text-xs text-red-800">{planError}</p>
+        </div>
+      )}
 
       <form className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4" aria-label="Auction filters" onSubmit={(e) => e.preventDefault()}>
         <div className="flex flex-col">

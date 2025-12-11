@@ -280,11 +280,16 @@ export const login2fa = async (
     const ok = await twofaService.verifyTokenOrBackupCode(userId, code);
     if (!ok) throw new AppError('Invalid 2FA code', 401);
 
+    const user = await findUserByEmail(email);
+    if (!user) {
+      throw new AppError('User not found', 404);
+    }
+
     const tokenPayload: TokenPayload = {
       userId,
       publisherId,
       email,
-      role: 'publisher',
+      role: ((user as any).role as TokenPayload['role']) || 'publisher',
     };
 
     const accessToken = issueAccessToken(tokenPayload);
@@ -311,6 +316,13 @@ export const login2fa = async (
         refreshToken: refreshToken.token,
         refreshTokenExpiresAt: refreshToken.expiresAt.toISOString(),
         refreshTokenExpiresIn: refreshToken.expiresInSeconds,
+        user: {
+          id: user.id,
+          email,
+          publisherId,
+          companyName: (user as any).company_name,
+          role: ((user as any).role as TokenPayload['role']) || 'publisher',
+        },
       },
     });
   } catch (error) {

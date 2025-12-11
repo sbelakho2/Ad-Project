@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fraudApi } from '@/lib/api'
 import { useSession } from '@/lib/useSession'
+import { usePlanAccess } from '@/lib/usePlanAccess'
 import { ShieldAlert, AlertTriangle, Shield, Activity, Ban, Flag } from 'lucide-react'
 import { formatNumber, formatPercentage } from '@/lib/utils'
 import type { FraudAlert, FraudStats } from '@/types'
@@ -25,6 +26,7 @@ const alertTypeLabels = {
 
 export default function FraudPage() {
   const { user, isLoading: sessionLoading } = useSession()
+  const { allowed, isLoading: planLoading, plan, error: planError } = usePlanAccess(['growth', 'scale', 'enterprise'])
   const publisherId = user?.publisherId
   const [timeWindow, setTimeWindow] = useState<'1h' | '24h' | '7d' | '30d'>('24h')
   const [severityFilter, setSeverityFilter] = useState<'all' | FraudAlert['severity']>('all')
@@ -46,7 +48,7 @@ export default function FraudPage() {
       const { data } = await fraudApi.getStats(publisherId, { window: timeWindow, signal })
       return data
     },
-    enabled: Boolean(publisherId),
+    enabled: Boolean(publisherId) && allowed,
     staleTime: 60_000,
     gcTime: 300_000,
     refetchOnWindowFocus: false,
@@ -65,7 +67,7 @@ export default function FraudPage() {
       const { data } = await fraudApi.getAlerts(publisherId, { limit: 50, signal })
       return data
     },
-    enabled: Boolean(publisherId),
+    enabled: Boolean(publisherId) && allowed,
     staleTime: 30_000,
     gcTime: 300_000,
   })
@@ -96,6 +98,33 @@ export default function FraudPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-sm text-gray-600">Loading session...</div>
+      </div>
+    )
+  }
+
+  if (planLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-sm text-gray-600">Checking your plan…</div>
+      </div>
+    )
+  }
+
+  if (!allowed) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="card max-w-lg text-center">
+          <ShieldAlert className="h-10 w-10 text-amber-600 mx-auto mb-3" aria-hidden={true} />
+          <p className="text-lg font-semibold text-gray-900">Upgrade to access fraud dashboards</p>
+          <p className="text-sm text-gray-700 mt-2">
+            Starter includes core dashboards only. Fraud/quality dashboards unlock on Growth and above. Current plan: {plan || 'unknown'}.
+          </p>
+          <div className="flex gap-2 justify-center mt-4 flex-wrap">
+            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">Open Billing</a>
+            <a href="mailto:billing@apexmediation.ee" className="px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700">Talk to billing</a>
+          </div>
+          {planError && <p className="text-xs text-red-600 mt-2">{planError}</p>}
+        </div>
       </div>
     )
   }

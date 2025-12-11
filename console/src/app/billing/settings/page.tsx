@@ -396,6 +396,47 @@ export default function BillingSettingsPage() {
             </p>
           </section>
 
+          <section className="bg-white rounded-lg shadow-sm border border-gray-200 p-6" aria-live="polite">
+            <h2 className="text-lg font-semibold text-gray-900">What each tier unlocks</h2>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2">
+              <div className="border border-gray-100 rounded-lg p-4">
+                <p className="text-sm font-semibold text-gray-900">Starter (0% to $10k/app/mo)</p>
+                <ul className="mt-2 text-sm text-gray-700 list-disc list-inside space-y-1">
+                  <li>Basic revenue + latency dashboards</li>
+                  <li>SDKs and Migration Studio</li>
+                  <li className="text-amber-700">No Transparency auctions, VRA reconciliation, fraud dashboards, or A/B tools</li>
+                </ul>
+              </div>
+              <div className="border border-gray-100 rounded-lg p-4">
+                <p className="text-sm font-semibold text-gray-900">Growth (2.5% platform fee)</p>
+                <ul className="mt-2 text-sm text-gray-700 list-disc list-inside space-y-1">
+                  <li>Everything in Starter</li>
+                  <li>Transparency auctions + VRA reconciliation exports</li>
+                  <li>Fraud/quality dashboards and A/B experiments</li>
+                  <li>Priority support and uptime SLA</li>
+                </ul>
+              </div>
+              <div className="border border-gray-100 rounded-lg p-4">
+                <p className="text-sm font-semibold text-gray-900">Scale (2.0% → 1.25% with annual prepay)</p>
+                <ul className="mt-2 text-sm text-gray-700 list-disc list-inside space-y-1">
+                  <li>Everything in Growth</li>
+                  <li>Custom roles/RBAC and BI exports</li>
+                  <li>Dedicated migration + integration support</li>
+                  <li>Joint roadmap sessions</li>
+                </ul>
+              </div>
+              <div className="border border-gray-100 rounded-lg p-4">
+                <p className="text-sm font-semibold text-gray-900">Enterprise (1.0–1.5% custom)</p>
+                <ul className="mt-2 text-sm text-gray-700 list-disc list-inside space-y-1">
+                  <li>Everything in Scale</li>
+                  <li>Custom SLAs and white-label options</li>
+                  <li>Bespoke data feeds and compliance support</li>
+                  <li>Invoice + wire after finance review (autopay default)</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
           {showPolicySection && (
             <section className="bg-white rounded-lg shadow-sm border border-primary-100 p-6" aria-live="polite">
               <div className="flex flex-col gap-2">

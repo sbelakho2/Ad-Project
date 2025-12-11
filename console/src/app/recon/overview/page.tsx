@@ -3,13 +3,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReconOverviewResult } from '@/lib/vra';
 import { getOverview } from '@/lib/vra';
+import { usePlanAccess } from '@/lib/usePlanAccess';
 
 export default function VraOverviewPage() {
+  const { allowed, isLoading: planLoading, plan, error: planError } = usePlanAccess(['growth', 'scale', 'enterprise']);
   const [data, setData] = useState<ReconOverviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (planLoading || !allowed) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     getOverview({})
@@ -38,10 +44,23 @@ export default function VraOverviewPage() {
     <div className="p-6 space-y-6">
       <h1 className="text-xl font-semibold">Reconciliation Overview</h1>
 
+      {planLoading && <p className="text-sm text-gray-500">Checking your plan…</p>}
+      {!planLoading && !allowed && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4" role="alert">
+          <p className="text-sm font-semibold text-amber-900">Upgrade to access VRA reconciliation</p>
+          <p className="text-sm text-amber-800 mt-1">Starter is limited to core dashboards. VRA reconciliation and transparency logs are available on Growth and above. Current plan: {plan || 'unknown'}.</p>
+          <div className="mt-3 flex gap-2 flex-wrap">
+            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">Open Billing</a>
+            <a href="mailto:billing@apexmediation.ee" className="px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700">Talk to billing</a>
+          </div>
+        </div>
+      )}
+      {planError && !planLoading && <p className="text-sm text-red-600">{planError}</p>}
+
       {loading && <p className="text-sm text-gray-500">Loading…</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {(!loading && !error) && (
+      {(!loading && !error && allowed) && (
         <>
           <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {topNetworks.length === 0 ? (

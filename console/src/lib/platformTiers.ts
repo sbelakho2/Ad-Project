@@ -28,10 +28,10 @@ export const PLATFORM_TIER_LABELS: Record<PlatformTierId, string> = {
 }
 
 const PLATFORM_TIER_SUMMARIES: Record<PlatformTierId, string> = {
-  starter: 'Includes 1M impressions, 100k API calls, and 50GB transfer',
-  growth: 'Includes 10M impressions, 1M API calls, and 500GB transfer',
-  scale: 'Includes 50M impressions, 5M API calls, and 2.5TB transfer',
-  enterprise: 'Includes 100M impressions, 10M API calls, and 5TB transfer',
+  starter: '0% platform fee up to $10k/app/month. Basic dashboards only; transparency/VRA/fraud unlock on upgrade.',
+  growth: '2.5% platform fee. Unlocks transparency auctions, VRA reconciliation, fraud dashboards, and A/B tools.',
+  scale: '2.0% platform fee; 1.25% with annual prepay. Adds RBAC, BI exports, dedicated integration help.',
+  enterprise: 'Custom (1.0–1.5%) with SLAs, white-label options, and bespoke data feeds.',
 }
 
 export const PLATFORM_TIER_USAGE_LIMITS: Record<PlatformTierId, PlatformTierUsageLimits> = {
