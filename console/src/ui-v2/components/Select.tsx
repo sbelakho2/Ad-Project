@@ -33,6 +33,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
           'border border-[var(--color-border)] pr-10',
           'focus-visible:outline-none focus-visible:[box-shadow:var(--focus-ring)]',
           'disabled:opacity-60 disabled:cursor-not-allowed',
+          '!bg-none', // Override global CSS background-image since we use SVG caret
           sizeCls(selectSize),
           invalid && 'border-[var(--color-danger)]',
           className
