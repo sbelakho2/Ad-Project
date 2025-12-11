@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as appKeysRepo from '../repositories/appApiKeyRepository'
-import AppError from '../utils/AppError'
+import { AppError } from '../middleware/errorHandler'
 import logger from '../utils/logger'
 
 const requirePublisherId = (req: Request): string => {
