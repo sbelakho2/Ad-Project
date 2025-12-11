@@ -206,7 +206,7 @@ export default function AppKeysPage() {
               <div className="flex-1">
                 <p className="font-medium text-green-800">API Key Created</p>
                 <p className="text-sm text-green-700 mb-3">
-                  Copy this key now. You won't be able to see it again.
+                  Copy this key now. You will not be able to see it again.
                 </p>
                 <div className="flex items-center gap-2 bg-white border border-green-300 rounded px-3 py-2">
                   <code className="flex-1 font-mono text-sm break-all">
