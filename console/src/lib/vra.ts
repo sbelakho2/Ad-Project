@@ -75,10 +75,12 @@ export async function getDeltas(query: ReconDeltaQuery): Promise<{ items: ReconD
 }
 
 export function buildDeltasCsvUrl(query: ReconDeltaQuery): string {
-  const url = new URL('/api/v1/recon/deltas.csv', window.location.origin);
+  // Build a relative URL - works in browser, and on server we shouldn't be generating download links
+  const params = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v === undefined || v === null) continue;
-    url.searchParams.set(k, String(v));
+    params.set(k, String(v));
   }
-  return url.toString();
+  const queryString = params.toString();
+  return `/api/v1/recon/deltas.csv${queryString ? `?${queryString}` : ''}`;
 }

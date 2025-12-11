@@ -8,31 +8,41 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'Sweden Sans', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'Helvetica Neue', 'Arial', 'sans-serif'],
-        'sweden': ['Sweden Sans', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', 'monospace'],
+        sans: ['var(--font-jakarta)', 'Plus Jakarta Sans', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['var(--font-jakarta)', 'Plus Jakarta Sans', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+      },
+      letterSpacing: {
+        'tighter': '-0.05em',
+        'tight': '-0.025em',
+        'normal': '0',
+        'wide': '0.025em',
+      },
+      lineHeight: {
+        'relaxed': '1.625',
+        'loose': '2',
       },
       colors: {
-        // Study in Sweden Color Palette
-        'primary-blue': '#005293',
-        'sunshine-yellow': '#FECB00',
-        'pale-yellow': '#FFD481',
-        'cream': '#E8E3D1',
-        'accent-red': '#C04437',
-        'success-green': '#5BAA2A',
+        // Premium ApexMediation Color Palette
+        'primary-blue': '#1E3A5F',
+        'sunshine-yellow': '#F59E0B',
+        'pale-yellow': '#FCD34D',
+        'cream': '#FFF8F0',
+        'accent-red': '#DC2626',
+        'success-green': '#059669',
 
-        // Keep legacy colors for gradual migration
+        // Premium primary palette with rich blues
         primary: {
-          50: '#E8F4F8',
-          100: '#D1E9F1',
-          200: '#A3D3E3',
-          300: '#75BDD5',
-          400: '#47A7C7',
-          500: '#005293', // Primary blue
-          600: '#004275',
-          700: '#003157',
-          800: '#00213A',
-          900: '#00111D',
+          50: '#EFF6FF',
+          100: '#DBEAFE',
+          200: '#BFDBFE',
+          300: '#93C5FD',
+          400: '#60A5FA',
+          500: '#3B82F6',
+          600: '#2563EB',
+          700: '#1D4ED8',
+          800: '#1E3A5F',
+          900: '#172554',
         },
         success: {
           50: '#f0fdf4',

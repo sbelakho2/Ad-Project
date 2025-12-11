@@ -1,7 +1,8 @@
 import axios, { AxiosInstance, AxiosError, AxiosHeaders, InternalAxiosRequestConfig } from 'axios'
 import { getCsrfToken, readXsrfCookie } from './csrf'
 
-const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true'
+// Mock API is never enabled in production
+const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true' && process.env.NODE_ENV !== 'production'
 const TENANT_HEADER = process.env.NEXT_PUBLIC_TENANT_HEADER || 'X-Publisher-Id'
 
 const appendApiVersion = (value: string, defaultSuffix = '/api/v1') => {
@@ -20,14 +21,30 @@ const normalizeBase = (candidate: string | undefined, fallbackHost: string) => {
   return appendApiVersion(base)
 }
 
-const CORE_HOST = process.env.NEXT_PUBLIC_API_URL
-const BASE_URL = USE_MOCK_API ? '/api/mock' : normalizeBase(CORE_HOST, 'http://localhost:8080')
+// In production, use relative URLs to avoid CORS and localhost issues
+// The Next.js API routes proxy to the backend
+const isServer = typeof window === 'undefined'
+const CORE_HOST = process.env.NEXT_PUBLIC_API_URL || ''
+
+// Use relative paths when no explicit host is set - Next.js will proxy these
+const getDefaultBase = () => {
+  if (USE_MOCK_API) return '/api/mock'
+  if (CORE_HOST) return normalizeBase(CORE_HOST, '')
+  // In browser, use relative URL; on server during SSR, skip external calls
+  return '/api/v1'
+}
+
+const BASE_URL = getDefaultBase()
 const FRAUD_API_URL = USE_MOCK_API
   ? '/api/mock'
-  : normalizeBase(process.env.NEXT_PUBLIC_FRAUD_API_URL, CORE_HOST || 'http://localhost:8080')
+  : process.env.NEXT_PUBLIC_FRAUD_API_URL
+    ? normalizeBase(process.env.NEXT_PUBLIC_FRAUD_API_URL, '')
+    : BASE_URL
 const ANALYTICS_API_URL = USE_MOCK_API
   ? '/api/mock'
-  : normalizeBase(process.env.NEXT_PUBLIC_ANALYTICS_API_URL, CORE_HOST || 'http://localhost:8080')
+  : process.env.NEXT_PUBLIC_ANALYTICS_API_URL
+    ? normalizeBase(process.env.NEXT_PUBLIC_ANALYTICS_API_URL, '')
+    : BASE_URL
 
 // Create axios instances
 export const apiClient: AxiosInstance = axios.create({

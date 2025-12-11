@@ -4,7 +4,12 @@
  * Adds limited retries/backoff, optional auth header, and de‑duping.
  */
 
-const AUCTION_URL = (process.env.NEXT_PUBLIC_AUCTION_URL || 'http://localhost:8081').replace(/\/$/, '');
+// In production, require NEXT_PUBLIC_AUCTION_URL to be set
+const AUCTION_URL_RAW = process.env.NEXT_PUBLIC_AUCTION_URL;
+if (process.env.NODE_ENV === 'production' && !AUCTION_URL_RAW) {
+  console.warn('[auctionApi] NEXT_PUBLIC_AUCTION_URL not set, auction features will be disabled');
+}
+const AUCTION_URL = (AUCTION_URL_RAW || '/api/auction').replace(/\/$/, '');
 
 export interface ApiEnvelope<T = any> {
   success: boolean;

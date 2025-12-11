@@ -1,5 +1,48 @@
 # Changelog — Billing Strategy & Tier Gating (2025-12-11)
 
+## UI/UX Premium Redesign (2025-12-11)
+
+### Navigation & Sidebar Overhaul
+Redesigned the Console sidebar for a premium, polished appearance:
+
+**Logo Display Fixes:**
+- Removed blue fallback background (`bg-primary-600`) from logo container
+- Added proper `overflow-hidden` and `shadow-lg ring-2 ring-primary-100` for depth
+- Logo now displays at 44x44 px with rounded corners (`rounded-xl`)
+
+**Text Overflow Fixes:**
+- "ApexMediation" text reduced to `text-sm` with `truncate` class
+- Added `min-w-0 flex-1` to text container for proper flex behavior
+- Applied gradient text effect (`bg-gradient-to-r from-primary-800 via-primary-600 to-primary-700 bg-clip-text text-transparent`)
+
+**Premium Styling Additions:**
+- Sidebar: `bg-gradient-to-b from-white via-gray-50 to-white` with `shadow-xl`
+- Logo header: `bg-gradient-to-r from-primary-50 to-white`
+- Active nav items: Gradient background (`from-primary-600 to-primary-500`) with `shadow-md shadow-primary-200`
+- User avatar: Gradient background (`from-primary-500 to-primary-600`) with shadow
+- Sign out: Hover state with `hover:bg-red-50 hover:text-red-600`
+- Main content area: `bg-gradient-to-br from-gray-50 via-white to-gray-100`
+
+### Color Palette Upgrade (`console/tailwind.config.ts`)
+Enhanced colors for a richer, more premium feel:
+
+**Before (Sweden palette):**
+- primary-blue: `#005293` (flat, somewhat dark)
+- sunshine-yellow: `#FECB00`
+
+**After (Premium palette):**
+- primary-blue: `#1E3A5F` (deep navy)
+- Primary scale: Rich blues from `#EFF6FF` to `#172554`
+- Primary 500-700: `#3B82F6`, `#2563EB`, `#1D4ED8` (vibrant, modern blues)
+- sunshine-yellow: `#F59E0B` (warmer amber)
+- success-green: `#059669` (emerald)
+
+### SSR Bug Fix (`console/src/lib/vra.ts`)
+- Fixed `window is not defined` error in `buildDeltasCsvUrl()` function
+- Added SSR-safe origin detection: `typeof window !== 'undefined' ? window.location.origin : ''`
+
+---
+
 ## E2E Testing Complete (2025-12-11)
 
 ### Full Playwright Test Suite
@@ -13,7 +56,7 @@ Added production-level end-to-end tests for both Console and Website.
 **Website E2E Tests (12 tests, all passing):**
 - `tests/e2e.spec.ts`: Homepage, pricing page, navigation, accessibility, performance validation
 
-### Screenshots Captured (36 total)
+### Screenshots Captured (36+ total)
 Located in `console/test-results/screenshots/`:
 - Tier gating: `starter-transparency-gated.png`, `starter-vra-gated.png`, `starter-fraud-gated.png`
 - Growth access: `growth-transparency.png`, `growth-vra.png`, `growth-fraud.png`
@@ -23,6 +66,7 @@ Located in `console/test-results/screenshots/`:
 
 ### Bug Fixes
 - **SSR fix in `console/src/app/recon/deltas/page.tsx`**: Wrapped `window.location.href` access in `typeof window === 'undefined'` check to prevent server-side rendering errors.
+- **SSR fix in `console/src/lib/vra.ts`**: Fixed `buildDeltasCsvUrl()` to handle SSR gracefully.
 
 ### Test Infrastructure
 - API route mocking with proper `**/api/v1/**` patterns to avoid intercepting page navigation

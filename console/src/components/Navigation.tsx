@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import Image from 'next/image'
 import { signOut } from 'next-auth/react'
 import { usePathname } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
@@ -11,19 +12,23 @@ import type { Role } from '@/lib/rbac'
 import { usePlanAccess } from '@/lib/usePlanAccess'
 import {
   LayoutDashboard,
-  Layout,
-  Layers,
-  Settings,
-  DollarSign,
+  LayoutGrid,
+  ArrowLeftRight,
+  Puzzle,
+  TrendingUp,
+  Eye,
   ShieldAlert,
-  BarChart3,
+  Wallet,
+  Receipt,
+  Link2,
+  FileCheck,
+  FileSearch,
+  Bug,
+  Settings,
+  Shield,
   LogOut,
   Menu,
   X,
-  ShieldCheck,
-  CreditCard,
-  GitCompare,
-  Wrench,
 } from 'lucide-react'
 
 type FeatureFlagKey = 'transparency' | 'billing' | 'migrationStudio'
@@ -40,21 +45,21 @@ type NavBlueprint = {
 
 const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'dashboard', label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'placements', label: 'Placements', href: '/placements', icon: Layout },
-  { key: 'migration-studio', label: 'Migration Studio', labelKey: 'migrationStudio.nav', href: '/migration-studio', icon: GitCompare, featureFlag: 'migrationStudio' },
-  { key: 'adapters', label: 'Adapters', href: '/adapters', icon: Layers },
-  { key: 'analytics', label: 'Analytics', href: '/analytics', icon: BarChart3 },
-  { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: ShieldCheck, featureFlag: 'transparency', minTier: 'growth' },
+  { key: 'placements', label: 'Placements', href: '/placements', icon: LayoutGrid },
+  { key: 'migration-studio', label: 'Migration Studio', labelKey: 'migrationStudio.nav', href: '/migration-studio', icon: ArrowLeftRight, featureFlag: 'migrationStudio' },
+  { key: 'adapters', label: 'Adapters', href: '/adapters', icon: Puzzle },
+  { key: 'analytics', label: 'Analytics', href: '/analytics', icon: TrendingUp },
+  { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: Eye, featureFlag: 'transparency', minTier: 'growth' },
   { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert, minTier: 'growth' },
-  { key: 'payouts', label: 'Payouts', href: '/payouts', icon: DollarSign },
-  { key: 'billing', label: 'Billing', href: '/billing/usage', icon: CreditCard, featureFlag: 'billing' },
+  { key: 'payouts', label: 'Payouts', href: '/payouts', icon: Wallet },
+  { key: 'billing', label: 'Billing', href: '/billing/usage', icon: Receipt, featureFlag: 'billing' },
   // Developer tools (always visible to authenticated users)
-  { key: 'supply-chain', label: 'Supply Chain', href: '/supply-chain', icon: ShieldCheck },
-  { key: 'tool-supply-chain-status', label: 'Supply Chain Status', href: '/tools/supply-chain-status', icon: ShieldCheck },
-  { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: Wrench },
-  { key: 'tool-mediation-debugger', label: 'Mediation Debugger', href: '/tools/mediation-debugger', icon: BarChart3 },
+  { key: 'supply-chain', label: 'Supply Chain', href: '/supply-chain', icon: Link2 },
+  { key: 'tool-supply-chain-status', label: 'Supply Chain Status', href: '/tools/supply-chain-status', icon: FileCheck },
+  { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: FileSearch },
+  { key: 'tool-mediation-debugger', label: 'Mediation Debugger', href: '/tools/mediation-debugger', icon: Bug },
   { key: 'settings', label: 'Settings', href: '/settings', icon: Settings },
-  { key: 'admin', label: 'Admin', href: '/admin/health', icon: Settings, roles: ['admin'] },
+  { key: 'admin', label: 'Admin', href: '/admin/health', icon: Shield, roles: ['admin'] },
 ]
 
 const NAV_SKELETON_KEYS = ['nav-skeleton-1', 'nav-skeleton-2', 'nav-skeleton-3', 'nav-skeleton-4', 'nav-skeleton-5', 'nav-skeleton-6']
@@ -143,23 +148,23 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Mobile menu button */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-lg bg-primary-600 flex items-center justify-center">
-            <span className="text-white font-bold text-sm">A</span>
+      <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b border-gray-100 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="h-8 w-8 rounded-lg overflow-hidden ring-1 ring-gray-100 relative">
+            <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="32px" priority />
           </div>
-          <span className="font-semibold text-gray-900">ApexMediation</span>
+          <span className="text-sm font-semibold text-gray-900 tracking-tight">ApexMediation</span>
         </div>
         <button
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
           aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={mobileMenuOpen}
-          className="p-2 hover:bg-gray-100 rounded-lg"
+          className="p-2 hover:bg-gray-50 rounded-lg transition-colors"
         >
           {mobileMenuOpen ? (
-            <X className="h-6 w-6 text-gray-600" aria-hidden={true} />
+            <X className="h-5 w-5 text-gray-500" aria-hidden={true} />
           ) : (
-            <Menu className="h-6 w-6 text-gray-600" aria-hidden={true} />
+            <Menu className="h-5 w-5 text-gray-500" aria-hidden={true} />
           )}
         </button>
       </div>
@@ -167,7 +172,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       {/* Mobile menu overlay */}
       {mobileMenuOpen && (
         <div
-          className="lg:hidden fixed inset-0 bg-black/50 z-40"
+          className="lg:hidden fixed inset-0 bg-black/40 z-40 backdrop-blur-sm"
           role="presentation"
           aria-hidden="true"
           onClick={() => setMobileMenuOpen(false)}
@@ -177,7 +182,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       {/* Sidebar */}
       <aside
         className={`
-          fixed top-0 left-0 bottom-0 w-64 bg-white border-r z-40
+          fixed top-0 left-0 bottom-0 w-64 bg-white border-r border-gray-100 z-40
           transition-transform duration-200 ease-in-out
           lg:translate-x-0
           ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -185,20 +190,20 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       >
         <div className="flex flex-col h-full">
           {/* Logo */}
-          <div className="p-6 border-b">
+          <div className="px-5 py-6 border-b border-gray-100">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-primary-600 flex items-center justify-center overflow-hidden">
-                <img src="/logo.jpg" alt="ApexMediation Logo" className="h-full w-full object-cover" />
+              <div className="h-10 w-10 rounded-xl overflow-hidden shadow-sm ring-1 ring-gray-100 flex-shrink-0 relative">
+                <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="40px" priority />
               </div>
-              <div>
-                <h1 className="font-semibold text-gray-900">ApexMediation</h1>
-                <p className="text-xs text-gray-600">Publisher Console</p>
+              <div className="min-w-0 flex-1">
+                <h1 className="text-base font-semibold text-gray-900 tracking-tight">ApexMediation</h1>
+                <p className="text-xs text-gray-400 font-medium tracking-wide">Publisher Console</p>
               </div>
             </div>
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+          <nav className="flex-1 px-3 py-5 space-y-0.5 overflow-y-auto">
             {navigation?.map((item) => {
               const isActive = pathname === item.href || pathname?.startsWith(`${item.href}/`)
               const Icon = item.icon as any
@@ -208,32 +213,32 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                   href={item.href}
                   onClick={() => setMobileMenuOpen(false)}
                   className={`
-                    flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition
+                    flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium tracking-tight transition-all duration-150
                     ${
                       isActive
-                        ? 'bg-primary-50 text-primary-700'
-                        : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
+                        ? 'bg-primary-600 text-white shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                     }
                   `}
                 >
-                  <Icon className="h-5 w-5" aria-hidden={true} />
-                  {item.name}
+                  <Icon className={`h-[18px] w-[18px] flex-shrink-0 ${isActive ? 'text-white' : 'text-gray-400'}`} strokeWidth={1.75} aria-hidden={true} />
+                  <span className="truncate">{item.name}</span>
                 </Link>
               )
             })}
           </nav>
 
           {/* User menu */}
-          <div className="p-4 border-t">
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer group">
-              <div className="h-8 w-8 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center text-sm font-semibold">
+          <div className="p-4 border-t border-gray-100">
+            <div className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer group transition-all duration-150">
+              <div className="h-8 w-8 rounded-full bg-gradient-to-br from-primary-500 to-primary-600 text-white flex items-center justify-center text-xs font-semibold">
                 {user?.email?.charAt(0).toUpperCase() || 'U'}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">
+                <p className="text-[13px] font-medium text-gray-900 truncate tracking-tight">
                   {user?.email || 'User'}
                 </p>
-                  <p className="text-xs text-gray-600 truncate">{user?.role}</p>
+                  <p className="text-xs text-gray-400 truncate capitalize">{user?.role}</p>
                 </div>
               </div>
               <button
@@ -247,7 +252,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
                   }
                 }}
                 disabled={signingOut}
-                className="w-full mt-2 flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-gray-900 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                className="w-full mt-2 flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-red-50 hover:text-red-600 transition-all duration-150 disabled:opacity-60 disabled:cursor-not-allowed"
                 aria-busy={signingOut}
               >
                 <LogOut className="h-5 w-5" aria-hidden={true} />
@@ -261,7 +266,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
 
       {/* Main content */}
       <div className="lg:pl-64">
-        <div className="pt-16 lg:pt-0">{children}</div>
+        <div className="pt-16 lg:pt-0 min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100">{children}</div>
       </div>
     </div>
   )
