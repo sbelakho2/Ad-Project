@@ -248,17 +248,23 @@ def _vpn_fetcher(target_dir: Path, session: requests.Session, ctx: FetchContext)
     entries: List[ManifestEntry] = []
     fetched_at = _now_iso()
     vpn_sources = [
-        # {
-        #     "name": "x4bnet-vpn-hosts",
-        #     "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn_hosts.txt",
-        #     "filename": "x4bnet_vpn_hosts.txt",
-        #     "license": "Creative Commons Attribution 4.0 International",
-        # },
         {
-            "name": "vpn-gate",
-            "url": "https://raw.githubusercontent.com/ejrv/VPNs/master/vpn-ipv4.txt",
-            "filename": "vpn_gate_ipv4.txt",
+            "name": "x4bnet-vpn-ipv4",
+            "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt",
+            "filename": "x4bnet_vpn_ipv4.txt",
             "license": "Creative Commons Attribution 4.0 International",
+        },
+        {
+            "name": "bad-asn-list",
+            "url": "https://raw.githubusercontent.com/brianhama/bad-asn-list/master/bad-asn-list.csv",
+            "filename": "bad_asn_list.csv",
+            "license": "MIT License",
+        },
+        {
+            "name": "bogon-ipv4",
+            "url": "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv4.txt",
+            "filename": "fullbogons_ipv4.txt",
+            "license": "Team Cymru Terms",
         },
     ]
 

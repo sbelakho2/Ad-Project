@@ -1,0 +1,38 @@
+{
+  "entries": [
+    {
+      "content_type": "text/plain",
+      "fetched_at": "2025-12-11T00:28:14Z",
+      "file": "x4bnet_vpn_ipv4.txt",
+      "license": "Creative Commons Attribution 4.0 International",
+      "metadata": {},
+      "name": "x4bnet-vpn-ipv4",
+      "sha256": "af59ac7b89b4cd9436afefa064329ccc7f0dd5e951a212ec21d38e8ac75f6641",
+      "url": "https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt"
+    },
+    {
+      "content_type": "text/plain",
+      "fetched_at": "2025-12-11T00:28:14Z",
+      "file": "bad_asn_list.csv",
+      "license": "MIT License",
+      "metadata": {},
+      "name": "bad-asn-list",
+      "sha256": "fcd85e15973e6b7889a35a01d131451303043789ccb049fd415af1ffefff6ee6",
+      "url": "https://raw.githubusercontent.com/brianhama/bad-asn-list/master/bad-asn-list.csv"
+    },
+    {
+      "content_type": "text/plain",
+      "fetched_at": "2025-12-11T00:28:14Z",
+      "file": "fullbogons_ipv4.txt",
+      "license": "Team Cymru Terms",
+      "metadata": {},
+      "name": "bogon-ipv4",
+      "sha256": "73649cbc8faaa6bec3030f6927e23232fa580d47d42dbf280a02cb1db1872679",
+      "url": "https://www.team-cymru.org/Services/Bogons/fullbogons-ipv4.txt"
+    }
+  ],
+  "generatedAt": "2025-12-11T00:28:16Z",
+  "runDate": "2025-12-11",
+  "source": "vpn",
+  "version": "v1"
+}
