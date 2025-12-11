@@ -114,6 +114,66 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
     });
   });
 
+  // Billing settings - for /billing/settings page
+  await page.route('**/api/v1/billing/settings', (route) => {
+    respondJson(route, 200, {
+      plan: {
+        name: tier.charAt(0).toUpperCase() + tier.slice(1),
+        type: tier,
+        platform_fee_rate: tier === 'starter' ? 0 : tier === 'growth' ? 0.05 : tier === 'scale' ? 0.03 : 0.02,
+        platform_fee_label: tier === 'starter' ? 'Free tier' : `${tier === 'growth' ? 5 : tier === 'scale' ? 3 : 2}%`,
+        revenue_band: tier === 'starter' ? '$0-$10k/mo' : tier === 'growth' ? '$10k-$100k/mo' : '$100k+/mo',
+        currency: 'USD',
+        included_impressions: 5000000,
+        included_api_calls: 200000,
+        included_data_transfer_gb: 100,
+      },
+      billing_email: 'billing@apexmediation.com',
+      receipt_preferences: {
+        send_receipts: true,
+        send_invoices: true,
+        send_usage_alerts: true,
+      },
+      stripe_customer_id: 'cus_mock123',
+    });
+  });
+
+  // Billing policy - for /billing/settings page
+  await page.route('**/api/v1/billing/policy', (route) => {
+    respondJson(route, 200, {
+      summary: 'ApexMediation charges a simple platform fee on your ad revenue. We never touch your network payouts.',
+      starterExperience: {
+        paymentMethodRequired: false,
+        revenueCapUsd: 10000,
+        capabilities: ['Basic mediation', 'Standard support', 'Core analytics'],
+        messaging: 'Start free, upgrade when you grow.',
+      },
+      upgradePath: {
+        triggers: ['Revenue exceeds $10k/mo', 'Need advanced features', 'Enterprise support'],
+        acceptedPaymentMethods: [
+          { id: 'card', label: 'Credit/Debit Card', regions: ['US', 'EU', 'APAC'], autopayEligible: true },
+          { id: 'wire', label: 'Wire Transfer', regions: ['Global'], autopayEligible: false, enterpriseOnly: true },
+        ],
+        autopay: {
+          defaultBehavior: 'Monthly billing with autopay',
+          encouragement: 'Enable autopay for uninterrupted service',
+          enterpriseOverride: 'Custom billing terms available',
+        },
+      },
+      billingCycle: {
+        cadence: 'Monthly',
+        notifications: [
+          { channel: 'email', timing: '7 days before', content: 'Upcoming invoice preview' },
+          { channel: 'email', timing: 'On invoice', content: 'Invoice ready for payment' },
+        ],
+      },
+      transparencyCommitments: {
+        weDontTouchPayouts: 'Networks pay you directly. We never hold or process your ad revenue.',
+        platformFeeOnly: 'We only charge a transparent platform fee based on your plan tier.',
+      },
+    });
+  });
+
   // NextAuth session endpoint (used by next-auth/react useSession)
   await page.route('**/api/auth/session', (route) => {
     respondJson(route, 200, {
@@ -124,19 +184,6 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
         publisherId: 'pub-screenshot-001',
       },
       expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    });
-  });
-
-  // Revenue summary (used by dashboard)
-  await page.route('**/api/v1/revenue/summary**', (route) => {
-    respondJson(route, 200, {
-      data: {
-        totalRevenue: 34500.00,
-        totalImpressions: 3450000,
-        fillRate: 0.87,
-        ecpm: 10.04,
-        currency: 'USD',
-      },
     });
   });
 
@@ -277,12 +324,12 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
     });
   });
 
-  await page.route('**/api/v1/recon/deltas', (route) => {
+  await page.route('**/api/v1/recon/deltas**', (route) => {
     respondJson(route, 200, {
       items: [
-        { id: 'd-1', network: 'IronSource', kind: 'underpayment', amount: 250, currency: 'USD', reasonCode: 'FILL_DISCREPANCY', windowStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date().toISOString(), evidenceId: 'ev-001', confidence: 0.92 },
-        { id: 'd-2', network: 'AdMob', kind: 'timing', amount: 150, currency: 'USD', reasonCode: 'LATE_ATTRIBUTION', windowStart: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), evidenceId: 'ev-002', confidence: 0.85 },
-        { id: 'd-3', network: 'Unity Ads', kind: 'overpayment', amount: 50, currency: 'USD', reasonCode: 'DUPLICATE_EVENT', windowStart: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date().toISOString(), evidenceId: 'ev-003', confidence: 0.98 },
+        { id: 'd-1', network: 'IronSource', kind: 'underpay', amount: 250, currency: 'USD', reasonCode: 'FILL_DISCREPANCY', windowStart: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date().toISOString(), evidenceId: 'ev-001', confidence: 0.92 },
+        { id: 'd-2', network: 'AdMob', kind: 'timing_lag', amount: 150, currency: 'USD', reasonCode: 'LATE_ATTRIBUTION', windowStart: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), evidenceId: 'ev-002', confidence: 0.85 },
+        { id: 'd-3', network: 'Unity Ads', kind: 'missing', amount: 50, currency: 'USD', reasonCode: 'DUPLICATE_EVENT', windowStart: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), windowEnd: new Date().toISOString(), evidenceId: 'ev-003', confidence: 0.98 },
       ],
       page: 1,
       pageSize: 50,
@@ -340,24 +387,34 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
   await page.route('**/api/v1/payouts/**', (route) => {
     const url = route.request().url();
     if (url.includes('/upcoming')) {
+      // unwrapSuccessEnvelope expects { success: true, data: PayoutHistory }
       return respondJson(route, 200, {
-        id: 'pay-upcoming',
-        amount: 6100.00,
-        currency: 'USD',
-        status: 'scheduled',
-        scheduledFor: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        method: 'wire',
+        success: true,
+        data: {
+          id: 'pay-upcoming',
+          amount: 6100.00,
+          currency: 'USD',
+          status: 'pending',
+          scheduledFor: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          method: 'wire',
+        },
       });
     }
     if (url.includes('/history')) {
+      // unwrapSuccessEnvelope expects { success: true, data: PaginatedResponse<PayoutHistory> }
+      // PaginatedResponse expects { data: T[], total, page, pageSize, hasMore }
       return respondJson(route, 200, {
-        items: [
-          { id: 'pay-1', amount: 5420.50, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
-          { id: 'pay-2', amount: 4850.25, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 37 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
-        ],
-        total: 2,
-        page: 1,
-        pageSize: 25,
+        success: true,
+        data: {
+          data: [
+            { id: 'pay-1', amount: 5420.50, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
+            { id: 'pay-2', amount: 4850.25, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 37 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
+          ],
+          total: 2,
+          page: 1,
+          pageSize: 25,
+          hasMore: false,
+        },
       });
     }
     respondJson(route, 200, { success: true });
@@ -368,7 +425,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
       items: [
         { id: 'pay-1', amount: 5420.50, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
         { id: 'pay-2', amount: 4850.25, currency: 'USD', status: 'completed', scheduledFor: new Date(Date.now() - 37 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
-        { id: 'pay-3', amount: 6100.00, currency: 'USD', status: 'scheduled', scheduledFor: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
+        { id: 'pay-3', amount: 6100.00, currency: 'USD', status: 'pending', scheduledFor: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), method: 'wire' },
       ],
       nextPayout: { amount: 6100.00, date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() },
     });
@@ -402,7 +459,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
     });
   });
 
-  // Supply chain
+  // Supply chain status - for tools
   await page.route('**/api/v1/supply-chain/**', (route) => {
     respondJson(route, 200, {
       sellers: [
@@ -415,6 +472,15 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
   });
 
   // Admin health
+  // Meta info endpoint
+  await page.route('**/api/v1/meta/info', (route) => {
+    respondJson(route, 200, {
+      version: '1.0.0',
+      environment: 'e2e-test',
+      buildTime: new Date().toISOString(),
+    });
+  });
+
   await page.route('**/api/v1/admin/health', (route) => {
     respondJson(route, 200, {
       services: [
@@ -429,9 +495,48 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
     });
   });
 
-  // Tools endpoints
+  // Admin health/red endpoint for Redis health
+  await page.route('**/api/v1/admin/health/red**', (route) => {
+    respondJson(route, 200, {
+      status: 'healthy',
+      latency: 2,
+      connections: 10,
+      memoryUsage: '25MB',
+    });
+  });
+
+  // Tools endpoints - general catch-all (LIFO: added before specific routes so they match first)
   await page.route('**/api/v1/tools/**', (route) => {
     respondJson(route, 200, { status: 'ok', data: {} });
+  });
+
+  // Supply chain summary - for /supply-chain page (added AFTER catch-all so it's checked FIRST in LIFO)
+  await page.route('**/api/v1/tools/supply-chain/summary', (route) => {
+    respondJson(route, 200, {
+      success: true,
+      data: {
+        summary: {
+          publisherId: 'pub-001',
+          generatedAt: new Date().toISOString(),
+          apps: [
+            {
+              appId: 'com.apex.demo',
+              ok: 12,
+              issues: 2,
+              missingDomain: 1,
+              placements: [
+                { placementId: 'pl-1', placementName: 'Home Banner', domain: 'apexmediation.com', sellerId: 'apex-pub-001', authorized: true, reason: null },
+                { placementId: 'pl-2', placementName: 'Interstitial', domain: 'apexmediation.com', sellerId: 'apex-pub-001', authorized: true, reason: null },
+                { placementId: 'pl-3', placementName: 'Rewarded', domain: null, sellerId: null, authorized: false, reason: 'Missing domain in ads.txt' },
+              ],
+            },
+          ],
+        },
+        snapshotId: 'snap-001',
+        snapshotPath: '/data/snapshots/supply-chain-2024-01-15.json',
+        persistedAt: new Date().toISOString(),
+      },
+    });
   });
 }
 
@@ -455,6 +560,12 @@ async function captureScreenshot(page: Page, routePath: string, routeName: strin
     
     // Allow animations to settle after fonts load
     await page.waitForTimeout(300);
+    
+    // Check for error content before capturing
+    const bodyText = await page.textContent('body') || '';
+    if (bodyText.includes('Something went wrong')) {
+      console.warn(`⚠ Warning: "${routeName}" contains "Something went wrong" error`);
+    }
     
     await page.screenshot({
       path: screenshotPath,

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { signIn } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-import { Shield } from 'lucide-react'
+import Image from 'next/image'
 
 const MAX_ATTEMPTS_BEFORE_COOLDOWN = 5
 const COOLDOWN_MS = 30_000
@@ -186,8 +186,15 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-primary-600 text-white mb-4">
-            <Shield className="h-8 w-8" />
+          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl overflow-hidden mb-4">
+            <Image
+              src="/logo.jpg"
+              alt="ApexMediation"
+              width={64}
+              height={64}
+              className="h-full w-full object-cover"
+              priority
+            />
           </div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">ApexMediation</h1>
           <p className="text-gray-600">Sign in to your publisher console</p>
