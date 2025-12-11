@@ -27,7 +27,7 @@ export default defineConfig({
         userId: 'usr-playwright',
         publisherId: 'pub-test-123',
         email: 'playwright@example.com',
-        role: 'publisher',
+        role: 'admin',
       }),
     },
   },
