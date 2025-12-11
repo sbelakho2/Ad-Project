@@ -36,7 +36,23 @@ async function setupMocks(page: Page, tier: TierName = 'scale') {
   await page.route('**/api/v1/billing/usage**', route => respondJson(route, 200, {
     current_period: { start: '2025-01-01', end: '2025-01-31', impressions: 100000, api_calls: 5000, data_transfer_gb: 10 },
     overages: { impressions: { amount: 0, cost: 0 }, api_calls: { amount: 0, cost: 0 }, data_transfer: { amount: 0, cost: 0 }, total_overage_cost: 0 },
-    subscription: { plan_type: tier, included_impressions: 500000, included_api_calls: 100000, included_data_transfer_gb: 50 }
+    subscription: { plan_type: tier, included_impressions: 500000, included_api_calls: 100000, included_data_transfer_gb: 50 },
+    items: [
+      { date: '2025-01-10', product: 'impressions', quantity: 50000, unit_price: 0.001 },
+      { date: '2025-01-11', product: 'impressions', quantity: 50000, unit_price: 0.001 },
+    ]
+  }));
+
+  // Billing policy for /billing/usage page
+  await page.route('**/api/v1/billing/policy', route => respondJson(route, 200, {
+    summary: 'Usage-based billing with transparent pricing.',
+    starterExperience: { paymentMethodRequired: false, revenueCapUsd: 10000, capabilities: [], messaging: '' }
+  }));
+
+  // Billing settings - for plan tier access checks
+  await page.route('**/api/v1/billing/settings', route => respondJson(route, 200, {
+    plan: { name: 'Scale', type: tier },
+    billing_email: 'test@test.com'
   }));
 
   // Adapters - returns Adapter[] directly (axios unwraps it from .data)
@@ -86,6 +102,22 @@ async function setupMocks(page: Page, tier: TierName = 'scale') {
   }));
 
   await page.route('**/api/v1/payouts/**', route => respondJson(route, 200, null));
+
+  // Recon overview - for /recon/overview page
+  await page.route('**/api/v1/recon/overview**', route => respondJson(route, 200, {
+    success: true,
+    data: {
+      coveragePercent: 95,
+      variancePercent: 2.3,
+      totals: { impressions: 1000000, paid: 12500, expected: 12800 },
+      byBreakdown: [],
+      byNetwork: [
+        { network: 'AdMob', impressions: 500000, paid: 6200, expected: 6400 },
+        { network: 'Unity Ads', impressions: 300000, paid: 3900, expected: 4000 },
+        { network: 'IronSource', impressions: 200000, paid: 2400, expected: 2400 },
+      ]
+    }
+  }));
   
   await page.route('**/api/v1/settings/**', route => respondJson(route, 200, {
     enabled: true, warningThreshold: 0.02, criticalThreshold: 0.05
@@ -98,6 +130,18 @@ async function setupMocks(page: Page, tier: TierName = 'scale') {
     uptime: 86400,
     version: '1.0.0'
   }));
+
+  // Apps - for /settings/keys page
+  await page.route('**/api/v1/apps', route => respondJson(route, 200, [
+    { id: 'app-1', name: 'Super Puzzle Game', platform: 'ios', bundle_id: 'com.example.puzzle', created_at: '2024-09-01T00:00:00Z' },
+    { id: 'app-2', name: 'Word Master Pro', platform: 'android', bundle_id: 'com.example.wordmaster', created_at: '2024-10-01T00:00:00Z' },
+  ]));
+
+  // App API Keys - for /settings/keys page
+  await page.route('**/api/v1/apps/*/keys', route => respondJson(route, 200, [
+    { id: 'key-1', app_id: 'app-1', environment: 'sandbox', key_prefix: 'ak_test_xxxx', last_used_at: '2025-01-10T12:00:00Z', created_at: '2024-09-15T00:00:00Z', revoked_at: null },
+    { id: 'key-2', app_id: 'app-1', environment: 'live', key_prefix: 'ak_live_xxxx', last_used_at: '2025-01-11T08:00:00Z', created_at: '2024-09-20T00:00:00Z', revoked_at: null },
+  ]));
 }
 
 const PAGES_TO_CHECK = [
@@ -107,6 +151,7 @@ const PAGES_TO_CHECK = [
   '/analytics',
   '/payouts',
   '/settings',
+  '/settings/keys',
   '/billing/usage',
   '/migration-studio',
   '/transparency/auctions',
@@ -133,22 +178,24 @@ test.describe('Screenshot Content Analysis', () => {
       
       const bodyText = await page.textContent('body') || '';
       
-      // Check for error indicators
+      // Check for error indicators - use specific phrases to reduce false positives
       const errorPatterns = [
-        { pattern: '403', name: '403 error' },
-        { pattern: 'Forbidden', name: 'Forbidden' },
-        { pattern: 'Cannot read properties', name: 'Cannot read properties' },
-        { pattern: 'undefined', name: 'undefined' },
-        { pattern: 'Error:', name: 'Error:' },
-        { pattern: 'Something went wrong', name: 'Something went wrong' },
-        { pattern: 'Network Error', name: 'Network Error' },
-        { pattern: 'Failed to fetch', name: 'Failed to fetch' },
+        { pattern: 'Error 403', name: '403 error', critical: true },
+        { pattern: '403 Forbidden', name: '403 Forbidden', critical: true },
+        { pattern: 'Access Denied', name: 'Access Denied', critical: true },
+        { pattern: 'Cannot read properties', name: 'Cannot read properties', critical: true },
+        { pattern: 'Error:', name: 'Error:', critical: false },
+        { pattern: 'Something went wrong', name: 'Something went wrong', critical: true },
+        { pattern: 'Network Error', name: 'Network Error', critical: true },
+        { pattern: 'Failed to fetch', name: 'Failed to fetch', critical: true },
       ];
       
       const foundErrors: string[] = [];
-      for (const { pattern, name } of errorPatterns) {
+      const foundCriticalErrors: string[] = [];
+      for (const { pattern, name, critical } of errorPatterns) {
         if (bodyText.includes(pattern)) {
           foundErrors.push(name);
+          if (critical) foundCriticalErrors.push(name);
         }
       }
       
@@ -167,12 +214,8 @@ test.describe('Screenshot Content Analysis', () => {
       const safeName = pagePath.replace(/\//g, '-').replace(/^-/, '');
       await page.screenshot({ path: `test-results/analysis-${safeName}.png` });
       
-      // Fail if there are critical errors (but not 'undefined' which might be in legitimate content)
-      const criticalErrors = foundErrors.filter(e => 
-        e === '403 error' || e === 'Forbidden' || e === 'Cannot read properties'
-      );
-      
-      expect(criticalErrors, `Critical errors found: ${criticalErrors.join(', ')}`).toHaveLength(0);
+      // Fail if there are critical errors
+      expect(foundCriticalErrors, `Critical errors found: ${foundCriticalErrors.join(', ')}`).toHaveLength(0);
       expect(consoleErrors.filter(e => 
         e.includes('Cannot read') || e.includes('TypeError') || e.includes('is not a function')
       ), 'JS errors in console').toHaveLength(0);
