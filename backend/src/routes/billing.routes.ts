@@ -19,6 +19,12 @@ router.get('/policy', billingController.getBillingPolicy);
 router.use(authenticate);
 
 /**
+ * POST /api/v1/billing/portal
+ * Create Stripe Customer Portal session
+ */
+router.post('/portal', authRateLimiter, billingController.createPortalSession);
+
+/**
  * GET /api/v1/billing/usage/current
  * Get current billing period usage for authenticated user
  */

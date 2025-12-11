@@ -6,17 +6,19 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
-	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/rivalapexmediation/auction/internal/api"
-	"github.com/rivalapexmediation/auction/internal/bidding"
+	"github.com/rivalapexmediation/auction/internal/auth"
 	"github.com/rivalapexmediation/auction/internal/bidders"
+	"github.com/rivalapexmediation/auction/internal/bidding"
 	"github.com/rivalapexmediation/auction/internal/waterfall"
 )
 
@@ -37,7 +39,18 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
- // Initialize auction components
+	// Postgres pool (used for SDK key auth + placement scoping)
+	dbURL := getEnv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/apexmediation")
+	pgPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		log.Fatalf("Failed to initialize Postgres pool: %v", err)
+	}
+	defer pgPool.Close()
+	if err := pgPool.Ping(ctx); err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
+	}
+
+	// Initialize auction components
 	auctionEngine := bidding.NewAuctionEngine(redisClient)
 	// Feature flags for hedging (off by default)
 	if v := getEnv("AUCTION_HEDGING_ENABLED", "false"); v == "true" || v == "1" || v == "TRUE" {
@@ -53,19 +66,27 @@ func main() {
 	// Wire a default in-memory Mediation Debugger (bounded capacity) with optional sampling/redaction
 	ringSize := 200
 	if v := getEnv("DEBUG_RING_SIZE", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 { ringSize = n }
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ringSize = n
+		}
 	}
 	sampleBps := 0 // 0 disables sampling; valid range 0..10000
 	if v := getEnv("DEBUG_SAMPLE_BPS", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 10000 { sampleBps = n }
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 10000 {
+			sampleBps = n
+		}
 	}
 	redactStrict := false
 	if v := getEnv("DEBUG_REDACTION_LEVEL", ""); v != "" {
-		if strings.EqualFold(v, "strict") { redactStrict = true }
+		if strings.EqualFold(v, "strict") {
+			redactStrict = true
+		}
 	}
 	maxLen := 256
 	if v := getEnv("DEBUG_MAXLEN", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 { maxLen = n }
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxLen = n
+		}
 	}
 	bidders.SetDebugger(bidders.NewInMemoryDebuggerWithOptions(ringSize, sampleBps, redactStrict, maxLen))
 	// Wire a default in-process metrics recorder with rolling percentiles (dev-friendly)
@@ -77,7 +98,7 @@ func main() {
 	_ = bidders.InstallOTelTracer()
 
 	// Initialize HTTP handlers
-	handlers := api.NewHandlers(auctionEngine, waterfallManager)
+	handlers := api.NewHandlers(auctionEngine, waterfallManager, pgPool)
 
 	// Setup router
 	router := mux.NewRouter()
@@ -85,9 +106,12 @@ func main() {
 	router.Use(corsMiddleware)
 
 	router.HandleFunc("/health", handlers.HealthCheck).Methods("GET")
-	router.HandleFunc("/v1/auction", handlers.RunAuction).Methods("POST")
+	sdk := router.PathPrefix("/v1").Subrouter()
+	sdk.Use(auth.Middleware(pgPool))
+	sdk.HandleFunc("/auction", handlers.RunAuction).Methods("POST")
+	sdk.HandleFunc("/waterfall/{placement}", handlers.GetWaterfall).Methods("GET")
+
 	router.HandleFunc("/v1/bids", handlers.ReceiveBid).Methods("POST")
-	router.HandleFunc("/v1/waterfall/{placement}", handlers.GetWaterfall).Methods("GET")
 	// Admin subrouters (apply optional security middlewares)
 	adminDebug := router.PathPrefix("/v1/debug").Subrouter()
 	adminDebug.Use(api.AdminIPAllowlistMiddleware)
@@ -148,7 +172,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		origin := getEnv("CORS_ORIGIN", "http://localhost:3000")
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		if r.Method == http.MethodOptions {

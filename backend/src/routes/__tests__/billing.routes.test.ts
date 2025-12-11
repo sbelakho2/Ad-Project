@@ -63,6 +63,12 @@ jest.mock('../../controllers/billing.controller', () => ({
       limits: { impressions: 10000, clicks: 500, video_starts: 100 }
     });
   }),
+  createPortalSession: jest.fn((_req, res) => {
+    res.json({
+      success: true,
+      url: 'https://billing.stripe.test/portal-session',
+    });
+  }),
   getBillingPolicy: jest.fn((_req, res) => {
     res.json({
       success: true,

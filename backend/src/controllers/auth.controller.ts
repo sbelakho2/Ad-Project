@@ -17,7 +17,6 @@ import { setAuthCookies } from '../utils/cookies';
 import twofaService from '../services/twofa.service';
 import { authAttemptsTotal, twofaEventsTotal } from '../utils/prometheus';
 import { getFeatureFlags } from '../config/featureFlags';
-import { bankAccountSchema, BankAccountPayload } from '../schemas/bankAccount';
 
 // Validation schemas
 export const loginSchema = z.object({
@@ -28,8 +27,8 @@ export const loginSchema = z.object({
 export const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
-  companyName: z.string().min(2),
-  bankAccount: bankAccountSchema,
+  name: z.string().min(1).optional(),
+  companyName: z.string().trim().min(2).optional(),
 });
 
 export const refreshSchema = z.object({
@@ -100,22 +99,6 @@ interface RefreshTokenIssueOptions {
   userAgent?: string;
   ipAddress?: string;
 }
-
-const normalizeBankAccount = (account: BankAccountPayload): BankAccountPayload => {
-  if (account.scheme === 'sepa') {
-    return {
-      ...account,
-      iban: account.iban.replace(/\s+/g, '').toUpperCase(),
-      bic: account.bic.replace(/\s+/g, '').toUpperCase(),
-    };
-  }
-
-  return {
-    ...account,
-    accountNumber: account.accountNumber.replace(/\s+/g, ''),
-    routingNumber: account.routingNumber.replace(/[^0-9]/g, ''),
-  };
-};
 
 const issueAccessToken = (payload: TokenPayload) => {
   const expiresInSeconds = resolveAccessTokenExpirationSeconds();
@@ -341,8 +324,12 @@ export const register = async (
 ): Promise<void> => {
   try {
     // Validate request body
-    const { email, password, companyName, bankAccount } = registerSchema.parse(req.body);
-    const normalizedBankAccount = normalizeBankAccount(bankAccount);
+    const { email, password, companyName, name } = registerSchema.parse(req.body);
+    const normalizedCompanyName =
+      (companyName && companyName.trim()) ||
+      (typeof name === 'string' && name.trim()) ||
+      email.split('@')[0] ||
+      'Company';
 
     // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
@@ -356,8 +343,7 @@ export const register = async (
     const { user } = await createUserWithPublisher(
       email,
       passwordHash,
-      companyName,
-      normalizedBankAccount
+      normalizedCompanyName
     );
 
     const tokenPayload: TokenPayload = {

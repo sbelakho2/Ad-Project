@@ -1,943 +1,379 @@
 'use client';
 
-import type { ReactNode } from 'react';
-import type { LucideIcon } from 'lucide-react';
-
-import clsx from 'clsx';
 import { motion } from 'framer-motion';
 import {
-  Coins,
-  Gauge,
-  Globe2,
-  Layers,
-  LifeBuoy,
-  Network,
-  PenSquare,
-  Radar,
-  Scale,
-  ServerCog,
+  Box,
+  GitBranch,
+  Key,
+  Lock,
+  Search,
   ShieldCheck,
-  TimerReset,
   Users2,
-  Wallet,
-  Workflow,
   Zap,
 } from 'lucide-react';
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
-import NewsletterPanel from '@/components/NewsletterPanel';
-import NotificationBar from '@/components/NotificationBar';
-import SectionHeading from '@/components/SectionHeading';
-import Section from '@/components/ui/Section';
-import Container from '@/components/ui/Container';
 
-const heroStats: Array<{ icon: LucideIcon; title: string; description: string }> = [
+// Animation helpers - use animate for reliable rendering
+const getRevealProps = (delay = 0) => ({
+  initial: false,
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.5, delay },
+});
+
+// ============================================================================
+// DATA
+// ============================================================================
+
+const pillars = [
   {
-    icon: TimerReset,
-    title: '13-minute go-live',
-    description: 'Follow the five-step quickstart to ship Unity, iOS, Android, or Web SDKs without waiting on a platform release cycle.',
+    icon: Box,
+    title: 'Keep your deals. We handle the plumbing.',
+    description:
+      'You stay in control of every ad network account and every contract. ApexMediation sits on top as a neutral BYO orchestration layer—no revenue share with networks, no surprise fees, no hidden optimizations.',
+  },
+  {
+    icon: Lock,
+    title: 'Every auction, cryptographically signed.',
+    description:
+      'Auction decisions are logged with tamper-evident hashes, so you can verify that what ran in production matches what we report. No more "just trust the dashboard".',
   },
   {
     icon: Zap,
-    title: '<50ms bidder runtime',
-    description: 'Header bidding requests fan out across 11 POPs, keeping waterfalls clear while experiments run in parallel.',
+    title: 'SDKs built to stay out of your way.',
+    description:
+      'All network I/O on background threads, strict main-thread guards, OTA-safe config rollouts, and kill-switches for misbehaving adapters. Designed for IL2CPP/Mono, Android, iOS, tvOS and Android TV.',
   },
   {
-    icon: ShieldCheck,
-    title: 'Real-time IVT Protection',
-    description: 'AI-driven architecture blocks invalid traffic before it impacts your bottom line, keeping your accounts safe from clawbacks.',
-  },
-  {
-    icon: Network,
-    title: '15 built-in adapters',
-    description: 'Android, iOS/tvOS, Unity, Android TV, and Web SDKs all expose the same 15 BYO network connectors documented in the adapter registry.',
+    icon: GitBranch,
+    title: 'Switch without breaking your game.',
+    description:
+      'Our Migration Studio imports your existing mediation and placement setup, simulates waterfalls, and lets you cut over one placement at a time—with full rollback available.',
   },
 ];
 
-type FeatureCardConfig = {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  badge?: string;
-  span?: 'double';
-  accent?: 'brand';
-};
+const howItWorksSteps = [
+  {
+    step: 1,
+    title: 'Connect your networks (BYO)',
+    description:
+      'You sign in to your existing ad network dashboards (AdMob, MAX, LevelPlay, Pangle, etc.) and add their credentials directly to your console. We never resell your demand; we only orchestrate.',
+  },
+  {
+    step: 2,
+    title: 'Drop in the SDKs',
+    description:
+      "Install the ApexMediation SDKs for Android, iOS, Unity, tvOS, Android TV or Web. SDKs are small, background-threaded, and ship with a Debug Panel so you can see exactly what they're doing.",
+  },
+  {
+    step: 3,
+    title: 'Observe, optimize, and verify',
+    description:
+      'Use the console to inspect waterfalls, see per-adapter latency & fill, run experiments, and export log-level auctions. Every auction has a cryptographic fingerprint, so you can reconcile with your BI stack.',
+  },
+];
 
-const featureCards: FeatureCardConfig[] = [
-  {
-    icon: Workflow,
-    title: 'Experiment autopilot',
-    description: 'Launch Bayesian A/B tests, guard traffic with automatic significance checks, and only roll out winners after the documented guardrails clear risk thresholds.',
-    badge: 'Docs favorite',
-    span: 'double',
-    accent: 'brand',
-  },
-  {
-    icon: ShieldCheck,
-    title: 'Fraud sentinel',
-    description: 'Behavioral, device, and timing models from the Fraud Prevention guide block IVT with enterprise-grade precision before advertisers claw back spend.',
-  },
-  {
-    icon: Scale,
-    title: 'Consent & GDPR automation',
-    description: 'Apply DPA-backed processing, IAB TCF strings, and 30-day deletion SLAs straight from the GDPR Compliance playbook.',
-  },
-  {
-    icon: Radar,
-    title: 'Telemetry & debugger',
-    description: 'Use the Mediation Debugger to replay auction traces, pacing curves, and transparency receipts alongside SDK logs.',
-  },
-  {
-    icon: Wallet,
-    title: 'Automated Net-30 Payouts',
-    description: 'A simple platform fee (0–2.5%) funds payouts, invoicing, FX, and compliance—publishers keep their demand while we automate NET 30 payments and €100 minimums across SEPA/SWIFT.',
-  },
+const reliabilityBullets = [
+  'OTA-safe config rollouts with staged traffic and automatic rollback',
+  'Per-adapter circuit breakers and timeouts, so one slow network can\'t stall your app',
+  'Kill-switches for adapters and placements you can flip instantly',
+  'Debuggable waterfalls and on-device Debug Panel for fast issue reproduction',
+];
+
+const audienceCards = [
   {
     icon: Users2,
-    title: 'Developer quickstart',
-    description: 'Unity, iOS, Android, Web, and CTV SDKs ship typed adapters, config-as-code, CI smoke tests, and the shared 15-network registry so you integrate in minutes, not sprints.',
+    title: 'Mid-sized studios',
+    description:
+      'You already run multiple ad networks and have real revenue to protect. ApexMediation gives you deeper visibility and a more robust core, without forcing you to re-negotiate your deals.',
+  },
+  {
+    icon: Search,
+    title: 'UA-savvy teams',
+    description:
+      'You care about incrementality, A/B tests, and log-level exports. ApexMediation gives you clean, reconciled data and cryptographic guarantees that your waterfalls match what you see in your BI tools.',
+  },
+  {
+    icon: Key,
+    title: 'Infra-conscious founders',
+    description:
+      'You want to avoid lock-in and opaque "one vendor for everything" setups. BYO mediation lets you keep the benefits of multiple networks, but with the control and transparency of building it yourself.',
   },
 ];
 
-type PopularCardConfig = {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  href: string;
-  badge?: string;
-};
+// ============================================================================
+// COMPONENTS
+// ============================================================================
 
-const popularCards: PopularCardConfig[] = [
-  {
-    icon: TimerReset,
-    title: 'Onboarding checklist',
-    description: 'Follow the five-step Quick Start to create apps, grab API keys, and ship your first ad in 13 minutes.',
-    href: '/documentation#getting-started',
-    badge: 'Fastest win',
-  },
-  {
-    icon: ServerCog,
-    title: 'Mediation debugger',
-    description: 'Replay sanitized auction traces, transparency receipts, and pacing deltas before pushing to production.',
-    href: '/documentation#mediation-debugger',
-  },
-  {
-    icon: ShieldCheck,
-    title: 'GDPR compliance desk',
-    description: 'Download the DPA, SCCs, consent flows, and API endpoints that satisfy access/delete requests inside 30 days.',
-    href: '/gdpr',
-    badge: 'Legal ready',
-  },
-];
+function HeroSection() {
+  return (
+    <section className="relative py-20 md:py-32">
+      <div className="container mx-auto px-4 text-center">
+        <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
+          <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
+            BYO ad mediation with cryptographic transparency.
+          </h1>
+          <p className="text-xl md:text-2xl text-gray-600 mb-8 max-w-3xl mx-auto">
+            ApexMediation lets you keep your existing ad network deals and SDKs—while we handle the hard parts: OTA-safe configs, ANR-minimal SDKs, and verifiable auction logs you can trust.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-4">
+            <a
+              href="/signup"
+              className="btn-primary px-8 py-4 text-lg font-semibold"
+            >
+              Start BYO trial
+            </a>
+            <a
+              href="/contact"
+              className="btn-secondary px-8 py-4 text-lg font-semibold"
+            >
+              Talk with an engineer
+            </a>
+          </div>
+          <p className="text-sm text-gray-500">
+            For mid-sized mobile and CTV publishers who are done guessing what their mediation layer is doing.
+          </p>
+        </motion.div>
+      </div>
+    </section>
+  );
+}
 
-type LearnCardConfig = {
-  icon: LucideIcon;
-  eyebrow: string;
-  title: string;
-  description: string;
-  cta: { label: string; href: string };
-  ctaVariant?: 'link' | 'button';
-};
+function PillarsSection() {
+  return (
+    <section className="py-20 bg-gray-50">
+      <div className="container mx-auto px-4">
+        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+          <p className="text-sm font-semibold text-brand-600 uppercase tracking-wide mb-2">
+            Why publishers choose ApexMediation
+          </p>
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+            BYO, not black box
+          </h2>
+        </motion.div>
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
+          {pillars.map((pillar, index) => (
+            <motion.div
+              key={pillar.title}
+              {...getRevealProps(index * 0.1)}
+              className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
+            >
+              <div className="w-12 h-12 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+                <pillar.icon className="w-6 h-6 text-brand-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {pillar.title}
+              </h3>
+              <p className="text-gray-600 text-sm leading-relaxed">
+                {pillar.description}
+              </p>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
 
-const learnCards: LearnCardConfig[] = [
-  {
-    icon: PenSquare,
-    eyebrow: 'Compliance',
-    title: 'GDPR toolkit & templates',
-    description: 'Download the DPA, SCCs, consent copy, and deletion runbooks straight from the GDPR Compliance guide.',
-    cta: { label: 'View GDPR guide', href: '/gdpr' },
-    ctaVariant: 'link',
-  },
-  {
-    icon: Gauge,
-    eyebrow: 'Playbook',
-    title: 'Revenue experiment templates',
-    description: 'Use the documented sample sizes, guardrails, and monitoring widgets to keep every test statistically sound.',
-    cta: { label: 'Open A/B testing docs', href: '/documentation#ab-testing-platform' },
-    ctaVariant: 'button',
-  },
-];
+function SocialProofSection() {
+  return (
+    <section className="py-20">
+      <div className="container mx-auto px-4 text-center">
+        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
+            Built with real studios, for real problems.
+          </h2>
+          <p className="text-lg text-gray-600 mb-12">
+            ApexMediation is shaped together with a small group of design-partner studios across mobile games, utilities and CTV apps. We prioritize the issues they actually hit in production: SDK crashes, opaque revenue swings, network disputes and painful migrations.
+          </p>
+          <div className="bg-gray-100 rounded-xl p-8 border-2 border-dashed border-gray-300">
+            <img
+              src="/api/brand/logo"
+              alt="ApexMediation"
+              className="h-12 w-auto mx-auto"
+            />
+            <p className="text-sm text-gray-400 mt-2">
+              Use this area later for studio logos, quotes, case studies.
+            </p>
+          </div>
+        </motion.div>
+      </div>
+    </section>
+  );
+}
 
-type PrincipleCardConfig = {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-};
+function HowItWorksSection() {
+  return (
+    <section className="py-20 bg-gray-50">
+      <div className="container mx-auto px-4">
+        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+            How ApexMediation fits into your stack
+          </h2>
+        </motion.div>
+        <div className="max-w-4xl mx-auto">
+          {howItWorksSteps.map((item, index) => (
+            <motion.div
+              key={item.step}
+              {...getRevealProps(index * 0.1)}
+              className="flex gap-6 mb-8 last:mb-0"
+            >
+              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-brand-600 text-white flex items-center justify-center text-xl font-bold">
+                {item.step}
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-gray-900 mb-2">
+                  {item.title}
+                </h3>
+                <p className="text-gray-600 leading-relaxed">
+                  {item.description}
+                </p>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
 
-const principleCards: PrincipleCardConfig[] = [
-  {
-    icon: Layers,
-    title: 'Auditable auctions',
-    description: 'Match every clearing price to transparency receipts and mediation debugger traces when finance needs evidence.',
-  },
-  {
-    icon: Scale,
-    title: 'Privacy by design',
-    description: 'GDPR, COPPA, and store policy guardrails follow the compliance guide and ship consent APIs by default.',
-  },
-  {
-    icon: LifeBuoy,
-    title: 'Human support',
-    description: 'Revenue engineers across EMEA + NA pair on launches, fraud reviews, and payment reconciliations.',
-  },
-  {
-    icon: Globe2,
-    title: 'Global readiness',
-    description: '11 POPs, localized docs, and WCAG AA-compliant surfaces keep consoles calm for every locale.',
-  },
-];
+function ReliabilitySection() {
+  return (
+    <section className="py-20">
+      <div className="container mx-auto px-4">
+        <div className="max-w-4xl mx-auto">
+          <motion.div {...getRevealProps(0)}>
+            <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+              Avoid the next &quot;over-the-air SDK crash&quot; headline.
+            </h2>
+            <p className="text-lg text-gray-600 mb-8">
+              Ad SDKs are a common cause of ANRs, crashes and mysterious revenue drops. ApexMediation is built by engineers with deep experience in high-reliability systems and battery-sensitive mobile apps, and backed by decades of technology work at our parent group.
+            </p>
+            <ul className="space-y-4">
+              {reliabilityBullets.map((bullet, index) => (
+                <li key={index} className="flex items-start gap-3">
+                  <ShieldCheck className="w-5 h-5 text-brand-600 flex-shrink-0 mt-1" />
+                  <span className="text-gray-700">{bullet}</span>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
-const supportedNetworks = [
-  'AdMob',
-  'AppLovin',
-  'Unity Ads',
-  'ironSource',
-  'Meta Audience Network',
-  'Vungle',
-  'Chartboost',
-  'Pangle',
-  'Mintegral',
-  'AdColony',
-  'Tapjoy',
-  'Moloco',
-  'Fyber',
-  'Smaato',
-  'Amazon Publisher Services',
-] as const;
+function AudienceSection() {
+  return (
+    <section className="py-20 bg-gray-50">
+      <div className="container mx-auto px-4">
+        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+            Who gets the most value
+          </h2>
+        </motion.div>
+        <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+          {audienceCards.map((card, index) => (
+            <motion.div
+              key={card.title}
+              {...getRevealProps(index * 0.1)}
+              className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
+            >
+              <div className="w-12 h-12 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+                <card.icon className="w-6 h-6 text-brand-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {card.title}
+              </h3>
+              <p className="text-gray-600 text-sm leading-relaxed">
+                {card.description}
+              </p>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
 
-const supportedNetworksList = supportedNetworks.join(', ');
+function PricingTeaserSection() {
+  return (
+    <section className="py-20">
+      <div className="container mx-auto px-4 text-center">
+        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+            Pay for platform value, not your ad revenue.
+          </h2>
+          <p className="text-lg text-gray-600 mb-8">
+            ApexMediation&apos;s BYO model means networks pay you directly. We charge a transparent platform fee based on usage, with a generous free tier so you can integrate, test, and ship before committing.
+          </p>
+          <a href="/pricing" className="btn-primary px-8 py-4 text-lg font-semibold">
+            View pricing
+          </a>
+        </motion.div>
+      </div>
+    </section>
+  );
+}
 
-type PricingTierConfig = {
-  icon: LucideIcon;
-  name: string;
-  price: string;
-  description: string;
-  highlights: string[];
-  badge?: string;
-  ctaLabel: string;
-  ctaHref: string;
-  accent?: 'brand';
-};
+function FinalCTASection() {
+  return (
+    <section className="py-20 bg-brand-600">
+      <div className="container mx-auto px-4 text-center">
+        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+          <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
+            Ready to stop guessing what your mediation layer is doing?
+          </h2>
+          <p className="text-lg text-brand-100 mb-8">
+            Join the early access cohort of studios using ApexMediation to make their ad stack verifiable, resilient and BYO-friendly.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <a
+              href="/signup"
+              className="bg-white text-brand-600 px-8 py-4 rounded-lg text-lg font-semibold hover:bg-brand-50 transition-colors"
+            >
+              Start BYO trial
+            </a>
+            <a
+              href="/contact"
+              className="border-2 border-white text-white px-8 py-4 rounded-lg text-lg font-semibold hover:bg-brand-500 transition-colors"
+            >
+              Book a technical walkthrough
+            </a>
+          </div>
+        </motion.div>
+      </div>
+    </section>
+  );
+}
 
-const pricingTiers: PricingTierConfig[] = [
-  {
-    icon: Coins,
-    name: 'Tier 0 — Starter',
-    price: '0% platform fee',
-    description: 'Free up to $10k mediated revenue per app per month with no payment method required. Ship the SDKs, validate BYO flows, and keep every cent while you ramp.',
-    highlights: [
-      'Full Android, iOS/tvOS, Unity, Web, and TV SDK access',
-      'Covers up to 5 apps per workspace',
-      'Core analytics + basic mediation debugger',
-      'Upgrade only when trailing 30-day revenue crosses $10k; add a card/ACH/SEPA rail at that point.',
-    ],
-    badge: 'Free tier',
-    ctaLabel: 'Start Building Now',
-    ctaHref: '/signup',
-    accent: 'brand',
-  },
-  {
-    icon: Gauge,
-    name: 'Tier 1 — Growth',
-    price: '2.5% platform fee',
-    description: '$10k–$100k mediated revenue per app per month. Stripe cards, ACH, or SEPA are stored for autopay so billing clears the moment invoices finalize.',
-    highlights: [
-      'Advanced observability (adapter metrics + SLO dashboards)',
-      'Migration Studio + audit-ready export bundles',
-      'Email/Slack support with documented SLA',
-      'Autopay using Stripe cards, ACH (US), or SEPA (EU) at billing period close',
-      'Example: $50k/mo → $1,250 platform fee',
-    ],
-    badge: 'Most popular',
-    ctaLabel: 'Review Growth tier',
-    ctaHref: '/pricing',
-  },
-  {
-    icon: Layers,
-    name: 'Tier 2 — Scale',
-    price: '2.0% platform fee',
-    description: '$100k–$500k mediated revenue per app per month. Autopay remains the default, with Stripe handling retries so mediation never throttles for billing.',
-    highlights: [
-      'Priority support + named revenue engineer',
-      'Custom dashboards and exports (BigQuery/S3/native APIs)',
-      'Early access to fraud/ML tooling while it runs in shadow mode',
-      'Stripe autopay with ACH/SEPA coverage plus finance visibility into every draft invoice',
-      'Example: $250k/mo → $5,000 platform fee',
-    ],
-    ctaLabel: 'Talk to revenue engineering',
-    ctaHref: '/contact',
-  },
-  {
-    icon: ShieldCheck,
-    name: 'Tier 3 — Enterprise',
-    price: 'Custom (1.0–1.5%) + minimum',
-    description: '$500k+ mediated revenue per app per month with regulated workflows and bespoke compliance reviews. Default autopay lives on Stripe rails, with manual invoice + wire only after finance approval.',
-    highlights: [
-      'All Scale features plus contractual SLAs',
-      'Dedicated Slack channel + quarterly reviews',
-      'Custom onboarding/migration program',
-      'Manual invoice + wire available post-review; autopay remains the default behavior',
-      'Custom data residency reviews with external audit support',
-    ],
-    ctaLabel: 'Design your enterprise plan',
-    ctaHref: '/contact',
-  },
-];
-
-type PlatformValuePoint = {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-};
-
-const platformValuePoints: PlatformValuePoint[] = [
-  {
-    icon: Workflow,
-    title: 'Mediation & auction brain',
-    description: 'Waterfall, header bidding, pacing, and floor automation across every BYO adapter—no need to juggle 10 SDK control panels.',
-  },
-  {
-    icon: Radar,
-    title: 'Observability & debugging',
-    description: 'Unified metrics, SLO dashboards, and the mediation debugger so ops teams can prove delivery and spot issues before revenue dips.',
-  },
-  {
-    icon: ShieldCheck,
-    title: 'Fraud & quality tooling',
-    description: 'Shadow ML models, anomaly alerts, and evidence packs that keep clawbacks low even while demand partners stay under your accounts.',
-  },
-  {
-    icon: PenSquare,
-    title: 'Migration & transparency',
-    description: 'Migration Studio, signed transparency logs, and reproducible auctions for every compliance or finance review.',
-  },
-  {
-    icon: Users2,
-    title: 'One SDK, one console',
-    description: 'Five platform SDKs, one integration path, and one UI instead of maintaining 10+ vendor SDKs and analytics portals.',
-  },
-];
-
-type AddOnConfig = {
-  title: string;
-  price: string;
-  description: string;
-};
-
-const addOns: AddOnConfig[] = [
-  {
-    title: 'White-label console',
-    price: '+0.25% platform fee or $1,500/mo',
-    description: 'Rebrand the console and share log-ins with enterprise customers without exposing the ApexMediation identity.',
-  },
-  {
-    title: 'Extended retention & premium analytics',
-    price: '+$500/mo per 12-month retention pack',
-    description: 'Keep raw auction, payout, and fraud data for longer windows or stream curated dashboards into your BI stack.',
-  },
-  {
-    title: 'Hands-on migration service',
-    price: 'One-time consulting fee (quote per studio)',
-    description: 'Revenue engineers import historical placements, recreate waterfalls, and pair on the go-live checklist end to end.',
-  },
-];
-
-const getRevealProps = (delay = 0) => ({
-  initial: 'hidden',
-  whileInView: 'visible',
-  viewport: { once: true, amount: 0.2 },
-  transition: { duration: 0.45, ease: 'easeOut', delay },
-  variants: {
-    hidden: { opacity: 0, y: 24 },
-    visible: { opacity: 1, y: 0 },
-  },
-});
+// ============================================================================
+// MAIN PAGE
+// ============================================================================
 
 export default function HomePage() {
   return (
     <>
-      <NotificationBar />
-
-      <main
-        className="relative isolate overflow-hidden bg-white text-gray-900"
-        role="main"
-        aria-labelledby="hero-heading"
-      >
-        <div
-          className="pointer-events-none absolute -left-40 top-24 hidden h-[520px] w-[520px] rounded-full bg-brand-50 blur-3xl md:block"
-          aria-hidden="true"
-        />
-        <div
-          className="pointer-events-none absolute right-[-140px] top-[-160px] hidden h-[500px] w-[500px] rounded-full bg-brand-100 blur-3xl lg:block"
-          aria-hidden="true"
-        />
-
+      <main className="relative bg-white text-gray-900">
         <div className="container relative z-10 py-6 md:py-10">
           <HomeNav />
         </div>
 
         <HeroSection />
+        <PillarsSection />
+        <SocialProofSection />
+        <HowItWorksSection />
+        <ReliabilitySection />
+        <AudienceSection />
+        <PricingTeaserSection />
+        <FinalCTASection />
       </main>
 
-      {/* Decorative divider removed per new visual spec */}
-
-      <Section>
-        <Container className="space-y-6">
-          <PopularSection />
-        </Container>
-      </Section>
-
-      <Section>
-        <Container className="space-y-6">
-          <FeaturesSection />
-        </Container>
-      </Section>
-
-      {/* Decorative divider removed per new visual spec */}
-
-      <Section>
-        <Container className="space-y-6">
-          <AdaptersSection />
-        </Container>
-      </Section>
-
-      {/* Decorative divider removed per new visual spec */}
-
-      <Section>
-        <Container className="space-y-6">
-          <LearnSection />
-        </Container>
-      </Section>
-
-      {/* Decorative divider removed per new visual spec */}
-
-      <Section>
-        <Container className="space-y-6">
-          <PrinciplesSection />
-        </Container>
-      </Section>
-
-      <Section inset>
-        <Container>
-          <NewsletterPanel />
-        </Container>
-      </Section>
-
-      <Section>
-        <Container className="space-y-6">
-          <PricingSection />
-        </Container>
-      </Section>
-
-      <Section>
-        <Container className="space-y-6">
-          <PlatformValueSection />
-        </Container>
-      </Section>
-
-      <Section>
-        <Container className="space-y-6">
-          <AddOnsSection />
-        </Container>
-      </Section>
       <Footer />
       <CookieBanner />
     </>
-  );
-}
-
-function HeroSection() {
-  return (
-    <section
-      id="hero"
-      className="hero relative z-10"
-      aria-labelledby="hero-heading"
-    >
-      <div className="mx-auto flex max-w-5xl flex-col items-center gap-8 px-4 text-center">
-        <div className="flex flex-col items-center gap-4">
-          <span className="eyebrow">Bring-your-own mediation SDKs</span>
-          <h1 id="hero-heading">
-            Maximize Yield. Minimize SDK Fatigue.
-          </h1>
-          <p>
-            Integrate 15 top networks in 13 minutes. Enterprise-grade fraud protection, real-time bidding, and automated payouts—all in one control plane.
-          </p>
-        </div>
-
-        <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <a href="/contact" className="btn-primary px-6">
-            Book a revenue audit →
-          </a>
-          <a href="/documentation" className="btn-secondary px-6">
-            Browse the docs
-          </a>
-        </div>
-
-        <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <HeroPill>BYO-first deployment</HeroPill>
-          <HeroPill>13-minute SDK quickstart</HeroPill>
-          <HeroPill>15 built-in adapters</HeroPill>
-          <HeroPill>NET 30 payouts • €100 min</HeroPill>
-        </div>
-
-        <div className="mt-10 grid w-full gap-6 sm:grid-cols-2 lg:grid-cols-4">
-          {heroStats.map((stat, index) => (
-            <HeroStat key={stat.title} delay={index * 0.05} {...stat} />
-          ))}
-        </div>
-
-        <p className="text-xs uppercase tracking-[0.32em] text-ink/60 underline">
-          <a
-            href="#animation-preferences"
-            className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]"
-          >
-            Pause animation
-          </a>
-        </p>
-      </div>
-
-      <div id="animation-preferences" className="sr-only" aria-hidden="true">
-        Animations are currently static on this page.
-      </div>
-    </section>
-  );
-}
-
-function HeroPill({ children }: { children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-4 py-2 text-[0.75rem] font-semibold tracking-[0.18em] text-ink">
-      {children}
-    </span>
-  );
-}
-
-function HeroStat({ icon: Icon, title, description, delay = 0 }: { icon: LucideIcon; title: string; description: string; delay?: number }) {
-  return (
-    <motion.article {...getRevealProps(delay)} className="card flex h-full flex-col gap-4 text-left">
-      <span className="icon-pill" aria-hidden="true">
-        <Icon />
-      </span>
-      <p className="font-display text-[1.375rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-        {title}
-      </p>
-      <p className="text-base text-inkMuted leading-relaxed">{description}</p>
-    </motion.article>
-  );
-}
-
-function PopularSection() {
-  return (
-    <section
-      id="popular"
-      className="bg-white py-16 md:py-20"
-      aria-labelledby="popular-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Popular right now"
-          title="Quick wins backed by the docs"
-          description="Start with the published quickstart, debugger, and compliance kits so product, legal, and finance stay in lockstep."
-          headingId="popular-heading"
-        />
-
-        <div className="grid gap-6 md:grid-cols-3">
-          {popularCards.map((card, index) => (
-            <PopularCard key={card.title} delay={index * 0.05} {...card} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PopularCard({ icon: Icon, title, description, href, badge, delay = 0 }: PopularCardConfig & { delay?: number }) {
-  return (
-    <motion.a
-      {...getRevealProps(delay)}
-      href={href}
-      className="card group flex h-full flex-col gap-5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]"
-    >
-      <div className="flex items-center justify-between gap-4">
-        <span className="icon-pill" aria-hidden="true">
-          <Icon />
-        </span>
-        {badge ? <span className="pill">{badge}</span> : null}
-      </div>
-      <span className="eyebrow">Playbook</span>
-      <h3 className="font-display text-[1.35rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-        {title}
-      </h3>
-      <p className="text-base text-inkMuted leading-[1.6]">
-        {description}
-      </p>
-      <span className="mt-auto inline-flex items-center gap-2 text-sm font-semibold text-brand">
-        Learn more
-        <span aria-hidden="true" className="transition-transform duration-300 group-hover:translate-x-1">
-          →
-        </span>
-      </span>
-    </motion.a>
-  );
-}
-
-function FeaturesSection() {
-  return (
-    <section
-      id="features"
-      className="bg-gray-50 py-20 md:py-24"
-      aria-labelledby="features-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Platform pillars"
-          title="Why developers choose ApexMediation"
-          description="Each pillar maps directly to a customer-facing guide—experiments, fraud, consent, telemetry, finance, and SDK ergonomics."
-          align="center"
-          headingId="features-heading"
-        />
-
-        <div className="grid gap-6 md:grid-cols-3">
-          {featureCards.map((card, index) => (
-            <FeatureCard key={card.title} delay={index * 0.05} {...card} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function FeatureCard({ icon: Icon, title, description, badge, span, accent, delay = 0 }: FeatureCardConfig & { delay?: number }) {
-  return (
-    <motion.article
-      {...getRevealProps(delay)}
-      className={clsx(
-        'feature-card flex h-full flex-col gap-4',
-        span === 'double' && 'md:col-span-2',
-        accent === 'brand' && 'bg-gradient-to-br from-brand-50/70 via-white to-white border-brand-100'
-      )}
-    >
-      <div className="flex items-center justify-between gap-4">
-        <span className="icon-pill" aria-hidden="true">
-          <Icon />
-        </span>
-        {badge ? <span className="pill">{badge}</span> : null}
-      </div>
-      <h3 className="font-display text-[1.35rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-        {title}
-      </h3>
-      <p className="text-base leading-[1.6] text-inkMuted">{description}</p>
-    </motion.article>
-  );
-}
-
-function AdaptersSection() {
-  return (
-    <section
-      id="adapters"
-      className="bg-white py-16 md:py-20"
-      aria-labelledby="adapters-heading"
-    >
-      <div className="section-container space-y-8">
-        <SectionHeading
-          eyebrow="Adapter coverage"
-          title="15 network connectors across every SDK"
-          description="Each BYO SDK (Android, iOS/tvOS, Unity, Android TV, and Web) reads from the same adapter registry, so you configure credentials once and reuse them everywhere."
-          headingId="adapters-heading"
-        />
-        <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-          {supportedNetworks.map((network) => (
-            <div
-              key={network}
-              className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-center text-sm font-semibold text-ink"
-            >
-              {network}
-            </div>
-          ))}
-        </div>
-        <p className="text-sm text-inkMuted">
-          Source: Adapter registries in the Android (`AdapterRegistry.kt`), iOS/tvOS (`AdapterRegistry.swift`), Unity (`AdapterCatalog.cs`), Android TV (`CtvAdapterRegistry`), and Web (`SUPPORTED_NETWORKS`) SDKs.
-        </p>
-      </div>
-    </section>
-  );
-}
-
-function LearnSection() {
-  return (
-    <section
-      id="learn"
-      className="bg-white py-16 md:py-20"
-      aria-labelledby="learn-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Learn & engage"
-          title="Keep your monetization muscle sharp"
-          description="Compliance kits and experimentation templates come straight from the customer-facing documentation team."
-          headingId="learn-heading"
-        />
-
-        <div className="grid gap-6 md:grid-cols-2">
-          {learnCards.map(({ icon: Icon, ...card }, index) => (
-            <motion.article
-              key={card.title}
-              {...getRevealProps(index * 0.05)}
-              className="card group flex h-full flex-col gap-4"
-            >
-              <div className="flex items-center gap-3">
-                <span className="icon-pill" aria-hidden="true">
-                  <Icon />
-                </span>
-                <span className="eyebrow">{card.eyebrow}</span>
-              </div>
-              <h3 className="font-display text-[1.35rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-                {card.title}
-              </h3>
-              <p className="text-base text-inkMuted leading-[1.6]">
-                {card.description}
-              </p>
-              {card.ctaVariant === 'button' ? (
-                <a href={card.cta.href} className="mt-auto inline-flex w-fit items-center justify-center btn-primary px-6">
-                  {card.cta.label}
-                </a>
-              ) : (
-                <a
-                  href={card.cta.href}
-                  className="mt-auto inline-flex items-center gap-2 text-sm font-semibold text-brand hover:text-brand-600"
-                >
-                  {card.cta.label}
-                  <span aria-hidden="true" className="transition-transform duration-300 group-hover:translate-x-1">
-                    →
-                  </span>
-                </a>
-              )}
-            </motion.article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PrincipleCard({ icon: Icon, title, description, delay = 0 }: PrincipleCardConfig & { delay?: number }) {
-  return (
-    <motion.article {...getRevealProps(delay)} className="card flex h-full flex-col gap-3">
-      <span className="icon-pill" aria-hidden="true">
-        <Icon />
-      </span>
-      <h3 className="font-display text-[1.2rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-        {title}
-      </h3>
-      <p className="text-base leading-[1.6] text-inkMuted">{description}</p>
-    </motion.article>
-  );
-}
-
-function PrinciplesSection() {
-  return (
-    <section
-      id="principles"
-      className="bg-gray-50 py-20 md:py-24"
-      aria-labelledby="principles-heading"
-    >
-      <div className="section-container">
-        <div className="grid gap-12 lg:grid-cols-2">
-          <div className="space-y-5">
-            <SectionHeading
-              eyebrow="Product principles"
-              title="Every promise traces back to the docs"
-              description="Pricing tables, GDPR guardrails, and support SLAs live in the same documentation we link throughout the site so your team can verify every claim."
-              headingId="principles-heading"
-            />
-            <ul className="space-y-3 text-base text-inkMuted">
-              <li className="flex items-start gap-3">
-                <span className="icon-pill" aria-hidden="true">
-                  <Coins />
-                </span>
-                <span>Platform fees stay transparent—0% Starter, 2.5% Growth, 2.0% Scale, and custom 1.0–1.5% Enterprise—backed by the same NET 30 payout schedule published in billing docs.</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <span className="icon-pill" aria-hidden="true">
-                  <Scale />
-                </span>
-                <span>GDPR, COPPA, and consent workflows mirror the compliance guide—complete with DPA, SCCs, and 30-day deletion SLAs.</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <span className="icon-pill" aria-hidden="true">
-                  <LifeBuoy />
-                </span>
-                <span>Support targets sub-4-hour responses during business hours, as promised in the Quick Start and Troubleshooting docs.</span>
-              </li>
-            </ul>
-            <a
-              href="/about"
-              className="inline-flex items-center gap-2 text-sm font-semibold text-brand underline decoration-2 underline-offset-4 hover:text-brand-600"
-            >
-              Learn about our mission
-              <span aria-hidden="true">→</span>
-            </a>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {principleCards.map((card, index) => (
-              <PrincipleCard key={card.title} delay={index * 0.05} {...card} />
-            ))}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PricingSection() {
-  return (
-    <section
-      id="pricing"
-      className="bg-white py-20 md:py-24"
-      aria-labelledby="pricing-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Get started"
-          title="BYO control plane pricing"
-          description="Starter stays 0% up to $10k/mo without a card. Growth (2.5%), Scale (2.0%), and Enterprise auto-charge via Stripe cards, ACH, or SEPA when invoices finalize so billing never blocks mediation."
-          align="center"
-          headingId="pricing-heading"
-        />
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {pricingTiers.map((tier, index) => (
-            <PricingCard key={tier.name} delay={index * 0.05} {...tier} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PlatformValueSection() {
-  return (
-    <section
-      id="platform-value"
-      className="bg-gray-50 py-20 md:py-24"
-      aria-labelledby="platform-value-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Platform value"
-          title="What every platform fee includes"
-          description="Five SDKs, adapter management, observability, fraud tooling, and migration support are part of the base platform—not add-ons or hidden upsells."
-          align="center"
-          headingId="platform-value-heading"
-        />
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {platformValuePoints.map((point, index) => (
-            <PlatformValueCard key={point.title} delay={index * 0.05} {...point} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PlatformValueCard({ icon: Icon, title, description, delay = 0 }: PlatformValuePoint & { delay?: number }) {
-  return (
-    <motion.article
-      {...getRevealProps(delay)}
-      className="card flex h-full flex-col gap-4"
-    >
-      <span className="icon-pill" aria-hidden="true">
-        <Icon />
-      </span>
-      <h3 className="font-display text-[1.3rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-        {title}
-      </h3>
-      <p className="text-base text-inkMuted leading-[1.6]">{description}</p>
-    </motion.article>
-  );
-}
-
-function PricingCard({ icon: Icon, name, price, description, highlights, badge, ctaHref, ctaLabel, accent, delay = 0 }: PricingTierConfig & { delay?: number }) {
-  const isBrand = accent === 'brand';
-  return (
-    <motion.article
-      {...getRevealProps(delay)}
-      className={clsx(
-        'card flex h-full flex-col gap-4',
-        isBrand && 'bg-gradient-to-br from-brand-50 via-white to-white border-brand-100'
-      )}
-    >
-      <div className="flex items-center justify-between gap-4">
-        <span className="icon-pill" aria-hidden="true">
-          <Icon />
-        </span>
-        {badge ? <span className="pill">{badge}</span> : null}
-      </div>
-      <div>
-        <span className="eyebrow">{name}</span>
-        <p className="font-display text-[2rem] font-semibold leading-tight text-ink">
-          {price}
-        </p>
-      </div>
-      <p className="text-base text-inkMuted leading-[1.6]">{description}</p>
-      <ul className="space-y-2 text-sm text-ink">
-        {highlights.map((item) => (
-          <li key={item} className="flex items-start gap-2">
-            <span className="mt-1 h-1.5 w-1.5 rounded-full bg-brand-500" aria-hidden="true" />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
-      <div className="mt-auto">
-        <a
-          href={ctaHref}
-          className={clsx('w-full', isBrand ? 'btn-primary' : 'btn-secondary')}
-        >
-          {ctaLabel}
-        </a>
-      </div>
-    </motion.article>
-  );
-}
-
-function AddOnsSection() {
-  return (
-    <section
-      id="add-ons"
-      className="bg-white py-20 md:py-24"
-      aria-labelledby="add-ons-heading"
-    >
-      <div className="section-container">
-        <SectionHeading
-          eyebrow="Optional add-ons"
-          title="Layer extras onto any platform tier"
-          description="Keep the base platform fees predictable and opt into white-labeling, longer retention, or hands-on migration support only when required."
-          align="center"
-          headingId="add-ons-heading"
-        />
-        <div className="grid gap-6 md:grid-cols-3">
-          {addOns.map((addOn, index) => (
-            <AddOnCard key={addOn.title} delay={index * 0.05} {...addOn} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function AddOnCard({ title, price, description, delay = 0 }: AddOnConfig & { delay?: number }) {
-  return (
-    <motion.article
-      {...getRevealProps(delay)}
-      className="card flex h-full flex-col gap-4"
-    >
-      <div>
-        <span className="eyebrow">{price}</span>
-        <h3 className="font-display text-[1.25rem] font-semibold leading-[1.3] tracking-[-0.01em] text-ink">
-          {title}
-        </h3>
-      </div>
-      <p className="text-base text-inkMuted leading-[1.6]">{description}</p>
-    </motion.article>
   );
 }

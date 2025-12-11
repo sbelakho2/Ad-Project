@@ -26,7 +26,6 @@ export async function POST(request: NextRequest) {
     const companyName = (body?.companyName ?? '').toString();
     const consent = !!body?.consent;
     const honeypot = (body?.hp ?? body?.company)?.toString?.() ?? '';
-    const bankAccountPayload = body?.bankAccount ?? {};
 
     // Validate input
     if (!email || !password || !name) {
@@ -65,58 +64,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true }, { status: 200 });
     }
 
-    // Require SEPA or ACH banking details so invoices can auto-debit
-    const scheme = bankAccountPayload?.scheme === 'ach' ? 'ach' : 'sepa';
-    const accountHolderName = (bankAccountPayload?.accountHolderName ?? companyName ?? name).toString().trim();
-
-    if (!accountHolderName) {
-      return NextResponse.json(
-        { success: false, error: 'Account holder name is required' },
-        { status: 400 }
-      );
-    }
-
-    let bankAccount;
-    if (scheme === 'sepa') {
-      const iban = (bankAccountPayload?.iban ?? '').toString().replace(/\s+/g, '').toUpperCase();
-      const bic = (bankAccountPayload?.bic ?? '').toString().replace(/\s+/g, '').toUpperCase();
-      const ibanValid = /^[A-Z0-9]{15,34}$/.test(iban);
-      const bicValid = /^[A-Z0-9]{8}([A-Z0-9]{3})?$/.test(bic);
-      if (!ibanValid || !bicValid) {
-        return NextResponse.json(
-          { success: false, error: 'Valid IBAN and BIC are required for SEPA debits' },
-          { status: 400 }
-        );
-      }
-      bankAccount = { scheme: 'sepa' as const, accountHolderName, iban, bic };
-    } else {
-      const accountNumber = (bankAccountPayload?.accountNumber ?? '').toString().replace(/\s+/g, '');
-      const routingNumber = (bankAccountPayload?.routingNumber ?? '').toString().replace(/[^0-9]/g, '');
-      const accountType = bankAccountPayload?.accountType === 'SAVINGS' ? 'SAVINGS' : 'CHECKING';
-      const acctValid = /^[0-9]{4,17}$/.test(accountNumber);
-      const routingValid = /^[0-9]{9}$/.test(routingNumber);
-      if (!acctValid || !routingValid) {
-        return NextResponse.json(
-          { success: false, error: 'Valid ACH account and routing numbers are required' },
-          { status: 400 }
-        );
-      }
-      bankAccount = {
-        scheme: 'ach' as const,
-        accountHolderName,
-        accountNumber,
-        routingNumber,
-        accountType,
-      };
-    }
-
     // Call backend registration endpoint
     const response = await api.post('/auth/register', {
       email,
       password,
       name,
       companyName,
-      bankAccount,
     });
 
     if (!response.success || !response.data) {

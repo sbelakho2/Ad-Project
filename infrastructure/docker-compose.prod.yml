@@ -28,6 +28,42 @@ services:
     networks:
       - apex-net
 
+  config:
+    build:
+      context: ../backend/config
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - PORT=8081
+      - ENV=production
+      - REDIS_ADDR=redis:6379
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/apexmediation}
+      # Persist keys in a volume in real production; for local prod-like runs it will self-generate.
+      - SIGNING_KEY_PATH=/keys/signing.key
+    expose:
+      - "8081"
+    networks:
+      - apex-net
+
+  auction:
+    build:
+      context: ../backend/auction
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - PORT=8082
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-local-strong-password}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/apexmediation}
+      # Web SDK / tooling access (browser only). Keep tight in real prod.
+      - CORS_ORIGIN=${AUCTION_CORS_ORIGIN:-https://apexmediation.ee}
+    expose:
+      - "8082"
+    networks:
+      - apex-net
+
   console:
     profiles:
       - ui
@@ -105,6 +141,8 @@ services:
     image: nginx:1.27-alpine
     depends_on:
       - backend
+      - config
+      - auction
     ports:
       - "${NGINX_PORT:-8080}:80"
       - "443:443"

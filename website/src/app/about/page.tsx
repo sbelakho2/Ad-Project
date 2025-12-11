@@ -24,10 +24,9 @@ export default function AboutPage() {
         <Breadcrumbs items={[{ label: 'Home', href: '/' }, { label: 'About' }]} />
 
         <div className="flex items-center gap-4 not-prose mb-6">
-          {/* Note: ensure Logo.jpg is available under website/public/Logo.jpg for Next to serve */}
           <div className="relative h-12 w-12 overflow-hidden rounded">
             <Image
-              src="/Logo.jpg"
+              src="/api/brand/logo"
               alt="ApexMediation logo"
               fill
               sizes="48px"

@@ -1,5 +1,6 @@
 // Types are augmented via ../types/express.d.ts; no triple-slash needed
 import { Request, Response, NextFunction } from 'express';
+import Stripe from 'stripe';
 import { AppError } from '../middleware/errorHandler';
 import { logger } from '../utils/logger';
 import { usageMeteringService } from '../services/billing/UsageMeteringService';
@@ -8,6 +9,24 @@ import { reconciliationService } from '../services/reconciliationService';
 import { migrationAssistantService } from '../services/billing/migrationAssistantService';
 import { platformFeeService } from '../services/billing/platformFeeService';
 import { getBillingPolicySnapshot } from '../config/billingPolicy';
+import { query } from '../utils/postgres';
+
+let stripeClient: Stripe | null = null;
+
+const getStripeClient = (): Stripe => {
+  if (stripeClient) return stripeClient;
+
+  const secretKey = process.env.STRIPE_SECRET_KEY;
+  if (!secretKey) {
+    throw new AppError('Stripe secret key not configured', 500);
+  }
+
+  stripeClient = new Stripe(secretKey, {
+    apiVersion: '2025-10-29.clover',
+  });
+
+  return stripeClient;
+};
 
 /**
  * GET /api/v1/billing/usage/current
@@ -238,6 +257,77 @@ export const requestMigration = async (
     });
   } catch (error) {
     logger.error('Error handling billing migration request', {
+      error,
+      userId: req.user?.userId,
+    });
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/billing/portal
+ * Creates a Stripe Customer Portal session for the authenticated user.
+ */
+export const createPortalSession = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const userId = req.user?.userId;
+    const email = req.user?.email || undefined;
+
+    if (!userId) {
+      throw new AppError('User not authenticated', 401);
+    }
+
+    const origin =
+      (req.get('origin') && req.get('origin')!.trim()) ||
+      (process.env.CONSOLE_URL && process.env.CONSOLE_URL.trim()) ||
+      (process.env.WEBSITE_URL && process.env.WEBSITE_URL.trim()) ||
+      '';
+
+    if (!origin) {
+      throw new AppError('Portal return URL not configured', 500);
+    }
+
+    const returnUrl = `${origin.replace(/\/+$/, '')}/billing/settings`;
+    const stripe = getStripeClient();
+
+    const result = await query<{ stripe_customer_id: string | null }>(
+      'SELECT stripe_customer_id FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      throw new AppError('User not found', 404);
+    }
+
+    let stripeCustomerId = result.rows[0].stripe_customer_id;
+
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email,
+        metadata: {
+          user_id: userId,
+        },
+      });
+      stripeCustomerId = customer.id;
+
+      await query('UPDATE users SET stripe_customer_id = $2 WHERE id = $1', [userId, stripeCustomerId]);
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: stripeCustomerId,
+      return_url: returnUrl,
+    });
+
+    res.json({
+      success: true,
+      url: session.url,
+    });
+  } catch (error) {
+    logger.error('Error creating Stripe portal session', {
       error,
       userId: req.user?.userId,
     });

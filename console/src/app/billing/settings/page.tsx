@@ -558,7 +558,7 @@ export default function BillingSettingsPage() {
               <button
                 type="button"
                 onClick={() => portalMutation.mutate()}
-                disabled={portalMutation.isPending || !settings?.stripe_customer_id || !user}
+                disabled={portalMutation.isPending || !user}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
                 {portalMutation.isPending ? (
@@ -578,7 +578,7 @@ export default function BillingSettingsPage() {
                   <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
                   {isStarterPlan
                     ? 'Starter tier accounts can stay card-free until they exceed the revenue cap. Add a payment method early to ensure autopay works the moment you upgrade.'
-                    : 'No Stripe account linked. Contact support to set up billing.'}
+                    : 'No Stripe customer linked yet. Open the Stripe Portal to add a payment method and enable autopay.'}
                 </p>
               )}
               {showAutopayCard && (

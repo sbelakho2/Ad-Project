@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/jackc/pgx/v5/pgxpool"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/rivalapexmediation/auction/internal/bidding"
+	"github.com/rivalapexmediation/auction/internal/auth"
 	"github.com/rivalapexmediation/auction/internal/bidders"
+	"github.com/rivalapexmediation/auction/internal/bidding"
 	"github.com/rivalapexmediation/auction/internal/waterfall"
 )
 
@@ -19,13 +21,15 @@ import (
 type Handlers struct {
 	auctionEngine    *bidding.AuctionEngine
 	waterfallManager *waterfall.WaterfallManager
+	pgPool           *pgxpool.Pool
 }
 
 // NewHandlers creates new HTTP handlers
-func NewHandlers(ae *bidding.AuctionEngine, wm *waterfall.WaterfallManager) *Handlers {
+func NewHandlers(ae *bidding.AuctionEngine, wm *waterfall.WaterfallManager, pgPool *pgxpool.Pool) *Handlers {
 	return &Handlers{
 		auctionEngine:    ae,
 		waterfallManager: wm,
+		pgPool:           pgPool,
 	}
 }
 
@@ -49,6 +53,18 @@ func (h *Handlers) RunAuction(w http.ResponseWriter, r *http.Request) {
 	// Validate request
 	if req.RequestID == "" || req.PlacementID == "" {
 		respondError(w, http.StatusBadRequest, "Missing required fields")
+		return
+	}
+
+	sdk, err := auth.RequireContext(r.Context())
+	if err != nil {
+		respondError(w, http.StatusUnauthorized, "Missing API key")
+		return
+	}
+
+	// Ensure placement belongs to the key's app.
+	if ok, err := auth.PlacementBelongsToApp(r.Context(), h.pgPool, req.PlacementID, sdk.AppID); err != nil || !ok {
+		respondError(w, http.StatusForbidden, "Placement not valid for this app")
 		return
 	}
 
@@ -86,6 +102,17 @@ func (h *Handlers) GetWaterfall(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	placementID := vars["placement"]
 
+	sdk, err := auth.RequireContext(r.Context())
+	if err != nil {
+		respondError(w, http.StatusUnauthorized, "Missing API key")
+		return
+	}
+
+	if ok, err := auth.PlacementBelongsToApp(r.Context(), h.pgPool, placementID, sdk.AppID); err != nil || !ok {
+		respondError(w, http.StatusForbidden, "Placement not valid for this app")
+		return
+	}
+
 	config, err := h.waterfallManager.GetWaterfall(r.Context(), placementID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch waterfall")
@@ -97,19 +124,22 @@ func (h *Handlers) GetWaterfall(w http.ResponseWriter, r *http.Request) {
 
 // GetMediationDebugEvents returns last-N mediation debugger events (sanitized) for a placement.
 // Query params:
-//   placement_id: string (optional; empty returns events stored under unknown bucket)
-//   n: int (optional; default 50, max 200)
+//
+//	placement_id: string (optional; empty returns events stored under unknown bucket)
+//	n: int (optional; default 50, max 200)
 func (h *Handlers) GetMediationDebugEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	placementID := q.Get("placement_id")
 	n := 50
 	if ns := q.Get("n"); ns != "" {
 		if v, err := strconv.Atoi(ns); err == nil && v > 0 {
-			if v > 200 { v = 200 }
+			if v > 200 {
+				v = 200
+			}
 			n = v
 		}
 	}
- events := bidders.GetLastDebugEvents(placementID, n)
+	events := bidders.GetLastDebugEvents(placementID, n)
 	respondAdminJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"data":    events,
@@ -138,7 +168,9 @@ func (h *Handlers) GetAdapterMetricsTimeSeries(w http.ResponseWriter, r *http.Re
 		out := map[string]any{}
 		for _, p := range parts {
 			wstr := strings.TrimSpace(p)
-			if wstr == "" { continue }
+			if wstr == "" {
+				continue
+			}
 			dur, err := time.ParseDuration(wstr)
 			if err != nil {
 				// Accept shorthands: 1h, 24h, 5m are parseable; ignore invalid tokens
@@ -153,7 +185,9 @@ func (h *Handlers) GetAdapterMetricsTimeSeries(w http.ResponseWriter, r *http.Re
 	// Legacy single-window by days (default 7, max 14)
 	days := 7
 	if s := q.Get("days"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 14 { days = v }
+		if v, err := strconv.Atoi(s); err == nil && v > 0 && v <= 14 {
+			days = v
+		}
 	}
 	maxAge := time.Duration(days) * 24 * time.Hour
 	snaps := bidders.GetTimeSeriesSnapshot(maxAge)
@@ -218,9 +252,13 @@ func (h *Handlers) GetObservabilitySnapshot(w http.ResponseWriter, r *http.Reque
 func respondAdminJSON(w http.ResponseWriter, statusCode int, payload map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	if payload == nil { payload = map[string]any{} }
+	if payload == nil {
+		payload = map[string]any{}
+	}
 	payload["schema_version"] = 1
-	if _, ok := payload["success"]; !ok { payload["success"] = true }
+	if _, ok := payload["success"]; !ok {
+		payload["success"] = true
+	}
 	_ = json.NewEncoder(w).Encode(payload)
 }
 

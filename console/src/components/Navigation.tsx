@@ -165,8 +165,8 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       {/* Mobile menu button */}
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b border-gray-100 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
-          <div className="h-8 w-8 rounded-lg overflow-hidden ring-1 ring-gray-100 relative">
-            <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="32px" priority />
+          <div className="h-10 w-10 rounded-lg overflow-hidden ring-1 ring-gray-100 relative">
+            <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="40px" priority />
           </div>
           <span className="text-sm font-semibold text-gray-900 tracking-tight">ApexMediation</span>
         </div>
@@ -207,8 +207,8 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
           {/* Logo */}
           <div className="px-5 py-6 border-b border-gray-100">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl overflow-hidden shadow-sm ring-1 ring-gray-100 flex-shrink-0 relative">
-                <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="40px" priority />
+              <div className="h-12 w-12 rounded-xl overflow-hidden shadow-sm ring-1 ring-gray-100 flex-shrink-0 relative">
+                <Image src="/logo.jpg" alt="ApexMediation Logo" fill className="object-cover" sizes="48px" priority />
               </div>
               <div className="min-w-0 flex-1">
                 <h1 className="text-base font-semibold text-gray-900 tracking-tight">ApexMediation</h1>

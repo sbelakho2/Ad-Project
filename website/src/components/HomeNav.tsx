@@ -11,11 +11,11 @@ export default function HomeNav() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const navItems = [
-    { label: 'Features', href: '/#features' },
+    { label: 'Product', href: '/product' },
     { label: 'Pricing', href: '/pricing' },
-    { label: 'Documentation', href: '/documentation' },
-    { label: 'About', href: '/about' },
-    { label: 'Contact', href: '/contact' },
+    { label: 'Developers', href: '/developers' },
+    { label: 'Security', href: '/security' },
+    { label: 'Company', href: '/company' },
   ];
 
   return (
@@ -23,13 +23,13 @@ export default function HomeNav() {
       {/* Desktop Navigation */}
       <div className="hidden md:flex items-center justify-center gap-8 py-6">
         <Link href="/" className="mr-4">
-          <img src="/logo.jpg" alt="ApexMediation" className="h-10 w-auto" />
+          <img src="/api/brand/logo" alt="ApexMediation" className="h-12 w-auto" />
         </Link>
         {navItems.map((item) => (
           <Link
             key={item.href}
             href={item.href}
-            className="text-brand-100 font-bold uppercase text-sm tracking-wide hover:underline decoration-2 underline-offset-4 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+            className="text-gray-700 font-semibold text-sm tracking-wide hover:text-brand-600 hover:underline decoration-2 underline-offset-4 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
           >
             {item.label}
           </Link>
@@ -38,13 +38,13 @@ export default function HomeNav() {
         <div className="flex items-center gap-4 ml-4">
           <Link
             href="/signin"
-            className="text-brand-100 font-bold uppercase text-sm hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+            className="text-gray-700 font-semibold text-sm hover:text-brand-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
           >
             Sign In
           </Link>
           <Link
             href="/signup"
-            className="btn-primary px-6 py-2 font-bold uppercase text-sm hover:shadow-lg transition-all"
+            className="btn-primary px-6 py-2 font-semibold text-sm hover:shadow-lg transition-all"
           >
             Sign Up
           </Link>
@@ -53,10 +53,12 @@ export default function HomeNav() {
 
       {/* Mobile Navigation */}
       <div className="md:hidden flex items-center justify-between py-4">
-        <span className="text-brand-100 font-bold uppercase text-lg">Menu</span>
+        <Link href="/" className="flex items-center gap-2">
+          <img src="/api/brand/logo" alt="ApexMediation" className="h-10 w-auto" />
+        </Link>
         <button
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          className="text-brand-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          className="text-gray-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
           aria-expanded={mobileMenuOpen}
           aria-controls="primary-navigation"
           aria-label="Toggle menu"

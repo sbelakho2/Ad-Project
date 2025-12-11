@@ -1,128 +1,233 @@
-import Link from 'next/link';
-import type { Metadata } from 'next';
+'use client';
 
-export const metadata: Metadata = {
-  title: 'Pricing & BYO Platform Tiers | ApexMediation',
-  description:
-    'Starter 0% up to $10k per app per month, Growth 2.5%, Scale 2% down to 1.25% with annual prepay, Enterprise custom. BYO only.',
-  alternates: {
-    canonical: 'https://apexmediation.ee/pricing',
-  },
-};
+import { motion } from 'framer-motion';
+import {
+  CheckCircle,
+  Coins,
+  Gauge,
+  HelpCircle,
+  Layers,
+  ShieldCheck,
+} from 'lucide-react';
 
-const tiers = [
+import CookieBanner from '@/components/CookieBanner';
+import Footer from '@/components/Footer';
+import HomeNav from '@/components/HomeNav';
+
+const getRevealProps = (delay = 0) => ({
+  initial: false,
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.5, delay },
+});
+
+const pricingTiers = [
   {
     name: 'Starter',
-    headline: '0% platform fee',
-    description: 'Free up to $10k per app per month. Built for BYO only.',
-    bullets: [
-      'No card or bank needed to explore; autopay rail stored only when you opt-in.',
-      'Includes SDKs, Migration Studio, and basic revenue/latency dashboards.',
-      'Transparency auctions, VRA reconciliation, fraud dashboards, and A/B tools are locked until you upgrade.'
+    price: 'Free',
+    badge: 'Free tier',
+    icon: Coins,
+    description: 'For teams integrating and testing.',
+    features: [
+      'Up to 5M impressions / month',
+      'Up to 200K API calls / month',
+      'Up to 100 GB data transfer / month',
+      'BYO networks only',
+      'Email support',
+      'Full SDKs & console access',
+      'Cryptographic auction logs (30-day retention)',
     ],
-    badge: 'BYO only',
+    cta: 'Get started free',
+    ctaHref: '/signup',
+    accent: true,
   },
   {
     name: 'Growth',
-    headline: '2.5% platform fee',
-    description: 'For teams leaning on experiments, support, and live QA.',
-    bullets: [
-      'Autopay with Stripe cards, ACH (US), or SEPA (EU/EEA).',
-      'Transparency auctions + VRA reconciliation exports, fraud/quality dashboards, and A/B testing.',
-      'You still own customer contracts and payments end-to-end.'
+    price: '2.5% platform fee',
+    badge: 'Most popular',
+    icon: Gauge,
+    description: 'For teams monetizing at scale with multiple networks.',
+    features: [
+      'Everything in Starter, plus:',
+      'Higher usage limits (custom per contract)',
+      '90-day log retention',
+      'Role-based access control',
+      'Priority support (Slack/Discord channel)',
     ],
-    badge: 'BYO only',
+    cta: 'Talk to sales',
+    ctaHref: '/contact',
+    accent: false,
   },
   {
     name: 'Scale',
-    headline: '2% → 1.25% with annual prepay',
-    description: 'Volume efficiency plus enterprise change control.',
-    bullets: [
-      'Volume pricing starts at 2%; annual prepay unlocks 1.25%.',
-      'Layered approvals, RBAC, BI/export pipelines, and observability tuned for ops.',
-      'Zero custody: your ad network payouts stay direct to you.'
+    price: '2.0% platform fee',
+    badge: '1.25% with annual prepay',
+    icon: Layers,
+    description: 'For mid-sized publishers with serious UA & BI needs.',
+    features: [
+      'Everything in Growth, plus:',
+      'BI exports & pre-built warehouse schemas',
+      'Dedicated integration help',
+      'Custom SLOs and escalation paths',
+      'Security & compliance review support',
     ],
-    badge: 'BYO only',
+    cta: 'Book a consult',
+    ctaHref: '/contact',
+    accent: false,
   },
   {
     name: 'Enterprise',
-    headline: 'Custom rate card',
-    description: 'Contracted SLAs, finance-reviewed rails, and bespoke workflows.',
-    bullets: [
-      'Invoice + wire after finance review; autopay remains the default.',
-      'Joint security, privacy, and observability readiness with your teams.',
-      'BYO adapters and contracts stay yours; Apex only bills the platform fee.'
+    price: 'Custom',
+    badge: '1.0–1.5% + minimum',
+    icon: ShieldCheck,
+    description: 'For large publishers with strict compliance or hybrid stacks.',
+    features: [
+      'Custom SLAs, regions, and data residency',
+      'Dedicated support engineer',
+      'Custom features and roadmap input',
+      'All Scale features plus contractual SLAs',
+      'Dedicated Slack channel + quarterly reviews',
     ],
-    badge: 'BYO only',
+    cta: 'Contact us',
+    ctaHref: '/contact',
+    accent: false,
+  },
+];
+
+const faqs = [
+  {
+    question: 'Do you take a cut of what networks pay me?',
+    answer: 'No. Networks pay you directly. Our fee is for platform usage only.',
+  },
+  {
+    question: 'What happens if I exceed my included usage?',
+    answer: 'We\'ll notify you early with clear overage pricing and give you time to adjust.',
+  },
+  {
+    question: 'Can I leave and take my data?',
+    answer: 'Yes. Your data exports and logs are yours to keep.',
   },
 ];
 
 export default function PricingPage() {
   return (
-    <main className="bg-gradient-to-b from-[#f3f6ff] via-white to-[#f5f7fb] min-h-screen">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-12 px-4 pb-16 pt-14 sm:px-6 lg:px-8">
-        <header className="space-y-4 text-center">
-          <p className="text-xs font-semibold uppercase tracking-[0.35em] text-slate-500">BYO Pricing</p>
-          <h1 className="text-4xl font-semibold text-gray-900 sm:text-5xl">One pricing model. BYO only.</h1>
-          <p className="mx-auto max-w-3xl text-base leading-relaxed text-gray-600 sm:text-lg">
-            Your business runs on these facts: Starter: free up to $10k per app per month (built for BYO only). When you opt into Growth or cross the cap, invoices auto-charge via Stripe. Growth is 2.5% platform fee (BYO only). Scale is 2% down to 1.25% with annual prepay (BYO only). Enterprise is custom rate card for BYO only.
-          </p>
-        </header>
+    <>
+      <main className="relative bg-white text-gray-900">
+        <div className="container relative z-10 py-6 md:py-10">
+          <HomeNav />
+        </div>
 
-        <section className="grid gap-6 md:grid-cols-2">
-          {tiers.map((tier) => (
-            <div key={tier.name} className="rounded-2xl bg-white p-6 shadow-lg ring-1 ring-gray-100">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-primary-600">{tier.badge}</p>
-                  <h2 className="mt-1 text-2xl font-bold text-gray-900">{tier.name}</h2>
-                  <p className="text-lg text-gray-700">{tier.headline}</p>
-                </div>
-              </div>
-              <p className="mt-3 text-sm text-gray-600">{tier.description}</p>
-              <ul className="mt-4 space-y-2 text-sm text-gray-700 list-disc list-inside">
-                {tier.bullets.map((item) => (
-                  <li key={item}>{item}</li>
+        {/* Hero */}
+        <section className="py-20 md:py-32">
+          <div className="container mx-auto px-4 text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
+              <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
+                Transparent pricing for a transparent mediation layer.
+              </h1>
+              <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto">
+                Networks pay you directly. We charge a predictable platform fee based on your usage.
+              </p>
+            </motion.div>
+          </div>
+        </section>
+
+        {/* Pricing Tiers */}
+        <section className="py-20 bg-gray-50">
+          <div className="container mx-auto px-4">
+            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8 max-w-7xl mx-auto">
+              {pricingTiers.map((tier, index) => (
+                <motion.div
+                  key={tier.name}
+                  {...getRevealProps(index * 0.1)}
+                  className={`rounded-xl p-6 ${
+                    tier.accent
+                      ? 'bg-brand-600 text-white'
+                      : 'bg-white border border-gray-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <tier.icon className={`w-8 h-8 ${tier.accent ? 'text-white' : 'text-brand-600'}`} />
+                    {tier.badge && (
+                      <span className={`text-xs font-semibold px-2 py-1 rounded ${
+                        tier.accent ? 'bg-white text-brand-600' : 'bg-brand-100 text-brand-600'
+                      }`}>
+                        {tier.badge}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className={`text-2xl font-bold mb-2 ${tier.accent ? 'text-white' : 'text-gray-900'}`}>
+                    {tier.name}
+                  </h3>
+                  <p className={`text-lg font-semibold mb-4 ${tier.accent ? 'text-brand-100' : 'text-brand-600'}`}>
+                    {tier.price}
+                  </p>
+                  <p className={`text-sm mb-6 ${tier.accent ? 'text-brand-100' : 'text-gray-600'}`}>
+                    {tier.description}
+                  </p>
+                  <ul className="space-y-3 mb-8">
+                    {tier.features.map((feature, i) => (
+                      <li key={i} className="flex items-start gap-2 text-sm">
+                        <CheckCircle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${
+                          tier.accent ? 'text-brand-200' : 'text-brand-600'
+                        }`} />
+                        <span className={tier.accent ? 'text-brand-100' : 'text-gray-700'}>
+                          {feature}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <a
+                    href={tier.ctaHref}
+                    className={`block w-full text-center py-3 rounded-lg font-semibold transition-colors ${
+                      tier.accent
+                        ? 'bg-white text-brand-600 hover:bg-brand-50'
+                        : 'bg-brand-600 text-white hover:bg-brand-700'
+                    }`}
+                  >
+                    {tier.cta}
+                  </a>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* FAQ */}
+        <section className="py-20">
+          <div className="container mx-auto px-4">
+            <div className="max-w-3xl mx-auto">
+              <motion.div {...getRevealProps(0)} className="text-center mb-12">
+                <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                  Frequently asked questions
+                </h2>
+              </motion.div>
+              <div className="space-y-6">
+                {faqs.map((faq, index) => (
+                  <motion.div
+                    key={faq.question}
+                    {...getRevealProps(index * 0.1)}
+                    className="bg-gray-50 rounded-xl p-6"
+                  >
+                    <div className="flex items-start gap-3">
+                      <HelpCircle className="w-6 h-6 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                          {faq.question}
+                        </h3>
+                        <p className="text-gray-600">
+                          {faq.answer}
+                        </p>
+                      </div>
+                    </div>
+                  </motion.div>
                 ))}
-              </ul>
-              <div className="mt-6 flex flex-wrap gap-3">
-                <Link
-                  href="/signup"
-                  className="inline-flex items-center justify-center rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-primary-700"
-                >
-                  Start with {tier.name}
-                </Link>
-                <Link
-                  href="mailto:sales@apexmediation.ee"
-                  className="inline-flex items-center justify-center rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50"
-                >
-                  Talk with us
-                </Link>
               </div>
             </div>
-          ))}
+          </div>
         </section>
+      </main>
 
-        <section className="grid gap-6 lg:grid-cols-2">
-          <div className="rounded-2xl bg-white p-6 shadow-lg ring-1 ring-gray-100">
-            <h3 className="text-lg font-semibold text-gray-900">What stays yours</h3>
-            <p className="mt-2 text-sm text-gray-700">
-              You own your customer and payment with the customer. You never touch publisher contracts or payments—BYO demand, credentials, and payouts remain yours. ApexMediation only bills the platform fee.
-            </p>
-            <p className="mt-3 text-sm text-gray-700">Starter keeps you in basic dashboards; upgrade to Growth for transparency auctions, VRA exports, fraud dashboards, and experiments. We store autopay rails encrypted and use them only when Stripe finalizes a post-Starter invoice. Enterprise teams can request invoice + wire after finance review; autopay stays the default to keep mediation live.</p>
-          </div>
-          <div className="rounded-2xl bg-white p-6 shadow-lg ring-1 ring-gray-100">
-            <h3 className="text-lg font-semibold text-gray-900">How charging works</h3>
-            <ul className="mt-3 space-y-2 text-sm text-gray-700 list-disc list-inside">
-              <li>Starter: free up to $10k per app per month (BYO only). Opt into Growth any time.</li>
-              <li>Growth: 2.5% platform fee (BYO only) with Stripe autopay at invoice finalization.</li>
-              <li>Scale: 2% list, trending to 1.25% with annual prepay and volume (BYO only).</li>
-              <li>Enterprise: custom rate card with layered approvals and finance-reviewed rails (BYO only).</li>
-            </ul>
-            <p className="mt-3 text-xs text-gray-500">Need a contract mapped before going live? <Link href="mailto:sales@apexmediation.ee" className="underline text-primary-600">Email sales</Link> and we will align your paper with the BYO fee schedule.</p>
-          </div>
-        </section>
-      </div>
-    </main>
+      <Footer />
+      <CookieBanner />
+    </>
   );
 }

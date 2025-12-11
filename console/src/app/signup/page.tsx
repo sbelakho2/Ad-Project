@@ -4,58 +4,19 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { signIn } from 'next-auth/react'
-import { ShieldCheck, Banknote, CheckCircle2 } from 'lucide-react'
+import { ShieldCheck, CheckCircle2 } from 'lucide-react'
 import { apiClient, handleApiError } from '@/lib/api-client'
 
 const MIN_PASSWORD_LENGTH = 8
-
-type BankScheme = 'sepa' | 'ach'
-
-type AccountType = 'CHECKING' | 'SAVINGS'
 
 export default function SignupPage() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [companyName, setCompanyName] = useState('')
-  const [scheme, setScheme] = useState<BankScheme>('sepa')
-  const [accountHolderName, setAccountHolderName] = useState('')
-  const [iban, setIban] = useState('')
-  const [bic, setBic] = useState('')
-  const [accountNumber, setAccountNumber] = useState('')
-  const [routingNumber, setRoutingNumber] = useState('')
-  const [accountType, setAccountType] = useState<AccountType>('CHECKING')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-
-  const resetBankFields = (nextScheme: BankScheme) => {
-    setScheme(nextScheme)
-    setAccountHolderName('')
-    setIban('')
-    setBic('')
-    setAccountNumber('')
-    setRoutingNumber('')
-    setAccountType('CHECKING')
-  }
-
-  const buildBankPayload = () => {
-    if (scheme === 'sepa') {
-      return {
-        scheme: 'sepa' as const,
-        accountHolderName,
-        iban,
-        bic,
-      }
-    }
-    return {
-      scheme: 'ach' as const,
-      accountHolderName,
-      accountNumber,
-      routingNumber,
-      accountType,
-    }
-  }
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -70,10 +31,6 @@ export default function SignupPage() {
       setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`)
       return
     }
-    if (!accountHolderName) {
-      setError('Add the account holder name for autopay readiness.')
-      return
-    }
 
     setIsSubmitting(true)
 
@@ -82,7 +39,6 @@ export default function SignupPage() {
         email,
         password,
         companyName,
-        bankAccount: buildBankPayload(),
       })
 
       setSuccess('Account created. Completing sign-in...')
@@ -175,136 +131,6 @@ export default function SignupPage() {
               />
             </div>
 
-            <div className="rounded-xl border border-gray-200 p-4 bg-gray-50">
-              <div className="flex items-center gap-2 mb-3">
-                <Banknote className="h-5 w-5 text-primary-600" />
-                <div>
-                  <p className="text-sm font-semibold text-gray-900">Autopay rail (kept on file)</p>
-                  <p className="text-xs text-gray-600">Required for post-Starter autopay. Stored securely; only charged when invoices finalize.</p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-3 mb-4">
-                <button
-                  type="button"
-                  onClick={() => resetBankFields('sepa')}
-                  className={`px-3 py-2 text-sm font-medium rounded-lg border ${
-                    scheme === 'sepa' ? 'border-primary-500 text-primary-700 bg-primary-50' : 'border-gray-200 text-gray-700'
-                  }`}
-                >
-                  SEPA (EU/EEA)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => resetBankFields('ach')}
-                  className={`px-3 py-2 text-sm font-medium rounded-lg border ${
-                    scheme === 'ach' ? 'border-primary-500 text-primary-700 bg-primary-50' : 'border-gray-200 text-gray-700'
-                  }`}
-                >
-                  ACH (US)
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="md:col-span-2">
-                  <label htmlFor="accountHolder" className="block text-sm font-medium text-gray-700 mb-2">
-                    Account holder name
-                  </label>
-                  <input
-                    id="accountHolder"
-                    type="text"
-                    value={accountHolderName}
-                    onChange={(e) => setAccountHolderName(e.target.value)}
-                    className="input w-full"
-                    placeholder="Name on the account"
-                    required
-                  />
-                </div>
-
-                {scheme === 'sepa' ? (
-                  <>
-                    <div>
-                      <label htmlFor="iban" className="block text-sm font-medium text-gray-700 mb-2">
-                        IBAN
-                      </label>
-                      <input
-                        id="iban"
-                        type="text"
-                        value={iban}
-                        onChange={(e) => setIban(e.target.value)}
-                        className="input w-full uppercase"
-                        placeholder="DE89 3704 0044 0532 0130 00"
-                        required
-                        autoComplete="off"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="bic" className="block text-sm font-medium text-gray-700 mb-2">
-                        BIC
-                      </label>
-                      <input
-                        id="bic"
-                        type="text"
-                        value={bic}
-                        onChange={(e) => setBic(e.target.value)}
-                        className="input w-full uppercase"
-                        placeholder="MARKDEF1100"
-                        required
-                        autoComplete="off"
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div>
-                      <label htmlFor="accountNumber" className="block text-sm font-medium text-gray-700 mb-2">
-                        Account number
-                      </label>
-                      <input
-                        id="accountNumber"
-                        type="text"
-                        value={accountNumber}
-                        onChange={(e) => setAccountNumber(e.target.value)}
-                        className="input w-full"
-                        placeholder="123456789"
-                        required
-                        autoComplete="off"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="routingNumber" className="block text-sm font-medium text-gray-700 mb-2">
-                        Routing number
-                      </label>
-                      <input
-                        id="routingNumber"
-                        type="text"
-                        value={routingNumber}
-                        onChange={(e) => setRoutingNumber(e.target.value)}
-                        className="input w-full"
-                        placeholder="9 digits"
-                        required
-                        autoComplete="off"
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="accountType" className="block text-sm font-medium text-gray-700 mb-2">
-                        Account type
-                      </label>
-                      <select
-                        id="accountType"
-                        value={accountType}
-                        onChange={(e) => setAccountType(e.target.value as AccountType)}
-                        className="input w-full"
-                      >
-                        <option value="CHECKING">Checking</option>
-                        <option value="SAVINGS">Savings</option>
-                      </select>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-
             <button
               type="submit"
               disabled={isSubmitting}
@@ -314,8 +140,7 @@ export default function SignupPage() {
             </button>
 
             <p className="text-xs text-gray-500 text-center">
-              Autopay rails are encrypted and only charged when Stripe finalizes a post-Starter invoice. You can rotate or
-              remove them later in Billing Settings. We never touch your publisher contracts or direct ad network payouts.
+              We never collect your card or bank details. When you upgrade off Starter, you’ll add a payment method in Stripe.
             </p>
           </form>
         </div>
@@ -334,7 +159,7 @@ export default function SignupPage() {
           <div className="rounded-xl bg-white border border-gray-200 p-4 text-sm text-gray-700 space-y-2">
             <p className="font-semibold text-gray-900">What stays yours</p>
             <p>Bring your own demand, contracts, and payments. ApexMediation only observes data and bills the platform fee.</p>
-            <p>Stripe cards, ACH, or SEPA are kept on file for autopay the moment you leave Starter; manual invoice + wire is available after finance review for Enterprise.</p>
+            <p>Payment methods are managed in Stripe (cards, ACH, SEPA) when you upgrade off Starter.</p>
             <p className="text-xs text-gray-500">Already working with us? <a className="text-primary-600 underline" href="mailto:sales@apexmediation.ee">Contact sales</a> to map your contract to this account.</p>
           </div>
           <p className="text-xs text-gray-500">By continuing you agree to the ApexMediation <Link className="underline" href="/terms">Terms</Link> and <Link className="underline" href="/privacy">Privacy</Link>.</p>

@@ -163,12 +163,6 @@ describeIfDb('Auth Integration Tests', () => {
           email: 'newuser@example.com',
           password: 'password123',
           companyName: 'New Company Inc.',
-          bankAccount: {
-            scheme: 'sepa',
-            accountHolderName: 'New Company Inc.',
-            iban: 'DE44500105175407324931',
-            bic: 'DEUTDEFF',
-          },
         })
         .expect(201);
 
@@ -193,13 +187,6 @@ describeIfDb('Auth Integration Tests', () => {
           email: 'existing@example.com',
           password: 'password123',
           companyName: 'Another Company',
-          bankAccount: {
-            scheme: 'ach',
-            accountHolderName: 'Another Company',
-            accountNumber: '1234567890',
-            routingNumber: '021000021',
-            accountType: 'CHECKING',
-          },
         })
         .expect(409);
 

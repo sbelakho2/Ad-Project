@@ -15,16 +15,14 @@ export default function Footer() {
               About ApexMediation
             </h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="/about" className="text-brand-600 hover:text-brand-700 hover:underline">Our Mission</a></li>
+              <li><a href="/company" className="text-brand-600 hover:text-brand-700 hover:underline">Company</a></li>
               <li><a href="/contact" className="text-brand-600 hover:text-brand-700 hover:underline">Contact</a></li>
-              <li><a href="/team" className="text-brand-600 hover:text-brand-700 hover:underline">Team</a></li>
-              <li><a href="/careers" className="text-brand-600 hover:text-brand-700 hover:underline">Careers</a></li>
-              <li><a href="/press" className="text-brand-600 hover:text-brand-700 hover:underline">Press Kit</a></li>
+              <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
             <div className="mt-6 text-xs text-gray-500">
               <p>Harju maakond, Tallinn</p>
-              <p>Kesklinna linnaosa, Sakala tn 7-2</p>
-              <p>10141, Estonia</p>
+              <p>Kesklinna linnaosa, Narva mnt 5</p>
+              <p>10117, Estonia</p>
             </div>
           </div>
 
@@ -34,10 +32,9 @@ export default function Footer() {
               Product
             </h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="/#features" className="text-brand-600 hover:text-brand-700 hover:underline">Features</a></li>
+              <li><a href="/product" className="text-brand-600 hover:text-brand-700 hover:underline">Product</a></li>
               <li><a href="/pricing" className="text-brand-600 hover:text-brand-700 hover:underline">Pricing</a></li>
-              <li><a href="/documentation" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
-              <li><a href="/changelog" className="text-brand-600 hover:text-brand-700 hover:underline">Changelog</a></li>
+              <li><a href="/developers" className="text-brand-600 hover:text-brand-700 hover:underline">Developers</a></li>
             </ul>
           </div>
 
@@ -47,10 +44,9 @@ export default function Footer() {
               Resources
             </h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="/blog" className="text-brand-600 hover:text-brand-700 hover:underline">Blog</a></li>
-              <li><a href="/guides" className="text-brand-600 hover:text-brand-700 hover:underline">Guides</a></li>
-              <li><a href="/case-studies" className="text-brand-600 hover:text-brand-700 hover:underline">Case Studies</a></li>
-              <li><a href="/support" className="text-brand-600 hover:text-brand-700 hover:underline">Support</a></li>
+              <li><a href="https://docs.apexmediation.ee" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
+              <li><a href="https://github.com/bel-consulting/apex-mediation-platform" className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
+              <li><a href="https://status.apexmediation.ee" className="text-brand-600 hover:text-brand-700 hover:underline">Status</a></li>
             </ul>
           </div>
 
@@ -78,7 +74,7 @@ export default function Footer() {
                   <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
                 </svg>
               </SocialIconLink>
-              <SocialIconLink href="https://github.com/sbelakho2/apex-mediation-platform" label="GitHub">
+              <SocialIconLink href="https://github.com/bel-consulting/apex-mediation-platform" label="GitHub">
                 <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
                   <path
                     fillRule="evenodd"
