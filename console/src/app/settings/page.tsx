@@ -10,11 +10,18 @@ import {
   ArrowRight,
   Key,
   Hash,
+  Shield,
 } from 'lucide-react'
 import { authOptions } from '@/lib/auth/options'
 import { hasRole, type Role } from '@/lib/rbac'
 
 const sections = [
+  {
+    title: 'SDK API Keys',
+    description: 'Manage per-app API keys for SDK authentication.',
+    href: '/settings/keys',
+    icon: Shield,
+  },
   {
     title: 'Fraud Protection',
     description: 'Configure thresholds, alerts, and automated blocking rules.',

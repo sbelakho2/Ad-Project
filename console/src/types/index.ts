@@ -562,3 +562,30 @@ export interface FraudDiagnostics {
     blockers?: string[]
   }
 }
+
+// App API Keys
+export interface AppApiKey {
+  id: string
+  appId: string
+  environment: 'sandbox' | 'live'
+  prefix: string
+  last4: string
+  createdAt: string
+  lastUsedAt: string | null
+  revokedAt: string | null
+}
+
+export interface AppApiKeyWithSecret extends AppApiKey {
+  secret: string
+}
+
+export interface App {
+  id: string
+  publisherId: string
+  bundleId: string
+  name: string
+  platform: 'android' | 'ios' | 'web' | 'tvos' | 'android-tv'
+  status: 'active' | 'paused'
+  createdAt: string
+  updatedAt: string
+}

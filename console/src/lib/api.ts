@@ -821,3 +821,60 @@ export const byoApi = {
     return response.data
   },
 }
+
+// =============================================================================
+// App API Keys
+// =============================================================================
+
+import type { App, AppApiKey, AppApiKeyWithSecret } from '@/types'
+
+export const appsApi = {
+  /**
+   * List all apps for the current publisher
+   */
+  list: async (): Promise<App[]> => {
+    const response = await apiClient.get<SuccessEnvelope<App[]>>('/apps')
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Get a single app by ID
+   */
+  get: async (appId: string): Promise<App> => {
+    const response = await apiClient.get<SuccessEnvelope<App>>(`/apps/${appId}`)
+    return unwrapSuccessEnvelope(response.data)
+  },
+}
+
+export const appKeysApi = {
+  /**
+   * List all API keys for an app
+   */
+  list: async (appId: string): Promise<AppApiKey[]> => {
+    const response = await apiClient.get<SuccessEnvelope<AppApiKey[]>>(`/apps/${appId}/keys`)
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Create a new API key for an app
+   */
+  create: async (appId: string, options: { live: boolean }): Promise<AppApiKeyWithSecret> => {
+    const response = await apiClient.post<SuccessEnvelope<AppApiKeyWithSecret>>(`/apps/${appId}/keys`, options)
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Rotate an existing API key (revokes old, creates new)
+   */
+  rotate: async (appId: string, keyId: string): Promise<AppApiKeyWithSecret> => {
+    const response = await apiClient.post<SuccessEnvelope<AppApiKeyWithSecret>>(`/apps/${appId}/keys/${keyId}/rotate`, {})
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Revoke an API key
+   */
+  revoke: async (appId: string, keyId: string): Promise<void> => {
+    await apiClient.delete(`/apps/${appId}/keys/${keyId}`)
+  },
+}
