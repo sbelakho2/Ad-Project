@@ -21,7 +21,7 @@ func setUpRouter() *mux.Router {
 	bidders.SetMetricsRecorder(bidders.NewRollingMetricsRecorder(128))
 	bidders.SetTimeSeriesAggregator(bidders.NewTimeSeriesAggregator(1*time.Minute, 1*time.Hour))
 
-	h := NewHandlers(nil, nil)
+	h := NewHandlers(nil, nil, nil)
 	r := mux.NewRouter()
 	// Minimal CORS middleware to emulate production preflight behavior
 	r.Use(corsTestMiddleware)
@@ -122,7 +122,6 @@ func TestAdminHandlers_Overview_OK(t *testing.T) {
 		t.Fatalf("expected debugger in overview data")
 	}
 }
-
 
 // corsTestMiddleware emulates production CORS behavior for test router (OPTIONS → 204)
 func corsTestMiddleware(next http.Handler) http.Handler {

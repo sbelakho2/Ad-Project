@@ -53,7 +53,11 @@ func setenv(k, v string) func() {
 	old, had := os.LookupEnv(k)
 	_ = os.Setenv(k, v)
 	return func() {
-		if had { _ = os.Setenv(k, old) } else { _ = os.Unsetenv(k) }
+		if had {
+			_ = os.Setenv(k, old)
+		} else {
+			_ = os.Unsetenv(k)
+		}
 	}
 }
 
@@ -61,7 +65,7 @@ func setenv(k, v string) func() {
 func TestAdminAPI_Contracts(t *testing.T) {
 	// Prepare handlers and router
 	seedObservability()
-	h := NewHandlers(nil, nil) // handlers don't strictly need engine for read-only admin endpoints
+	h := NewHandlers(nil, nil, nil) // handlers don't strictly need engine for read-only admin endpoints
 	r := buildTestRouter(h)
 
 	// Case 1: no auth/allowlist/ratelimit set (back-compat path)
@@ -70,44 +74,68 @@ func TestAdminAPI_Contracts(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/metrics/adapters", nil)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200, got %d", w.Code) }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
 		body := w.Body.String()
 		var m map[string]any
 		if err := json.Unmarshal([]byte(body), &m); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
 		}
-		if _, ok := m["schema_version"]; !ok { t.Fatalf("missing schema_version in %s", body) }
-		if ok, ok2 := m["success"].(bool); !ok2 || !ok { t.Fatalf("expected success=true, got %v in %s", m["success"], body) }
+		if _, ok := m["schema_version"]; !ok {
+			t.Fatalf("missing schema_version in %s", body)
+		}
+		if ok, ok2 := m["success"].(bool); !ok2 || !ok {
+			t.Fatalf("expected success=true, got %v in %s", m["success"], body)
+		}
 
 		// legacy timeseries by days
 		req = httptest.NewRequest("GET", "/v1/metrics/adapters/timeseries?days=1", nil)
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200, got %d", w.Code) }
-		if !strings.Contains(w.Body.String(), "\"data\":") { t.Fatalf("expected data field in response") }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "\"data\":") {
+			t.Fatalf("expected data field in response")
+		}
 
 		// multi-window timeseries
 		req = httptest.NewRequest("GET", "/v1/metrics/adapters/timeseries?windows=5m,1h", nil)
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200, got %d", w.Code) }
-		if !strings.Contains(w.Body.String(), "\"5m\"") { t.Fatalf("expected multi-window keys in response: %s", w.Body.String()) }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "\"5m\"") {
+			t.Fatalf("expected multi-window keys in response: %s", w.Body.String())
+		}
 
 		// SLO endpoint
 		req = httptest.NewRequest("GET", "/v1/metrics/slo", nil)
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200, got %d", w.Code) }
-		if !strings.Contains(w.Body.String(), "window_1h") { t.Fatalf("expected slo windows in response") }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "window_1h") {
+			t.Fatalf("expected slo windows in response")
+		}
 
 		// Debug events
 		req = httptest.NewRequest("GET", "/v1/debug/mediation?placement_id=pl-1&n=2", nil)
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200, got %d", w.Code) }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
 		var dbg map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &dbg); err != nil { t.Fatalf("invalid JSON: %v", err) }
-		if dbg["success"] != true { t.Fatalf("expected success true in debug response") }
+		if err := json.Unmarshal(w.Body.Bytes(), &dbg); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if dbg["success"] != true {
+			t.Fatalf("expected success true in debug response")
+		}
 		// data should be an array of events
 		if _, ok := dbg["data"].([]any); !ok {
 			t.Fatalf("expected data to be an array in %s", w.Body.String())
@@ -133,15 +161,25 @@ func TestAdminAPI_Contracts(t *testing.T) {
 		req.RemoteAddr = "127.0.0.1:12345"
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200 with auth+allowlist, got %d: %s", w.Code, w.Body.String()) }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 with auth+allowlist, got %d: %s", w.Code, w.Body.String())
+		}
 
 		// Validate success envelope with security middlewares enabled
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK { t.Fatalf("expected 200 with auth+allowlist, got %d", w.Code) }
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 with auth+allowlist, got %d", w.Code)
+		}
 		var em map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &em); err != nil { t.Fatalf("invalid JSON: %v", err) }
-		if _, ok := em["schema_version"]; !ok { t.Fatalf("missing schema_version in %s", w.Body.String()) }
-		if ok, ok2 := em["success"].(bool); !ok2 || !ok { t.Fatalf("expected success=true, got %v in %s", em["success"], w.Body.String()) }
+		if err := json.Unmarshal(w.Body.Bytes(), &em); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if _, ok := em["schema_version"]; !ok {
+			t.Fatalf("missing schema_version in %s", w.Body.String())
+		}
+		if ok, ok2 := em["success"].(bool); !ok2 || !ok {
+			t.Fatalf("expected success=true, got %v in %s", em["success"], w.Body.String())
+		}
 	})
 }
