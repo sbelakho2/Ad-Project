@@ -7,6 +7,8 @@ RUN if [ -f package-lock.json ]; then npm ci || npm install; else npm install; f
 # Ensure @aws-sdk/credential-providers is present for verifyStorage build; install if missing
 RUN node -e "try{const p=require('./package.json'); if(!(p.dependencies&&p.dependencies['@aws-sdk/credential-providers'])) process.exit(1);}catch(e){process.exit(1)}" \
     || npm install @aws-sdk/credential-providers@^3.922.0 --save
+# Ensure type definitions are present (may be hoisted in workspace context)
+RUN npm install @types/node@^20.19.0 @types/jest@^29.5.0 --save-dev 2>/dev/null || true
 
 # Stage 2: Build source
 FROM node:20-alpine AS build
