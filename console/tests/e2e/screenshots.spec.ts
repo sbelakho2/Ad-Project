@@ -27,6 +27,7 @@ const CONSOLE_ROUTES = [
   { path: '/analytics', name: 'analytics', minTier: 'starter' as TierName },
   { path: '/payouts', name: 'payouts', minTier: 'starter' as TierName },
   { path: '/settings', name: 'settings', minTier: 'starter' as TierName },
+  { path: '/settings/keys', name: 'settings-keys', minTier: 'starter' as TierName },
   { path: '/billing/usage', name: 'billing-usage', minTier: 'starter' as TierName },
   { path: '/billing/settings', name: 'billing-settings', minTier: 'starter' as TierName },
   { path: '/migration-studio', name: 'migration-studio', minTier: 'starter' as TierName },
@@ -248,6 +249,26 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
       { id: 'adp-3', name: 'IronSource', network: 'ironsource', status: 'active', credentials_valid: true, last_sync_at: new Date(Date.now() - 3600000).toISOString() },
       { id: 'adp-4', name: 'AppLovin MAX', network: 'applovin', status: 'inactive', credentials_valid: false, last_sync_at: null },
       { id: 'adp-5', name: 'Vungle', network: 'vungle', status: 'active', credentials_valid: true, last_sync_at: new Date().toISOString() },
+    ]);
+  });
+
+  // Apps - returns App[] for /settings/keys page
+  await page.route('**/api/v1/apps', (route) => {
+    respondJson(route, 200, [
+      { id: 'app-1', name: 'Super Puzzle Game', platform: 'ios', bundle_id: 'com.example.puzzle', created_at: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString() },
+      { id: 'app-2', name: 'Word Master Pro', platform: 'android', bundle_id: 'com.example.wordmaster', created_at: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString() },
+      { id: 'app-3', name: 'Racing Legends', platform: 'ios', bundle_id: 'com.example.racing', created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
+    ]);
+  });
+
+  // App API Keys - returns AppApiKey[] for /settings/keys page
+  await page.route('**/api/v1/apps/*/keys', (route) => {
+    const url = route.request().url();
+    const appIdMatch = url.match(/\/apps\/([^/]+)\/keys/);
+    const appId = appIdMatch ? appIdMatch[1] : 'app-1';
+    respondJson(route, 200, [
+      { id: 'key-1', app_id: appId, environment: 'sandbox', key_prefix: 'ak_test_xxxxxxxx', last_used_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), created_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), revoked_at: null },
+      { id: 'key-2', app_id: appId, environment: 'live', key_prefix: 'ak_live_xxxxxxxx', last_used_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(), created_at: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(), revoked_at: null },
     ]);
   });
 
