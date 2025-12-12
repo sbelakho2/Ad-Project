@@ -20,7 +20,7 @@ jobs:
       - name: Checkout Public Repo
         uses: actions/checkout@v4
         with:
-          repository: sbelakho2/Ad-Project
+          repository: sbelakho2/apex-mediation-platform
           token: ${{ secrets.PUBLIC_REPO_TOKEN }}
           path: public-repo
 

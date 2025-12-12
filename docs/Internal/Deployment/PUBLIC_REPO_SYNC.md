@@ -6,8 +6,8 @@ This guide explains how to synchronize the private `Ad-Project` monorepo with th
 
 We maintain a strict separation between our internal monorepo (containing backend code, infrastructure, and internal docs) and the public repository (containing only SDKs, integration docs, and examples).
 
-**Private Repo**: `https://github.com/sbelakho2/apex-mediation-platform` (Origin)
-**Public Repo**: `https://github.com/sbelakho2/apex-mediation-platform`
+**Private (Dev) Repo**: `https://github.com/sbelakho2/Ad-Project`
+**Public (Production) Repo**: `https://github.com/sbelakho2/apex-mediation-platform`
 
 ## Setup Requirements
 
