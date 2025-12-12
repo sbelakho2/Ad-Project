@@ -1,3 +1,43 @@
+# Changelog — Console UI Polish & Deployment Readiness (2025-12-12)
+
+## Console Dropdown Arrow Fix (2025-12-12)
+
+### Global Select Element Styling
+Fixed double arrow rendering in console dropdown menus by adding consistent global styling.
+
+**Root Cause:**
+- Native `<select>` elements using `.input` class or inline styles were displaying the browser's default dropdown arrow
+- The browser arrow was appearing alongside any custom styling, causing double arrows
+
+**CSS Fixes (`console/src/app/globals.css`):**
+- Added global `select` rule in `@layer base` with `appearance-none` to hide native browser arrows
+- Added custom chevron icon via CSS `background-image` (inline SVG) for consistent styling
+- Added new `.input` class with proper form input styling including:
+  - Rounded borders, shadow, focus ring
+  - Disabled state styling
+- Added `select.input` specific rules to ensure proper dropdown arrow rendering
+
+**Component Update (`console/src/ui-v2/components/Select.tsx`):**
+- Added `!bg-none` class to override global CSS background-image since component uses SVG caret
+- Prevents double icons (CSS background-image + SVG element)
+
+### Deployment Verification
+- Rebuilt console Docker image on droplet
+- Regenerated 86 screenshots (all tests passing)
+- Ran 13 screenshot content analysis tests (all passing)
+- No UI errors, broken layouts, or console errors detected
+
+### Droplet Readiness Verified
+- **Backend**: Healthy (postgres up, redis up, queues up)
+- **Console**: Running with latest build
+- **Database**: All tables present (apps, publishers, app_api_keys, app_api_key_usages)
+- **Redis**: Connected with authentication
+- **Disk**: 57GB free (26% used)
+- **Memory**: 2.1GB available
+- **Git**: Synced to commit `4bf3b2d`
+
+---
+
 # Changelog — Billing Strategy & Tier Gating (2025-12-11)
 
 ## UI/UX Premium Redesign (2025-12-11)
