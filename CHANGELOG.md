@@ -1,3 +1,142 @@
+# Changelog — Migration Studio Enhancement (2025-12-13)
+
+## 🔄 Migration Studio: Real Traffic Routing & SDK Integration
+
+**Status:** Migration Studio now fully functional for actual traffic migration (not just shadow mode).
+
+### Critical Enhancement: `/assign` Endpoint Now Returns Adapter Configuration
+
+The Migration Studio was previously shadow-only—it compared metrics but never actually routed traffic through Apex adapters. This update transforms it into a production-ready migration tool.
+
+**New Behavior (`POST /api/v1/migration/assign`):**
+```json
+{
+  "success": true,
+  "data": {
+    "has_experiment": true,
+    "experiment_id": "...",
+    "arm": "test",
+    "use_apex": true,
+    "adapters": [
+      { "adapter_id": "...", "adapter_name": "Apex_Interstitial_Premium", "priority": 1 }
+    ],
+    "mirror_percent": 10,
+    "mode": "mirroring"
+  }
+}
+```
+
+SDKs can now:
+1. Check `use_apex` boolean to know whether to use Apex adapters
+2. Get the ordered `adapters[]` array with adapter IDs and priorities
+3. Route traffic through Apex adapters for the test arm
+
+### New Backend Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/migration/experiments/:id/sdk-integration` | GET | Returns platform-specific SDK code snippets (iOS, Android, Web, Unity) |
+| `/migration/experiments/:id/complete` | POST | Sets experiment to 100% traffic (completes migration) |
+| `/migration/experiments/:id/rollback` | POST | Reverts to shadow mode (0% traffic) |
+| `/migration/experiments/:id/mappings` | GET | Returns all adapter mappings for an experiment |
+
+### CSRF Fix for SDK Authentication
+- Added `/migration/assign` to CSRF exemption list in `middleware/csrf.ts`
+- This endpoint uses SDK secret authentication, not browser sessions
+- Fixes "Invalid CSRF token" errors for SDK-to-server calls
+
+### Console UI Enhancements
+
+**SDK Integration Section (Experiment Detail Page):**
+- Shows API endpoint URL for SDK calls
+- Displays adapter configuration table
+- Platform-specific code snippets with copy-to-clipboard button
+- Supports iOS (Swift), Android (Kotlin), Web (JavaScript), Unity (C#)
+
+**Migration Actions Section:**
+- "Complete Migration" button → Sets to 100% traffic
+- "Rollback Migration" button → Reverts to shadow mode
+- Confirmation dialogs prevent accidental clicks
+
+**ImportWizard Improvements:**
+- Step-by-step credential instructions for ironSource:
+  1. Navigate to ironSource Dashboard → API → Mediation
+  2. Find API Key and Secret Key
+  3. Copy refresh token from dashboard
+- Step-by-step credential instructions for AppLovin:
+  1. Navigate to AppLovin Dashboard → Account → Keys
+  2. Copy Report Key (read-only access)
+  3. Find SDK Key in Account settings
+- Added security notice about credential handling
+- Changed API key fields to password type for security
+
+### Smoke Test Results
+```bash
+# Test arm returns adapter config:
+curl -X POST /api/v1/migration/assign -d '{"placement_id":"...","user_identifier":"test-20"}'
+→ {"arm":"test","use_apex":true,"adapters":[{"adapter_id":"...","adapter_name":"Apex_Interstitial_Premium"}]}
+
+# Traffic split (10% test, 90% control):
+→ 19 control, 1 test out of 20 requests ✅
+```
+
+### Files Modified
+- `backend/src/controllers/migration.controller.ts` — Enhanced getAssignment, added new endpoints
+- `backend/src/services/migrationStudioService.ts` — Added completeMigration, rollbackMigration
+- `backend/src/routes/migration.routes.ts` — Registered new routes
+- `backend/src/middleware/csrf.ts` — Added /assign to exemption list
+- `console/src/app/migration-studio/[experimentId]/page.tsx` — Added SDK Integration & Actions sections
+- `console/src/components/migration-studio/ImportWizard.tsx` — Enhanced credential instructions
+- `console/src/lib/api.ts` — Added API methods for new endpoints
+- `console/src/types/index.ts` — Added MigrationSdkIntegration types
+
+### Commit
+`13a2872` — feat: enhance Migration Studio with real traffic routing and SDK integration
+
+---
+
+## VRA Network Connections & Scheduler (2025-12-12/13)
+
+### New VRA Components
+Added infrastructure for automated VRA network synchronization:
+
+- **Network Connector Service** (`backend/src/services/vra/networkConnectorService.ts`)
+  - Manages connections to ad network reporting APIs
+  - Supports ironSource, AppLovin, Unity, AdMob connectors
+  
+- **VRA Scheduler** (`backend/src/services/vra/vraScheduler.ts`)
+  - Schedules automated reconciliation jobs
+  - Configurable sync intervals per network
+
+- **VRA Sync Service** (`backend/src/services/vra/vraSyncService.ts`)
+  - Orchestrates data fetching from networks
+  - Handles rate limiting and retry logic
+
+- **Network Connections Routes** (`backend/src/routes/vraConnections.routes.ts`)
+  - CRUD operations for network connections
+  - Connection testing endpoints
+
+### Database Migration
+`20251212_vra_network_connections.sql` — Adds tables for storing network credentials and sync status
+
+---
+
+## Additional Fixes (2025-12-12)
+
+### VRA Synthetic Load Script Fix
+- `8163809` — Fixed UUID generation in VRA synthetic load testing script
+- Ensures proper UUID format for test data
+
+### Analytics CSRF Exemption
+- `8b3fa4d` — Exempted analytics event ingestion from CSRF protection
+- SDK-to-server traffic doesn't use browser sessions
+
+### Public Repo Sync Fixes
+- `4b45fc8` — Excluded CHANGELOG.md from public repo sync
+- `d48238d`, `824334e`, `13e38e4`, `47da776` — Corrected domain to apexmediation.ee and repo references
+
+---
+
 # Changelog — Production Readiness Completion (2025-12-12)
 
 ## 🚀 PRODUCTION READINESS: COMPLETE
