@@ -273,9 +273,9 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
       url: winner.creativeUrl,
     }, DELIVERY_TOKEN_TTL_SEC);
 
-    const impression = `${baseUrl}/t/imp?token=${encodeURIComponent(impressionToken)}`;
-    const click = `${baseUrl}/t/click?token=${encodeURIComponent(clickToken)}`;
-    const creativeUrl = `${baseUrl}/creative?token=${encodeURIComponent(deliveryToken)}`;
+    const impression = `${baseUrl}/api/v1/rtb/t/imp?token=${encodeURIComponent(impressionToken)}`;
+    const click = `${baseUrl}/api/v1/rtb/t/click?token=${encodeURIComponent(clickToken)}`;
+    const creativeUrl = `${baseUrl}/api/v1/rtb/creative?token=${encodeURIComponent(deliveryToken)}`;
 
     safeInc(rtbWinsTotal, { adapter: winner.adapter, ...metricLabels });
 
