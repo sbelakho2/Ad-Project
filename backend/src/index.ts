@@ -108,6 +108,10 @@ const limiter = rateLimit({
 });
 app.use(`/api/${API_VERSION}/`, limiter);
 
+// Raw body parsing for Stripe webhooks (must be BEFORE express.json())
+// Stripe needs the raw body buffer for signature verification
+app.use(`/api/${API_VERSION}/webhooks/stripe`, express.raw({ type: 'application/json' }));
+
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
