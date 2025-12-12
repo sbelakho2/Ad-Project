@@ -9,14 +9,15 @@ Add the repository and dependency to your `build.gradle` (app level):
 ```groovy
 repositories {
     mavenCentral()
-    maven { url "https://repo.apexmediation.com/android" }
+    // TODO: SDK distribution URL to be confirmed before GA
+    maven { url "https://sdk.apexmediation.ee/android" }
 }
 
 dependencies {
-    implementation 'com.rivalapexmediation.sdk:core:1.0.0'
+    implementation 'ee.apexmediation.sdk:core:1.0.0'
     // Add adapters for your BYO networks
-    implementation 'com.rivalapexmediation.sdk:adapter-admob:1.0.0'
-    implementation 'com.rivalapexmediation.sdk:adapter-applovin:1.0.0'
+    implementation 'ee.apexmediation.sdk:adapter-admob:1.0.0'
+    implementation 'ee.apexmediation.sdk:adapter-applovin:1.0.0'
 }
 ```
 
