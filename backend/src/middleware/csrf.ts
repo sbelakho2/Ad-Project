@@ -28,14 +28,25 @@ const baseCsurf = csurf({
 });
 
 // Wrapper that ignores CSRF for specific auth acquisition endpoints (login/register/refresh)
+// and SDK/RTB endpoints that use API key authentication (not browser sessions)
 export function csrfProtection(req: Request, res: Response, next: NextFunction) {
   const path = req.path || '';
   const method = req.method.toUpperCase();
   const apiVersion = process.env.API_VERSION || 'v1';
   const authAcquire = new RegExp(`^/api/${apiVersion}/auth/(login|register|refresh)$`);
   const flagsPath = new RegExp(`^/api/${apiVersion}/flags`);
-  // Exempt CSRF for auth acquisition endpoints and ops-only feature flag toggles
+  const rtbPath = new RegExp(`^/api/${apiVersion}/rtb/`);
+  const webhooksPath = new RegExp(`^/api/${apiVersion}/webhooks/`);
+  // Exempt CSRF for auth acquisition endpoints, ops-only feature flag toggles, and SDK/RTB endpoints
   if (method === 'POST' && (authAcquire.test(path) || flagsPath.test(path))) {
+    return next();
+  }
+  // RTB/bidding endpoints use SDK key auth (not session cookies), exempt from CSRF
+  if (rtbPath.test(path)) {
+    return next();
+  }
+  // Webhooks are server-to-server, exempt from CSRF
+  if (webhooksPath.test(path)) {
     return next();
   }
   return (baseCsurf as unknown as (req: Request, res: Response, next: NextFunction) => void)(req, res, next);
