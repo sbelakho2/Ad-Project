@@ -8,6 +8,7 @@ export interface UserRecord {
   password_hash: string;
   created_at: Date;
   company_name?: string;
+  role?: 'admin' | 'publisher' | 'readonly';
 }
 
 export interface CreatedUser {
@@ -27,7 +28,7 @@ export const findUserByEmail = async (email: string): Promise<UserRecord | null>
 
   try {
     const result: QueryResult<UserRecord> = await query<UserRecord>(
-      `SELECT u.id, u.publisher_id, u.email, u.password_hash, u.created_at, p.company_name
+      `SELECT u.id, u.publisher_id, u.email, u.password_hash, u.created_at, u.role, p.company_name
        FROM users u
        JOIN publishers p ON p.id = u.publisher_id
        WHERE u.email = $1`,
