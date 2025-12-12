@@ -4,7 +4,7 @@
 
 The Reporting API allows you to programmatically retrieve performance data for your apps and ad units.
 
-**Base URL**: `https://api.apexmediation.com/api/v1/reporting`
+**Base URL**: `https://api.apexmediation.ee/api/v1/reporting`
 
 ## Authentication
 

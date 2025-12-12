@@ -4,8 +4,8 @@
 
 If you encounter any issues or have questions about integrating Apex Mediation, please reach out to our support team.
 
-*   **Email**: [support@apexmediation.com](mailto:support@apexmediation.com)
-*   **Developer Portal**: [https://developer.apexmediation.com](https://developer.apexmediation.com)
+*   **Email**: [support@apexmediation.ee](mailto:support@apexmediation.ee)
+*   **Developer Portal**: [https://developer.apexmediation.ee](https://developer.apexmediation.ee)
 
 ## Reporting Issues
 

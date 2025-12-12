@@ -1,4 +1,4 @@
-### Improvement Plan — apex-mediation-platform (ApexMediation)
+### Improvement Plan — Ad-Project (ApexMediation)
 
 #### 0) Purpose and scope
 This document turns the current repository review into a concrete, actionable improvement plan. It focuses on first‑party code, configs, workflows, and docs across all packages. Generated/vendor directories (e.g., `node_modules/`, `.venv/`, `dist/`, `build/`) are excluded.

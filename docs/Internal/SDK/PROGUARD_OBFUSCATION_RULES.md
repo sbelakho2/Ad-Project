@@ -728,7 +728,7 @@ retrace mapping.txt stacktrace.txt
 4. **Check logging** for "class not found" errors
 5. **Monitor crash reports** for obfuscation issues
 
-For support, contact sdk-support@apexmediation.com with:
+For support, contact sdk-support@apexmediation.ee with:
 - ProGuard/R8 version
 - Full mapping.txt file
 - Stack trace of any crashes

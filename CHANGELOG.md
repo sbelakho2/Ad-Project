@@ -2936,7 +2936,7 @@ What changed (highlights)
 - FIX-07-04 — `quality/e2e/billing/usage-to-invoice.spec.ts` now reads console/API base URLs plus login credentials from env vars, letting CI supply real tenants instead of hard-coded `demo@apexmediation.ee` values while preserving the local defaults.
 - FIX-07-05 — `quality/load-tests/auction-load-test.js` shares the staging-ready defaults from the tracking test (placement/adFormat/device/app metadata), injects unique request IDs each iteration, and normalizes the optional Bearer token header so load runs surface real adapter issues.
 - FIX-07-06 — `quality/e2e/website/visual.spec.ts` now accepts `WEBSITE_BASE_URL`, writes every screenshot to `artifacts/website-visual/`, and attaches the PNG to the test run so CI retains visual evidence even when snapshots pass/fail.
-- FIX-07-07 — `quality/go.mod` now declares `github.com/sbelakho2/apex-mediation-platform/quality` (instead of the generic `quality` path) and `go mod tidy` refreshed `go.sum`, preventing accidental dependency resolution conflicts when importing the suite externally.
+- FIX-07-07 — `quality/go.mod` now declares `github.com/sbelakho2/Ad-Project/quality` (instead of the generic `quality` path) and `go mod tidy` refreshed `go.sum`, preventing accidental dependency resolution conflicts when importing the suite externally.
 - FIX-07-08 — `quality/integration/helpers_test.go` introduces an in-memory publisher/ad server, payment ledger, and config rollout simulator so `end_to_end_test.go` can exercise real flows (ad auction, fraud blocking, payouts, staged rollouts) without external services. The helper also backs `queryAnalyticsPostgres`, `generateTestRevenue`, and the `makeAPIRequest` shim, meaning `go test ./integration` now passes locally and in CI.
 - FIX-07-09 — `quality/lighthouse/website.config.cjs` now runs three Lighthouse samples by default (override with `LHCI_RUNS`) so CI compares median scores instead of a single potentially cold run.
 - FIX-07-10 — `quality/lint/no-hardcoded-hex.js` expands its extension allowlist to `.scss/.sass/.json`, ensuring theme tokens defined outside TS/JS files are linted for rogue hex colors.
@@ -3847,7 +3847,7 @@ export VRA_SHADOW_ONLY=true
 bash backend/scripts/vraCanarySmoke.sh
 
 # optional explicit window/auth
-API_URL="https://api.apexmediation.com" \
+API_URL="https://api.apexmediation.ee" \
 FROM="2025-11-01T00:00:00Z" TO="2025-11-02T00:00:00Z" \
 AUTH_TOKEN="<jwt>" bash backend/scripts/vraCanarySmoke.sh
 ```

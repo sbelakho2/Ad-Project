@@ -4,7 +4,7 @@
 
 The Management API allows you to programmatically configure your placements and waterfalls.
 
-**Base URL**: `https://api.apexmediation.com/api/v1`
+**Base URL**: `https://api.apexmediation.ee/api/v1`
 
 ## Authentication
 

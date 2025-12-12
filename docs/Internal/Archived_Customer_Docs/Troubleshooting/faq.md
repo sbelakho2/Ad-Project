@@ -1,4 +1,4 @@
-**🐛 Bug Reports**: [GitHub Issues](https://github.com/sbelakho2/apex-mediation-platform/issues)
+**🐛 Bug Reports**: [GitHub Issues](https://github.com/sbelakho2/Ad-Project/issues)
 
 ---
 # Frequently Asked Questions (FAQ)
@@ -381,7 +381,7 @@ To cancel: **Dashboard → Billing → Cancel Account**
 - **💬 Live Chat**: Available in dashboard (Mon-Fri, 9AM-5PM EET)
 - **📞 Phone**: +372 5XXX XXXX (Enterprise customers only)
 - **📚 Documentation**: [docs.apexmediation.ee](https://docs.apexmediation.ee)
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/sbelakho2/apex-mediation-platform/issues)
+- **🐛 Bug Reports**: [GitHub Issues](https://github.com/sbelakho2/Ad-Project/issues)
 
 **Emergency Support** (Production outages, Enterprise only):
 - **Phone**: +372 5XXX XXXX (24/7)
@@ -410,11 +410,11 @@ To cancel: **Dashboard → Billing → Cancel Account**
 **Answer**: Multiple resources:
 
 1. **Documentation** - [docs.apexmediation.ee](https://docs.apexmediation.ee) (embedded examples)
-2. **GitHub** - [github.com/sbelakho2/apex-mediation-platform](https://github.com/sbelakho2/apex-mediation-platform)
+2. **GitHub** - [github.com/sbelakho2/Ad-Project](https://github.com/sbelakho2/Ad-Project)
 3. **Sample Apps**:
-   - Unity: [Sample Game](https://github.com/sbelakho2/apex-mediation-platform)
-   - iOS: [Sample App](https://github.com/sbelakho2/apex-mediation-platform)
-   - Android: [Sample App](https://github.com/sbelakho2/apex-mediation-platform)
+   - Unity: [Sample Game](https://github.com/sbelakho2/Ad-Project)
+   - iOS: [Sample App](https://github.com/sbelakho2/Ad-Project)
+   - Android: [Sample App](https://github.com/sbelakho2/Ad-Project)
 
 ---
 
@@ -422,7 +422,7 @@ To cancel: **Dashboard → Billing → Cancel Account**
 
 **Answer**: **Yes!** We welcome contributions:
 
-1. Fork [github.com/sbelakho2/apex-mediation-platform](https://github.com/sbelakho2/apex-mediation-platform)
+1. Fork [github.com/sbelakho2/Ad-Project](https://github.com/sbelakho2/Ad-Project)
 2. Make improvements (fix typos, add examples, clarify instructions)
 3. Submit a Pull Request
 4. We'll review within 2 business days

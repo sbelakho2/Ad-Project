@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Usage:
  * ```kotlin
  * // At SDK init time:
- * NetworkWarmer.warmup("https://api.apexmediation.com")
+ * NetworkWarmer.warmup("https://api.apexmediation.ee")
  * 
  * // Get pre-warmed client for requests:
  * val client = NetworkWarmer.getWarmedClient()
@@ -77,7 +77,7 @@ object NetworkWarmer {
      * 
      * Call this at SDK initialization time for best cold-start performance.
      * 
-     * @param endpoint Base URL of the auction endpoint (e.g., "https://api.apexmediation.com")
+     * @param endpoint Base URL of the auction endpoint (e.g., "https://api.apexmediation.ee")
      */
     fun warmup(endpoint: String) {
         if (warmedEndpoints.contains(endpoint)) return

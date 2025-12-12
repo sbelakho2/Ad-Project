@@ -219,9 +219,9 @@ async function fetchAppConfig(appId: string): Promise<SdkConfigData | null> {
         debugMode: sdkFlags.debugMode,
       },
       environment: {
-        apiBaseUrl: process.env.API_BASE_URL || 'https://api.apexmediation.com',
-        auctionEndpoint: process.env.AUCTION_ENDPOINT || 'https://api.apexmediation.com/v1/auction',
-        telemetryEndpoint: process.env.TELEMETRY_ENDPOINT || 'https://api.apexmediation.com/v1/analytics',
+        apiBaseUrl: process.env.API_BASE_URL || 'https://api.apexmediation.ee',
+        auctionEndpoint: process.env.AUCTION_ENDPOINT || 'https://api.apexmediation.ee/v1/auction',
+        telemetryEndpoint: process.env.TELEMETRY_ENDPOINT || 'https://api.apexmediation.ee/v1/analytics',
       },
     };
     

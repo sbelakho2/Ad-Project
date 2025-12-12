@@ -153,7 +153,7 @@ grep -A 10 "How to Simulate" docs/Monitoring/ALERTS.md | head -20
   annotations:
     summary: "Auction latency p95 above 100ms"
     description: "{{ $value }}ms latency on {{ $labels.instance }}"
-    runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/rtb-high-latency.md"
+    runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/rtb-high-latency.md"
     dashboard: "https://grafana.rival.com/d/rtb-overview"
 ```
 

@@ -162,7 +162,7 @@ export default function DevelopersPage() {
                   Read the docs
                 </a>
                 <a
-                  href="https://github.com/bel-consulting/apex-mediation-platform"
+                  href="https://github.com/sbelakho2/Ad-Project"
                   className="inline-flex items-center gap-2 bg-gray-900 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-800 transition-colors"
                 >
                   <GitBranch className="w-5 h-5" />

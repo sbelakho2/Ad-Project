@@ -1,13 +1,13 @@
 # Public Repository Synchronization Guide
 
-This guide explains how to synchronize the private `apex-mediation-platform` monorepo with the public `apex-mediation-platform` repository.
+This guide explains how to synchronize the private `Ad-Project` monorepo with the public `Ad-Project` repository.
 
 ## Overview
 
 We maintain a strict separation between our internal monorepo (containing backend code, infrastructure, and internal docs) and the public repository (containing only SDKs, integration docs, and examples).
 
-**Private Repo**: `https://github.com/sbelakho2/apex-mediation-platform` (Origin)
-**Public Repo**: `https://github.com/sbelakho2/apex-mediation-platform`
+**Private Repo**: `https://github.com/sbelakho2/Ad-Project` (Origin)
+**Public Repo**: `https://github.com/sbelakho2/Ad-Project`
 
 ## Setup Requirements
 
@@ -19,7 +19,7 @@ To enable the synchronization workflow, you must configure a GitHub Secret in th
     *   Copy the token.
 
 2.  **Add Secret to Private Repo**:
-    *   Go to `apex-mediation-platform` > Settings > Secrets and variables > Actions.
+    *   Go to `Ad-Project` > Settings > Secrets and variables > Actions.
     *   Click **New repository secret**.
     *   **Name**: `PUBLIC_REPO_TOKEN`
     *   **Value**: [Paste your PAT here]
@@ -29,7 +29,7 @@ To enable the synchronization workflow, you must configure a GitHub Secret in th
 
 The synchronization is **manual** (`workflow_dispatch`) to prevent accidental leaks of internal code.
 
-1.  Go to the **Actions** tab in the `apex-mediation-platform` repository.
+1.  Go to the **Actions** tab in the `Ad-Project` repository.
 2.  Select the **Sync Public Repo** workflow from the sidebar.
 3.  Click **Run workflow**.
 4.  (Optional) Enter a custom commit message.

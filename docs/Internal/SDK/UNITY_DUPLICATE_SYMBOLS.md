@@ -828,7 +828,7 @@ public static void AuditDependencies()
 - [Unity iOS Plugin Guide](https://docs.unity3d.com/Manual/PluginsForIOS.html)
 - [Unity Android Plugin Guide](https://docs.unity3d.com/Manual/PluginsForAndroid.html)
 
-For additional help, contact sdk-support@apexmediation.com with:
+For additional help, contact sdk-support@apexmediation.ee with:
 1. Full build log
 2. List of ad SDKs/versions
 3. Unity version

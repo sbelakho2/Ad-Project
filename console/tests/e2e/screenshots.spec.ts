@@ -71,7 +71,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
       success: true,
       data: {
         userId: 'screenshot-user',
-        email: 'screenshots@apexmediation.com',
+        email: 'screenshots@apexmediation.ee',
         role: 'admin',
         publisherId: 'pub-screenshot-001',
       },
@@ -129,7 +129,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
         included_api_calls: 200000,
         included_data_transfer_gb: 100,
       },
-      billing_email: 'billing@apexmediation.com',
+      billing_email: 'billing@apexmediation.ee',
       receipt_preferences: {
         send_receipts: true,
         send_invoices: true,
@@ -180,7 +180,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
     respondJson(route, 200, {
       user: {
         id: 'screenshot-user',
-        email: 'screenshots@apexmediation.com',
+        email: 'screenshots@apexmediation.ee',
         role: 'admin',
         publisherId: 'pub-screenshot-001',
       },
@@ -475,7 +475,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
       });
     }
     respondJson(route, 200, {
-      profile: { name: 'Demo Publisher', email: 'demo@apexmediation.com', company: 'Apex Games Inc.' },
+      profile: { name: 'Demo Publisher', email: 'demo@apexmediation.ee', company: 'Apex Games Inc.' },
       notifications: { email: true, slack: false, webhook: true },
     });
   });
@@ -484,7 +484,7 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
   await page.route('**/api/v1/supply-chain/**', (route) => {
     respondJson(route, 200, {
       sellers: [
-        { id: 'sel-1', domain: 'apexmediation.com', type: 'DIRECT', status: 'verified' },
+        { id: 'sel-1', domain: 'apexmediation.ee', type: 'DIRECT', status: 'verified' },
         { id: 'sel-2', domain: 'partner-exchange.com', type: 'RESELLER', status: 'verified' },
       ],
       status: 'healthy',
@@ -546,8 +546,8 @@ async function setupComprehensiveMocks(page: Page, tier: TierName = 'scale') {
               issues: 2,
               missingDomain: 1,
               placements: [
-                { placementId: 'pl-1', placementName: 'Home Banner', domain: 'apexmediation.com', sellerId: 'apex-pub-001', authorized: true, reason: null },
-                { placementId: 'pl-2', placementName: 'Interstitial', domain: 'apexmediation.com', sellerId: 'apex-pub-001', authorized: true, reason: null },
+                { placementId: 'pl-1', placementName: 'Home Banner', domain: 'apexmediation.ee', sellerId: 'apex-pub-001', authorized: true, reason: null },
+                { placementId: 'pl-2', placementName: 'Interstitial', domain: 'apexmediation.ee', sellerId: 'apex-pub-001', authorized: true, reason: null },
                 { placementId: 'pl-3', placementName: 'Rewarded', domain: null, sellerId: null, authorized: false, reason: 'Missing domain in ads.txt' },
               ],
             },

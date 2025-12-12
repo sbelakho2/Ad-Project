@@ -40,7 +40,7 @@ Choose your platform:
 
 ### Unity (Recommended for Games)
 
-1. In **Package Manager** select **Add package from git URL...** and paste `https://github.com/sbelakho2/apex-mediation-platform.git?path=sdk/core/unity#main`.
+1. In **Package Manager** select **Add package from git URL...** and paste `https://github.com/sbelakho2/Ad-Project.git?path=sdk/core/unity#main`.
 2. Open **Apex Mediation > Config-as-Code**, export a signed config JSON, and save it as a `TextAsset` (e.g., `Assets/Config/apex_config.json`).
 3. Drop the **Apex Mediation Entry Point** component onto a bootstrap GameObject, assign the TextAsset + signing key, and enable "Attach Debugger Overlay in Editor" for local runs.
 4. Drive everything else through the static facade:
@@ -68,7 +68,7 @@ public class AdManager : MonoBehaviour
 
 1. Install via Swift Package Manager:
    ```
-    https://github.com/sbelakho2/apex-mediation-platform.git
+    https://github.com/sbelakho2/Ad-Project.git
    ```
 
 2. Initialize in `AppDelegate`:
@@ -220,7 +220,7 @@ ApexMediation.loadAd('banner-ad');
 - **📧 Email**: support@apexmediation.ee
 - **💬 Live Chat**: Available in the dashboard
 - **📚 Documentation**: [docs.apexmediation.ee](https://docs.apexmediation.ee)
-- **🐛 Report a Bug**: [GitHub Issues](https://github.com/sbelakho2/apex-mediation-platform/issues)
+- **🐛 Report a Bug**: [GitHub Issues](https://github.com/sbelakho2/Ad-Project/issues)
 - **⏱️ Response Time**: < 4 hours during business hours (Mon-Fri, 9AM-5PM EET)
 
 ---

@@ -36,10 +36,10 @@ interface ConnectionResult {
 }
 
 const DEFAULT_ENDPOINTS = [
-  'https://auction.rivalapexmediation.com',
-  'https://api.rivalapexmediation.com',
-  'https://telemetry.rivalapexmediation.com',
-  'https://cdn.rivalapexmediation.com',
+  'https://auction.rivalapexmediation.ee',
+  'https://api.rivalapexmediation.ee',
+  'https://telemetry.rivalapexmediation.ee',
+  'https://cdn.rivalapexmediation.ee',
 ];
 
 const DEFAULT_CONFIG: NetworkWarmerConfig = {

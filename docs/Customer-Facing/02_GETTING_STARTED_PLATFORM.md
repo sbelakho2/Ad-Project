@@ -4,7 +4,7 @@ This guide will help you integrate your first ad placement in **under 60 minutes
 
 ## Prerequisites
 
-1.  **ApexMediation Account**: [Sign up here](https://console.apexmediation.com) (or your deployed console URL).
+1.  **ApexMediation Account**: [Sign up here](https://console.apexmediation.ee) (or your deployed console URL).
 2.  **Ad Network Account**: You need at least one active account with a supported network (e.g., AdMob, AppLovin, Meta).
 3.  **Development Environment**:
     *   **Android**: Android Studio, API Level 21+

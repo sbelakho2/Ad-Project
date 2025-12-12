@@ -15,7 +15,7 @@ import Network
 /// Usage:
 /// ```swift
 /// // At SDK init time:
-/// NetworkWarmer.shared.warmup(endpoint: "https://api.apexmediation.com")
+/// NetworkWarmer.shared.warmup(endpoint: "https://api.apexmediation.ee")
 ///
 /// // Check status:
 /// if NetworkWarmer.shared.isWarmedUp { ... }
@@ -66,7 +66,7 @@ public final class NetworkWarmer: @unchecked Sendable {
     ///
     /// Call this at SDK initialization time for best cold-start performance.
     ///
-    /// - Parameter endpoint: Base URL of the auction endpoint (e.g., "https://api.apexmediation.com")
+    /// - Parameter endpoint: Base URL of the auction endpoint (e.g., "https://api.apexmediation.ee")
     public func warmup(endpoint: String) {
         queue.async { [weak self] in
             guard let self = self else { return }

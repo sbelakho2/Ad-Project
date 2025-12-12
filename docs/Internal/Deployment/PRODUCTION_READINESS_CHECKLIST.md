@@ -32,7 +32,7 @@ This is the single, self-contained runbook to take the system to production on D
 
 ### 0.0.0 Staging Stack Online (HTTP → TLS/HSTS)
 - [x] Materialize runtime envs on droplet only (do not commit):
-  - `/home/deploy/apex-mediation-platform/infrastructure/production/.env.backend` (Managed Postgres `?sslmode=require` or `no-verify` during staging), Redis URL, secrets (`JWT_SECRET`, `COOKIE_SECRET`, optional `CSRF_SECRET`).
+  - `/home/deploy/Ad-Project/infrastructure/production/.env.backend` (Managed Postgres `?sslmode=require` or `no-verify` during staging), Redis URL, secrets (`JWT_SECRET`, `COOKIE_SECRET`, optional `CSRF_SECRET`).
 - [x] Start core services (backend, redis, postgres) behind Nginx on HTTP (port 80):
   - `NGINX_PORT=80 docker compose -f infrastructure/docker-compose.prod.yml up -d`
   - Verify `curl -i http://<ip>/health`.

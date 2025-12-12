@@ -1,6 +1,6 @@
 # Upptime configuration for ApexMediation status page
 owner: sbelakho2
-repo: apex-mediation-platform
+repo: Ad-Project
 user-agent: ApexMediation-UptimeBot/1.0
 assignees:
   - bel-consulting/platform-infra
@@ -18,7 +18,7 @@ status-website:
     - title: Status
       href: /
     - title: Incident Guide
-      href: https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/Monitoring/STATUS_PAGE_AND_INCIDENT_TAXONOMY.md
+      href: https://github.com/sbelakho2/Ad-Project/blob/main/docs/Monitoring/STATUS_PAGE_AND_INCIDENT_TAXONOMY.md
     - title: Transparency
       href: https://apexmediation.ee/docs/transparency
 

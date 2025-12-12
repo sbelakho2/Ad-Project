@@ -2194,7 +2194,7 @@ Evidence
 
 Verification
 - `$env:PATH="C:\\Program Files\\nodejs;" + $env:PATH; node -v`
-- `cd c:/Users/sadok/apex-mediation-platform; npm install --ignore-scripts`
+- `cd c:/Users/sadok/Ad-Project; npm install --ignore-scripts`
 - `cd backend; npx husky install`
 - `$env:SKIP_DB_SETUP='true'; $env:DATABASE_URL='postgresql://postgres:postgres@localhost:5433/dummy'; $env:TEST_DATABASE_URL=$env:DATABASE_URL; npm test -- --testPathPattern=corsPreflight.integration.test.ts`
 - `Remove-Item Env:SKIP_DB_SETUP; Remove-Item Env:DATABASE_URL; Remove-Item Env:TEST_DATABASE_URL`

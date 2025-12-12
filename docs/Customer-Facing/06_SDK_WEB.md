@@ -7,7 +7,7 @@
 Add the Apex Mediation script to the `<head>` of your HTML page:
 
 ```html
-<script src="https://cdn.apexmediation.com/sdk/web/v1/apex.min.js" async></script>
+<script src="https://cdn.apexmediation.ee/sdk/web/v1/apex.min.js" async></script>
 ```
 
 ### 2. Initialize SDK

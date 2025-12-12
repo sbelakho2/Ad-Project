@@ -5,8 +5,8 @@ Purpose
 - Keep this document updated during canary/pilot and after notable UI changes.
 
 Environments
-- Console URL: https://console.apexmediation.com (or local dev)
-- API URL: https://api.apexmediation.com (or local dev)
+- Console URL: https://console.apexmediation.ee (or local dev)
+- API URL: https://api.apexmediation.ee (or local dev)
 - Flags expected for canary: `VRA_ENABLED=true`, `VRA_SHADOW_ONLY=true`
 
 Preconditions

@@ -1,4 +1,4 @@
-# apex-mediation-platform Capability and Effectiveness Audit
+# Ad-Project Capability and Effectiveness Audit
 
 Date: 2025-11-06
 Auditor: Automated Repository Review (Junie)

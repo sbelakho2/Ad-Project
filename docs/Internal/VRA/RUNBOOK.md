@@ -60,13 +60,13 @@ Canary smoke (script)
 bash backend/scripts/vraCanarySmoke.sh
 
 # With explicit API URL and time window
-API_URL="https://api.apexmediation.com" \
+API_URL="https://api.apexmediation.ee" \
 FROM="2025-11-01T00:00:00Z" \
 TO="2025-11-02T00:00:00Z" \
 bash backend/scripts/vraCanarySmoke.sh
 
 # With auth
-API_URL="https://api.apexmediation.com" \
+API_URL="https://api.apexmediation.ee" \
 AUTH_TOKEN="<jwt>" \
 bash backend/scripts/vraCanarySmoke.sh
 ```
