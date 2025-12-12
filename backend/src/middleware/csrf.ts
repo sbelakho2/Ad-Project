@@ -37,6 +37,7 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   const flagsPath = new RegExp(`^/api/${apiVersion}/flags`);
   const rtbPath = new RegExp(`^/api/${apiVersion}/rtb/`);
   const webhooksPath = new RegExp(`^/api/${apiVersion}/webhooks/`);
+  const analyticsEventsPath = new RegExp(`^/api/${apiVersion}/analytics/events/`);
   // Exempt CSRF for auth acquisition endpoints, ops-only feature flag toggles, and SDK/RTB endpoints
   if (method === 'POST' && (authAcquire.test(path) || flagsPath.test(path))) {
     return next();
@@ -47,6 +48,10 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   }
   // Webhooks are server-to-server, exempt from CSRF
   if (webhooksPath.test(path)) {
+    return next();
+  }
+  // Analytics event ingestion from SDKs - no browser session, exempt from CSRF
+  if (analyticsEventsPath.test(path)) {
     return next();
   }
   return (baseCsurf as unknown as (req: Request, res: Response, next: NextFunction) => void)(req, res, next);
