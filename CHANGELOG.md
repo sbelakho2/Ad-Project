@@ -1,3 +1,81 @@
+# Changelog — Comprehensive Smoke Test & Production Validation (2025-12-12)
+
+## Full Platform Smoke Test Execution (2025-12-12)
+
+### Tier-Based Account Creation & Testing
+Created test accounts for all pricing tiers with SDK keys and validated RTB bidding across all tiers:
+
+| Tier | Email | SDK Key Prefix | Status |
+|------|-------|----------------|--------|
+| Free | test@apexmediation.ee | ak_test_38dc... | ✅ Working |
+| Starter | starter@apexmediation.ee | ak_test_5bfd... | ✅ Working |
+| Growth | growth@apexmediation.ee | ak_test_d509... | ✅ Working |
+| Scale | scale@apexmediation.ee | ak_test_9b38... | ✅ Working |
+| Enterprise | enterprise@apexmediation.ee | ak_test_02285... | ✅ Working |
+
+**All passwords:** `admin123`
+
+### SDK Key Generation
+- Created properly hashed SDK keys for each tier using bcrypt + SHA256 digest
+- Keys stored in `app_api_keys` table with proper publisher/app associations
+- SDK authentication validated end-to-end for all tiers
+
+### RTB Bidding Validation (All 4 Formats)
+- ✅ Banner bids working across all tiers
+- ✅ Interstitial bids working
+- ✅ Rewarded bids working
+- ✅ Native bids working
+
+### Analytics & Dashboard
+- ✅ Analytics Overview: Working (lifetime revenue $26,928.90)
+- ✅ Analytics Timeseries: Working (31 data points)
+- ✅ Analytics by Adapter/Country/App: Working
+- ✅ Dashboard Overview: Working (after fix)
+- ✅ Dashboard KPIs: Working
+
+### Billing & VRA
+- ✅ Billing Policy endpoint: Working
+- ✅ Platform Fee Tiers: Working
+- ✅ VRA Reconciliation Overview: Working
+- ✅ Keys Management: Working
+
+### Privacy/Consent Processing
+- ✅ GDPR consent strings processed correctly
+- ✅ US Privacy (CCPA) strings processed correctly
+- ✅ COPPA flags processed correctly
+
+### Fixes Applied
+
+**1. Dashboard Authentication (dashboard.routes.ts)**
+- Added missing `authenticate` middleware to dashboard routes
+- Routes were checking `req.user.publisherId` but auth middleware wasn't applied
+- Fix: Added `router.use(authenticate)` before route handlers
+
+**2. API Keys Table Creation**
+- Created missing `api_keys` table to match TypeORM entity definition
+- Table was expected by `apiKeys.controller.ts` but didn't exist
+- Created with proper foreign key to `users` table
+
+**3. Feature Flags Enabled (docker-compose.yml)**
+- Added environment variables to enable previously disabled features:
+  - `BILLING_ENABLED=true`
+  - `AB_TESTING_ENABLED=true`
+  - `MIGRATION_STUDIO_ENABLED=true`
+  - `TRANSPARENCY_ENABLED=true`
+  - `VRA_ENABLED=true`
+
+### Infrastructure Status
+All services healthy on droplet 164.90.232.151:
+- Backend: Port 8080 ✅ (healthy)
+- Console: Port 3000 ✅
+- PostgreSQL: Port 5432 ✅
+- Redis: Port 6379 ✅
+
+### Evidence
+Full smoke test report saved to: `docs/Internal/Testing/SMOKE_TEST_REPORT.md`
+
+---
+
 # Changelog — Console UI Polish & Deployment Readiness (2025-12-12)
 
 ## Console Dropdown Arrow Fix (2025-12-12)
