@@ -58,6 +58,7 @@ export default function Footer() {
             <ul className="space-y-2 text-sm">
               <li><a href="/privacy" className="text-brand-600 hover:text-brand-700 hover:underline">Privacy Policy</a></li>
               <li><a href="/terms" className="text-brand-600 hover:text-brand-700 hover:underline">Terms of Service</a></li>
+              <li><a href="/dpa" className="text-brand-600 hover:text-brand-700 hover:underline">Data Processing Addendum</a></li>
               <li><a href="/gdpr" className="text-brand-600 hover:text-brand-700 hover:underline">GDPR</a></li>
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>

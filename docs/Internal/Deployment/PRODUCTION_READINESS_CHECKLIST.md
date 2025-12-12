@@ -681,7 +681,7 @@ References
 - [x] Document secondary rails (Wise link, Stripe card, PayPal) in pricing/docs.
 - [x] Review billing artifacts (pricing, invoicing guide, FAQ) for NET 30 + Wise defaults.
 
-## 5. Starter → Autopay Enforcement QA
+## 5. Non-Starter tiers → Autopay Enforcement QA
 - [ ] Enforce Starter cap in backend (no payment method until $10k/app/month; upgrade flips `requires_payment_method`).
 - [ ] Surface autopay rails (card/ACH/SEPA) via `autopayEligible`; document Enterprise manual exceptions.
 - [ ] Console `/billing/settings` shows Starter vs paid copy plus autopay info card.
@@ -694,7 +694,6 @@ References
 ## 6. Invoice → Payment Dry-Run
 - [ ] Generate Stripe test customer + usage (Runbook §5).
 - [ ] Finalize invoice in test mode; confirm webhook marks local status paid.
-- [ ] Download PDF/email verifying Wise SEPA + ACH wiring blocks.
 - [ ] Store evidence under `docs/Internal/QA/stripe-dry-run/`.
 - [ ] Repeat scenario in live mode with €0 invoice once Stripe live.
 
