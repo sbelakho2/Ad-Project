@@ -28,7 +28,7 @@ jobs:
             set -euo pipefail
             if [ ! -d /opt/apex ]; then sudo mkdir -p /opt/apex && sudo chown -R "$USER":"$USER" /opt/apex; fi
             if [ ! -d /opt/apex/.git ]; then
-              git clone https://github.com/sbelakho2/Ad-Project /opt/apex
+              git clone https://github.com/sbelakho2/apex-mediation-platform /opt/apex
             else
               cd /opt/apex && git fetch --all && git reset --hard origin/main
             fi

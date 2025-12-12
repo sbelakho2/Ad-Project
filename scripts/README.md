@@ -343,7 +343,7 @@ PYTHON=/opt/venvs/ml/bin/python ./scripts/ml/fetch_enrichment.sh
 
 1. **Always run from project root**:
    ```bash
-   cd /path/to/Ad-Project
+   cd /path/to/apex-mediation-platform
    ./scripts/script-name.sh
    ```
 

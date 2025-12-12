@@ -23,7 +23,7 @@ groups:
         annotations:
           summary: "High error rate detected"
           description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/http-error-spike.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/http-error-spike.md"
           dashboard: "https://grafana.rival.com/d/api-red-metrics"
 
       - alert: HighLatency
@@ -35,7 +35,7 @@ groups:
         annotations:
           summary: "High API latency detected"
           description: "P95 latency is {{ $value }}s, above 500ms threshold."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/high-api-latency.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/high-api-latency.md"
           dashboard: "https://grafana.rival.com/d/api-red-metrics"
 
       - alert: HighMemoryUsage
@@ -255,7 +255,7 @@ groups:
         annotations:
           summary: "Auction latency p95 elevated"
           description: "Auction p95 latency is {{ $value }}s, above 200ms warning threshold."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/rtb-high-latency.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/rtb-high-latency.md"
           dashboard: "https://grafana.rival.com/d/rtb-overview"
 
       - alert: AuctionLatencyP95Critical
@@ -267,7 +267,7 @@ groups:
         annotations:
           summary: "Auction latency p95 critical"
           description: "Auction p95 latency is {{ $value }}s, above 500ms critical threshold. Investigate adapter timeouts."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/rtb-critical-latency.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/rtb-critical-latency.md"
           dashboard: "https://grafana.rival.com/d/rtb-overview"
 
       - alert: AdapterTimeoutSpikeShort
@@ -279,7 +279,7 @@ groups:
         annotations:
           summary: "Adapter timeout spike detected (5m window)"
           description: "Adapter {{ $labels.adapter }} timeout rate is {{ $value }}/s over the last 5 minutes."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/adapter-timeouts.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/adapter-timeouts.md"
           dashboard: "https://grafana.rival.com/d/rtb-overview"
 
       - alert: AdapterTimeoutSpikeSustained
@@ -291,7 +291,7 @@ groups:
         annotations:
           summary: "Sustained adapter timeout spike (1h window)"
           description: "Adapter {{ $labels.adapter }} timeout rate is {{ $value }}/s over the last hour. Check adapter health."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/adapter-timeouts.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/adapter-timeouts.md"
           dashboard: "https://grafana.rival.com/d/rtb-overview"
 
       - alert: HighNoFillRate
@@ -303,7 +303,7 @@ groups:
         annotations:
           summary: "High no-fill rate"
           description: "No-fill rate is {{ $value | humanizePercentage }}, above 50% threshold. Check adapter availability."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/high-no-fill-rate.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/high-no-fill-rate.md"
           dashboard: "https://grafana.rival.com/d/rtb-overview"
 
       - alert: HTTPErrorBudgetBurnShort
@@ -339,7 +339,7 @@ groups:
         annotations:
           summary: "Postgres analytics write failures detected"
           description: "{{ $value }} write failures/s inserting into analytics tables. Check Postgres health, staging pressure, and recent migrations."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/analytics-postgres.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/analytics-postgres.md"
           dashboard: "https://grafana.rival.com/d/tracking-ingest"
 
       - alert: AnalyticsBufferGrowth
@@ -351,7 +351,7 @@ groups:
         annotations:
           summary: "Analytics staging buffer growing"
           description: "Analytics buffer holds {{ $value }} events (>5k). Workers may be lagging or merges stuck."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/analytics-postgres.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/analytics-postgres.md"
           dashboard: "https://grafana.rival.com/d/tracking-ingest"
 
       - alert: AnalyticsPipelineBroken
@@ -363,7 +363,7 @@ groups:
         annotations:
           summary: "Analytics pipeline backed up"
           description: "Event lag rate is {{ $value }}/s. Queue may be blocked or Postgres merges unavailable."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/analytics-postgres.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/analytics-postgres.md"
           dashboard: "https://grafana.rival.com/d/tracking-ingest"
 
   # Queue health alerts
@@ -379,7 +379,7 @@ groups:
         annotations:
           summary: "Queue backlog growing"
           description: "Queue {{ $labels.queue }} depth growing at {{ $value }}/s. Check worker health."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/queue-backlog.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/queue-backlog.md"
           dashboard: "https://grafana.rival.com/d/db-queue"
 
       - alert: QueueDepthCritical
@@ -391,7 +391,7 @@ groups:
         annotations:
           summary: "Queue depth critical"
           description: "Queue {{ $labels.queue }} has {{ $value }} jobs. Workers may be stalled."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/queue-backlog.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/queue-backlog.md"
           dashboard: "https://grafana.rival.com/d/db-queue"
 
       - alert: QueueOldestJobStale
@@ -403,7 +403,7 @@ groups:
         annotations:
           summary: "Queue has stale jobs"
           description: "Oldest job in queue {{ $labels.queue }} is {{ $value }}s old (>15m). Check worker processing."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/queue-backlog.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/queue-backlog.md"
           dashboard: "https://grafana.rival.com/d/db-queue"
 
       - alert: HighQueueFailureRate
@@ -415,7 +415,7 @@ groups:
         annotations:
           summary: "High queue job failure rate"
           description: "Queue {{ $labels.queue }} failure rate is {{ $value | humanizePercentage }}, above 10% threshold."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/queue-backlog.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/queue-backlog.md"
           dashboard: "https://grafana.rival.com/d/db-queue"
 
   # AI automation cost controls
@@ -475,7 +475,7 @@ groups:
         annotations:
           summary: "Migration experiment auto-paused by guardrails"
           description: "Experiment {{ $labels.exp_id }} paused due to {{ $labels.reason }} violation. Check experiment metrics and adjust guardrails if needed."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/migration-studio-guardrails.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/migration-studio-guardrails.md"
           dashboard: "https://grafana.rival.com/d/migration-studio"
 
       - alert: MigrationKillSwitch
@@ -487,7 +487,7 @@ groups:
         annotations:
           summary: "Migration experiment kill switch triggered"
           description: "CRITICAL: Experiment {{ $labels.exp_id }} killed due to {{ $labels.reason }} violation. Revenue floor or latency budget exceeded. Immediate investigation required."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/migration-studio-guardrails.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/migration-studio-guardrails.md"
           dashboard: "https://grafana.rival.com/d/migration-studio"
 
       - alert: MigrationHighLatency
@@ -499,7 +499,7 @@ groups:
         annotations:
           summary: "Migration test arm experiencing high latency"
           description: "Test arm p95 latency is {{ $value }}s for exp_id {{ $labels.exp_id }}. Check adapter health and consider reducing mirror_percent."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/migration-studio-guardrails.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/migration-studio-guardrails.md"
           dashboard: "https://grafana.rival.com/d/migration-studio"
 
       - alert: MigrationRevenueDrop
@@ -516,7 +516,7 @@ groups:
         annotations:
           summary: "Migration test arm revenue significantly below control"
           description: "Test arm eCPM is <85% of control for exp_id {{ $labels.exp_id }}. Check adapter configuration and guardrail thresholds."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/migration-studio-guardrails.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/migration-studio-guardrails.md"
           dashboard: "https://grafana.rival.com/d/migration-studio"
 
       - alert: MigrationTestArmNoFill
@@ -528,7 +528,7 @@ groups:
         annotations:
           summary: "Migration test arm no-fill rate elevated"
           description: "Test arm no-fill rate is 20%+ higher than control for exp_id {{ $labels.exp_id }}. Check adapter availability."
-          runbook: "https://github.com/sbelakho2/Ad-Project/blob/main/docs/runbooks/migration-studio-guardrails.md"
+          runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/migration-studio-guardrails.md"
           dashboard: "https://grafana.rival.com/d/migration-studio"
 
 

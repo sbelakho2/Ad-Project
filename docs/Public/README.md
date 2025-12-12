@@ -38,11 +38,11 @@ implementation 'com.rivalapexmediation.sdk:core:1.0.0'
 
 ### iOS
 ```swift
-.package(url: "https://github.com/sbelakho2/Ad-Project", from: "1.0.0")
+.package(url: "https://github.com/sbelakho2/apex-mediation-platform", from: "1.0.0")
 ```
 
 ### Unity
-Download the [latest .unitypackage](https://github.com/sbelakho2/Ad-Project/releases).
+Download the [latest .unitypackage](https://github.com/sbelakho2/apex-mediation-platform/releases).
 
 ## 🤝 Support
 

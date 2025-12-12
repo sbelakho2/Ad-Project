@@ -4,7 +4,7 @@
 
 ### 1. Import SDK
 
-1.  Download the `ApexMediation.unitypackage` from the [Releases Page](https://github.com/sbelakho2/Ad-Project/releases).
+1.  Download the `ApexMediation.unitypackage` from the [Releases Page](https://github.com/sbelakho2/apex-mediation-platform/releases).
 2.  In Unity, go to **Assets > Import Package > Custom Package**.
 3.  Select the downloaded file and click **Import**.
 

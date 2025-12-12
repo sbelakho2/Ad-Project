@@ -48,7 +48,7 @@ Add the tvOS specific package via Swift Package Manager.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/sbelakho2/Ad-Project", from: "1.0.0")
+    .package(url: "https://github.com/sbelakho2/apex-mediation-platform", from: "1.0.0")
 ]
 ```
 

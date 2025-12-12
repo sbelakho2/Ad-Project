@@ -18,7 +18,7 @@ Comprehensive improvements across Android, iOS, Unity, and CTV SDKs covering pub
 **Problem**: Placeholder `https://maven.pkg.github.com/ORG/REPO` in publishing configuration.
 
 **Solution**:
-- Updated `build.gradle` to use actual repository: `sbelakho2/Ad-Project`
+- Updated `build.gradle` to use actual repository: `sbelakho2/apex-mediation-platform`
 - Added fallback chain: project property → env var → default
 - Supports customization via `gradle.properties` or environment variables
 
@@ -140,7 +140,7 @@ url = uri("https://maven.pkg.github.com/${githubOrg}/${githubRepo}")
 **Documentation Created**: `sdk/core/ios/DISTRIBUTION.md`
 
 **Key Points**:
-- GitHub repository: `https://github.com/sbelakho2/Ad-Project`
+- GitHub repository: `https://github.com/sbelakho2/apex-mediation-platform`
 - Package name: `RivalApexMediationSDK`
 - Minimum: iOS 14.0, tvOS 14.0
 - Dependencies: Alamofire, SwiftProtobuf, Swift Crypto

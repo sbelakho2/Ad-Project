@@ -4,7 +4,7 @@
 > Scope: Bring-Your-Own demand mode with Config-as-Code, transparency proofs, and debugger overlay.
 
 ## TL;DR (single-entry quick start)
-1. **Install package:** `Window > Package Manager > + > Add package from git URL...` -> `https://github.com/sbelakho2/Ad-Project.git?path=sdk/core/unity#main`
+1. **Install package:** `Window > Package Manager > + > Add package from git URL...` -> `https://github.com/sbelakho2/apex-mediation-platform.git?path=sdk/core/unity#main`
 2. **Export a signed config:** `Apex Mediation > Config-as-Code` -> click **Export Mock Config** or paste your placements, set the signing key, and copy the JSON.
 3. **Create a TextAsset:** in Unity, create `Assets/Config/apex_config.json`, paste the signed JSON, set `TextAsset` import settings to UTF-8.
 4. **Drop `ApexMediationEntryPoint` into your bootstrap scene:** assign the TextAsset, signing key, optional adapter credentials, and (if desired) keep "Attach Debugger Overlay in Editor" enabled.
@@ -31,7 +31,7 @@ See also (Developer‑Facing):
 
 | Method | Steps |
 | --- | --- |
-| **Git (recommended)** | `Window > Package Manager > + > Add package from git URL...` -> `https://github.com/sbelakho2/Ad-Project.git?path=sdk/core/unity#main` |
+| **Git (recommended)** | `Window > Package Manager > + > Add package from git URL...` -> `https://github.com/sbelakho2/apex-mediation-platform.git?path=sdk/core/unity#main` |
 | **Local folder** | Clone this repo, then in Package Manager choose **Add package from disk...** and select `sdk/core/unity/package.json`. |
 
 The package ships two asmdefs:

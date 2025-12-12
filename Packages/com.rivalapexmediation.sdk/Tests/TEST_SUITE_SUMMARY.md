@@ -80,7 +80,7 @@
 /Applications/Unity/Hub/Editor/2022.3.12f1/Unity.app/Contents/MacOS/Unity \
   -batchmode \
   -nographics \
-  -projectPath /Users/sabelakhoua/IdeaProjects/Ad-Project \
+  -projectPath /Users/sabelakhoua/IdeaProjects/apex-mediation-platform \
   -runTests \
   -testPlatform EditMode \
   -testResults ./test-results-editmode.xml \
@@ -90,7 +90,7 @@
 /Applications/Unity/Hub/Editor/2022.3.12f1/Unity.app/Contents/MacOS/Unity \
   -batchmode \
   -nographics \
-  -projectPath /Users/sabelakhoua/IdeaProjects/Ad-Project \
+  -projectPath /Users/sabelakhoua/IdeaProjects/apex-mediation-platform \
   -runTests \
   -testPlatform PlayMode \
   -testResults ./test-results-playmode.xml \

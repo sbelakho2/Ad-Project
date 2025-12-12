@@ -43,7 +43,7 @@
 pg_dump $DATABASE_URL > backup_$(date +%Y%m%d_%H%M%S).sql
 
 # Run billing migrations
-cd /home/aaron/IdeaProjects/Ad-Project
+cd /home/aaron/IdeaProjects/apex-mediation-platform
 ./scripts/run-billing-migrations.sh
 
 # Verify tables created
