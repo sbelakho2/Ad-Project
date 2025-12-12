@@ -597,6 +597,7 @@ References
 - [ ] Optional: Discord/Forum channel for developers; moderation guidelines in place.
 
 ### SLAs & Status Communications
+
 - [ ] Publish SLA targets and maintenance window policy (link status page from Section 2.4).
 - [ ] Prepare incident communication templates (degradation, outage, postmortem).
 
