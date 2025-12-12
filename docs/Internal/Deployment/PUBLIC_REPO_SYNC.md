@@ -44,7 +44,6 @@ The workflow automatically filters and copies only the following artifacts:
 | `sdk/` | `sdk/` | All SDK source code (Android, iOS, Unity, Web, TV). |
 | `docs/Customer-Facing/` | `docs/` | Public integration guides. |
 | `Test Apps/` | `examples/` | Sample applications. |
-| `CHANGELOG.md` | `CHANGELOG.md` | Release history. |
 | `docs/Public/README.md` | `README.md` | The public-facing README. |
 
-**Note**: Build artifacts (`.build`, `build/`) are automatically stripped during the sync process.
+**Note**: `CHANGELOG.md` is internal-only and NOT synced to the public repo.

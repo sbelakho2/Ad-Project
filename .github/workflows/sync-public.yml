@@ -52,13 +52,10 @@ jobs:
           mkdir -p public-repo/examples
           cp -r private-repo/"Test Apps"/* public-repo/examples/
 
-          # Copy Meta Files
-          cp private-repo/CHANGELOG.md public-repo/
-          # Ensure README is copied if it exists in private repo root, otherwise use the one in docs/Public
+          # Copy README (no changelog - internal only)
           if [ -f private-repo/docs/Public/README.md ]; then
             cp private-repo/docs/Public/README.md public-repo/README.md
           fi
-          cp private-repo/docs/Public/README.md public-repo/
 
       - name: Commit and Push
         working-directory: public-repo
