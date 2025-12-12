@@ -1,5 +1,47 @@
 # Changelog — Production Readiness Completion (2025-12-12)
 
+## Stripe Webhook Integration Complete (2025-12-12 15:06 UTC)
+
+### Stripe Webhook Testing ✅
+Successfully integrated and tested Stripe webhooks on production droplet.
+
+**Configuration:**
+- `STRIPE_SECRET_KEY`: Configured ✅
+- `STRIPE_WEBHOOK_SECRET`: Configured ✅
+- Webhook endpoint: `/api/v1/webhooks/stripe`
+
+**Code Fix Applied:**
+- Added `express.raw()` middleware for Stripe webhook route before `express.json()`
+- Required for Stripe signature verification (needs raw body buffer)
+- Commit: `89945f5` - "fix: use raw body parsing for Stripe webhook endpoint"
+
+**Test Results (All 200 OK):**
+| Event Type | Status |
+|------------|--------|
+| customer.created | ✅ 200 |
+| customer.updated | ✅ 200 |
+| payment_method.attached | ✅ 200 |
+| invoice.created | ✅ 200 |
+| invoice.finalized | ✅ 200 |
+| invoice.paid | ✅ 200 |
+| invoice.payment_succeeded | ✅ 200 |
+| charge.succeeded | ✅ 200 |
+| payment_intent.created | ✅ 200 |
+| payment_intent.succeeded | ✅ 200 |
+| customer.subscription.created | ✅ 200 |
+| checkout.session.completed | ✅ 200 |
+
+**Testing Method:**
+```bash
+# Used Stripe CLI to forward and trigger events
+stripe listen --forward-to http://164.90.232.151:8080/api/v1/webhooks/stripe
+stripe trigger invoice.paid
+stripe trigger customer.subscription.created
+stripe trigger checkout.session.completed
+```
+
+---
+
 ## Security, Operations & VRA Testing (2025-12-12 14:00-14:45 UTC)
 
 ### Security Scans Completed ✅
