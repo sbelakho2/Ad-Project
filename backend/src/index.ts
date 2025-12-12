@@ -19,6 +19,7 @@ import csrfProtection from './middleware/csrf';
 import metricsRouteMiddleware from './middleware/metricsRouteMiddleware';
 import { createHealthCheckRoutes } from './routes/healthCheck';
 import pool from './utils/postgres';
+import { initVraConnectionRoutes } from './routes/vraConnections.routes';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';
@@ -193,6 +194,10 @@ const startServer = async (): Promise<void> => {
   try {
     // Initialize PostgreSQL
     await initializeDatabase();
+
+    // Initialize VRA services
+    initVraConnectionRoutes(pool);
+    logger.info('VRA connection services initialized');
 
     // Initialize Redis (non-blocking - log warning if fails)
     try {

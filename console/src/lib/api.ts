@@ -638,6 +638,67 @@ export const migrationApi = {
       )
     )
   },
+  completeMigration: async (id: string) => {
+    if (USE_MOCK_API) {
+      return unwrapApiResponse(mockApiCall<ApiResponse<MigrationExperiment>>('migration-experiment'))
+    }
+    return unwrapApiResponse(
+      apiClient.post<ApiResponse<MigrationExperiment>>(
+        `/migration/experiments/${id}/complete`,
+        {}
+      )
+    )
+  },
+  rollbackMigration: async (id: string, reason?: string) => {
+    if (USE_MOCK_API) {
+      return unwrapApiResponse(mockApiCall<ApiResponse<MigrationExperiment>>('migration-experiment'))
+    }
+    return unwrapApiResponse(
+      apiClient.post<ApiResponse<MigrationExperiment>>(
+        `/migration/experiments/${id}/rollback`,
+        { reason }
+      )
+    )
+  },
+  getSdkIntegration: async (id: string, platform?: string) => {
+    if (USE_MOCK_API) {
+      return {
+        experiment_id: id,
+        placement_id: 'mock-placement-id',
+        adapters: [
+          { id: 'apex_adapter_applovin_max_v1', name: 'Apex · AppLovin MAX' },
+          { id: 'apex_adapter_ironsource_v1', name: 'Apex · ironSource' },
+        ],
+        api_endpoint: 'https://api.apex-ad.com/api/v1/migration/assign',
+        snippets: {
+          ios: {
+            language: 'swift',
+            code: '// iOS SDK Code...',
+            instructions: '1. Add ApexSDK to your Podfile',
+          },
+          android: {
+            language: 'kotlin',
+            code: '// Android SDK Code...',
+            instructions: '1. Add to build.gradle',
+          },
+        },
+      }
+    }
+    return unwrapApiResponse(
+      apiClient.get<ApiResponse<any>>(
+        `/migration/experiments/${id}/sdk-integration`,
+        { params: platform ? { platform } : undefined }
+      )
+    )
+  },
+  getExperimentMappings: async (id: string) => {
+    if (USE_MOCK_API) {
+      return []
+    }
+    return unwrapApiResponse(
+      apiClient.get<ApiResponse<any[]>>(`/migration/experiments/${id}/mappings`)
+    )
+  },
 }
 
 // Payout API

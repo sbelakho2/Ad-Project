@@ -501,6 +501,40 @@ export interface MigrationExperimentShareLink {
   last_accessed_at?: string
 }
 
+// SDK Integration types
+export interface MigrationSdkSnippet {
+  language: string
+  code: string
+  instructions: string
+}
+
+export interface MigrationSdkIntegration {
+  experiment_id: string
+  placement_id: string
+  adapters: Array<{ id: string; name: string }>
+  api_endpoint: string
+  snippets: Record<string, MigrationSdkSnippet>
+}
+
+export interface MigrationMapping {
+  id: string
+  experiment_id: string
+  incumbent_network: string
+  incumbent_instance_id: string
+  incumbent_instance_name?: string
+  incumbent_waterfall_position?: number
+  incumbent_ecpm_cents?: number
+  our_adapter_id?: string
+  our_adapter_name?: string
+  mapping_status: 'pending' | 'confirmed' | 'skipped' | 'conflict'
+  mapping_confidence?: 'high' | 'medium' | 'low'
+  conflict_reason?: string
+  resolved_by?: string
+  resolved_at?: string
+  created_at: string
+  updated_at: string
+}
+
 // BYO (Bring Your Own) Network Credentials types
 export interface NetworkCredential {
   id: string

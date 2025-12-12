@@ -43,12 +43,40 @@ async function safeQuery<T extends QueryResultRow = QueryResultRow>(
 }
 
 export class VraService {
-  // Overview aggregates derived from revenue_events table (normalized to USD)
+  // Overview aggregates derived from revenue_events (expected) and recon_statements_norm (paid)
   async getOverview(params: ReconOverviewParams): Promise<ReconOverviewResult> {
     const from = params.from ?? new Date(Date.now() - 7 * 86400000).toISOString();
     const to = params.to ?? new Date().toISOString();
+    const publisherId = params.publisherId;
 
-    const rows = await safeQuery<{
+    // Get expected revenue from SDK events
+    const expectedRows = await safeQuery<{
+      network: string;
+      format: string;
+      country: string;
+      impressions: string;
+      expected: string;
+    }>(
+      'overview',
+      `
+      SELECT
+        adapter_name AS network,
+        COALESCE(ad_format::text, 'unknown') AS format,
+        COALESCE(country_code, 'XX') AS country,
+        COUNT(*)::bigint AS impressions,
+        ROUND(COALESCE(SUM(revenue_usd), 0)::numeric, 6)::text AS expected
+      FROM revenue_events
+      WHERE timestamp >= $1::timestamptz
+        AND timestamp <  $2::timestamptz
+        ${publisherId ? 'AND publisher_id = $3' : ''}
+      GROUP BY adapter_name, ad_format, country_code
+      ORDER BY expected DESC
+      `,
+      publisherId ? [from, to, publisherId] : [from, to]
+    );
+
+    // Get paid revenue from network statements
+    const paidRows = await safeQuery<{
       network: string;
       format: string;
       country: string;
@@ -58,64 +86,89 @@ export class VraService {
       'overview',
       `
       SELECT
-        adapter_name AS network,
-        ad_format::text AS format,
-        country_code AS country,
-        SUM(CASE WHEN revenue_type = 'impression' THEN 1 ELSE 0 END)::bigint AS impressions,
-        ROUND(COALESCE(SUM(revenue_usd), 0)::numeric, 6)::text AS paid
-      FROM revenue_events
-      WHERE timestamp >= $1::timestamptz
-        AND timestamp <  $2::timestamptz
-      GROUP BY adapter_name, ad_format, country_code
+        network_type AS network,
+        COALESCE(format, 'unknown') AS format,
+        COALESCE(country, 'XX') AS country,
+        COALESCE(SUM(impressions), 0)::bigint AS impressions,
+        ROUND(COALESCE(SUM(paid), 0)::numeric, 6)::text AS paid
+      FROM recon_statements_norm
+      WHERE event_date >= $1::date
+        AND event_date <  $2::date
+        ${publisherId ? 'AND publisher_id = $3' : ''}
+      GROUP BY network_type, format, country
       ORDER BY paid DESC
       `,
-      [from, to]
+      publisherId ? [from, to, publisherId] : [from, to]
     );
 
-    const byBreakdown = rows.map((r) => ({
-      network: r.network,
-      format: r.format,
-      country: r.country,
-      impressions: Number(r.impressions) || 0,
-      paid: Number(r.paid) || 0,
-      expected: undefined,
-    }));
+    // Build lookup map for paid amounts
+    const paidMap = new Map<string, { impressions: number; paid: number }>();
+    for (const r of paidRows) {
+      const key = `${r.network}|${r.format}|${r.country}`;
+      paidMap.set(key, {
+        impressions: Number(r.impressions) || 0,
+        paid: Number(r.paid) || 0,
+      });
+    }
 
+    // Merge expected with paid data
+    const byBreakdown = expectedRows.map((r) => {
+      const key = `${r.network}|${r.format}|${r.country}`;
+      const paidData = paidMap.get(key);
+      return {
+        network: r.network,
+        format: r.format,
+        country: r.country,
+        impressions: Number(r.impressions) || 0,
+        expected: Number(r.expected) || 0,
+        paid: paidData?.paid || 0,
+      };
+    });
+
+    // Calculate totals
     const totals = byBreakdown.reduce(
       (acc, r) => {
         acc.impressions += r.impressions;
+        acc.expected += r.expected;
         acc.paid += r.paid;
         return acc;
       },
       { impressions: 0, paid: 0, expected: 0 }
     );
 
-    // Until recon_expected is populated, we approximate expected == paid for conservative variance (0%)
-    totals.expected = totals.paid;
-    const variancePercent = totals.expected > 0 ? 0 : 0;
+    // Calculate real variance percentage
+    const varianceUsd = totals.expected - totals.paid;
+    const variancePercent = totals.expected > 0 
+      ? Math.round((varianceUsd / totals.expected) * 10000) / 100 
+      : 0;
 
-    // Coverage: ratio of rows with any paid data (proxy for matched coverage)
-    const coveragePercent = byBreakdown.length > 0 ? 100 : 0;
+    // Calculate real coverage: networks with statements / networks with events
+    const networksWithEvents = new Set(expectedRows.map(r => r.network));
+    const networksWithStatements = new Set(paidRows.map(r => r.network));
+    const coveredNetworks = [...networksWithEvents].filter(n => networksWithStatements.has(n));
+    const coveragePercent = networksWithEvents.size > 0
+      ? Math.round((coveredNetworks.length / networksWithEvents.size) * 100)
+      : (paidRows.length > 0 ? 100 : 0);
 
     // Best‑effort publish pilot‑gate gauges used by alerts; never throw
     try {
       vraCoveragePercent.set({ scope: 'pilot' }, coveragePercent);
-      vraVariancePercent.set({ scope: 'pilot' }, variancePercent);
+      vraVariancePercent.set({ scope: 'pilot' }, Math.abs(variancePercent));
     } catch (_) {
       // ignore metric errors in lightweight/test environments
     }
 
     // Per-network slices for UI overview and dashboards
-    const byNetworkMap = new Map<string, { network: string; impressions: number; paid: number; expected: number }>();
+    const byNetworkMap = new Map<string, { network: string; impressions: number; paid: number; expected: number; variance: number }>();
     for (const r of byBreakdown) {
-      const prev = byNetworkMap.get(r.network) || { network: r.network, impressions: 0, paid: 0, expected: 0 };
+      const prev = byNetworkMap.get(r.network) || { network: r.network, impressions: 0, paid: 0, expected: 0, variance: 0 };
       prev.impressions += r.impressions;
       prev.paid += r.paid;
-      // expected currently mirrors paid until recon_expected is live
-      prev.expected += r.paid;
+      prev.expected += r.expected;
+      prev.variance = prev.expected - prev.paid;
       byNetworkMap.set(r.network, prev);
     }
-    const byNetwork = Array.from(byNetworkMap.values()).sort((a, b) => b.paid - a.paid);
+    const byNetwork = Array.from(byNetworkMap.values()).sort((a, b) => b.expected - a.expected);
 
     return {
       coveragePercent,

@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Clock,
+  Code2,
   Copy,
   CheckCircle2,
   ChevronLeft,
@@ -17,6 +18,8 @@ import {
   PauseCircle,
   Play,
   RefreshCcw,
+  Rocket,
+  RotateCcw,
   Save,
   Trash2,
   TrendingDown,
@@ -31,6 +34,7 @@ import type {
   MigrationGuardrails,
   MigrationMetricUnit,
   MigrationExperimentShareLink,
+  MigrationSdkIntegration,
 } from '@/types'
 import { formatCurrency, formatDate, formatDateRange, formatNumber, formatPercentage, t } from '@/i18n'
 import { Spinner } from '@/components/ui/Spinner'
@@ -1192,8 +1196,355 @@ export default function MigrationExperimentPage() {
             {t('migrationStudio.detail.backToOverview')}
           </Link>
         </section>
+
+        {/* SDK Integration Section */}
+        <SdkIntegrationSection experimentId={experimentId} />
+
+        {/* Complete/Rollback Migration Section */}
+        <MigrationActionsSection 
+          experiment={experiment} 
+          onComplete={async () => {
+            const updated = await migrationApi.completeMigration(experiment.id)
+            invalidateExperimentQueries(updated)
+          }}
+          onRollback={async (reason) => {
+            const updated = await migrationApi.rollbackMigration(experiment.id, reason)
+            invalidateExperimentQueries(updated)
+          }}
+        />
       </main>
     </div>
+  )
+}
+
+function SdkIntegrationSection({ experimentId }: { experimentId: string }) {
+  const [selectedPlatform, setSelectedPlatform] = useState<string>('ios')
+  const [copied, setCopied] = useState(false)
+
+  const { data: sdkIntegration, isLoading, isError } = useQuery({
+    queryKey: ['migration-sdk-integration', experimentId],
+    queryFn: () => migrationApi.getSdkIntegration(experimentId),
+  })
+
+  const handleCopyCode = async () => {
+    if (!sdkIntegration?.snippets?.[selectedPlatform]?.code) return
+    try {
+      await navigator.clipboard.writeText(sdkIntegration.snippets[selectedPlatform].code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Fallback for older browsers
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <section className="card">
+        <div className="flex items-center gap-3">
+          <Spinner size="sm" label="Loading SDK integration..." />
+          <span className="text-sm text-gray-600">Loading SDK integration...</span>
+        </div>
+      </section>
+    )
+  }
+
+  if (isError || !sdkIntegration) {
+    return null
+  }
+
+  const snippet = sdkIntegration.snippets?.[selectedPlatform]
+  const platforms = Object.keys(sdkIntegration.snippets || {})
+
+  return (
+    <section className="card space-y-6">
+      <div>
+        <div className="flex items-center gap-2">
+          <Code2 className="h-5 w-5 text-primary-600" aria-hidden={true} />
+          <h2 className="text-xl font-semibold text-gray-900">SDK Integration</h2>
+        </div>
+        <p className="mt-1 text-sm text-gray-600 max-w-2xl">
+          Integrate the Apex SDK into your app to start routing traffic through the experiment.
+        </p>
+      </div>
+
+      <div className="bg-slate-50 rounded-lg p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-700">API Endpoint:</span>
+          <code className="text-xs bg-white px-2 py-1 rounded border font-mono">
+            {sdkIntegration.api_endpoint}
+          </code>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-700">Placement ID:</span>
+          <code className="text-xs bg-white px-2 py-1 rounded border font-mono">
+            {sdkIntegration.placement_id}
+          </code>
+        </div>
+        {sdkIntegration.adapters && sdkIntegration.adapters.length > 0 && (
+          <div>
+            <span className="text-sm font-medium text-gray-700">Configured Adapters:</span>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {sdkIntegration.adapters.map((adapter: { id: string; name: string }) => (
+                <span key={adapter.id} className="inline-flex items-center px-2 py-1 rounded-full text-xs bg-emerald-100 text-emerald-700">
+                  {adapter.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center gap-2 mb-4">
+          <label htmlFor="platform-select" className="text-sm font-medium text-gray-700">
+            Platform:
+          </label>
+          <select
+            id="platform-select"
+            value={selectedPlatform}
+            onChange={(e) => setSelectedPlatform(e.target.value)}
+            className="input w-40"
+          >
+            {platforms.map((platform) => (
+              <option key={platform} value={platform}>
+                {platform.charAt(0).toUpperCase() + platform.slice(1)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {snippet && (
+          <>
+            <div className="relative">
+              <div className="absolute top-2 right-2 z-10">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost flex items-center gap-1"
+                  onClick={handleCopyCode}
+                >
+                  {copied ? (
+                    <>
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                      <span className="text-emerald-600">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-4 w-4" />
+                      Copy
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="bg-gray-900 text-gray-100 rounded-lg p-4 overflow-x-auto text-xs font-mono leading-relaxed max-h-96">
+                <code>{snippet.code}</code>
+              </pre>
+            </div>
+
+            <div className="mt-4 bg-sky-50 border border-sky-200 rounded-lg p-4">
+              <h4 className="text-sm font-semibold text-sky-800">Setup Instructions</h4>
+              <p className="mt-2 text-sm text-sky-700 whitespace-pre-line">
+                {snippet.instructions}
+              </p>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function MigrationActionsSection({ 
+  experiment, 
+  onComplete, 
+  onRollback 
+}: { 
+  experiment: MigrationExperiment
+  onComplete: () => Promise<void>
+  onRollback: (reason?: string) => Promise<void>
+}) {
+  const [showRollbackConfirm, setShowRollbackConfirm] = useState(false)
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false)
+  const [rollbackReason, setRollbackReason] = useState('')
+  const [isCompleting, setIsCompleting] = useState(false)
+  const [isRollingBack, setIsRollingBack] = useState(false)
+
+  const isActive = experiment.status === 'active'
+  const isCompleted = experiment.status === 'completed'
+  const canComplete = isActive && experiment.mirror_percent >= 10
+  const canRollback = isActive || isCompleted
+
+  const handleComplete = async () => {
+    setIsCompleting(true)
+    try {
+      await onComplete()
+      setShowCompleteConfirm(false)
+    } finally {
+      setIsCompleting(false)
+    }
+  }
+
+  const handleRollback = async () => {
+    setIsRollingBack(true)
+    try {
+      await onRollback(rollbackReason || undefined)
+      setShowRollbackConfirm(false)
+      setRollbackReason('')
+    } finally {
+      setIsRollingBack(false)
+    }
+  }
+
+  if (!canComplete && !canRollback) {
+    return null
+  }
+
+  return (
+    <section className="card space-y-6">
+      <div>
+        <div className="flex items-center gap-2">
+          <Rocket className="h-5 w-5 text-primary-600" aria-hidden={true} />
+          <h2 className="text-xl font-semibold text-gray-900">Migration Actions</h2>
+        </div>
+        <p className="mt-1 text-sm text-gray-600 max-w-2xl">
+          Complete the migration to route 100% of traffic through Apex, or rollback if needed.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-4">
+        {canComplete && !showCompleteConfirm && (
+          <button
+            type="button"
+            className="btn btn-primary flex items-center gap-2"
+            onClick={() => setShowCompleteConfirm(true)}
+          >
+            <Rocket className="h-4 w-4" aria-hidden={true} />
+            Complete Migration (100%)
+          </button>
+        )}
+
+        {canRollback && !showRollbackConfirm && (
+          <button
+            type="button"
+            className="btn btn-outline text-amber-600 border-amber-300 hover:bg-amber-50 flex items-center gap-2"
+            onClick={() => setShowRollbackConfirm(true)}
+          >
+            <RotateCcw className="h-4 w-4" aria-hidden={true} />
+            Rollback Migration
+          </button>
+        )}
+      </div>
+
+      {showCompleteConfirm && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 space-y-4">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="h-5 w-5 text-emerald-600 mt-0.5" aria-hidden={true} />
+            <div>
+              <h4 className="font-semibold text-emerald-800">Complete Migration?</h4>
+              <p className="mt-1 text-sm text-emerald-700">
+                This will set traffic to 100% and mark the migration as complete. 
+                All ad requests will be routed through Apex adapters.
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              className="btn btn-primary flex items-center gap-2"
+              onClick={handleComplete}
+              disabled={isCompleting}
+            >
+              {isCompleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4" />
+              )}
+              {isCompleting ? 'Completing...' : 'Yes, Complete Migration'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setShowCompleteConfirm(false)}
+              disabled={isCompleting}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showRollbackConfirm && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="h-5 w-5 text-amber-600 mt-0.5" aria-hidden={true} />
+            <div>
+              <h4 className="font-semibold text-amber-800">Rollback Migration?</h4>
+              <p className="mt-1 text-sm text-amber-700">
+                This will pause the experiment and revert to 0% traffic through Apex.
+                All ad requests will be routed back through your incumbent mediation.
+              </p>
+            </div>
+          </div>
+          <div>
+            <label htmlFor="rollback-reason" className="block text-sm font-medium text-amber-800 mb-1">
+              Reason (optional):
+            </label>
+            <input
+              id="rollback-reason"
+              type="text"
+              value={rollbackReason}
+              onChange={(e) => setRollbackReason(e.target.value)}
+              placeholder="e.g., Revenue dropped unexpectedly"
+              className="input w-full"
+            />
+          </div>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              className="btn bg-amber-600 text-white hover:bg-amber-700 flex items-center gap-2"
+              onClick={handleRollback}
+              disabled={isRollingBack}
+            >
+              {isRollingBack ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              {isRollingBack ? 'Rolling Back...' : 'Yes, Rollback'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                setShowRollbackConfirm(false)
+                setRollbackReason('')
+              }}
+              disabled={isRollingBack}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isCompleted && (
+        <div className="bg-sky-50 border border-sky-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="h-5 w-5 text-sky-600 mt-0.5" aria-hidden={true} />
+            <div>
+              <h4 className="font-semibold text-sky-800">Migration Complete</h4>
+              <p className="mt-1 text-sm text-sky-700">
+                100% of traffic is now being routed through Apex adapters.
+                {experiment.completed_at && (
+                  <span className="block mt-1 text-xs">
+                    Completed on {formatDate(experiment.completed_at)}
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   )
 }
 

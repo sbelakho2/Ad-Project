@@ -30,6 +30,7 @@ import toolsRoutes from './tools.routes';
 import configRoutes from './config.routes';
 import { killSwitchGuard } from '../middleware/featureFlags';
 import vraRoutes from './vra.routes';
+import vraConnectionsRoutes from './vraConnections.routes';
 
 const router = Router();
 
@@ -71,5 +72,7 @@ router.use('/byo', byoRoutes); // BYO model credential vault & transparency
 router.use('/tools', toolsRoutes); // Developer tools (e.g., app-ads.txt inspector)
 // VRA routes mounted at root to expose /recon/* and /proofs/* under /api/v1
 router.use('/', vraRoutes);
+// VRA network connection management
+router.use('/vra', vraConnectionsRoutes);
 
 export default router;

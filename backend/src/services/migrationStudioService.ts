@@ -1542,4 +1542,139 @@ export class MigrationStudioService {
       last_guardrail_check: row.last_guardrail_check,
     };
   }
+
+  /**
+   * Complete migration - set to 100% and mark as completed
+   */
+  async completeMigration(
+    experimentId: string,
+    publisherId: string,
+    userId: string
+  ): Promise<MigrationExperiment> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Verify experiment exists and is active
+      const existing = await client.query(
+        `SELECT * FROM migration_experiments WHERE id = $1 AND publisher_id = $2`,
+        [experimentId, publisherId]
+      );
+
+      if (existing.rows.length === 0) {
+        throw new AppError('Experiment not found', 404);
+      }
+
+      const exp = existing.rows[0];
+      if (exp.status !== 'active') {
+        throw new AppError('Experiment must be active to complete migration', 400);
+      }
+
+      // Update to 100% and completed status
+      const result = await client.query(
+        `UPDATE migration_experiments
+         SET status = 'completed',
+             mode = 'mirroring',
+             mirror_percent = 100,
+             completed_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [experimentId]
+      );
+
+      // Log completion event
+      await client.query(
+        `INSERT INTO migration_events (experiment_id, event_type, reason, triggered_by)
+         VALUES ($1, $2, $3, $4)`,
+        [experimentId, 'deactivation', 'Migration completed - 100% traffic on Apex', userId]
+      );
+
+      // Audit log
+      await client.query(
+        `INSERT INTO migration_audit (experiment_id, user_id, action, resource_type, resource_id, new_value)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [experimentId, userId, 'complete', 'experiment', experimentId, JSON.stringify(result.rows[0])]
+      );
+
+      await client.query('COMMIT');
+
+      logger.info('Migration completed', { experimentId, publisherId });
+      return this.mapExperiment(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Rollback migration - revert to control (pause and reset)
+   */
+  async rollbackMigration(
+    experimentId: string,
+    publisherId: string,
+    userId: string,
+    reason?: string
+  ): Promise<MigrationExperiment> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Verify experiment exists
+      const existing = await client.query(
+        `SELECT * FROM migration_experiments WHERE id = $1 AND publisher_id = $2`,
+        [experimentId, publisherId]
+      );
+
+      if (existing.rows.length === 0) {
+        throw new AppError('Experiment not found', 404);
+      }
+
+      const exp = existing.rows[0];
+      if (!['active', 'completed'].includes(exp.status)) {
+        throw new AppError('Experiment must be active or completed to rollback', 400);
+      }
+
+      // Rollback to paused with 0% mirror
+      const result = await client.query(
+        `UPDATE migration_experiments
+         SET status = 'paused',
+             mode = 'shadow',
+             mirror_percent = 0,
+             paused_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [experimentId]
+      );
+
+      // Log rollback event
+      await client.query(
+        `INSERT INTO migration_events (experiment_id, event_type, reason, triggered_by)
+         VALUES ($1, $2, $3, $4)`,
+        [experimentId, 'guardrail_pause', reason || 'Manual rollback requested', userId]
+      );
+
+      // Audit log
+      await client.query(
+        `INSERT INTO migration_audit (experiment_id, user_id, action, resource_type, resource_id, old_value, new_value)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [experimentId, userId, 'rollback', 'experiment', experimentId, JSON.stringify(exp), JSON.stringify(result.rows[0])]
+      );
+
+      await client.query('COMMIT');
+
+      logger.warn('Migration rolled back', { experimentId, publisherId, reason });
+      return this.mapExperiment(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }

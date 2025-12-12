@@ -468,6 +468,7 @@ export const deleteExperiment = async (
 /**
  * POST /api/v1/migration/assign
  * Get experiment assignment for a user (used by SDKs)
+ * Returns adapter configuration for test arm so SDK can actually route traffic
  */
 export const getAssignment = async (
   req: Request,
@@ -514,6 +515,7 @@ export const getAssignment = async (
         data: {
           has_experiment: false,
           arm: 'control',
+          use_apex: false,
         },
       });
       return;
@@ -538,6 +540,7 @@ export const getAssignment = async (
         data: {
           has_experiment: false,
           arm: 'control',
+          use_apex: false,
         },
       });
       return;
@@ -569,12 +572,34 @@ export const getAssignment = async (
       console.error('Failed to log assignment:', err);
     });
 
+    // For test arm in mirroring mode, fetch adapter configurations
+    let adapters: Array<{ adapter_id: string; adapter_name: string; priority: number }> = [];
+    const useApex = arm === 'test' && mode === 'mirroring';
+    
+    if (useApex) {
+      const mappingsResult = await pool.query(
+        `SELECT our_adapter_id, our_adapter_name, incumbent_waterfall_position
+         FROM migration_mappings
+         WHERE experiment_id = $1 AND mapping_status = 'confirmed' AND our_adapter_id IS NOT NULL
+         ORDER BY incumbent_waterfall_position ASC NULLS LAST`,
+        [experiment.id]
+      );
+      
+      adapters = mappingsResult.rows.map((row, idx) => ({
+        adapter_id: row.our_adapter_id,
+        adapter_name: row.our_adapter_name || row.our_adapter_id,
+        priority: row.incumbent_waterfall_position ?? idx + 1,
+      }));
+    }
+
     res.json({
       success: true,
       data: {
         has_experiment: true,
         experiment_id: experiment.id,
         arm,
+        use_apex: useApex,
+        adapters: useApex ? adapters : undefined,
         mirror_percent: experiment.mirror_percent,
         assignment_ts: assignmentTs,
         mode,
@@ -608,6 +633,403 @@ export const generateReport = async (
     res.json({
       success: true,
       data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/v1/migration/experiments/:id/sdk-integration
+ * Generate SDK integration code snippets for the experiment
+ */
+export const getSdkIntegration = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+    const { id } = req.params;
+    const { platform } = req.query;
+
+    if (!publisherId) {
+      throw new AppError('Unauthorized', 401);
+    }
+
+    // Get experiment details
+    const experiment = await migrationService.getExperiment(id, publisherId);
+    
+    // Get mappings for adapter list
+    const mappingsResult = await pool.query(
+      `SELECT our_adapter_id, our_adapter_name
+       FROM migration_mappings
+       WHERE experiment_id = $1 AND mapping_status = 'confirmed' AND our_adapter_id IS NOT NULL`,
+      [id]
+    );
+    
+    const adapters = mappingsResult.rows.map(row => ({
+      id: row.our_adapter_id,
+      name: row.our_adapter_name || row.our_adapter_id,
+    }));
+
+    const baseUrl = process.env.API_BASE_URL || 'https://api.apex-ad.com';
+    const placementId = experiment.placement_id || 'YOUR_PLACEMENT_ID';
+
+    // Generate platform-specific code
+    const snippets: Record<string, { language: string; code: string; instructions: string }> = {
+      ios: {
+        language: 'swift',
+        code: `// ApexMigration SDK Integration - iOS
+import ApexSDK
+
+class AdManager {
+    static let shared = AdManager()
+    
+    func initialize() {
+        // Configure migration experiment
+        ApexMigration.configure(
+            experimentId: "${id}",
+            placementId: "${placementId}"
+        )
+        
+        // Check assignment before loading ads
+        ApexMigration.getAssignment { [weak self] result in
+            switch result {
+            case .success(let assignment):
+                if assignment.useApex {
+                    // Route traffic through Apex adapters
+                    self?.loadWithApex(adapters: assignment.adapters)
+                } else {
+                    // Continue using incumbent mediation
+                    self?.loadWithIncumbent()
+                }
+            case .failure(let error):
+                // Fallback to incumbent on error
+                print("Migration assignment failed: \\(error)")
+                self?.loadWithIncumbent()
+            }
+        }
+    }
+    
+    private func loadWithApex(adapters: [ApexAdapter]) {
+        // Initialize Apex adapters in priority order
+        for adapter in adapters {
+            ApexAdapterRegistry.register(adapter)
+        }
+        ApexAdLoader.shared.load(placementId: "${placementId}")
+    }
+    
+    private func loadWithIncumbent() {
+        // Your existing mediation code
+        // IronSource.loadInterstitial() or MAXInterstitialAd.load()
+    }
+}`,
+        instructions: `1. Add ApexSDK to your Podfile: pod 'ApexSDK', '~> 2.0'
+2. Run pod install
+3. Replace YOUR_PLACEMENT_ID with your actual placement ID
+4. Call AdManager.shared.initialize() in your app delegate`,
+      },
+      android: {
+        language: 'kotlin',
+        code: `// ApexMigration SDK Integration - Android
+import com.apex.sdk.ApexMigration
+import com.apex.sdk.MigrationAssignment
+
+class AdManager private constructor() {
+    companion object {
+        val instance: AdManager by lazy { AdManager() }
+    }
+    
+    fun initialize(context: Context) {
+        // Configure migration experiment
+        ApexMigration.configure(
+            experimentId = "${id}",
+            placementId = "${placementId}"
+        )
+        
+        // Check assignment before loading ads
+        ApexMigration.getAssignment { result ->
+            result.onSuccess { assignment ->
+                if (assignment.useApex) {
+                    // Route traffic through Apex adapters
+                    loadWithApex(context, assignment.adapters)
+                } else {
+                    // Continue using incumbent mediation
+                    loadWithIncumbent(context)
+                }
+            }.onFailure { error ->
+                // Fallback to incumbent on error
+                Log.e("Migration", "Assignment failed: \${error.message}")
+                loadWithIncumbent(context)
+            }
+        }
+    }
+    
+    private fun loadWithApex(context: Context, adapters: List<ApexAdapter>) {
+        // Initialize Apex adapters in priority order
+        adapters.forEach { adapter ->
+            ApexAdapterRegistry.register(adapter)
+        }
+        ApexAdLoader.getInstance().load(context, "${placementId}")
+    }
+    
+    private fun loadWithIncumbent(context: Context) {
+        // Your existing mediation code
+        // IronSource.loadInterstitial() or MaxInterstitialAd.load()
+    }
+}`,
+        instructions: `1. Add to build.gradle: implementation 'com.apex.sdk:apex-sdk:2.0.0'
+2. Sync Gradle
+3. Replace YOUR_PLACEMENT_ID with your actual placement ID
+4. Call AdManager.instance.initialize(this) in your Application class`,
+      },
+      web: {
+        language: 'typescript',
+        code: `// ApexMigration SDK Integration - Web
+import { ApexMigration, MigrationAssignment } from '@apex-ad/web-sdk';
+
+class AdManager {
+  private static instance: AdManager;
+  
+  static getInstance(): AdManager {
+    if (!this.instance) {
+      this.instance = new AdManager();
+    }
+    return this.instance;
+  }
+  
+  async initialize(): Promise<void> {
+    // Configure migration experiment
+    ApexMigration.configure({
+      experimentId: '${id}',
+      placementId: '${placementId}',
+    });
+    
+    try {
+      // Check assignment before loading ads
+      const assignment = await ApexMigration.getAssignment();
+      
+      if (assignment.useApex) {
+        // Route traffic through Apex adapters
+        await this.loadWithApex(assignment.adapters);
+      } else {
+        // Continue using incumbent mediation
+        await this.loadWithIncumbent();
+      }
+    } catch (error) {
+      // Fallback to incumbent on error
+      console.error('Migration assignment failed:', error);
+      await this.loadWithIncumbent();
+    }
+  }
+  
+  private async loadWithApex(adapters: ApexAdapter[]): Promise<void> {
+    // Initialize Apex adapters in priority order
+    for (const adapter of adapters) {
+      ApexAdapterRegistry.register(adapter);
+    }
+    await ApexAdLoader.load('${placementId}');
+  }
+  
+  private async loadWithIncumbent(): Promise<void> {
+    // Your existing mediation code
+    // googletag.cmd.push() or prebid.js
+  }
+}
+
+export default AdManager;`,
+        instructions: `1. Install: npm install @apex-ad/web-sdk
+2. Import AdManager in your entry point
+3. Replace YOUR_PLACEMENT_ID with your actual placement ID
+4. Call AdManager.getInstance().initialize() on page load`,
+      },
+      unity: {
+        language: 'csharp',
+        code: `// ApexMigration SDK Integration - Unity
+using ApexSDK;
+using UnityEngine;
+
+public class AdManager : MonoBehaviour
+{
+    public static AdManager Instance { get; private set; }
+    
+    private void Awake()
+    {
+        if (Instance == null)
+        {
+            Instance = this;
+            DontDestroyOnLoad(gameObject);
+        }
+        else
+        {
+            Destroy(gameObject);
+        }
+    }
+    
+    public void Initialize()
+    {
+        // Configure migration experiment
+        ApexMigration.Configure(
+            experimentId: "${id}",
+            placementId: "${placementId}"
+        );
+        
+        // Check assignment before loading ads
+        ApexMigration.GetAssignment((assignment, error) =>
+        {
+            if (error != null)
+            {
+                Debug.LogError($"Migration assignment failed: {error}");
+                LoadWithIncumbent();
+                return;
+            }
+            
+            if (assignment.UseApex)
+            {
+                // Route traffic through Apex adapters
+                LoadWithApex(assignment.Adapters);
+            }
+            else
+            {
+                // Continue using incumbent mediation
+                LoadWithIncumbent();
+            }
+        });
+    }
+    
+    private void LoadWithApex(ApexAdapter[] adapters)
+    {
+        // Initialize Apex adapters in priority order
+        foreach (var adapter in adapters)
+        {
+            ApexAdapterRegistry.Register(adapter);
+        }
+        ApexAdLoader.Instance.Load("${placementId}");
+    }
+    
+    private void LoadWithIncumbent()
+    {
+        // Your existing mediation code
+        // IronSource.Agent.loadInterstitial() or MaxSdk.LoadInterstitial()
+    }
+}`,
+        instructions: `1. Import ApexSDK.unitypackage into your project
+2. Add AdManager script to a GameObject in your first scene
+3. Replace YOUR_PLACEMENT_ID with your actual placement ID
+4. Call AdManager.Instance.Initialize() after scene loads`,
+      },
+    };
+
+    // Filter by platform if specified
+    const platforms = platform 
+      ? { [platform as string]: snippets[platform as string] }
+      : snippets;
+
+    res.json({
+      success: true,
+      data: {
+        experiment_id: id,
+        placement_id: placementId,
+        adapters,
+        api_endpoint: `${baseUrl}/api/v1/migration/assign`,
+        snippets: platforms,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/migration/experiments/:id/complete
+ * Complete migration - set experiment to 100% and mark complete
+ */
+export const completeMigration = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+    const userId = req.user?.userId;
+    const { id } = req.params;
+
+    if (!publisherId || !userId) {
+      throw new AppError('Unauthorized', 401);
+    }
+
+    const experiment = await migrationService.completeMigration(id, publisherId, userId);
+
+    res.json({
+      success: true,
+      data: experiment,
+      message: 'Migration completed. 100% traffic now routed through Apex.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/migration/experiments/:id/rollback
+ * Rollback migration - pause and revert to control
+ */
+export const rollbackMigration = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+    const userId = req.user?.userId;
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!publisherId || !userId) {
+      throw new AppError('Unauthorized', 401);
+    }
+
+    const experiment = await migrationService.rollbackMigration(id, publisherId, userId, reason);
+
+    res.json({
+      success: true,
+      data: experiment,
+      message: 'Migration rolled back. Traffic reverted to incumbent mediation.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/v1/migration/experiments/:id/mappings
+ * Get all mappings for an experiment
+ */
+export const getExperimentMappings = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+    const { id } = req.params;
+
+    if (!publisherId) {
+      throw new AppError('Unauthorized', 401);
+    }
+
+    // Verify experiment belongs to publisher
+    await migrationService.getExperiment(id, publisherId);
+    
+    const result = await pool.query(
+      `SELECT * FROM migration_mappings WHERE experiment_id = $1 ORDER BY incumbent_waterfall_position ASC NULLS LAST`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
     });
   } catch (error) {
     next(error);

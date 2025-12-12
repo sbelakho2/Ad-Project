@@ -1,5 +1,6 @@
 export interface ReconOverviewParams {
   appId?: string;
+  publisherId?: string;
   from?: string; // ISO date
   to?: string;   // ISO date
 }
@@ -9,13 +10,13 @@ export interface ReconOverviewItem {
   format: string;
   country: string;
   impressions: number;
-  paid: number; // in USD (normalized)
-  expected?: number; // in USD (if available)
+  paid: number; // in USD (normalized) - from network statements
+  expected: number; // in USD - from SDK events
 }
 
 export interface ReconOverviewResult {
-  coveragePercent: number; // 0-100
-  variancePercent: number; // unexplained variance
+  coveragePercent: number; // 0-100 - networks with statements / networks with events
+  variancePercent: number; // (expected - paid) / expected * 100
   totals: {
     impressions: number;
     paid: number;
@@ -28,11 +29,12 @@ export interface ReconOverviewResult {
     impressions: number;
     paid: number;
     expected: number;
+    variance?: number;
   }>;
 }
 
 export interface ReconDeltaItem {
-  kind: 'underpay' | 'missing' | 'viewability_gap' | 'ivt_outlier' | 'fx_mismatch' | 'timing_lag';
+  kind: 'underpay' | 'overpay' | 'missing' | 'missing_network' | 'missing_sdk' | 'viewability_gap' | 'ivt_outlier' | 'fx_mismatch' | 'timing_lag';
   amount: number; // USD
   currency: string; // ISO-4217
   reasonCode: string;
@@ -40,6 +42,8 @@ export interface ReconDeltaItem {
   windowEnd: string;   // ISO ts
   evidenceId: string;
   confidence: number; // 0..1
+  network?: string;
+  resolved?: boolean;
 }
 
 export interface ReconDeltaQuery {

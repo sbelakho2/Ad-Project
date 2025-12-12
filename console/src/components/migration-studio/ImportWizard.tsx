@@ -553,36 +553,85 @@ function SourceStep({
               {t('migrationStudio.import.csv.selectedFile', { name: selectedFile.name })}
             </p>
           )}
+          <div className="mt-6 text-left bg-white border rounded-lg p-4">
+            <h4 className="text-sm font-semibold text-gray-800">CSV Format</h4>
+            <p className="mt-1 text-xs text-gray-600">Your CSV should include these columns:</p>
+            <code className="mt-2 block text-xs bg-gray-100 p-2 rounded font-mono">
+              network,instance_id,instance_name,waterfall_position,ecpm_cents
+            </code>
+          </div>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="block text-sm font-medium text-gray-700" htmlFor={apiKeyFieldId}>
-              {t('migrationStudio.import.api.apiKeyLabel')}
-            </label>
-            <input
-              type="text"
-              id={apiKeyFieldId}
-              value={apiCredentials.apiKey}
-              onChange={(event) => onCredentialsChange({ ...apiCredentials, apiKey: event.target.value })}
-              className="input mt-1 w-full"
-              placeholder={t('migrationStudio.import.api.apiKeyPlaceholder')}
-              required
-            />
+        <div className="space-y-4">
+          {/* Connection Help Card */}
+          <div className={`rounded-xl border p-4 ${source === 'ironSource' ? 'bg-purple-50 border-purple-200' : 'bg-blue-50 border-blue-200'}`}>
+            <h4 className={`text-sm font-semibold ${source === 'ironSource' ? 'text-purple-800' : 'text-blue-800'}`}>
+              {source === 'ironSource' ? 'How to get your ironSource credentials' : 'How to get your AppLovin credentials'}
+            </h4>
+            {source === 'ironSource' ? (
+              <ol className="mt-2 text-xs text-purple-700 space-y-1 list-decimal list-inside">
+                <li>Log in to your <a href="https://platform.is.com" target="_blank" rel="noopener noreferrer" className="underline font-medium">ironSource Platform</a></li>
+                <li>Go to <strong>Account</strong> → <strong>API</strong></li>
+                <li>Copy your <strong>Secret Key</strong> (API Key)</li>
+                <li>Your <strong>Account ID</strong> is shown at the top of the dashboard</li>
+              </ol>
+            ) : (
+              <ol className="mt-2 text-xs text-blue-700 space-y-1 list-decimal list-inside">
+                <li>Log in to your <a href="https://dash.applovin.com" target="_blank" rel="noopener noreferrer" className="underline font-medium">AppLovin Dashboard</a></li>
+                <li>Go to <strong>Account</strong> → <strong>Keys</strong></li>
+                <li>Copy your <strong>Report Key</strong> (API Key)</li>
+                <li>Your <strong>Account ID</strong> is the email or publisher ID shown in account settings</li>
+              </ol>
+            )}
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700" htmlFor={accountFieldId}>
-              {t('migrationStudio.import.api.accountLabel')}
-            </label>
-            <input
-              type="text"
-              id={accountFieldId}
-              value={apiCredentials.accountId}
-              onChange={(event) => onCredentialsChange({ ...apiCredentials, accountId: event.target.value })}
-              className="input mt-1 w-full"
-              placeholder={t('migrationStudio.import.api.accountPlaceholder')}
-              required
-            />
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-gray-700" htmlFor={apiKeyFieldId}>
+                {t('migrationStudio.import.api.apiKeyLabel')}
+              </label>
+              <input
+                type="password"
+                id={apiKeyFieldId}
+                value={apiCredentials.apiKey}
+                onChange={(event) => onCredentialsChange({ ...apiCredentials, apiKey: event.target.value })}
+                className="input mt-1 w-full"
+                placeholder={source === 'ironSource' ? 'Enter your ironSource Secret Key' : 'Enter your AppLovin Report Key'}
+                required
+                autoComplete="off"
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                {source === 'ironSource' ? 'Found in Platform → Account → API' : 'Found in Dashboard → Account → Keys'}
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700" htmlFor={accountFieldId}>
+                {t('migrationStudio.import.api.accountLabel')}
+              </label>
+              <input
+                type="text"
+                id={accountFieldId}
+                value={apiCredentials.accountId}
+                onChange={(event) => onCredentialsChange({ ...apiCredentials, accountId: event.target.value })}
+                className="input mt-1 w-full"
+                placeholder={source === 'ironSource' ? 'e.g., 12345678' : 'e.g., pub-12345 or email'}
+                required
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Your {source === 'ironSource' ? 'ironSource' : 'AppLovin'} account identifier
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
+            <ShieldAlert className="h-5 w-5 text-amber-600 mt-0.5" aria-hidden="true" />
+            <div>
+              <p className="text-sm font-medium text-amber-800">Your credentials are secure</p>
+              <p className="mt-1 text-xs text-amber-700">
+                We only use your API credentials to fetch your current mediation configuration. 
+                Credentials are not stored and are only used for this import.
+              </p>
+            </div>
           </div>
         </div>
       )}
