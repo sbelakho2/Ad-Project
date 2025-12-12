@@ -6,12 +6,13 @@ The billing module provides usage tracking, invoice management, and reconciliati
 
 > This module is live in production; anything marked as "Planned" lives behind feature flags and must not be promised externally until the referenced FIX is complete.
 
-## Feature Parity Snapshot — 2025-11-16
+## Feature Parity Snapshot — 2025-12-12
 | Capability | Surface | Status | Notes |
 | --- | --- | --- | --- |
 | Usage tracking & overage detection | `/billing/usage`, `GET /api/v1/billing/usage/current` | ✅ Shipped | Data sourced from Postgres analytics replicas with hourly cache invalidation. |
 | Invoice management & PDFs | `/billing/invoices`, `/billing/invoices/[id]`, `GET /api/v1/billing/invoices*` | ✅ Shipped | Detail pages + PDF downloads in console, Stripe webhook sync in backend. |
 | Admin reconciliation | `/admin/billing`, `POST /api/v1/billing/reconcile` | ✅ Shipped | Requires admin role and acknowledgement prompt. |
+| **Stripe Webhook Integration** | `POST /api/v1/webhooks/stripe` | ✅ Shipped (2025-12-12) | Raw body parsing for signature verification; 12+ event types tested. |
 | Migration Assistant (beta) | `/billing/settings` (flag `NEXT_PUBLIC_ENABLE_BILLING_MIGRATION`), `POST /api/v1/billing/migration/request` | ✅ Pilot | Sends sandbox/production migration context to ops with request IDs and char-count validation. |
 | Payment method management | `/billing/payment-methods` (flagged), `POST /api/v1/billing/payment-methods/*` | ⏳ Planned (FIX-03-116 follow-up) | UI/API scaffolding complete; awaiting Stripe customer portal wiring + QA. |
 | Dunning management & retries | Console notifications + Stripe webhooks | ⏳ Planned (FIX-03-116 follow-up) | Playbooks documented; automation shipping under FIX-03-154. |
@@ -214,17 +215,48 @@ npm test -- integration/billing.test.ts
 
 ## Stripe Webhook Configuration
 
+### Setup (2025-12-12 Update)
+
 1. Create webhook endpoint in Stripe Dashboard
 2. Point to: `https://yourdomain.com/api/v1/webhooks/stripe`
 3. Select events:
+   - `customer.created`
+   - `customer.updated`
+   - `payment_method.attached`
    - `invoice.created`
    - `invoice.finalized`
+   - `invoice.paid`
    - `invoice.payment_succeeded`
    - `invoice.payment_failed`
+   - `charge.succeeded`
    - `charge.refunded`
+   - `payment_intent.created`
+   - `payment_intent.succeeded`
+   - `customer.subscription.created`
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
+   - `checkout.session.completed`
 4. Copy webhook signing secret to `STRIPE_WEBHOOK_SECRET` env var
+
+### Technical Implementation Note
+
+Stripe webhooks require the raw request body for signature verification. The backend implements this with:
+
+```typescript
+// In backend/src/index.ts - BEFORE express.json()
+app.use('/api/v1/webhooks/stripe', express.raw({ type: 'application/json' }));
+app.use(express.json()); // After raw body route
+```
+
+This ensures the Stripe webhook endpoint receives the unmodified body buffer for HMAC signature verification.
+
+### Tested Event Types (2025-12-12)
+All 12 event types tested and returning 200 OK:
+- `customer.created`, `customer.updated`
+- `payment_method.attached`
+- `invoice.created`, `invoice.finalized`, `invoice.paid`, `invoice.payment_succeeded`
+- `charge.succeeded`, `payment_intent.created`, `payment_intent.succeeded`
+- `customer.subscription.created`, `checkout.session.completed`
 
 ## Security
 

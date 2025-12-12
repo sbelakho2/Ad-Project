@@ -126,6 +126,28 @@ let config = SDKConfig(
 MediationSDK.shared.initialize(appId: "YOUR_APP_ID", configuration: config)
 ```
 
+## SDK API Keys
+
+Your app requires an SDK API key to authenticate with Apex auction/RTB services.
+
+1. Log in to the [Console](https://console.apexmediation.ee)
+2. Navigate to **Settings → SDK Keys** (or **Apps → Your App → Keys**)
+3. Create a key for your app, choosing:
+   - **Test mode** (`sk_test_...`) for development/staging
+   - **Live mode** (`sk_live_...`) for production
+4. Copy the secret immediately (it's only shown once)
+5. Set the key in your app before making ad requests
+
+```swift
+// In your AppDelegate or before first ad load
+BelAds.setApiKey("sk_live_xxxx...")  // Use sk_test_ for development
+```
+
+Store keys securely:
+- Use build configuration or encrypted keychain storage
+- Never commit keys to source control
+- Rotate keys periodically via Console
+
 ## SKAdNetwork
 
 Ensure your `Info.plist` includes the SKAdNetwork IDs for all your ad partners to track conversions.

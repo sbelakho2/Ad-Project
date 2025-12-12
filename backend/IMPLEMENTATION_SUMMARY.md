@@ -1,12 +1,84 @@
 # ApexMediation Backend - Implementation Summary
 
-_Last updated: 2025-11-18_
+_Last updated: 2025-12-12_
 
 > **FIX-10 governance:** This document highlights completed backend features but is not a production-readiness claim. For the current deployment state, see `docs/Internal/Deployment/PROJECT_STATUS.md`. For prioritized backlog, see `docs/Internal/Development/FIXES.md` (FIX-01 covers backend issues).
 
 ## Completed Features
 
 All major backend implementation tasks have been completed successfully.
+
+### 🆕 Per-App SDK Key Authentication
+**Status:** ✅ Completed (2025-12-12)  
+**Files:**
+- `src/routes/keys.routes.ts` - Publisher-level API key management
+- `src/routes/apps.routes.ts` - Per-app key endpoints
+- `src/controllers/apiKeys.controller.ts` - Publisher key operations
+- `src/controllers/appKeys.controller.ts` - App-scoped key operations
+- `src/repositories/appApiKeyRepository.ts` - Database layer
+- `src/middleware/appApiKeyAuth.ts` - SDK key authentication middleware
+- `database/migrations/XXX_app_api_keys.sql`
+
+**Features:**
+- Per-app SDK keys (separate from publisher API keys)
+- Test (`sk_test_`) and live (`sk_live_`) key prefixes
+- Production vs staging environment scoping
+- Key rotation with automatic old key revocation
+- Secure storage (bcrypt hash + SHA-256 digest for lookup)
+- Rate-limited key management endpoints
+- Go services integration (RTB/auction endpoints)
+
+**API Endpoints:**
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/keys` | List publisher API keys |
+| `POST` | `/api/v1/keys` | Create publisher API key |
+| `POST` | `/api/v1/keys/:id/rotate` | Rotate publisher key |
+| `DELETE` | `/api/v1/keys/:id` | Revoke publisher key |
+| `GET` | `/api/v1/apps/:appId/keys` | List app SDK keys |
+| `POST` | `/api/v1/apps/:appId/keys` | Create app SDK key |
+| `POST` | `/api/v1/apps/:appId/keys/:id/rotate` | Rotate app key |
+| `DELETE` | `/api/v1/apps/:appId/keys/:id` | Revoke app key |
+
+**RTB/Auction Integration:**
+- RTB endpoints (`/api/v1/rtb/*`) use `appApiKeyAuth` middleware
+- SDK key validates app ownership and environment
+- Exempted from CSRF protection for SDK calls
+
+---
+
+### 🆕 Stripe Webhook Integration
+**Status:** ✅ Completed (2025-12-12)  
+**Files:**
+- `src/index.ts` - Raw body parsing middleware for webhooks
+- `src/routes/webhooks.routes.ts` - Webhook endpoint
+- `src/controllers/stripe.webhook.controller.ts` - Event handlers
+
+**Features:**
+- Stripe signature verification with raw body buffer
+- Support for 12+ event types (invoice.paid, customer.subscription.created, etc.)
+- Automatic subscription sync on payment events
+- Idempotent event processing
+
+**Technical Note:**
+```typescript
+// Stripe webhooks require raw body for signature verification
+// Added BEFORE express.json() middleware in src/index.ts
+app.use('/api/v1/webhooks/stripe', express.raw({ type: 'application/json' }));
+```
+
+---
+
+### 🆕 VRA Reconciliation Endpoints
+**Status:** ✅ Enabled (2025-12-12)  
+**Endpoints:**
+- `GET /api/v1/recon/overview` - Reconciliation summary (variance %, coverage %)
+- `GET /api/v1/recon/deltas` - Discrepancy details (JSON/CSV export)
+- `POST /api/v1/recon/build-expected` - Build expected revenue from network statements
+
+**Documentation:** See `VRA.md` for full technical sheet.
+
+---
 
 ### 1. ✅ Export Data Persistence
 **Status:** Completed  

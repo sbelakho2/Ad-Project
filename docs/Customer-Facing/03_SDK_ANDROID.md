@@ -97,8 +97,32 @@ BelAds.setLogLevel(LogLevel.VERBOSE)
 // Toggle test mode (e.g., via a hidden debug menu)
 BelAds.setTestMode(true)
 
-// Set Auction API Key (for Enterprise/Hybrid clients)
-BelAds.setAuctionApiKey("YOUR_KEY")
+// Set SDK API Key (required for RTB/auction endpoints)
+// Generate keys in Console → Settings → SDK Keys
+BelAds.setApiKey("sk_live_xxxx...")  // Use sk_test_ for development
+```
+
+## SDK API Keys
+
+Your app requires an SDK API key to authenticate with Apex auction/RTB services.
+
+1. Log in to the [Console](https://console.apexmediation.ee)
+2. Navigate to **Settings → SDK Keys** (or **Apps → Your App → Keys**)
+3. Create a key for your app, choosing:
+   - **Test mode** (`sk_test_...`) for development/staging
+   - **Live mode** (`sk_live_...`) for production
+4. Copy the secret immediately (it's only shown once)
+5. Set the key in your app before making ad requests
+
+```kotlin
+// In your Application.onCreate() or before first ad load
+BelAds.setApiKey(BuildConfig.APEX_SDK_KEY)
+```
+
+Store keys securely:
+- Use BuildConfig fields or encrypted preferences
+- Never commit keys to source control
+- Rotate keys periodically via Console
 ```
 
 ## ProGuard / R8

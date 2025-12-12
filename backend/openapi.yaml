@@ -564,6 +564,199 @@ paths:
                 $ref: '#/components/schemas/MigrationAssignmentResponse'
         '400':
           description: Invalid payload
+
+  # ==========================================
+  # SDK API Keys (Added 2025-12-12)
+  # ==========================================
+  /keys:
+    get:
+      summary: List publisher API keys
+      description: Returns all API keys for the authenticated publisher. Secrets are not returned; only prefix and last4 digits.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyListResponse'
+        '401':
+          description: Unauthorized
+    post:
+      summary: Create a new publisher API key
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                live:
+                  type: boolean
+                  description: If true, creates sk_live_ key; otherwise sk_test_
+      responses:
+        '201':
+          description: API key created. Secret is returned only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreateResponse'
+        '401':
+          description: Unauthorized
+
+  /keys/{id}/rotate:
+    post:
+      summary: Rotate an API key
+      description: Revokes the old key and creates a new one with the same mode (live/test).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: New API key created. Secret is returned only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreateResponse'
+        '404':
+          description: Key not found
+
+  /keys/{id}:
+    delete:
+      summary: Revoke an API key
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Key not found
+
+  /apps/{appId}/keys:
+    get:
+      summary: List SDK keys for an app
+      description: Returns all SDK keys for a specific app. Secrets are not returned.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: appId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of app SDK keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppKeyListResponse'
+        '401':
+          description: Unauthorized
+        '404':
+          description: App not found
+    post:
+      summary: Create a new SDK key for an app
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: appId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                live:
+                  type: boolean
+                  description: If true, creates sk_live_ key; otherwise sk_test_
+                environment:
+                  type: string
+                  enum: [production, staging]
+                  description: Target environment for the key
+      responses:
+        '201':
+          description: SDK key created. Secret is returned only once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppKeyCreateResponse'
+        '401':
+          description: Unauthorized
+        '404':
+          description: App not found
+
+  /apps/{appId}/keys/{id}/rotate:
+    post:
+      summary: Rotate an app SDK key
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: appId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: New SDK key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppKeyCreateResponse'
+        '404':
+          description: Key or app not found
+
+  /apps/{appId}/keys/{id}:
+    delete:
+      summary: Revoke an app SDK key
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: appId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Key revoked
+        '404':
+          description: Key or app not found
+
 components:
   securitySchemes:
     bearerAuth:
@@ -590,6 +783,123 @@ components:
                   type: string
                 publisherId:
                   type: string
+
+    # SDK API Key Schemas (Added 2025-12-12)
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        prefix:
+          type: string
+          enum: [sk_live, sk_test]
+        last4:
+          type: string
+          description: Last 4 characters of the key
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApiKeyListResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            keys:
+              type: array
+              items:
+                $ref: '#/components/schemas/ApiKey'
+
+    ApiKeyCreateResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            secret:
+              type: string
+              description: The full secret key (only returned once at creation)
+            prefix:
+              type: string
+            last4:
+              type: string
+
+    AppKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        appId:
+          type: string
+          format: uuid
+        prefix:
+          type: string
+          enum: [sk_live, sk_test]
+        last4:
+          type: string
+        environment:
+          type: string
+          enum: [production, staging]
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AppKeyListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            keys:
+              type: array
+              items:
+                $ref: '#/components/schemas/AppKey'
+
+    AppKeyCreateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            secret:
+              type: string
+              description: The full secret key (only returned once at creation)
+            prefix:
+              type: string
+            last4:
+              type: string
+            environment:
+              type: string
+
     RevenueSummary:
       type: object
       properties:

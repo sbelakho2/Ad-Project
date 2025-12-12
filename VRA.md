@@ -49,6 +49,8 @@ Isolation: New schemas and endpoints; no edits to existing tables/APIs.
 
 Feature flag: vra.enabled (default OFF); vra.shadow_only=true (no operational side-effects).
 
+**Production Status (2025-12-12):** VRA endpoints enabled on production droplet (164.90.232.151). Multi-day soak test running to verify reconciliation stability. See `docs/Internal/Deployment/WAYS_FORWARD_2025-12-12.md` for deployment evidence.
+
 Dashboards and Alerts
 - Grafana dashboards (sample JSON shipped):
   - monitoring/grafana/dashboards/vra-overview.json — high-level coverage, byNetwork cards.

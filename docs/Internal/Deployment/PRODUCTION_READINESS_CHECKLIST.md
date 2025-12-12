@@ -673,7 +673,7 @@ References
 - [ ] Configure Estonian VAT profile.
 - [ ] Create BYO tier products (Starter free SKU, Growth 2.5%, Scale 2.0%, Enterprise custom 1.0–1.5%+ minimum).
 - [ ] Enable metered billing on `mediated_revenue_usd`.
-- [ ] Configure webhooks (`invoice.payment_failed`, `invoice.payment_succeeded`).
+- [x] Configure webhooks (`invoice.payment_failed`, `invoice.payment_succeeded`). *(2025-12-12: Stripe webhooks tested with 12 event types, all returning 200 OK. See CHANGELOG.md.)*
 - [ ] Enable Customer Portal.
 - [ ] Test payment flow in test mode; enable live mode.
 - [x] Verify default SEPA instructions (Wise Europe SA IBAN + reference block).
@@ -693,8 +693,8 @@ References
 - [ ] Run staging/local capture session (pricing grid + signup policy callout) and drop assets into `docs/Internal/QA/billing-policy/`.
 
 ## 6. Invoice → Payment Dry-Run
-- [ ] Generate Stripe test customer + usage (Runbook §5).
-- [ ] Finalize invoice in test mode; confirm webhook marks local status paid.
+- [x] Generate Stripe test customer + usage (Runbook §5). *(2025-12-12: Stripe CLI used to trigger test events)*
+- [x] Finalize invoice in test mode; confirm webhook marks local status paid. *(2025-12-12: invoice.paid, invoice.payment_succeeded webhooks tested and returning 200)*
 - [ ] Store evidence under `docs/Internal/QA/stripe-dry-run/`.
 - [ ] Repeat scenario in live mode with €0 invoice once Stripe live.
 

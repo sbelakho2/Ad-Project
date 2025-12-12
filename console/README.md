@@ -1,6 +1,6 @@
 # Ad Platform Console
 
-_Last updated: 2025-11-18_
+_Last updated: 2025-12-12_
 
 > **FIX-10 governance:** This README describes console features and architecture. For actual deployment readiness, see `docs/Internal/Deployment/PROJECT_STATUS.md`. For prioritized backlog (including console work), see `docs/Internal/Development/FIXES.md` (FIX-03).
 
@@ -27,6 +27,14 @@ Modern Next.js 14 web application providing publishers with a comprehensive dash
 - Live revenue, impression, and fill-rate widgets backed by backend `/api/v1` data via TanStack Query
 - Time-series charts with locale-aware formatting and CSV export helpers
 - Fraud & payout widgets sharing normalized status badges and CTA links
+
+### SDK Keys Management (NEW - 2025-12-12)
+- Per-app SDK key generation and management at `/settings/keys`
+- Test (`sk_test_`) and live (`sk_live_`) key modes
+- Key rotation with secure one-time secret display
+- Key revocation with confirmation modal
+- Copy-to-clipboard with toast notifications
+- Integration with Go RTB services for SDK authentication
 
 ### Placement & Adapter Management
 - Infinite-scroll placement list with client-side filters/search

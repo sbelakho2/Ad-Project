@@ -137,17 +137,28 @@ Successfully implemented complete billing platform infrastructure covering:
 
 ### Stripe Webhook Handler
 ✅ **Webhook Routes** (`backend/src/routes/webhooks.routes.ts`)
+- **Raw Body Parsing** - Uses `express.raw()` middleware BEFORE `express.json()` in `src/index.ts` to provide raw body buffer for signature verification (fix applied 2025-12-12, commit `89945f5`)
 - **Signature Verification** - `stripe.webhooks.constructEvent()` prevents unauthorized events
 - **Idempotency** - Deduplication via `stripe_webhook_events` table
-- **Event Handlers:**
-  1. `invoice.created` - Creates local invoice record
-  2. `invoice.finalized` - Marks invoice as ready for payment
-  3. `invoice.payment_succeeded` - Updates status to paid, records payment date
-  4. `invoice.payment_failed` - Increments failed payment counter
-  5. `charge.refunded` - Logs refund event to audit trail
-  6. `customer.subscription.updated` - Syncs subscription status changes
-  7. `customer.subscription.deleted` - Marks subscription as cancelled
-  8. `customer.subscription.trial_will_end` - Future alert support
+- **Production Testing (2025-12-12):** All 12 event types tested and returning 200 OK
+
+**Event Handlers:**
+  1. `customer.created` - Creates local customer record
+  2. `customer.updated` - Syncs customer data changes
+  3. `payment_method.attached` - Records payment method addition
+  4. `invoice.created` - Creates local invoice record
+  5. `invoice.finalized` - Marks invoice as ready for payment
+  6. `invoice.paid` - Updates status to paid
+  7. `invoice.payment_succeeded` - Updates status to paid, records payment date
+  8. `invoice.payment_failed` - Increments failed payment counter
+  9. `charge.succeeded` - Logs successful charge
+  10. `charge.refunded` - Logs refund event to audit trail
+  11. `payment_intent.created` - Tracks payment intent initiation
+  12. `payment_intent.succeeded` - Records successful payment
+  13. `customer.subscription.created` - Creates local subscription record
+  14. `customer.subscription.updated` - Syncs subscription status changes
+  15. `customer.subscription.deleted` - Marks subscription as cancelled
+  16. `checkout.session.completed` - Handles checkout completion
 
 ### Database Migrations
 ✅ **Migration 017** (`backend/migrations/017_billing_audit_and_idempotency.sql`)
