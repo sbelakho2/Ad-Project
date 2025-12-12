@@ -23,16 +23,30 @@ log() {
 NETWORKS=("admob" "unity" "applovin" "ironsource" "vungle")
 PLACEMENTS=("banner_home" "interstitial_levelup" "rewarded_bonus" "native_feed" "mrec_sidebar")
 DEVICES=("phone" "tablet")
-OS_LIST=("iOS" "Android")
+OS_LIST=("ios" "android")
 
 random_element() {
   local arr=("$@")
   echo "${arr[$RANDOM % ${#arr[@]}]}"
 }
 
+random_uuid() {
+  # Generate a valid UUID v4
+  printf '%04x%04x-%04x-%04x-%04x-%04x%04x%04x\n' \
+    $RANDOM $RANDOM $RANDOM \
+    $(($RANDOM & 0x0fff | 0x4000)) \
+    $(($RANDOM & 0x3fff | 0x8000)) \
+    $RANDOM $RANDOM $RANDOM
+}
+
 random_revenue() {
   # Random revenue between $0.001 and $0.10
   echo "0.0$(printf '%02d' $((RANDOM % 100 + 1)))"
+}
+
+random_latency() {
+  # Random latency between 50 and 500ms
+  echo "$((RANDOM % 450 + 50))"
 }
 
 generate_impression_batch() {
@@ -44,19 +58,42 @@ generate_impression_batch() {
     local placement=$(random_element "${PLACEMENTS[@]}")
     local device=$(random_element "${DEVICES[@]}")
     local os=$(random_element "${OS_LIST[@]}")
-    local impression_id="imp_$(date +%s%N)_${RANDOM}"
+    local event_id=$(random_uuid)
+    local app_id=$(random_uuid)
+    local placement_uuid=$(random_uuid)
+    local adapter_uuid=$(random_uuid)
+    local session_id=$(random_uuid)
+    local request_id=$(random_uuid)
+    local user_id="user_${RANDOM}"
     local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local ecpm=$(random_revenue)
+    local bid=$(random_revenue)
+    local latency=$(random_latency)
     
     if [[ $i -gt 0 ]]; then events+=","; fi
     events+="{
-      \"impressionId\": \"$impression_id\",
-      \"placementId\": \"$placement\",
-      \"networkId\": \"$network\",
-      \"deviceType\": \"$device\",
+      \"event_id\": \"$event_id\",
+      \"publisher_id\": \"efbb0394-23eb-4b80-a4d6-9a0e60ef1b56\",
+      \"app_id\": \"$app_id\",
+      \"placement_id\": \"$placement_uuid\",
+      \"adapter_id\": \"$adapter_uuid\",
+      \"adapter_name\": \"$network\",
+      \"ad_unit_id\": \"ca-app-pub-test/$network\",
+      \"ad_format\": \"banner\",
+      \"country_code\": \"US\",
+      \"device_type\": \"$device\",
       \"os\": \"$os\",
-      \"timestamp\": \"$timestamp\",
-      \"adType\": \"banner\",
-      \"country\": \"US\"
+      \"os_version\": \"17.0\",
+      \"app_version\": \"1.0.0\",
+      \"sdk_version\": \"1.0.0\",
+      \"session_id\": \"$session_id\",
+      \"user_id\": \"$user_id\",
+      \"request_id\": \"$request_id\",
+      \"bid_price_usd\": $bid,
+      \"ecpm_usd\": $ecpm,
+      \"latency_ms\": $latency,
+      \"is_test_mode\": true,
+      \"timestamp\": \"$timestamp\"
     }"
   done
   
@@ -71,19 +108,41 @@ generate_revenue_batch() {
   for ((i=0; i<batch_size; i++)); do
     local network=$(random_element "${NETWORKS[@]}")
     local placement=$(random_element "${PLACEMENTS[@]}")
+    local device=$(random_element "${DEVICES[@]}")
+    local os=$(random_element "${OS_LIST[@]}")
     local revenue=$(random_revenue)
-    local impression_id="imp_$(date +%s%N)_${RANDOM}"
+    local event_id=$(random_uuid)
+    local app_id=$(random_uuid)
+    local placement_uuid=$(random_uuid)
+    local adapter_uuid=$(random_uuid)
+    local session_id=$(random_uuid)
+    local request_id=$(random_uuid)
+    local user_id="user_${RANDOM}"
     local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     
     if [[ $i -gt 0 ]]; then events+=","; fi
     events+="{
-      \"impressionId\": \"$impression_id\",
-      \"placementId\": \"$placement\",
-      \"networkId\": \"$network\",
-      \"revenue\": $revenue,
-      \"currency\": \"USD\",
-      \"timestamp\": \"$timestamp\",
-      \"revenueType\": \"impression\"
+      \"event_id\": \"$event_id\",
+      \"publisher_id\": \"efbb0394-23eb-4b80-a4d6-9a0e60ef1b56\",
+      \"app_id\": \"$app_id\",
+      \"placement_id\": \"$placement_uuid\",
+      \"adapter_id\": \"$adapter_uuid\",
+      \"adapter_name\": \"$network\",
+      \"ad_unit_id\": \"ca-app-pub-test/$network\",
+      \"ad_format\": \"banner\",
+      \"country_code\": \"US\",
+      \"device_type\": \"$device\",
+      \"os\": \"$os\",
+      \"os_version\": \"17.0\",
+      \"app_version\": \"1.0.0\",
+      \"sdk_version\": \"1.0.0\",
+      \"session_id\": \"$session_id\",
+      \"user_id\": \"$user_id\",
+      \"request_id\": \"$request_id\",
+      \"revenue_usd\": $revenue,
+      \"revenue_type\": \"impression\",
+      \"is_test_mode\": true,
+      \"timestamp\": \"$timestamp\"
     }"
   done
   
