@@ -58,7 +58,8 @@ const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: FileSearch },
   { key: 'tool-mediation-debugger', label: 'Mediation Debugger', href: '/tools/mediation-debugger', icon: Bug },
   { key: 'settings', label: 'Settings', href: '/settings', icon: Settings },
-  { key: 'admin', label: 'Admin', href: '/admin/health', icon: Shield, roles: ['admin'] },
+  // NOTE: Admin panel is for OPERATORS ONLY (not customer admins)
+  // Operators access via /admin/login directly - no nav link exposed to customers
 ]
 
 const NAV_SKELETON_KEYS = ['nav-skeleton-1', 'nav-skeleton-2', 'nav-skeleton-3', 'nav-skeleton-4', 'nav-skeleton-5', 'nav-skeleton-6']

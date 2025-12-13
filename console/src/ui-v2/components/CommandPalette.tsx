@@ -15,7 +15,8 @@ const COMMANDS: Command[] = [
   { id: 'billing', label: 'Open Billing → Usage', href: '/billing/usage', keywords: ['invoices', 'usage', 'payments'] },
   { id: 'transparency', label: 'Open Transparency → Auctions', href: '/transparency/auctions', keywords: ['receipts', 'hash', 'signature'] },
   { id: 'settings', label: 'Open Settings', href: '/settings', keywords: ['preferences', 'account'] },
-  { id: 'admin', label: 'Open Admin → Health', href: '/admin/health', keywords: ['ops', 'health', 'status'] },
+  // Admin panel removed - operator cockpit is not for customers
+  // Operators access directly via /admin/login
 ]
 
 function match(q: string, cmd: Command): boolean {

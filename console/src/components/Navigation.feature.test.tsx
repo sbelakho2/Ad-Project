@@ -87,7 +87,9 @@ describe('Navigation feature flags', () => {
     expect(screen.queryByRole('link', { name: /Billing/i })).not.toBeInTheDocument()
   })
 
-  it('renders admin link only for admin role', () => {
+  it('does not render admin link for any customer role (operator-only)', () => {
+    // Admin link is removed - operator cockpit is not for customers
+    // Test that admin link is NOT shown for customer admin role
     mockUseSession.mockReturnValue({
       user: { email: 'publisher@example.com', role: 'publisher' },
       isLoading: false,
@@ -95,12 +97,14 @@ describe('Navigation feature flags', () => {
     renderNavigation()
     expect(screen.queryByRole('link', { name: /Admin/i })).not.toBeInTheDocument()
 
+    // Customer admin role should also NOT see admin link
     mockUseSession.mockReturnValue({
       user: { email: 'admin@example.com', role: 'admin' },
       isLoading: false,
     })
     renderNavigation()
 
-    expect(screen.getByRole('link', { name: /Admin/i })).toBeInTheDocument()
+    // Admin panel is for OPERATORS only - not shown in customer navigation
+    expect(screen.queryByRole('link', { name: /Admin/i })).not.toBeInTheDocument()
   })
 })

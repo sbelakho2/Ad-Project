@@ -26,10 +26,10 @@ const getRevealProps = (delay = 0) => ({
 });
 
 const byoKeyPoints = [
-  'You own all ad network accounts, contracts and payouts.',
-  'ApexMediation never arbitrages or resells your demand.',
-  'Our adapters and S2S integrations are built to be network-agnostic.',
-  'You can swap networks in and out without touching our commercial terms.',
+  'Keep all your ad network accounts, contracts, and 100% of payouts.',
+  'We optimize how your networks compete—we never resell your demand.',
+  'Works with all major networks: AdMob, AppLovin, Unity, Meta, and more.',
+  'Add or remove networks anytime without touching your ApexMediation setup.',
 ];
 
 const transparencySubsections = [
@@ -115,16 +115,16 @@ export default function ProductPage() {
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
               <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
-                One mediation layer. Your networks. Your rules.
+                Smart mediation that maximizes your revenue.
               </h1>
               <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto">
-                ApexMediation is the neutral orchestration layer between your apps and your ad networks, with SDKs tuned for reliability and a console built for serious teams.
+                ApexMediation optimizes every ad request with ML-powered waterfalls, reliable SDKs, and real-time analytics—while you keep full control of your ad network relationships.
               </p>
             </motion.div>
           </div>
         </section>
 
-        {/* BYO Model */}
+        {/* Your Networks, Your Revenue */}
         <section className="py-20 bg-gray-50">
           <div className="container mx-auto px-4">
             <div className="max-w-4xl mx-auto">
@@ -132,11 +132,11 @@ export default function ProductPage() {
                 <div className="flex items-center gap-3 mb-4">
                   <Box className="w-8 h-8 text-brand-600" />
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-                    BYO: Bring Your Own demand and keep control.
+                    Your networks. Your revenue. Your control.
                   </h2>
                 </div>
                 <p className="text-lg text-gray-600 mb-8">
-                  Managed demand bundles networks and negotiations under one vendor. BYO mediation keeps you in charge of your ad relationships, while ApexMediation focuses on the infrastructure: auctions, SDKs, observability, and safety.
+                  Your existing contracts, accounts, and payouts stay exactly as they are. ApexMediation focuses on optimization and infrastructure—you keep full ownership of your demand.
                 </p>
                 <ul className="space-y-3">
                   {byoKeyPoints.map((point, index) => (

@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { authenticate, authorize } from '../middleware/auth';
+import { authenticate, authorize, operatorOnly } from '../middleware/auth';
 import { query } from '../utils/postgres';
 import { AppDataSource } from '../database';
 import { AdapterConfig } from '../database/entities/adapterConfig.entity';
@@ -10,8 +10,10 @@ import { redis } from '../utils/redis';
 
 const router = Router();
 
-// All admin routes require auth + admin role
-router.use(authenticate, authorize(['admin']));
+// All admin routes require authentication + OPERATOR-ONLY access
+// CRITICAL: Customer 'admin' role does NOT grant access to these routes
+// Operators are identified by email whitelist via OPERATOR_EMAILS env var
+router.use(authenticate, operatorOnly());
 
 /**
  * GET /api/v1/admin/billing/audit

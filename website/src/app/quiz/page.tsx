@@ -72,22 +72,22 @@ const RESULTS = [
   {
     minScore: 1,
     maxScore: 1.9,
-    label: 'BYO Fast Track',
-    summary: 'Great for teams spinning up monetisation. Use the BYO step-by-step integration guides and keep costs at zero until the marginal fee applies to live revenue.',
+    label: 'Starter Fast Track',
+    summary: 'Perfect for teams spinning up monetisation. Use our step-by-step integration guides and pay nothing until revenue flows—then just a simple marginal fee.',
     cta: { label: 'Read the integration checklist', href: '/documentation#integration-checklist' },
   },
   {
     minScore: 2,
     maxScore: 2.9,
-    label: 'BYO + Guidance',
-    summary: 'You are ready for the BYO control plane plus scheduled check-ins on fraud, experiments, and reconciliation. We will tailor onboarding workshops without changing the single pricing model.',
-    cta: { label: 'Review BYO pricing', href: '/pricing' },
+    label: 'Growth + Guidance',
+    summary: 'Ready to scale with scheduled check-ins on fraud prevention, A/B experiments, and revenue reconciliation. We tailor onboarding workshops to your team\'s needs.',
+    cta: { label: 'See pricing', href: '/pricing' },
   },
   {
     minScore: 3,
     maxScore: 4,
-    label: 'BYO Enterprise Track',
-    summary: 'You need automation, custom workflows, and contractual SLAs. The BYO control plane already supports these—let us map the marginal schedule to your approvals and configure tooling with you.',
+    label: 'Enterprise Track',
+    summary: 'You need automation, custom workflows, and contractual SLAs. Our platform supports all of this—let us map the fee schedule to your approval process and configure tooling with you.',
     cta: { label: 'Talk to our enterprise specialists', href: 'mailto:sales@apexmediation.ee' },
   },
 ];
@@ -197,7 +197,7 @@ export default function QuizPage() {
 
         <footer className="space-y-4 text-center text-sm text-white/80">
           <p>
-            Ready to put these insights into action? Explore our <Link href="/documentation" className="font-bold underline">documentation</Link> or review the <Link href="/pricing" className="font-bold underline">BYO pricing guide</Link>.
+            Ready to put these insights into action? Explore our <Link href="/documentation" className="font-bold underline">documentation</Link> or review the <Link href="/pricing" className="font-bold underline">pricing guide</Link>.
           </p>
         </footer>
       </div>

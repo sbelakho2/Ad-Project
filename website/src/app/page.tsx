@@ -30,48 +30,48 @@ const getRevealProps = (delay = 0) => ({
 const pillars = [
   {
     icon: Box,
-    title: 'Keep your deals. We handle the plumbing.',
+    title: 'Keep your ad network relationships.',
     description:
-      'You stay in control of every ad network account and every contract. ApexMediation sits on top as a neutral BYO orchestration layer—no revenue share with networks, no surprise fees, no hidden optimizations.',
+      'Your existing contracts, accounts, and payouts stay exactly as they are. ApexMediation optimizes how your networks compete—you keep 100% of what they pay you.',
   },
   {
     icon: Lock,
-    title: 'Every auction, cryptographically signed.',
+    title: 'See exactly what happened.',
     description:
-      'Auction decisions are logged with tamper-evident hashes, so you can verify that what ran in production matches what we report. No more "just trust the dashboard".',
+      'Every auction decision is logged and verifiable. When you need to reconcile with networks or understand a revenue change, you have the data—not just a dashboard.',
   },
   {
     icon: Zap,
-    title: 'SDKs built to stay out of your way.',
+    title: 'Reliable SDKs that just work.',
     description:
-      'All network I/O on background threads, strict main-thread guards, OTA-safe config rollouts, and kill-switches for misbehaving adapters. Designed for IL2CPP/Mono, Android, iOS, tvOS and Android TV.',
+      'Built for performance: background-only network calls, safe config updates, and automatic recovery from adapter issues. Supports Unity, Android, iOS, tvOS, and Android TV.',
   },
   {
     icon: GitBranch,
-    title: 'Switch without breaking your game.',
+    title: 'Migrate without disruption.',
     description:
-      'Our Migration Studio imports your existing mediation and placement setup, simulates waterfalls, and lets you cut over one placement at a time—with full rollback available.',
+      'Migration Studio imports your existing setup, lets you test before switching, and enables per-placement rollout with instant rollback if needed.',
   },
 ];
 
 const howItWorksSteps = [
   {
     step: 1,
-    title: 'Connect your networks (BYO)',
+    title: 'Connect your ad networks',
     description:
-      'You sign in to your existing ad network dashboards (AdMob, MAX, LevelPlay, Pangle, etc.) and add their credentials directly to your console. We never resell your demand; we only orchestrate.',
+      'Link your existing AdMob, AppLovin, Unity, Meta, and other ad network accounts. Your contracts and payouts stay exactly as they are.',
   },
   {
     step: 2,
-    title: 'Drop in the SDKs',
+    title: 'Add the SDK',
     description:
-      "Install the ApexMediation SDKs for Android, iOS, Unity, tvOS, Android TV or Web. SDKs are small, background-threaded, and ship with a Debug Panel so you can see exactly what they're doing.",
+      'Install the ApexMediation SDK for your platform (Android, iOS, Unity, tvOS, or Web). It\'s lightweight, background-threaded, and includes a debug panel.',
   },
   {
     step: 3,
-    title: 'Observe, optimize, and verify',
+    title: 'Watch revenue grow',
     description:
-      'Use the console to inspect waterfalls, see per-adapter latency & fill, run experiments, and export log-level auctions. Every auction has a cryptographic fingerprint, so you can reconcile with your BI stack.',
+      'Our ML optimizes your waterfall automatically. Monitor performance in real-time, run A/B tests, and export detailed analytics to your data tools.',
   },
 ];
 
@@ -85,21 +85,21 @@ const reliabilityBullets = [
 const audienceCards = [
   {
     icon: Users2,
-    title: 'Mid-sized studios',
+    title: 'Growing studios',
     description:
-      'You already run multiple ad networks and have real revenue to protect. ApexMediation gives you deeper visibility and a more robust core, without forcing you to re-negotiate your deals.',
+      'You\'re running multiple ad networks and want to maximize revenue without the complexity. ApexMediation gives you one dashboard, smart optimization, and zero disruption to your existing setup.',
   },
   {
     icon: Search,
-    title: 'UA-savvy teams',
+    title: 'Data-driven teams',
     description:
-      'You care about incrementality, A/B tests, and log-level exports. ApexMediation gives you clean, reconciled data and cryptographic guarantees that your waterfalls match what you see in your BI tools.',
+      'You need real analytics, not just dashboards. Get log-level exports, A/B testing, and verifiable data you can trust for reconciliation and BI.',
   },
   {
     icon: Key,
-    title: 'Infra-conscious founders',
+    title: 'Control-conscious publishers',
     description:
-      'You want to avoid lock-in and opaque "one vendor for everything" setups. BYO mediation lets you keep the benefits of multiple networks, but with the control and transparency of building it yourself.',
+      'You want the benefits of mediation without vendor lock-in. Keep your ad network relationships, export your data anytime, and switch providers if you ever need to.',
   },
 ];
 
@@ -112,28 +112,31 @@ function HeroSection() {
     <section className="relative py-20 md:py-32">
       <div className="container mx-auto px-4 text-center">
         <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
+          <p className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-50 text-brand-700 text-sm font-medium mb-6">
+            ✓ Free to start · No credit card required
+          </p>
           <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
-            BYO ad mediation with cryptographic transparency.
+            Ad mediation that maximizes your revenue—transparently.
           </h1>
           <p className="text-xl md:text-2xl text-gray-600 mb-8 max-w-3xl mx-auto">
-            ApexMediation lets you keep your existing ad network deals and SDKs—while we handle the hard parts: OTA-safe configs, ANR-minimal SDKs, and verifiable auction logs you can trust.
+            ApexMediation optimizes every ad request across your networks with ML-powered waterfalls, real-time analytics, and verifiable auction logs. Keep your existing ad network relationships—we handle the optimization.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-4">
             <a
               href="/signup"
               className="btn-primary px-8 py-4 text-lg font-semibold"
             >
-              Start BYO trial
+              Get started free
             </a>
             <a
               href="/contact"
               className="btn-secondary px-8 py-4 text-lg font-semibold"
             >
-              Talk with an engineer
+              Talk with our team
             </a>
           </div>
           <p className="text-sm text-gray-500">
-            For mid-sized mobile and CTV publishers who are done guessing what their mediation layer is doing.
+            Trusted by mobile and CTV publishers who want full visibility into their ad stack.
           </p>
         </motion.div>
       </div>
@@ -150,7 +153,7 @@ function PillarsSection() {
             Why publishers choose ApexMediation
           </p>
           <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-            BYO, not black box
+            Powerful mediation, full transparency
           </h2>
         </motion.div>
         <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
@@ -305,10 +308,10 @@ function PricingTeaserSection() {
       <div className="container mx-auto px-4 text-center">
         <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
           <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
-            Pay for platform value, not your ad revenue.
+            Simple, transparent pricing.
           </h2>
           <p className="text-lg text-gray-600 mb-8">
-            ApexMediation&apos;s BYO model means networks pay you directly. We charge a transparent platform fee based on usage, with a generous free tier so you can integrate, test, and ship before committing.
+            Start free with up to $10k/month in mediated revenue per app. As you grow, pay a small platform fee—your ad network payouts stay 100% yours.
           </p>
           <a href="/pricing" className="btn-primary px-8 py-4 text-lg font-semibold">
             View pricing
@@ -325,23 +328,23 @@ function FinalCTASection() {
       <div className="container mx-auto px-4 text-center">
         <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
           <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
-            Ready to stop guessing what your mediation layer is doing?
+            Ready to maximize your ad revenue?
           </h2>
           <p className="text-lg text-brand-100 mb-8">
-            Join the early access cohort of studios using ApexMediation to make their ad stack verifiable, resilient and BYO-friendly.
+            Join studios already using ApexMediation to optimize fill rates, increase eCPM, and get full transparency into their ad stack.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <a
               href="/signup"
               className="bg-white text-brand-600 px-8 py-4 rounded-lg text-lg font-semibold hover:bg-brand-50 transition-colors"
             >
-              Start BYO trial
+              Get started free
             </a>
             <a
               href="/contact"
               className="border-2 border-white text-white px-8 py-4 rounded-lg text-lg font-semibold hover:bg-brand-500 transition-colors"
             >
-              Book a technical walkthrough
+              Schedule a demo
             </a>
           </div>
         </motion.div>

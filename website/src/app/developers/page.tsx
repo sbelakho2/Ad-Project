@@ -151,7 +151,7 @@ export default function DevelopersPage() {
                 SDKs built for ad teams who ship.
               </h1>
               <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto mb-8">
-                Integrate once. Bring your own networks. Keep full control.
+                Integrate once. Your networks, your revenue, your control.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a

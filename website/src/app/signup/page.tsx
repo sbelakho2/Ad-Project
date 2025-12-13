@@ -103,7 +103,7 @@ export default function SignUpPage() {
       <div className="max-w-md w-full space-y-8 bg-white p-10 rounded-xl shadow-md">
         <div>
           <h2 className="mt-6 text-center text-h2-sm font-semibold text-gray-900 tracking-tight">
-            Create your account
+            Start maximizing your ad revenue
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
             Already have an account?{' '}
@@ -114,11 +114,11 @@ export default function SignUpPage() {
         </div>
 
         <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 space-y-2" role="note">
-          <p className="font-semibold text-gray-900">Stripe-first billing policy snapshot</p>
+          <p className="font-semibold text-gray-900">What you get</p>
           <ul className="list-disc space-y-1 pl-5">
-            <li>Starter stays 0% up to $10k per app per month—no card or bank needed until you upgrade.</li>
-            <li>When you opt into Growth or cross the cap, invoices auto-charge via Stripe (cards, ACH in the US, SEPA in the EU) the moment they finalize.</li>
-            <li>Enterprise teams can request invoice + wire after finance review, but autopay remains the default to keep mediation running.</li>
+            <li>Free up to $10k/month mediated revenue per app—no credit card required.</li>
+            <li>All SDKs, dashboard access, and real-time analytics included.</li>
+            <li>Upgrade anytime with simple, transparent pricing.</li>
           </ul>
         </div>
 
@@ -253,11 +253,11 @@ export default function SignUpPage() {
               disabled={!canSubmit}
               className="btn-primary w-full py-3 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Creating account...' : 'Create account →'}
+              {loading ? 'Creating account...' : 'Get started free'}
             </button>
           </div>
 
-          <p className="text-xs text-center text-gray-500">We don’t collect payment details on this site. Add a payment method in Stripe when you upgrade.</p>
+          <p className="text-xs text-center text-gray-500">No credit card required. You keep 100% of your ad network payouts.</p>
         </form>
       </div>
     </div>

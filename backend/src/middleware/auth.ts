@@ -82,3 +82,43 @@ export const authorize = (roles: Array<'admin' | 'publisher' | 'readonly'>) => {
     next();
   };
 };
+
+/**
+ * OPERATOR-ONLY authorization middleware
+ * 
+ * This middleware restricts access to system operators only (not customer admins).
+ * Operators are identified by email whitelist via OPERATOR_EMAILS environment variable.
+ * 
+ * CRITICAL: Customer roles (including 'admin') do NOT grant operator access.
+ * The operator panel exposes company-privileged data and system controls.
+ */
+export const operatorOnly = () => {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const userEmail = req.user?.email?.toLowerCase();
+    
+    // Get operator emails from environment
+    const operatorEmails = (process.env.OPERATOR_EMAILS || '')
+      .split(',')
+      .map(email => email.trim().toLowerCase())
+      .filter(Boolean);
+    
+    // Fail-secure: if no operator emails configured, deny all access
+    if (operatorEmails.length === 0) {
+      logger.warn('OPERATOR_EMAILS not configured - denying admin access', { email: userEmail });
+      return next(new AppError('Operator access not configured', 403));
+    }
+    
+    // Check if user's email is in the operator whitelist
+    if (!userEmail || !operatorEmails.includes(userEmail)) {
+      logger.warn('Non-operator attempted admin access', { 
+        email: userEmail, 
+        ip: req.ip,
+        path: req.path 
+      });
+      return next(new AppError('Operator access required', 403));
+    }
+    
+    logger.info('Operator access granted', { email: userEmail, path: req.path });
+    next();
+  };
+};

@@ -55,22 +55,22 @@ export function AppShellV2({ children }: { children: ReactNode }) {
     [featureFallbacks, features]
   )
 
-  const isAdmin = (user?.role as string | undefined) === 'admin'
+  // NOTE: Admin panel is for OPERATORS ONLY - not exposed in customer navigation
+  // Operators access directly via /admin/login
 
   const navLinks = useMemo(() => {
-    const items: { href: string; label: string; feature?: keyof typeof resolved; roles?: ('admin')[] }[] = [
+    const items: { href: string; label: string; feature?: keyof typeof resolved }[] = [
       { href: '/dashboard', label: 'Dashboard' },
       { href: '/billing/usage', label: 'Billing', feature: 'billing' as any },
       { href: '/transparency/auctions', label: 'Transparency', feature: 'transparency' as any },
       { href: '/settings', label: 'Settings' },
-      { href: '/admin/health', label: 'Admin', roles: ['admin'] },
+      // Admin link removed - operator cockpit is not for customers
     ]
     return items.filter((it) => {
-      if (it.roles && !isAdmin) return false
       if (it.feature && !resolved[it.feature]) return false
       return true
     })
-  }, [isAdmin, resolved])
+  }, [resolved])
 
   return (
     <ToastProvider>
