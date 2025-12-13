@@ -1,3 +1,184 @@
+# Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
+
+## ✅ Infrastructure Validation Complete (2025-12-13 11:32 UTC)
+
+**Status:** All core infrastructure verified working and production-ready.
+
+### Infrastructure Health
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| Backend API | ✅ Healthy | Port 8080, PostgreSQL/Redis/Queues UP |
+| Console Frontend | ✅ Running | Port 3000, HTTP 200 |
+| Prometheus | ✅ Ready | Port 9090, 7/7 targets UP |
+| Grafana | ✅ Running | Port 3001 |
+| PostgreSQL | ✅ Running | 139+ tables on DB server |
+| Redis | ✅ Running | System service on port 6379 |
+
+### API Endpoints Verified
+
+| Endpoint | Status |
+|----------|--------|
+| `POST /api/v1/auth/register` | ✅ Working |
+| `POST /api/v1/keys` | ✅ Working |
+| `POST /api/v1/apps/:appId/keys` | ✅ Working |
+| `POST /api/v1/rtb/bid` | ✅ Working (Returns $2.05 CPM bid from AppLovin) |
+| `GET /api/v1/dashboard/overview` | ✅ Working |
+| `GET /api/v1/analytics/overview` | ✅ Working |
+
+### Database Schema Fixes Applied
+
+- Created `api_keys` table for user-scoped API keys
+- Created `app_api_keys` table for SDK/app-scoped API keys
+- Added missing columns to `users` table (firstName, lastName, createdAt, updatedAt, passwordHash)
+- Created `api_key_usages`, `skan_postbacks`, `audit_twofa` tables
+
+### Evidence
+
+See [evidence-2025-12-13/infrastructure-validation-report.md](evidence-2025-12-13/infrastructure-validation-report.md)
+
+---
+
+
+## � Documentation Consolidation (2025-01-06)
+
+**Status:** All documentation updated to reflect Hetzner production deployment.
+
+### Files Updated
+
+| Document | Changes |
+|----------|---------|
+| `docs/Monitoring/MONITORING_INFRASTRUCTURE.md` | Added cross-references to related docs |
+| `docs/Architecture/HETZNER_POSTGRES_DESIGN.md` | Fixed server IPs (App: 46.62.252.96, DB: 77.42.44.35), added monitoring stack, updated status to "Deployed" |
+| `docs/Internal/Infrastructure/production-deployment.md` | Added Hetzner section at top, updated as primary production |
+| `docs/Internal/Monitoring/GRAFANA_DASHBOARDS.md` | Added deprecation notice pointing to new authoritative doc, updated branding from "Rival" to "ApexMediation" |
+| `docs/Internal/Monitoring/ALERTS.md` | Added deprecation notice, added Hetzner production alert section, updated branding |
+| `docs/runbooks/ROLLBACK.md` | Updated all IPs from DigitalOcean (164.90.232.151) to Hetzner (46.62.252.96), added monitoring checks |
+
+### Branding Updates
+
+- Changed "Rival ad platform" → "ApexMediation platform" throughout
+- Updated production URLs from `grafana.rival.com` → `46.62.252.96:3001`
+- Updated SSH credentials from DO deploy user → Hetzner root
+
+### Cross-References Added
+
+All monitoring/infrastructure docs now cross-reference each other:
+- `MONITORING_INFRASTRUCTURE.md` ↔ `HETZNER_POSTGRES_DESIGN.md`
+- `MONITORING_INFRASTRUCTURE.md` ↔ `ROLLBACK.md`
+- `GRAFANA_DASHBOARDS.md` → `MONITORING_INFRASTRUCTURE.md` (deprecation pointer)
+- `ALERTS.md` → `MONITORING_INFRASTRUCTURE.md` (deprecation pointer)
+- `production-deployment.md` → `HETZNER_POSTGRES_DESIGN.md`
+
+---
+
+## �📊 Complete Monitoring Stack Deployment (2025-12-13)
+
+**Status:** Full GDPR-compliant monitoring stack deployed to Hetzner production infrastructure.
+
+### Access URLs
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| **Grafana** | http://46.62.252.96:3001 | `admin` / `ApexGrafana2025!` |
+| **Prometheus** | http://46.62.252.96:9090 | No auth (internal) |
+| **Alertmanager** | http://46.62.252.96:9093 | No auth (internal) |
+
+### Prometheus Scrape Targets (All Healthy ✅)
+
+| Target | Endpoint | Status |
+|--------|----------|--------|
+| `backend-api` | adproject-backend-1:8080/metrics | ✅ UP |
+| `billing` | adproject-backend-1:8080/metrics | ✅ UP |
+| `rtb-auction` | adproject-backend-1:8080/metrics | ✅ UP |
+| `postgres` | postgres-exporter:9187/metrics | ✅ UP |
+| `node-app-server` | node-exporter:9100/metrics | ✅ UP |
+| `cadvisor` | cadvisor:8080/metrics | ✅ UP |
+| `prometheus` | localhost:9090/metrics | ✅ UP |
+
+### 4 Grafana Dashboards Created
+
+1. **Executive Overview** (`apex-executive-overview`) — Platform health, KPIs, business metrics
+2. **RTB Analytics** (`apex-rtb-analytics`) — Fill rates, eCPM, adapter performance, revenue by geo
+3. **Billing & Finance** (`apex-billing-finance`) — MRR/ARR, churn rate, payment processing
+4. **Database Performance** (`apex-database`) — Connections, table sizes, index usage, locks
+
+### Alert Rules Deployed
+
+- **Backend Alerts:** Error rate >5%, latency >500ms, API down, memory usage
+- **Database Alerts:** Connection pool >90%, replication lag, table bloat, long queries
+- **Billing Alerts:** Payment failures >10%, webhook failures, MRR drops
+- **Infrastructure Alerts:** Disk >85%, memory >90%, CPU >80%, SSL expiry
+
+### GDPR Compliance Measures
+
+- No PII in metrics (user IDs, emails, IPs explicitly dropped)
+- Query text not collected from PostgreSQL
+- 30-day retention with 10GB limit
+- Anonymized aggregate counts only
+
+### Backend Integration
+
+The backend is now connected to Prometheus via the `monitoring_monitoring` network:
+```yaml
+environment:
+  - PROMETHEUS_URL=http://prometheus:9090
+  - GRAFANA_URL=http://grafana:3000
+```
+
+Admin health endpoint `/api/v1/admin/health/red` now returns **real metrics**:
+```json
+{"api_rps_5m": 0.357, "api_error_rate_5m": 0, "api_p95_latency_5m": 0.024}
+```
+
+### Files Created
+
+```
+infrastructure/production/monitoring/
+├── docker-compose.monitoring.yml
+├── prometheus.yml
+├── alertmanager.yml
+├── recording-rules.yml
+├── postgres-exporter-queries.yml
+├── alerts/{backend,database,billing,infrastructure}.yml
+└── grafana/
+    ├── provisioning/datasources/datasources.yml
+    ├── provisioning/dashboards/dashboards.yml
+    └── dashboards/{executive-overview,rtb-analytics,billing-finance,database-performance}.json
+```
+
+---
+
+## ✅ Admin Console Tests Complete (2025-12-13)
+
+**Status:** All 27 admin panel tests passing.
+
+### Tests Created
+
+| Test File | Tests | Description |
+|-----------|-------|-------------|
+| `admin/health/__tests__/page.test.tsx` | 6 | Health dashboard rendering, metrics display |
+| `admin/sales-automation/__tests__/page.test.tsx` | 8 | Sales automation dashboard, KPIs |
+| `admin/audit/__tests__/page.test.tsx` | 7 | Audit log page, filtering, export |
+
+### Admin API Endpoints Verified (Hetzner)
+
+All endpoints return 200 with proper data:
+- `/api/v1/admin/health`
+- `/api/v1/admin/health/red`
+- `/api/v1/admin/analytics/overview`
+- `/api/v1/admin/billing-audit`
+- `/api/v1/admin/adapters`
+
+### npm Workspaces Configuration
+
+Jest runs from root with workspace flag:
+```bash
+npx --workspace=console jest
+```
+
+---
+
 # Changelog — Migration Studio Enhancement (2025-12-13)
 
 ## 🔄 Migration Studio: Real Traffic Routing & SDK Integration
