@@ -126,3 +126,45 @@ export async function getSalesAutomationOverview(params?: { signal?: AbortSignal
     throw new Error(handleApiError(err))
   }
 }
+
+/**
+ * Trigger system-wide billing reconciliation (OPERATOR-ONLY)
+ * This is different from customer-facing billing - this affects all customers!
+ */
+export interface ReconciliationResult {
+  success: boolean
+  data?: {
+    processed: number
+    discrepancies: number
+    errors: string[]
+  }
+  message?: string
+}
+
+export async function operatorReconcileBilling(idempotencyKey: string): Promise<ReconciliationResult> {
+  try {
+    const res = await apiClient.post<ReconciliationResult>(
+      '/admin/billing/reconcile',
+      {},
+      {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+        },
+      }
+    )
+    return res.data
+  } catch (err) {
+    throw new Error(handleApiError(err))
+  }
+}
+
+/**
+ * Resend invoice email to a customer (OPERATOR-ONLY)
+ */
+export async function operatorResendInvoiceEmail(payload: { invoiceId: string; email: string }): Promise<void> {
+  try {
+    await apiClient.post('/admin/billing/resend-invoice', payload)
+  } catch (err) {
+    throw new Error(handleApiError(err))
+  }
+}

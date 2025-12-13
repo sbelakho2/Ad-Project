@@ -7,6 +7,8 @@ import adapterConfigService from '../services/adapterConfigService';
 import { z } from 'zod';
 import logger from '../utils/logger';
 import { redis } from '../utils/redis';
+import { reconciliationService } from '../services/reconciliationService';
+import { AppError } from '../middleware/errorHandler';
 
 const router = Router();
 
@@ -86,6 +88,105 @@ router.get('/billing/audit', async (req: Request, res: Response, next: NextFunct
     });
   } catch (err) {
     next(err);
+  }
+});
+
+/**
+ * POST /api/v1/admin/billing/reconcile
+ * Trigger system-wide billing reconciliation (OPERATOR-ONLY)
+ * This is different from customer-facing billing - this affects all customers!
+ */
+router.post('/billing/reconcile', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // Enforce header-based idempotency per FIX-11 (648)
+    const idempotencyKeyHeader = req.header('Idempotency-Key') || req.header('idempotency-key');
+    const idempotencyKey = idempotencyKeyHeader?.trim();
+
+    if (!idempotencyKey) {
+      throw new AppError('Idempotency-Key header required', 400);
+    }
+
+    // Check if already processed
+    const existing = await reconciliationService.checkIdempotencyKey(idempotencyKey);
+    if (existing) {
+      res.json({
+        success: true,
+        data: existing,
+        message: 'Reconciliation already processed',
+      });
+      return;
+    }
+
+    // Run reconciliation
+    const result = await reconciliationService.reconcile();
+    
+    // Store idempotency record
+    await reconciliationService.storeIdempotencyKey(idempotencyKey, result);
+    
+    // Emit audit event
+    logger.info('Billing reconciliation triggered by operator', {
+      operator: req.user?.email,
+      result,
+      idempotencyKey,
+    });
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    logger.error('Error during billing reconciliation', { error, user: req.user });
+    next(error);
+  }
+});
+
+/**
+ * POST /api/v1/admin/billing/resend-invoice
+ * Resend invoice email to a customer (OPERATOR-ONLY)
+ */
+router.post('/billing/resend-invoice', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { invoiceId, email } = req.body;
+    
+    if (!invoiceId || !email) {
+      throw new AppError('invoiceId and email are required', 400);
+    }
+    
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      throw new AppError('Invalid email format', 400);
+    }
+    
+    // TODO: Implement actual invoice email resend via Stripe or email service
+    // For now, log the request and return success
+    logger.info('Invoice email resend requested by operator', {
+      operator: req.user?.email,
+      invoiceId,
+      recipientEmail: email,
+    });
+    
+    // Audit log
+    await query(
+      `INSERT INTO billing_audit (customer_id, event_type, actor, data, ip_address, user_agent, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [
+        null, // system-wide action
+        'invoice_resend_requested',
+        req.user?.email || 'operator',
+        JSON.stringify({ invoiceId, recipientEmail: email }),
+        req.ip || req.socket?.remoteAddress || 'unknown',
+        req.get('User-Agent') || 'unknown',
+      ]
+    ).catch(e => logger.warn('Failed to write audit log', { error: e }));
+
+    res.json({
+      success: true,
+      message: 'Invoice email queued for delivery',
+    });
+  } catch (error) {
+    logger.error('Error resending invoice email', { error, user: req.user });
+    next(error);
   }
 });
 

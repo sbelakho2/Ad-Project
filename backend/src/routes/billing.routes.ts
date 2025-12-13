@@ -58,13 +58,19 @@ router.post('/migration/request', billingController.requestMigration);
 
 /**
  * POST /api/v1/billing/reconcile
- * Trigger billing reconciliation (admin only)
+ * DEPRECATED: Billing reconciliation is now operator-only at /api/v1/admin/billing/reconcile
+ * Customer admins cannot trigger system-wide reconciliation
  */
 router.post(
   '/reconcile',
   authorize(['admin']),
   authRateLimiter,
-  billingController.reconcileBilling
+  (_req, res) => {
+    res.status(403).json({
+      success: false,
+      error: 'Billing reconciliation is an operator-only function. Contact support if you need assistance.',
+    });
+  }
 );
 
 /**

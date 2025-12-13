@@ -1,7 +1,7 @@
 'use client'
 
 import { type ChangeEvent, useCallback, useMemo, useRef, useState } from 'react'
-import { reconcileBilling, resendInvoiceEmail } from '@/lib/billing'
+import { operatorReconcileBilling, operatorResendInvoiceEmail } from '@/lib/admin'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -43,7 +43,7 @@ export default function AdminBillingOpsPage() {
           : `admin-reconcile-${Date.now()}`)
       reconcileKeyRef.current = key
 
-      const res = await reconcileBilling(key)
+      const res = await operatorReconcileBilling(key)
       setReconStatus(res?.success ? 'Reconciliation triggered successfully' : 'Reconciliation completed with discrepancies')
     } catch (e: any) {
       setError(e?.message || 'Failed to trigger reconciliation')
@@ -64,7 +64,7 @@ export default function AdminBillingOpsPage() {
       setResendLoading(true)
       setResendError(null)
       setResendStatus(null)
-      await resendInvoiceEmail({ invoiceId: trimmedInvoiceId, email: trimmedEmail })
+      await operatorResendInvoiceEmail({ invoiceId: trimmedInvoiceId, email: trimmedEmail })
       setResendStatus('Invoice email queued for delivery')
     } catch (e: any) {
       setResendError(e?.message || 'Unable to resend invoice email')
