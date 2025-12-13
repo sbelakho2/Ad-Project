@@ -6,6 +6,7 @@ import { useAdminGate } from '@/lib/useAdminGate'
 
 const ADMIN_NAV = [
   { name: 'Health', href: '/admin/health', segment: 'health' },
+  { name: 'Infrastructure', href: '/admin/infrastructure', segment: 'infrastructure' },
   { name: 'Billing Ops', href: '/admin/billing', segment: 'billing' },
   { name: 'Audit Log', href: '/admin/audit', segment: 'audit' },
   { name: 'Sales Automation', href: '/admin/sales-automation', segment: 'sales-automation' },
