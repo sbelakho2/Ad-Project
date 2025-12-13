@@ -320,11 +320,11 @@ Path: `monitoring/grafana/migration-studio.json`
 - Guardrail pauses (orange)
 - Kill switches (red)
 
-**Access**: `https://grafana.rival.com/d/migration-studio`
+**Access (Hetzner Production)**: `http://46.62.252.96:3001/d/apex-rtb-analytics`
 
 ### Alert Routing
 
-All Migration Studio alerts route through Prometheus → Alertmanager → PagerDuty (`migration-studio` service).
+All Migration Studio alerts route through Prometheus → Alertmanager.
 
 **Runbook**: [Migration Studio Guardrails](../../runbooks/migration-studio-guardrails.md)
 
@@ -336,6 +336,6 @@ All Migration Studio alerts route through Prometheus → Alertmanager → PagerD
 - `MigrationTestArmNoFill` (Warning): Test no-fill 20%+ higher
 
 **Notification Channels**:
-- Slack: `#migration-studio-alerts`
-- PagerDuty: On-call rotation for critical alerts
+- Email: DevOps team (configured in Alertmanager)
+- Slack: `#migration-studio-alerts` (requires Slack webhook configuration)
 - Email: Publisher stakeholders (configurable per experiment)

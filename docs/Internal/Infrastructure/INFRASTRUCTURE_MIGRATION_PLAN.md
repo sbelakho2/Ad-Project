@@ -1,5 +1,28 @@
-# Infrastructure Migration Plan — DigitalOcean, $50/mo Max (FRA1 + TLS hardened)
-## Goal: Production-ready under $50/month, minimal overhead
+# Infrastructure Migration Plan — COMPLETED (Now on Hetzner)
+
+> **MIGRATION COMPLETE (2025-12-13)**: The platform has fully migrated from DigitalOcean to Hetzner infrastructure.
+>
+> **Current Production Infrastructure:**
+> - **App Server:** 46.62.252.96 (apexmediation.ee)
+> - **DB Server:** 77.42.44.35
+> - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee
+> - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
+> - **TLS:** Caddy with auto Let's Encrypt
+> - **Database:** PostgreSQL 16 (self-hosted on DB server)
+> - **Cache:** Redis on app server with password authentication
+>
+> **See:** [HETZNER_PRODUCTION_CHECKLIST.md](../Deployment/HETZNER_PRODUCTION_CHECKLIST.md) for current operations guide.
+
+---
+
+## Historical Context (DigitalOcean Plan - SUPERSEDED)
+
+The content below documents the original DigitalOcean migration plan. This has been superseded by the Hetzner deployment, but is retained for historical reference.
+
+---
+
+## Original Plan: DigitalOcean, $50/mo Max (FRA1 + TLS hardened)
+### Goal: Production-ready under $50/month, minimal overhead
 
 This plan replaces the previous multi-provider direction (Supabase + Upstash + ClickHouse) with a single DigitalOcean droplet, DO Managed Postgres, self-hosted Redis, and MinIO (self-hosted S3) for objects and backups with optional offsite sync to DigitalOcean Spaces. Monitoring leans on DO built-ins with an optional lightweight Grafana stack. ClickHouse is deferred; use Postgres-first analytics. Region is pinned to FRA1 (Frankfurt) by default for EU latency/compliance. TLS is terminated on the droplet via Let’s Encrypt with hardened defaults (HSTS after validation, OCSP stapling, modern ciphers).
 

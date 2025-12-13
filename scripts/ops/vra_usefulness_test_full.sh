@@ -23,8 +23,10 @@
 
 set -euo pipefail
 
-API_URL="${API_URL:-http://164.90.232.151:8080}"
-DROPLET="164.90.232.151"
+# Hetzner infrastructure
+API_URL="${API_URL:-https://api.apexmediation.ee}"
+APP_SERVER="46.62.252.96"
+DB_SERVER="77.42.44.35"
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
 PUBLISHER_ID="efbb0394-23eb-4b80-a4d6-9a0e60ef1b56"
 EVIDENCE_DIR="evidence-$(date +%F)/vra-usefulness"
@@ -46,11 +48,11 @@ random_uuid() {
 }
 
 psql_exec() {
-  ssh deploy@$DROPLET "docker exec ad-project-postgres-1 psql -U postgres -d apexmediation -t -c \"$1\"" 2>/dev/null | tr -d ' \n'
+  ssh -i ~/.ssh/hetzner-db-mac root@$DB_SERVER "sudo -u postgres psql -d adproject -t -c \"$1\"" 2>/dev/null | tr -d ' \n'
 }
 
 psql_cmd() {
-  ssh deploy@$DROPLET "docker exec ad-project-postgres-1 psql -U postgres -d apexmediation -c \"$1\"" 2>/dev/null
+  ssh -i ~/.ssh/hetzner-db-mac root@$DB_SERVER "sudo -u postgres psql -d adproject -c \"$1\"" 2>/dev/null
 }
 
 # ============================================================

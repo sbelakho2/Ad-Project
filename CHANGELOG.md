@@ -1,5 +1,66 @@
 # Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
 
+## 🔄 Documentation Sweep: DigitalOcean → Hetzner (2025-12-13)
+
+**Status:** All scripts and documentation updated to reflect Hetzner production infrastructure.
+
+### Infrastructure Details
+
+| Component | Old (DigitalOcean) | New (Hetzner) |
+|-----------|-------------------|---------------|
+| App Server | 164.90.232.151 | 46.62.252.96 |
+| DB Server | (same droplet) | 77.42.44.35 |
+| Database | DO Managed Postgres | PostgreSQL 16 (self-hosted) |
+| TLS | Nginx + Certbot | Caddy (auto Let's Encrypt) |
+| SSH | `deploy@164.90.232.151` | `root@<IP>` with `~/.ssh/hetzner-db-mac` |
+
+### Scripts Updated
+
+| Script | Changes |
+|--------|---------|
+| `scripts/ops/vra_multiday_test.sh` | Updated IPs and SSH pattern |
+| `scripts/ops/vra_overnight_stability.sh` | Updated API URL to `https://api.apexmediation.ee` |
+| `scripts/ops/vra_usefulness_test.sh` | Updated API URL and SSH commands |
+| `scripts/ops/vra_usefulness_test_full.sh` | Updated API URL and psql functions |
+| `scripts/ops/vra_synthetic_load.sh` | Updated API URL |
+| `scripts/ops/hetzner_ssh.sh` | **NEW** - SSH helper for Hetzner servers |
+| `scripts/ops/do_ssh.sh` | Deprecated (redirects to hetzner_ssh.sh) |
+
+### Playwright Configs Updated
+
+| Config | Changes |
+|--------|---------|
+| `console/playwright.droplet.config.ts` | Updated to `https://console.apexmediation.ee` |
+| `console/playwright.screenshots.config.ts` | Updated to `https://console.apexmediation.ee` |
+
+### Documentation Updated
+
+| Document | Changes |
+|----------|---------|
+| `console/fly.toml` | Updated deprecation notice to reference Hetzner |
+| `backend/fly.toml` | Updated deprecation notice to reference Hetzner |
+| `backend/deploy-backend.sh` | Updated deprecation message |
+| `infrastructure/nginx/apexmediation.conf` | Updated header comment |
+| `docs/Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md` | **NEW** - Complete Hetzner operations guide |
+| `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` | Added deprecation notice |
+| `docs/Internal/Infrastructure/INFRASTRUCTURE_MIGRATION_PLAN.md` | Added completion notice |
+
+### Files Deleted (Obsolete DigitalOcean)
+
+- `.github/workflows/deploy-do.yml`
+- `docs/Internal/Infrastructure/DO_READINESS_CHECKLIST.md`
+- `docs/Internal/Deployment/DO_INITIAL_BOOT_COMMANDS.md`
+- `infrastructure/database/do-managed-postgres-roles.sql`
+
+### Files Intentionally Unchanged (Legitimate References)
+
+- `data/enrichment/v1/vpn/2025-12-11/bad_asn_list.csv` - DigitalOcean as cloud provider in fraud detection
+- `backend/src/services/VPNProxyDetectionService.ts` - 'digitalocean' in datacenter detection
+- `backend/src/services/quality/weakLabels/networkDetector.ts` - AS14061 reference
+- Test files referencing DigitalOcean ASN for fraud detection
+
+---
+
 ## ✅ Infrastructure Validation Complete (2025-12-13 11:32 UTC)
 
 **Status:** All core infrastructure verified working and production-ready.

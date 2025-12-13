@@ -7,7 +7,8 @@ set -euo pipefail
 
 DURATION_MINUTES=${1:-60}
 EVENTS_PER_MINUTE=${2:-20}
-API_URL="http://164.90.232.151:8080"
+# Hetzner infrastructure (App: 46.62.252.96, DB: 77.42.44.35)
+API_URL="https://api.apexmediation.ee"
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
 SDK_KEY="ak_test_38dc38e6-7b2e-4f8a-9c5d-1e2f3a4b5c6d"
 EVIDENCE_DIR="evidence-$(date +%F)/vra"

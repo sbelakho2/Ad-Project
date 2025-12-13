@@ -1,6 +1,8 @@
 # Grafana Dashboards Reference
 
-Complete guide to all Grafana dashboards for monitoring the Rival ad platform.
+> **Note:** For the current Hetzner production deployment, see [docs/Monitoring/MONITORING_INFRASTRUCTURE.md](../../Monitoring/MONITORING_INFRASTRUCTURE.md). This document covers the general dashboard patterns and PromQL queries.
+
+Complete guide to all Grafana dashboards for the ApexMediation platform.
 
 ## Table of Contents
 
@@ -15,6 +17,19 @@ Complete guide to all Grafana dashboards for monitoring the Rival ad platform.
 ---
 
 ## Dashboard Overview
+
+### Production Dashboards (Hetzner)
+
+| Dashboard | ID | Purpose |
+|-----------|-----|---------|
+| Executive Overview | `apex-executive-overview` | Platform health, KPIs, business metrics |
+| RTB Analytics | `apex-rtb-analytics` | Fill rates, eCPM, adapter performance |
+| Billing & Finance | `apex-billing-finance` | MRR/ARR, churn, payment processing |
+| Database Performance | `apex-database` | PostgreSQL monitoring |
+
+**Access:** http://46.62.252.96:3001 (Credentials: `admin` / `ApexGrafana2025!`)
+
+### Legacy Kubernetes Dashboards
 
 | Dashboard | Purpose | Key Metrics | Refresh Interval |
 |-----------|---------|-------------|------------------|
@@ -36,9 +51,9 @@ open http://localhost:3000
 # Password: (from secret)
 ```
 
-**Production:**
+**Production (Hetzner):**
 ```
-https://grafana.rival.com
+http://46.62.252.96:3001
 ```
 
 ---
@@ -876,15 +891,15 @@ Grafana sidecar will auto-load dashboards with label `grafana_dashboard: "1"`.
 ### Clone and Modify
 
 ```bash
-# Export existing dashboard
-curl -X GET https://grafana.rival.com/api/dashboards/uid/rtb-overview \
+# Export existing dashboard (Hetzner Production)
+curl -X GET http://46.62.252.96:3001/api/dashboards/uid/apex-rtb-analytics \
   -H "Authorization: Bearer $GRAFANA_API_KEY" > my-dashboard.json
 
 # Edit dashboard
 vi my-dashboard.json
 
 # Import modified version
-curl -X POST https://grafana.rival.com/api/dashboards/db \
+curl -X POST http://46.62.252.96:3001/api/dashboards/db \
   -H "Authorization: Bearer $GRAFANA_API_KEY" \
   -H "Content-Type: application/json" \
   -d @my-dashboard.json
@@ -956,7 +971,8 @@ Click on panel legend or table row to filter other panels:
 Add annotations to mark deployments/incidents:
 
 ```bash
-curl -X POST https://grafana.rival.com/api/annotations \
+# Hetzner Production Grafana
+curl -X POST http://46.62.252.96:3001/api/annotations \
   -H "Authorization: Bearer $GRAFANA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

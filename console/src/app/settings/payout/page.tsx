@@ -11,7 +11,7 @@ import { ArrowLeft, Banknote, Save, AlertCircle, CheckCircle, Eye, EyeOff, Shiel
 
 const payoutSchema = z
   .object({
-    method: z.enum(['stripe', 'paypal', 'wire'], { required_error: 'Select a payout method' }),
+    method: z.enum(['stripe', 'wire'], { required_error: 'Select a payout method' }),
     accountName: z
       .string()
       .trim()
@@ -29,7 +29,7 @@ const payoutSchema = z
       .transform((s) => s.toUpperCase()),
     minimumPayout: z.coerce.number().min(0, 'Minimum payout must be >= 0'),
     autoPayout: z.boolean(),
-    backupMethod: z.union([z.enum(['stripe', 'paypal', 'wire']), z.literal('')]).optional(),
+    backupMethod: z.union([z.enum(['stripe', 'wire']), z.literal('')]).optional(),
   })
   .refine(
     (v) => {
@@ -203,7 +203,7 @@ export default function PayoutSettingsPage() {
               </p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {['stripe', 'paypal', 'wire'].map((option) => (
+              {['stripe', 'wire'].map((option) => (
                 <label
                   key={option}
                   className={`card cursor-pointer border transition ${
@@ -214,10 +214,8 @@ export default function PayoutSettingsPage() {
                   <p className="text-sm font-semibold capitalize text-gray-900">{option}</p>
                   <p className="text-xs text-gray-600 mt-1">
                     {option === 'wire'
-                      ? 'Traditional bank transfer for large balances.'
-                      : option === 'stripe'
-                      ? 'Fast payouts to connected Stripe account.'
-                      : 'Send to a verified PayPal business account.'}
+                      ? 'Traditional bank transfer (SEPA/ACH) for verified accounts.'
+                      : 'Fast auto-pay via Stripe (card or direct debit).'}
                   </p>
                 </label>
               ))}
@@ -331,7 +329,7 @@ export default function PayoutSettingsPage() {
               </label>
               <select id="backupMethod" className="input" {...form.register('backupMethod')}>
                 <option value="">None</option>
-                {['stripe', 'paypal', 'wire'].map((option) => (
+                {['stripe', 'wire'].map((option) => (
                   <option key={option} value={option} disabled={option === primaryMethod}>
                     {option.charAt(0).toUpperCase() + option.slice(1)}
                   </option>

@@ -1,24 +1,27 @@
 # Prometheus Alerts Reference
 
-Complete guide to all Prometheus alert rules for the Rival ad platform.
+> **Note:** For the current Hetzner production deployment alerts, see [docs/Monitoring/MONITORING_INFRASTRUCTURE.md](../../Monitoring/MONITORING_INFRASTRUCTURE.md). This document covers general alert patterns and runbooks.
+
+Complete guide to Prometheus alert rules for the ApexMediation platform.
 
 ## Table of Contents
 
 1. [Alert Overview](#alert-overview)
-2. [Alert Groups](#alert-groups)
-3. [Severity Levels](#severity-levels)
-4. [RTB Auction Alerts](#rtb-auction-alerts)
-5. [Analytics (Postgres) Alerts](#analytics-postgres-alerts)
-6. [Queue Health Alerts](#queue-health-alerts)
-7. [Testing Alerts](#testing-alerts)
-8. [Alertmanager Configuration](#alertmanager-configuration)
-9. [Runbooks](#runbooks)
+2. [Production Alerts (Hetzner)](#production-alerts-hetzner)
+3. [Alert Groups](#alert-groups)
+4. [Severity Levels](#severity-levels)
+5. [RTB Auction Alerts](#rtb-auction-alerts)
+6. [Analytics (Postgres) Alerts](#analytics-postgres-alerts)
+7. [Queue Health Alerts](#queue-health-alerts)
+8. [Testing Alerts](#testing-alerts)
+9. [Alertmanager Configuration](#alertmanager-configuration)
+10. [Runbooks](#runbooks)
 
 ---
 
 ## Alert Overview
 
-Alerts are defined in `monitoring/alerts.yml` and evaluated by Prometheus every 15 seconds (default).
+Alerts are defined in Prometheus rule files and evaluated every 15 seconds (default).
 
 ### Alert File Structure
 
@@ -43,7 +46,26 @@ groups:
 2. **Firing:** Condition true for longer than `for` duration
 3. **Resolved:** Condition returns to false
 
-### Current Alert Groups
+---
+
+## Production Alerts (Hetzner)
+
+**Location:** `infrastructure/production/monitoring/alerts/`
+
+| File | Alert Count | Purpose |
+|------|-------------|---------|
+| `backend.yml` | 7 | API health, latency, error rates |
+| `database.yml` | 5 | PostgreSQL connections, queries, replication |
+| `billing.yml` | 4 | Payment processing, revenue tracking |
+| `infrastructure.yml` | 5 | Container health, disk, memory |
+
+**Access Alerts:** http://46.62.252.96:9093 (Alertmanager)
+
+---
+
+## Alert Groups
+
+### Legacy Kubernetes Alert Summary
 
 | Group | Alerts | Purpose | File Location |
 |-------|--------|---------|---------------|
@@ -51,11 +73,7 @@ groups:
 | analytics_postgres | 3 | Analytics pipeline (Postgres) issues | monitoring/alerts.yml |
 | queue_health | 4 | Background job queue monitoring | monitoring/alerts.yml |
 
-**Total Alerts:** 14
-
----
-
-## Alert Groups
+**Total Legacy Alerts:** 14
 
 ### RTB Auction (7 alerts)
 

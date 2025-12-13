@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-API_URL="${API_URL:-http://164.90.232.151:8080}"
+# Hetzner infrastructure (App: 46.62.252.96, DB: 77.42.44.35)
+API_URL="${API_URL:-https://api.apexmediation.ee}"
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
 PUBLISHER_ID="efbb0394-23eb-4b80-a4d6-9a0e60ef1b56"
 EVIDENCE_DIR="evidence-$(date +%F)/vra"
@@ -201,7 +202,7 @@ sleep 15
 log ""
 log "PHASE 3: Verifying SDK revenue events..."
 
-REVENUE_COUNT=$(ssh deploy@164.90.232.151 "docker exec ad-project-postgres-1 psql -U postgres -d apexmediation -t -c \"
+REVENUE_COUNT=$(ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adproject -t -c \"
   SELECT COUNT(*) FROM analytics_revenue_events 
   WHERE adapter_name LIKE '%_test_%' 
   AND observed_at > NOW() - INTERVAL '1 hour'
@@ -211,7 +212,7 @@ log "SDK Revenue events stored: $REVENUE_COUNT (expected: 4)"
 
 # Check totals by adapter
 log "Revenue by adapter (SDK-tracked):"
-ssh deploy@164.90.232.151 "docker exec ad-project-postgres-1 psql -U postgres -d apexmediation -c \"
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adproject -c \"
   SELECT adapter_name, SUM(revenue_usd) as total_usd
   FROM analytics_revenue_events 
   WHERE adapter_name LIKE '%_test_%'

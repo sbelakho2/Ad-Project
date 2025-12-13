@@ -177,7 +177,7 @@ export interface PayoutHistory {
   amount: number
   currency: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
-  method: 'stripe' | 'paypal' | 'wire'
+  method: 'stripe' | 'wire'
   scheduledFor: string
   processedAt?: string
 }
@@ -192,13 +192,13 @@ export interface FraudSettings {
 
 export interface PayoutSettings {
   threshold: number
-  method: 'stripe' | 'paypal' | 'wire'
+  method: 'stripe' | 'wire'
   currency: string
   schedule: 'monthly'
   accountName: string
   accountReference: string
   autoPayout: boolean
-  backupMethod?: 'stripe' | 'paypal' | 'wire'
+  backupMethod?: 'stripe' | 'wire'
   updatedAt: string
 }
 

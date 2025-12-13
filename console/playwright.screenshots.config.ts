@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const BASE_URL = process.env.CONSOLE_BASE_URL || 'http://164.90.232.151:3000';
+// Hetzner infrastructure (App: 46.62.252.96, DB: 77.42.44.35)
+const BASE_URL = process.env.CONSOLE_BASE_URL || 'https://console.apexmediation.ee';
 
 export default defineConfig({
   testDir: './tests',

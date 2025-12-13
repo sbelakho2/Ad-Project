@@ -5,10 +5,12 @@
 
 set -euo pipefail
 
-DROPLET_IP="164.90.232.151"
-SSH_KEY="$HOME/.ssh/apexmediation-github-deploy"
-SSH_CMD="ssh -i $SSH_KEY deploy@$DROPLET_IP"
-API_URL="http://$DROPLET_IP:8080"
+# Hetzner infrastructure
+APP_SERVER="46.62.252.96"
+DB_SERVER="77.42.44.35"
+SSH_KEY="$HOME/.ssh/hetzner-db-mac"
+SSH_CMD="ssh -i $SSH_KEY root@$DB_SERVER"
+API_URL="https://api.apexmediation.ee"
 TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
 EVIDENCE_DIR="evidence-$(date +%F)/vra"
 LOG_FILE="$EVIDENCE_DIR/multiday_test.log"

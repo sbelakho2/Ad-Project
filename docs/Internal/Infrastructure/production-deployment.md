@@ -2,6 +2,45 @@
 
 > **Postgres-only update:** Sections that mention provisioning or validating ClickHouse are retained for historical reference but should be skipped for new deployments. The current production stack relies on PostgreSQL + Redis only; consult `docs/Internal/Infrastructure/POSTGRES_MIGRATION_PLAN.md` for the authoritative rollout flow.
 
+---
+
+## Hetzner Bare-Metal Deployment (Current Production)
+
+The primary production environment is deployed on Hetzner dedicated servers using Docker Compose. See the following resources for current production:
+
+| Resource | Location |
+|----------|----------|
+| **Deployment Documentation** | [docs/Architecture/HETZNER_POSTGRES_DESIGN.md](../../Architecture/HETZNER_POSTGRES_DESIGN.md) |
+| **Monitoring Infrastructure** | [docs/Monitoring/MONITORING_INFRASTRUCTURE.md](../../Monitoring/MONITORING_INFRASTRUCTURE.md) |
+| **Docker Compose Files** | `infrastructure/production/` |
+| **Monitoring Stack** | `infrastructure/production/monitoring/` |
+
+### Production Servers
+
+| Role | IP Address | Services |
+|------|------------|----------|
+| App Server | 46.62.252.96 | Backend:8080, Console:3000, Grafana:3001, Prometheus:9090 |
+| DB Server | 77.42.44.35 | PostgreSQL 16:5432 |
+
+### Quick Access
+
+```bash
+# SSH to App Server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+# SSH to DB Server  
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+
+# Database Connection
+PGPASSWORD='ApexProd2025!' psql -h 77.42.44.35 -U postgres -d adproject
+```
+
+---
+
+## Kubernetes/Cloud Deployment (Legacy/Alternative)
+
+The sections below describe Kubernetes-based deployments on AWS EKS or Google GKE. Use these for cloud-native deployments.
+
 ## Prerequisites
 
 ### Infrastructure Requirements

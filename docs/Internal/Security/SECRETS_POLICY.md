@@ -8,7 +8,7 @@
 
 ## Overview
 
-This document defines the secrets management policy for the Rival Ad Platform. All team members must follow these guidelines to protect sensitive credentials, API keys, and other secrets from unauthorized access.
+This document defines the secrets management policy for the ApexMediation platform. All team members must follow these guidelines to protect sensitive credentials, API keys, and other secrets from unauthorized access.
 
 ---
 

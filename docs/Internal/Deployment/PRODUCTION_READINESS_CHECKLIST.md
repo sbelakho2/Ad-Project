@@ -1,4 +1,19 @@
-# Production Readiness Checklist
+# Production Readiness Checklist (DigitalOcean - SUPERSEDED)
+
+> **⚠️ DEPRECATION NOTICE (2025-12-13)**  
+> This document was for the DigitalOcean deployment which has been superseded by Hetzner.
+>
+> **For current production operations, see:**  
+> [HETZNER_PRODUCTION_CHECKLIST.md](./HETZNER_PRODUCTION_CHECKLIST.md)
+>
+> **Current Infrastructure:**
+> - App Server: 46.62.252.96 (apexmediation.ee)
+> - DB Server: 77.42.44.35
+> - SSH: `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
+
+---
+
+## Historical Content (DigitalOcean - Archived)
 
 This is the single, self-contained runbook to take the system to production on DigitalOcean. It consolidates prerequisites, environment materialization, deployment, HTTPS/HSTS, DB/Redis verification, metrics protection, evidence capture, and rollback guidance. Cross-links point to deeper runbooks where needed, but all critical commands are summarized here for operator convenience.
 

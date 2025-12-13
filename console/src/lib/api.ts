@@ -716,13 +716,13 @@ type UpcomingPayoutRequest = {
 
 type UpdatePayoutSettingsPayload = {
   threshold: number
-  method: 'stripe' | 'paypal' | 'wire'
+  method: 'stripe' | 'wire'
   currency: string
   schedule?: 'monthly'
   accountName: string
   accountReference: string
   autoPayout: boolean
-  backupMethod?: 'stripe' | 'paypal' | 'wire'
+  backupMethod?: 'stripe' | 'wire'
 }
 
 export const payoutApi = {
@@ -755,7 +755,7 @@ export const payoutApi = {
     })
     return unwrapSuccessEnvelope(response.data)
   },
-  updateMethod: (method: 'stripe' | 'paypal' | 'wire', details: Record<string, any>) =>
+  updateMethod: (method: 'stripe' | 'wire', details: Record<string, any>) =>
     apiClient.put('/payouts/method', { method, details }),
 }
 

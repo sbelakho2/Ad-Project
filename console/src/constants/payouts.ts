@@ -42,7 +42,6 @@ export const PAYOUT_STATUS_META: Record<
 
 export const PAYOUT_METHOD_LABELS: Record<PayoutMethod, string> = {
   stripe: 'Stripe',
-  paypal: 'PayPal',
   wire: 'Wire Transfer',
 }
 

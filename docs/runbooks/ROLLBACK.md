@@ -1,6 +1,6 @@
 # Rollback Runbook
 
-**Last Updated:** 2025-12-12  
+**Last Updated:** 2025-01-06  
 **Owner:** DevOps  
 **Approval Required:** On-call lead for production rollback
 
@@ -19,26 +19,41 @@
 
 ## Quick Reference
 
-### SSH Access
+### SSH Access (Hetzner Production)
 ```bash
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# App Server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+# DB Server  
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 ```
 
-### Current Services
-| Service | Port | Container | Image |
-|---------|------|-----------|-------|
-| Backend | 8080 | ad-project-backend-1 | ad-project-backend |
-| Console | 3000 | ad-project-console-1 | ad-project-console |
-| Postgres | 5432 | ad-project-postgres-1 | postgres:16-alpine |
-| Redis | 6379 | ad-project-redis-1 | redis:7-alpine |
+### Current Services (Hetzner)
+| Service | Port | Server | Notes |
+|---------|------|--------|-------|
+| Backend | 8080 | 46.62.252.96 | Node.js API |
+| Console | 3000 | 46.62.252.96 | Next.js dashboard |
+| Grafana | 3001 | 46.62.252.96 | Monitoring dashboards |
+| Prometheus | 9090 | 46.62.252.96 | Metrics collection |
+| Alertmanager | 9093 | 46.62.252.96 | Alert routing |
+| PostgreSQL | 5432 | 77.42.44.35 | Database |
+| Redis | 6379 | 46.62.252.96 | Cache (container) |
 
 ### Health Endpoints
 ```bash
-# Quick health check
-curl -s http://164.90.232.151:8080/health | jq .
-curl -s http://164.90.232.151:8080/ready | jq .
-curl -s http://164.90.232.151:3000 | head -1
+# Quick health check (Hetzner)
+curl -s http://46.62.252.96:8080/health | jq .
+curl -s http://46.62.252.96:8080/ready | jq .
+curl -s http://46.62.252.96:3000 | head -1
+
+# Prometheus targets
+curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets | length'
 ```
+
+### Monitoring Links
+- **Grafana:** http://46.62.252.96:3001 (admin / ApexGrafana2025!)
+- **Prometheus:** http://46.62.252.96:9090
+- **Alertmanager:** http://46.62.252.96:9093
 
 ---
 
@@ -47,6 +62,7 @@ curl -s http://164.90.232.151:3000 | head -1
 Before initiating rollback:
 
 - [ ] **Identify the issue** - What broke? Is rollback the right solution?
+- [ ] **Check monitoring** - Review Grafana dashboards, Prometheus alerts
 - [ ] **Document the current state** - Take screenshots, save logs
 - [ ] **Notify stakeholders** - Alert team in Slack/on-call channel
 - [ ] **Verify rollback target** - Which version to rollback to?
@@ -62,12 +78,12 @@ Before initiating rollback:
 If issue is container-related (crash, resource exhaustion):
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 # Restart affected service
 cd Ad-Project
-docker compose restart backend   # or: console, postgres, redis
+docker compose restart backend   # or: console, redis
 
 # Verify health
 curl -s http://localhost:8080/health | jq .
@@ -78,8 +94,8 @@ curl -s http://localhost:8080/health | jq .
 If issue is in recent code changes:
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd Ad-Project
 
 # View recent commits
@@ -106,8 +122,8 @@ curl -s http://localhost:8080/health | jq .
 If you have tagged releases:
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd Ad-Project
 
 # Stop current container
@@ -126,8 +142,8 @@ docker compose up -d backend
 For complete environment issues:
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd Ad-Project
 
 # Stop all services
@@ -155,26 +171,27 @@ curl -s http://localhost:3000 | head -1
 ### Check Migration Status
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to db server
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
 # List applied migrations
-docker exec ad-project-postgres-1 psql -U postgres -d apex -c \
+psql -U postgres -d adproject -c \
   "SELECT * FROM migrations ORDER BY id DESC LIMIT 10;"
 ```
 
 ### Rollback Last Migration
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd Ad-Project
 
 # Run migration rollback (if supported)
 docker exec ad-project-backend-1 npm run migrate:down
 
-# Verify
-docker exec ad-project-postgres-1 psql -U postgres -d apex -c \
+# Verify on DB server
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+psql -U postgres -d adproject -c \
   "SELECT * FROM migrations ORDER BY id DESC LIMIT 5;"
 ```
 
@@ -183,17 +200,11 @@ docker exec ad-project-postgres-1 psql -U postgres -d apex -c \
 If you have a backup:
 
 ```bash
-# SSH to droplet
-ssh -i ~/.ssh/apexmediation-github-deploy deploy@164.90.232.151
+# SSH to db server
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# Stop backend to prevent writes
-docker compose stop backend
-
-# Restore from backup
-docker exec -i ad-project-postgres-1 psql -U postgres -d apex < /path/to/backup.sql
-
-# Restart backend
-docker compose start backend
+# Restore from backup (after stopping backend on app server)
+psql -U postgres -d adproject < /path/to/backup.sql
 ```
 
 ---
@@ -205,29 +216,33 @@ After any rollback, verify:
 ### 1. Health Checks
 ```bash
 # API health
-curl -s http://164.90.232.151:8080/health | jq .
+curl -s http://46.62.252.96:8080/health | jq .
 # Expected: {"status":"healthy","services":{"postgres":"up","redis":"up","queues":"up"}}
 
-curl -s http://164.90.232.151:8080/ready | jq .
+curl -s http://46.62.252.96:8080/ready | jq .
 # Expected: {"status":"ready","database":{"connected":true}}
 
 # Console health
-curl -s -o /dev/null -w "%{http_code}" http://164.90.232.151:3000
+curl -s -o /dev/null -w "%{http_code}" http://46.62.252.96:3000
 # Expected: 200
+
+# Monitoring health
+curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets | length'
+# Expected: 7
 ```
 
 ### 2. Core Functionality
 ```bash
 # Authentication
-curl -s -X POST http://164.90.232.151:8080/api/v1/auth/login \
+curl -s -X POST http://46.62.252.96:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@apexmediation.ee","password":"admin123"}' | jq .success
+  -d '{"email":"admin@hetzner-test.com","password":"Admin123!"}' | jq .success
 # Expected: true
 
 # RTB endpoint
-curl -s -X POST http://164.90.232.151:8080/api/v1/rtb/bid \
+curl -s -X POST http://46.62.252.96:8080/api/v1/rtb/bid \
   -H "Content-Type: application/json" \
-  -H "X-SDK-Key: ak_test_38dc..." \
+  -H "X-SDK-Key: ak_test_..." \
   -d '{"placementId":"test","adType":"banner"}' | jq .
 # Expected: bid response
 ```
@@ -242,6 +257,15 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```bash
 # Check for errors in last 5 minutes
 docker logs --since 5m ad-project-backend-1 2>&1 | grep -i error | tail -20
+```
+
+### 5. Monitoring Check
+```bash
+# Check Grafana (in browser)
+open http://46.62.252.96:3001
+
+# Check Prometheus targets
+curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
 ```
 
 ---

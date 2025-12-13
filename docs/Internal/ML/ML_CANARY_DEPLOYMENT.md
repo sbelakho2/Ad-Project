@@ -316,7 +316,8 @@ kubectl set env deployment/backend \
   -n production
 
 # 3. Monitor Grafana dashboard
-open https://grafana.rival.com/d/ml-canary
+# Hetzner Production: http://46.62.252.96:3001/d/apex-rtb-analytics
+open http://46.62.252.96:3001/d/apex-rtb-analytics
 
 # 4. Increase to 10% after 24h
 kubectl set env deployment/backend \
@@ -325,7 +326,7 @@ kubectl set env deployment/backend \
 
 # 5. Continue until 100%, then promote
 kubectl set image deployment/ml-inference \
-  ml-inference=rivalapex/ml-inference:1.1.0 \
+  ml-inference=apexmediation/ml-inference:1.1.0 \
   -n ml
 
 # 6. Disable canary routing

@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# Convenience SSH wrapper for the testing DO droplet.
+# DEPRECATED: This script was for DigitalOcean. Use hetzner_ssh.sh instead.
+#
+# Production has moved to Hetzner:
+#   App Server: 46.62.252.96 (apexmediation.ee)
+#   DB Server:  77.42.44.35
+#
 # Usage:
-#   ./scripts/ops/do_ssh.sh                     # open interactive shell
-#   ./scripts/ops/do_ssh.sh -- "<remote cmd>"   # run a single remote command
+#   ./scripts/ops/hetzner_ssh.sh        # SSH to app server (default)
+#   ./scripts/ops/hetzner_ssh.sh db     # SSH to database server
 
-HOST="deploy@164.90.232.151"
-KEY="${APEX_DO_SSH_KEY:-$HOME/.ssh/apexmediation-github-deploy}"
-
-if [[ ! -f "$KEY" ]]; then
-  echo "[err] SSH key not found at $KEY" >&2
-  exit 1
-fi
-
-if [[ $# -gt 0 ]]; then
-  # If first arg is --, shift and treat remainder as remote command
-  if [[ "$1" == "--" ]]; then shift; fi
-  echo "[run] ssh -i $KEY $HOST -- $*"
-  ssh -i "$KEY" "$HOST" -- "$@"
-else
-  echo "[run] ssh -i $KEY $HOST"
-  ssh -i "$KEY" "$HOST"
-fi
+echo "[DEPRECATED] do_ssh.sh is obsolete. Use hetzner_ssh.sh instead:" >&2
+echo "  ./scripts/ops/hetzner_ssh.sh        # SSH to app server" >&2
+echo "  ./scripts/ops/hetzner_ssh.sh db     # SSH to database server" >&2
+exit 1

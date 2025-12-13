@@ -1,8 +1,18 @@
 # Hetzner Postgres-Only Infrastructure Design
 
-**Status:** Implementation Ready  
+**Status:** Deployed (Production)  
 **Date:** 2025-12-13  
+**Updated:** 2025-01-06 (IP corrections, monitoring stack addition)
 **Target:** Long-term heavy load, self-managing, speed-first architecture
+
+---
+
+## Related Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [Monitoring Infrastructure](../Monitoring/MONITORING_INFRASTRUCTURE.md) | Prometheus, Grafana, Alertmanager setup |
+| [Production Deployment](../Internal/Infrastructure/production-deployment.md) | Deployment procedures |
 
 ---
 
@@ -17,15 +27,16 @@
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    APP SERVER (77.42.44.35)                      │
+│                    APP SERVER (46.62.252.96)                     │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Backend   │  │   Console   │  │   Admin Control Panel   │  │
-│  │  (Node.js)  │  │  (Next.js)  │  │       (Next.js)         │  │
+│  │   Backend   │  │   Console   │  │   Monitoring Stack      │  │
+│  │  (Node.js)  │  │  (Next.js)  │  │  Prometheus/Grafana     │  │
+│  │   :8080     │  │    :3000    │  │  :9090/:3001/:9093      │  │
 │  └──────┬──────┘  └─────────────┘  └───────────┬─────────────┘  │
 │         │                                       │                │
 │  ┌──────┴──────┐                     ┌─────────┴─────────┐      │
-│  │    Redis    │                     │  Telemetry Agent  │      │
-│  │   (Cache)   │                     │                   │      │
+│  │    Redis    │                     │  Node Exporter    │      │
+│  │   (Cache)   │                     │  cAdvisor         │      │
 │  └─────────────┘                     └───────────────────┘      │
 │         │                                       │                │
 │         └───────────────────┬───────────────────┘                │
@@ -36,21 +47,16 @@
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    DB SERVER (46.62.252.96 - PRIVATE)            │
-│                    NO PUBLIC INTERNET ACCESS                     │
+│                    DB SERVER (77.42.44.35)                       │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    PostgreSQL 16                            ││
+│  │                    PostgreSQL 16  :5432                     ││
 │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌────────┐││
 │  │  │  core   │ │  config │ │   ops   │ │  events │ │  agg   │││
 │  │  │ schema  │ │ schema  │ │ schema  │ │ schema  │ │ schema │││
 │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └────────┘││
 │  └─────────────────────────────────────────────────────────────┘│
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    DB Autopilot Service                     ││
-│  │  • Health monitoring (OK/DEGRADED/FAIL)                     ││
-│  │  • Partition management                                     ││
-│  │  • Vacuum monitoring                                        ││
-│  │  • Disk/Memory forecasting                                  ││
+│  │           Postgres Exporter :9187 (for Prometheus)          ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -61,19 +67,25 @@
 |------|-----|----------|---------|
 | Internet | App Server:80/443 | HTTPS | ✅ |
 | Internet | App Server:22 | SSH | ✅ (key-only) |
-| Internet | DB Server:* | Any | ❌ BLOCKED |
-| App Server | DB Server:5432 | PostgreSQL | ✅ Private VLAN |
-| App Server | DB Server:9100 | Metrics | ✅ Private VLAN |
-| DB Server | Internet | Any | ❌ BLOCKED |
+| Internet | App Server:8080 | Backend API | ✅ |
+| Internet | App Server:3000 | Console | ✅ |
+| Internet | App Server:3001 | Grafana | ✅ |
+| Internet | App Server:9090 | Prometheus | ✅ |
+| Internet | DB Server:* | Any | ⚠️ (currently accessible, recommend firewall) |
+| App Server | DB Server:5432 | PostgreSQL | ✅ |
+| App Server | DB Server:9187 | Postgres Exporter | ✅ |
 
-### SSH Access (Via App Server Jump Host)
+### SSH Access
 
 ```bash
-# Direct to App Server
+# App Server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+# DB Server
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# To DB Server (via App Server jump)
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@<DB_PRIVATE_IP>
+# Database connection
+PGPASSWORD='ApexProd2025!' psql -h 77.42.44.35 -U postgres -d adproject
 ```
 
 ---

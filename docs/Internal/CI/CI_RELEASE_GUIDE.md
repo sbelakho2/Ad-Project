@@ -1,6 +1,6 @@
 # CI/CD Release Guide
 
-Complete guide for continuous integration, SDK releases, publishing, and rollback procedures for the Rival Ad Platform.
+Complete guide for continuous integration, SDK releases, publishing, and rollback procedures for the ApexMediation platform.
 
 ## Table of Contents
 
@@ -383,11 +383,11 @@ git push --delete origin v1.2.3
 # Check synthetic probes
 gh run list --workflow=synthetic-probes.yml
 
-# View Grafana dashboards
-open https://grafana.rival.com/d/rtb-overview
+# View Grafana dashboards (Hetzner Production)
+open http://46.62.252.96:3001/d/apex-rtb-analytics
 
 # Check error rates
-curl https://prometheus.rival.com/api/v1/query?query='rate(http_request_duration_seconds_count{status_code=~"5.."}[5m])'
+curl 'http://46.62.252.96:9090/api/v1/query?query=rate(http_request_duration_seconds_count{status_code=~"5.."}[5m])'
 ```
 
 ## Troubleshooting

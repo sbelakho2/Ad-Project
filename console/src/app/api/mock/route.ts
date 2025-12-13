@@ -229,7 +229,7 @@ const mockData = {
       amount: randomFloat(9000, 14000),
       currency: 'USD',
       status: 'completed',
-      method: 'paypal',
+      method: 'wire',
       scheduledFor: new Date(Date.now() - 22 * 24 * 60 * 60 * 1000).toISOString(),
       processedAt: new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString(),
     },
