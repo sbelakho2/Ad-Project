@@ -1,0 +1,175 @@
+# Database Alerting Rules
+# ApexMediation Production Monitoring
+
+groups:
+  - name: database
+    interval: 30s
+    rules:
+      # ============================================
+      # AVAILABILITY
+      # ============================================
+      - alert: PostgreSQLDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+          page: "true"
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database is unreachable from {{ $labels.instance }}"
+          runbook_url: "https://docs.apexmediation.ee/runbooks/postgres-down"
+
+      - alert: PostgreSQLExporterDown
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "PostgreSQL exporter is down"
+          description: "Cannot collect PostgreSQL metrics"
+
+      # ============================================
+      # CONNECTIONS
+      # ============================================
+      - alert: HighDatabaseConnections
+        expr: pg_stat_activity_count > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connections"
+          description: "{{ $value }} active connections (max: 100)"
+
+      - alert: CriticalDatabaseConnections
+        expr: pg_stat_activity_count > 95
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Critical: Connection pool nearly exhausted"
+          description: "Connection pool is at {{ $value | printf \"%.0f\" }}% capacity"
+          runbook_url: "https://docs.apexmediation.ee/runbooks/connection-pool-exhausted"
+
+      - alert: TooManyIdleConnections
+        expr: |
+          pg_connection_stats{state="idle"} > 50
+        for: 30m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Too many idle connections"
+          description: "{{ $value }} idle connections - consider connection pooling"
+
+      - alert: ConnectionsWaiting
+        expr: pg_connection_stats{state="active", waiting="1"} > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Queries waiting on locks"
+          description: "{{ $value }} connections are waiting on locks"
+
+      # ============================================
+      # PERFORMANCE
+      # ============================================
+      - alert: SlowQueries
+        expr: pg_slow_queries{} > 3
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Slow queries detected"
+          description: "{{ $value }} queries running longer than 5 seconds"
+
+      - alert: LowCacheHitRatio
+        expr: pg_cache_hit_ratio < 0.90
+        for: 30m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Low buffer cache hit ratio"
+          description: "Cache hit ratio is {{ $value | humanizePercentage }}, should be >90%"
+          runbook_url: "https://docs.apexmediation.ee/runbooks/low-cache-hit-ratio"
+
+      - alert: HighTransactionRollbacks
+        expr: |
+          rate(pg_transactions{type="rollbacks"}[5m]) 
+          / 
+          (rate(pg_transactions{type="commits"}[5m]) + rate(pg_transactions{type="rollbacks"}[5m]))
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High rollback rate"
+          description: "Transaction rollback rate is {{ $value | humanizePercentage }}"
+
+      # ============================================
+      # STORAGE
+      # ============================================
+      - alert: DatabaseSizeGrowing
+        expr: |
+          (pg_database_size{database="adproject"} - pg_database_size{database="adproject"} offset 1d) 
+          / pg_database_size{database="adproject"} offset 1d
+          > 0.1
+        for: 1h
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Rapid database growth"
+          description: "Database has grown by more than 10% in the last 24 hours"
+
+      - alert: HighDeadRows
+        expr: pg_table_size{dead_rows="1"} > 100000
+        for: 1h
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High dead row count"
+          description: "Table {{ $labels.table }} has {{ $value }} dead rows - consider VACUUM"
+
+      - alert: IndexBloat
+        expr: |
+          pg_index_usage{size_bytes="1"} > 100000000 
+          AND pg_index_usage{scans="1"} == 0
+        for: 24h
+        labels:
+          severity: info
+          service: database
+        annotations:
+          summary: "Unused index detected"
+          description: "Index {{ $labels.index }} on {{ $labels.table }} is >100MB but never scanned"
+
+      # ============================================
+      # REPLICATION (if applicable)
+      # ============================================
+      - alert: ReplicationLag
+        expr: pg_replication_lag{lag_seconds="1"} > 60
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Replication lag detected"
+          description: "Replication lag is {{ $value }} seconds"
+
+      - alert: CriticalReplicationLag
+        expr: pg_replication_lag{lag_seconds="1"} > 300
+        for: 5m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Critical replication lag"
+          description: "Replication lag is {{ $value }} seconds - failover may be unsafe"

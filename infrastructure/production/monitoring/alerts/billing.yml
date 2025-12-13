@@ -1,0 +1,160 @@
+# Billing & Payment Alerting Rules
+# ApexMediation Production Monitoring
+
+groups:
+  - name: billing
+    interval: 1m
+    rules:
+      # ============================================
+      # PAYMENT PROCESSING
+      # ============================================
+      - alert: HighPaymentFailureRate
+        expr: |
+          sum(rate(stripe_payment_failed_total[5m])) 
+          / 
+          sum(rate(stripe_payment_attempted_total[5m]))
+          > 0.10
+        for: 5m
+        labels:
+          severity: critical
+          service: billing
+        annotations:
+          summary: "High payment failure rate"
+          description: "Payment failure rate is {{ $value | humanizePercentage }} (threshold: 10%)"
+          runbook_url: "https://docs.apexmediation.ee/runbooks/payment-failures"
+
+      - alert: PaymentProcessingDown
+        expr: rate(stripe_payment_attempted_total[10m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "No payment activity"
+          description: "No payment attempts recorded in the last 30 minutes"
+
+      - alert: StripeWebhookFailures
+        expr: increase(stripe_webhook_failures_total[5m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Stripe webhook delivery failures"
+          description: "{{ $value }} webhook failures in the last 5 minutes"
+
+      - alert: StripeWebhookDown
+        expr: rate(stripe_webhook_received_total[30m]) == 0
+        for: 1h
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "No Stripe webhooks received"
+          description: "No Stripe webhooks in the last hour - check webhook configuration"
+
+      # ============================================
+      # SUBSCRIPTION METRICS
+      # ============================================
+      - alert: HighChurnRate
+        expr: |
+          increase(subscription_cancelled_total[24h]) 
+          / 
+          subscription_active_total
+          > 0.05
+        for: 1h
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Elevated churn rate"
+          description: "Daily churn rate is {{ $value | humanizePercentage }}"
+
+      - alert: SubscriptionCreationFailed
+        expr: increase(subscription_creation_failed_total[5m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Subscription creation failures"
+          description: "{{ $value }} subscription creation failures in the last 5 minutes"
+
+      # ============================================
+      # INVOICE METRICS
+      # ============================================
+      - alert: InvoiceGenerationFailed
+        expr: increase(invoice_generation_failed_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Invoice generation failures"
+          description: "{{ $value }} invoice generation failures"
+
+      - alert: HighOutstandingInvoices
+        expr: invoice_outstanding_total > 100
+        for: 1h
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "High number of outstanding invoices"
+          description: "{{ $value }} invoices are outstanding"
+
+      # ============================================
+      # REVENUE METRICS
+      # ============================================
+      - alert: RevenueDrop
+        expr: |
+          sum(increase(stripe_payment_amount_total[1h])) 
+          < 
+          0.5 * avg_over_time(sum(increase(stripe_payment_amount_total[1h]))[7d:1h])
+        for: 2h
+        labels:
+          severity: warning
+          service: billing
+        annotations:
+          summary: "Revenue significantly below average"
+          description: "Hourly revenue is less than 50% of the 7-day average"
+
+  - name: rtb_billing
+    interval: 1m
+    rules:
+      # ============================================
+      # RTB AUCTION BILLING
+      # ============================================
+      - alert: BidPricingAnomaly
+        expr: |
+          abs(
+            avg(rtb_winning_bid_price) - avg_over_time(avg(rtb_winning_bid_price)[24h:1h])
+          ) / avg_over_time(avg(rtb_winning_bid_price)[24h:1h])
+          > 0.3
+        for: 30m
+        labels:
+          severity: warning
+          service: rtb
+        annotations:
+          summary: "RTB bid pricing anomaly"
+          description: "Average bid price deviates more than 30% from 24h average"
+
+      - alert: HighFillRate
+        expr: rtb_fill_rate > 0.95
+        for: 1h
+        labels:
+          severity: info
+          service: rtb
+        annotations:
+          summary: "Very high RTB fill rate"
+          description: "Fill rate is {{ $value | humanizePercentage }} - may be under-monetizing"
+
+      - alert: LowFillRate
+        expr: rtb_fill_rate < 0.3
+        for: 1h
+        labels:
+          severity: warning
+          service: rtb
+        annotations:
+          summary: "Low RTB fill rate"
+          description: "Fill rate is {{ $value | humanizePercentage }} - check adapter health"

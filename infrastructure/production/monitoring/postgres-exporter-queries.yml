@@ -1,0 +1,228 @@
+# Postgres Exporter Custom Queries
+# GDPR-Compliant: No query text or user data collection
+
+# Database size metrics
+pg_database_size:
+  query: |
+    SELECT datname as database, pg_database_size(datname) as size_bytes
+    FROM pg_database
+    WHERE datistemplate = false
+  metrics:
+    - database:
+        usage: "LABEL"
+        description: "Database name"
+    - size_bytes:
+        usage: "GAUGE"
+        description: "Database size in bytes"
+
+# Table size metrics
+pg_table_size:
+  query: |
+    SELECT 
+      schemaname as schema,
+      relname as table,
+      pg_total_relation_size(relid) as total_bytes,
+      pg_table_size(relid) as table_bytes,
+      pg_indexes_size(relid) as index_bytes,
+      n_live_tup as row_count,
+      n_dead_tup as dead_rows
+    FROM pg_stat_user_tables
+    ORDER BY pg_total_relation_size(relid) DESC
+    LIMIT 50
+  metrics:
+    - schema:
+        usage: "LABEL"
+        description: "Schema name"
+    - table:
+        usage: "LABEL"
+        description: "Table name"
+    - total_bytes:
+        usage: "GAUGE"
+        description: "Total table size including indexes"
+    - table_bytes:
+        usage: "GAUGE"
+        description: "Table size without indexes"
+    - index_bytes:
+        usage: "GAUGE"
+        description: "Index size"
+    - row_count:
+        usage: "GAUGE"
+        description: "Number of live rows"
+    - dead_rows:
+        usage: "GAUGE"
+        description: "Number of dead rows"
+
+# Connection statistics
+pg_connection_stats:
+  query: |
+    SELECT 
+      state,
+      COUNT(*) as count,
+      COUNT(*) FILTER (WHERE wait_event IS NOT NULL) as waiting
+    FROM pg_stat_activity
+    WHERE datname = 'adproject'
+    GROUP BY state
+  metrics:
+    - state:
+        usage: "LABEL"
+        description: "Connection state"
+    - count:
+        usage: "GAUGE"
+        description: "Number of connections in this state"
+    - waiting:
+        usage: "GAUGE"
+        description: "Number of waiting connections"
+
+# Slow query count (without query text for GDPR)
+pg_slow_queries:
+  query: |
+    SELECT 
+      COUNT(*) as count,
+      COALESCE(SUM(EXTRACT(EPOCH FROM (now() - query_start))), 0) as total_duration_seconds
+    FROM pg_stat_activity
+    WHERE state = 'active'
+      AND query_start < now() - interval '5 seconds'
+      AND datname = 'adproject'
+  metrics:
+    - count:
+        usage: "GAUGE"
+        description: "Number of queries running longer than 5 seconds"
+    - total_duration_seconds:
+        usage: "GAUGE"
+        description: "Total duration of slow queries"
+
+# Lock statistics (using different metric name to avoid conflict)
+pg_lock_stats:
+  query: |
+    SELECT 
+      mode,
+      COUNT(*) as lock_count
+    FROM pg_locks
+    WHERE database = (SELECT oid FROM pg_database WHERE datname = 'adproject')
+    GROUP BY mode
+  metrics:
+    - mode:
+        usage: "LABEL"
+        description: "Lock mode"
+    - lock_count:
+        usage: "GAUGE"
+        description: "Number of locks in this mode"
+
+# Replication lag (if applicable)
+pg_replication_lag:
+  query: |
+    SELECT 
+      CASE 
+        WHEN pg_is_in_recovery() 
+        THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+        ELSE 0 
+      END as lag_seconds
+  metrics:
+    - lag_seconds:
+        usage: "GAUGE"
+        description: "Replication lag in seconds"
+
+# Index usage statistics
+pg_index_usage:
+  query: |
+    SELECT 
+      schemaname as schema,
+      relname as table,
+      indexrelname as index,
+      idx_scan as scans,
+      idx_tup_read as tuples_read,
+      idx_tup_fetch as tuples_fetched,
+      pg_relation_size(indexrelid) as size_bytes
+    FROM pg_stat_user_indexes
+    ORDER BY idx_scan DESC
+    LIMIT 50
+  metrics:
+    - schema:
+        usage: "LABEL"
+        description: "Schema name"
+    - table:
+        usage: "LABEL"
+        description: "Table name"
+    - index:
+        usage: "LABEL"
+        description: "Index name"
+    - scans:
+        usage: "COUNTER"
+        description: "Number of index scans"
+    - tuples_read:
+        usage: "COUNTER"
+        description: "Number of tuples read"
+    - tuples_fetched:
+        usage: "COUNTER"
+        description: "Number of tuples fetched"
+    - size_bytes:
+        usage: "GAUGE"
+        description: "Index size in bytes"
+
+# Cache hit ratio
+pg_cache_hit_ratio:
+  query: |
+    SELECT 
+      COALESCE(
+        SUM(heap_blks_hit) / NULLIF(SUM(heap_blks_hit) + SUM(heap_blks_read), 0),
+        0
+      ) as ratio
+    FROM pg_statio_user_tables
+  metrics:
+    - ratio:
+        usage: "GAUGE"
+        description: "Buffer cache hit ratio (0-1)"
+
+# Transaction rates
+pg_transactions:
+  query: |
+    SELECT 
+      xact_commit as commits,
+      xact_rollback as rollbacks,
+      blks_read as blocks_read,
+      blks_hit as blocks_hit,
+      tup_returned as tuples_returned,
+      tup_fetched as tuples_fetched,
+      tup_inserted as tuples_inserted,
+      tup_updated as tuples_updated,
+      tup_deleted as tuples_deleted
+    FROM pg_stat_database
+    WHERE datname = 'adproject'
+  metrics:
+    - commits:
+        usage: "COUNTER"
+        description: "Number of committed transactions"
+    - rollbacks:
+        usage: "COUNTER"
+        description: "Number of rolled back transactions"
+    - blocks_read:
+        usage: "COUNTER"
+        description: "Number of disk blocks read"
+    - blocks_hit:
+        usage: "COUNTER"
+        description: "Number of disk blocks found in buffer cache"
+    - tuples_returned:
+        usage: "COUNTER"
+        description: "Number of rows returned by queries"
+    - tuples_fetched:
+        usage: "COUNTER"
+        description: "Number of rows fetched by queries"
+    - tuples_inserted:
+        usage: "COUNTER"
+        description: "Number of rows inserted"
+    - tuples_updated:
+        usage: "COUNTER"
+        description: "Number of rows updated"
+    - tuples_deleted:
+        usage: "COUNTER"
+        description: "Number of rows deleted"
+
+# WAL statistics
+pg_wal_stats:
+  query: |
+    SELECT 
+      pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0') as wal_bytes_total
+  metrics:
+    - wal_bytes_total:
+        usage: "COUNTER"
+        description: "Total WAL bytes written"

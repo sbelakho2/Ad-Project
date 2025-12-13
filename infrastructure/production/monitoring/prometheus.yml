@@ -1,0 +1,132 @@
+# Prometheus Configuration for ApexMediation Production
+# GDPR-Compliant: No PII collection, anonymized metrics only
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'hetzner-prod'
+    environment: 'production'
+    region: 'eu-central'
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load alerting and recording rules
+rule_files:
+  - '/etc/prometheus/alerts/*.yml'
+  - '/etc/prometheus/recording-rules.yml'
+
+# Scrape configurations
+scrape_configs:
+  # ============================================
+  # BACKEND API METRICS
+  # ============================================
+  - job_name: 'backend-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'adproject-backend-1:8080'
+        labels:
+          service: 'backend'
+          tier: 'api'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):.*'
+        replacement: '${1}'
+    # GDPR: Drop any metrics that might contain PII
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '.*user_id.*|.*email.*|.*ip_address.*'
+        action: drop
+
+  # ============================================
+  # POSTGRESQL DATABASE METRICS
+  # ============================================
+  - job_name: 'postgres'
+    static_configs:
+      - targets:
+          - 'postgres-exporter:9187'
+        labels:
+          service: 'database'
+          tier: 'data'
+          db_host: '77.42.44.35'
+
+  # ============================================
+  # SYSTEM METRICS (Node Exporter)
+  # ============================================
+  - job_name: 'node-app-server'
+    static_configs:
+      - targets:
+          - 'node-exporter:9100'
+        labels:
+          service: 'system'
+          tier: 'infrastructure'
+          host: 'app-server'
+
+  # ============================================
+  # CONTAINER METRICS (cAdvisor)
+  # ============================================
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets:
+          - 'cadvisor:8080'
+        labels:
+          service: 'containers'
+          tier: 'infrastructure'
+    # GDPR: Only collect container-level metrics, no process names
+    metric_relabel_configs:
+      - source_labels: [container_label_maintainer]
+        action: drop
+
+  # ============================================
+  # PROMETHEUS SELF-MONITORING
+  # ============================================
+  - job_name: 'prometheus'
+    static_configs:
+      - targets:
+          - 'localhost:9090'
+        labels:
+          service: 'prometheus'
+          tier: 'monitoring'
+
+  # ============================================
+  # RTB AUCTION METRICS (Custom)
+  # ============================================
+  - job_name: 'rtb-auction'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'adproject-backend-1:8080'
+        labels:
+          service: 'rtb'
+          tier: 'auction'
+    params:
+      # Filter for RTB-specific metrics
+      match[]:
+        - '{__name__=~"rtb_.*"}'
+        - '{__name__=~"auction_.*"}'
+        - '{__name__=~"bidder_.*"}'
+
+  # ============================================
+  # BILLING & PAYMENT METRICS
+  # ============================================
+  - job_name: 'billing'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+          - 'adproject-backend-1:8080'
+        labels:
+          service: 'billing'
+          tier: 'payments'
+    params:
+      match[]:
+        - '{__name__=~"stripe_.*"}'
+        - '{__name__=~"payment_.*"}'
+        - '{__name__=~"invoice_.*"}'
+        - '{__name__=~"subscription_.*"}'
