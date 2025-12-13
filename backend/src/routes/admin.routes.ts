@@ -189,7 +189,7 @@ router.get('/health/red', async (_req: Request, res: Response) => {
  * Adapter Registry Admin (619)
  *
  * Manage RTB adapter configurations stored in DB with TTL cache in adapterConfigService.
- * All routes below are admin‑only (router is already auth+authorize(['admin'])).
+ * All routes below are operator‑only (router is already auth+operatorOnly()).
  */
 
 // GET /api/v1/admin/rtb/adapters — list adapter configs (masked)
