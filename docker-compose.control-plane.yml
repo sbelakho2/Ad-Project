@@ -1,0 +1,79 @@
+# Control Plane Docker Compose
+# Separate service for system administration
+# 
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.control-plane.yml up
+
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=4000
+      
+      # Operator Authentication (separate from customer API)
+      - OPERATOR_JWT_SECRET=${OPERATOR_JWT_SECRET:?OPERATOR_JWT_SECRET is required}
+      - OPERATOR_JWT_EXPIRES_IN=${OPERATOR_JWT_EXPIRES_IN:-8h}
+      
+      # Operator credentials (bcrypt hashes)
+      # Generate with: node -e "console.log(require('bcryptjs').hashSync('password', 12))"
+      - OPERATOR_CREDENTIALS=${OPERATOR_CREDENTIALS:?OPERATOR_CREDENTIALS is required}
+      
+      # IP Allowlist (comma-separated CIDR blocks)
+      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:-127.0.0.1/32}
+      
+      # Three-tier database access
+      # Read-only pool (monitoring, telemetry)
+      - DB_READONLY_HOST=${DB_HOST:-postgres}
+      - DB_READONLY_PORT=${DB_PORT:-5432}
+      - DB_READONLY_NAME=${DB_NAME:-apexmediation}
+      - DB_READONLY_USER=${DB_READONLY_USER:-apex_readonly}
+      - DB_READONLY_PASSWORD=${DB_READONLY_PASSWORD:?DB_READONLY_PASSWORD required}
+      - DB_READONLY_SSL=${DB_SSL:-false}
+      - DB_READONLY_POOL_MIN=2
+      - DB_READONLY_POOL_MAX=10
+      
+      # Operator pool (partition management, safe writes)
+      - DB_OPERATOR_HOST=${DB_HOST:-postgres}
+      - DB_OPERATOR_PORT=${DB_PORT:-5432}
+      - DB_OPERATOR_NAME=${DB_NAME:-apexmediation}
+      - DB_OPERATOR_USER=${DB_OPERATOR_USER:-apex_operator}
+      - DB_OPERATOR_PASSWORD=${DB_OPERATOR_PASSWORD:?DB_OPERATOR_PASSWORD required}
+      - DB_OPERATOR_SSL=${DB_SSL:-false}
+      - DB_OPERATOR_POOL_MIN=1
+      - DB_OPERATOR_POOL_MAX=5
+      
+      # Break-glass pool (emergency session termination)
+      - DB_BREAKGLASS_HOST=${DB_HOST:-postgres}
+      - DB_BREAKGLASS_PORT=${DB_PORT:-5432}
+      - DB_BREAKGLASS_NAME=${DB_NAME:-apexmediation}
+      - DB_BREAKGLASS_USER=${DB_BREAKGLASS_USER:-apex_breakglass}
+      - DB_BREAKGLASS_PASSWORD=${DB_BREAKGLASS_PASSWORD:?DB_BREAKGLASS_PASSWORD required}
+      - DB_BREAKGLASS_SSL=${DB_SSL:-false}
+      - DB_BREAKGLASS_POOL_MIN=0
+      - DB_BREAKGLASS_POOL_MAX=2
+      
+      # Backend metrics endpoint (for app telemetry)
+      - BACKEND_METRICS_URL=${BACKEND_METRICS_URL:-http://backend:8080/metrics}
+      
+      # Host metrics (node-exporter)
+      - NODE_EXPORTER_URL=${NODE_EXPORTER_URL:-http://node-exporter:9100/metrics}
+      
+      # CORS (same-origin only for admin subdomain)
+      - CORS_ORIGIN=${CONTROL_PLANE_CORS_ORIGIN:-https://admin.apexmediation.ee}
+      
+    depends_on:
+      - postgres
+    networks:
+      - ad-stack
+    # Do NOT expose to public internet directly - goes through Caddy with IP allowlist
+    profiles:
+      - production
+      - control-plane
+
+networks:
+  ad-stack:
+    external: true

@@ -186,12 +186,12 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl overflow-hidden mb-4">
+          <div className="inline-flex items-center justify-center h-24 w-24 rounded-2xl overflow-hidden mb-4 shadow-lg">
             <Image
               src="/logo.jpg"
               alt="ApexMediation"
-              width={64}
-              height={64}
+              width={96}
+              height={96}
               className="h-full w-full object-cover"
               priority
             />
@@ -374,11 +374,13 @@ export default function LoginPage() {
         {/* Footer */}
         <div className="text-center mt-8 text-sm text-gray-600">
           <p>© 2025 ApexMediation. All rights reserved.</p>
-          <p className="mt-1" aria-live="polite">
-            {cooldownRemaining > 0
-              ? `Login locked for ${cooldownRemaining}s due to repeated failures.`
-              : `${Math.max(0, MAX_ATTEMPTS_BEFORE_COOLDOWN - failedAttempts)} attempts remaining before a short lockout.`}
-          </p>
+          {(cooldownRemaining > 0 || failedAttempts > 0) && (
+            <p className="mt-1 text-amber-600" aria-live="polite">
+              {cooldownRemaining > 0
+                ? `Login locked for ${cooldownRemaining}s due to repeated failures.`
+                : `${Math.max(0, MAX_ATTEMPTS_BEFORE_COOLDOWN - failedAttempts)} attempts remaining before lockout.`}
+            </p>
+          )}
         </div>
       </div>
     </div>

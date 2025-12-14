@@ -17,7 +17,9 @@ import transparencyRoutes from './transparency.routes';
 import metaRoutes from './meta.routes';
 import billingRoutes from './billing.routes';
 import webhooksRoutes from './webhooks.routes';
-import adminRoutes from './admin.routes';
+// DEPRECATED: Admin routes moved to control-plane service (admin.apexmediation.ee)
+// This stub returns 410 GONE for any /admin/* request
+import adminRoutes from './admin.routes.deprecated';
 import privacyRoutes from './privacy.routes';
 import migrationRoutes from './migration.routes';
 import keysRoutes from './keys.routes';

@@ -158,23 +158,26 @@ networks:
   - monitoring_monitoring  # Connected to monitoring stack
 ```
 
-### Admin Health Endpoint
+### Control Plane Dashboard
 
-The `/api/v1/admin/health/red` endpoint now returns real Prometheus metrics:
+> **Note:** The `/api/v1/admin/*` endpoints have been **removed** from the customer API (returns 410 GONE).
+> Operator telemetry is now available via the separate Control Plane service.
+
+The Control Plane dashboard at `https://admin.apexmediation.ee` provides real-time system metrics:
 
 ```json
+GET /api/v1/dashboard
 {
-  "success": true,
-  "data": {
-    "api_rps_5m": 0.357,
-    "api_error_rate_5m": 0,
-    "api_p95_latency_5m": 0.024,
-    "rtb_p95_latency_5m": null,
-    "rtb_adapter_timeouts_rps_5m": 0,
-    "timestamp": "2025-12-13T09:42:36.760Z"
-  }
+  "system": { "degradedMode": false },
+  "database": { "connectionPool": {...}, "sessions": {...} },
+  "host": { "disk": {...}, "memory": {...} },
+  "app": { "health": "UP", "latency": {...} },
+  "partitions": { "healthy": true, "summary": {...} },
+  "recentActions": [...]
 }
 ```
+
+See [Control Plane Architecture](../Architecture/CONTROL_PLANE.md) for full API reference and access details.
 
 ## File Structure
 

@@ -1,6 +1,145 @@
 # Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
 
-## 🔄 Documentation Sweep: DigitalOcean → Hetzner (2025-12-13)
+## 🗄️ Autonomous PostgreSQL Configuration (2025-12-14)
+
+**Status:** PostgreSQL configured for hands-off autonomous operation
+
+### PITR (Point-in-Time Recovery) Added
+
+- WAL archiving enabled: `archive_mode = on`
+- Archive location: `/var/backups/postgresql/wal/`
+- 7-day WAL retention with automated cleanup
+- Recovery to any point in time now possible
+
+### PgBouncer Connection Pooling Added
+
+- Installed on app server (46.62.252.96:6432)
+- Transaction pooling mode (most efficient)
+- 1000 client connections → 25 PostgreSQL connections
+- New `adproject` user with MD5 auth for pooler compatibility
+- Ready for app migration when needed
+
+
+
+### Performance Optimization (8GB RAM / 4 CPU / NVMe)
+
+| Setting | Before | After | Impact |
+|---------|--------|-------|--------|
+| shared_buffers | 128MB | 2GB | 16x larger database cache |
+| effective_cache_size | 4GB | 6GB | Better query plans |
+| work_mem | 4MB | 64MB | Faster sorts/hashes |
+| random_page_cost | 4.0 | 1.1 | SSD-optimized planner |
+| autovacuum_vacuum_scale_factor | 0.2 | 0.05 | 4x more frequent vacuum |
+| jit | off | on | JIT for complex queries |
+
+### Autonomous Maintenance Jobs
+
+| Job | Schedule | Purpose |
+|-----|----------|---------|
+| Health Check | Every 5 min | Self-healing, auto-restart |
+| Daily Backup | 3:00 AM | Compressed backup, 7-day retention |
+| Weekly Backup | Sunday | 4-week retention |
+| Query Monitor | 6:00 AM | Slow query reporting |
+| Index Maintenance | Sunday 4 AM | ANALYZE, bloat detection |
+| Monthly Maintenance | 1st 1 AM | VACUUM, stats reset |
+| Partition Maintenance | 1st 2 AM | Future partition creation |
+
+### Extensions Enabled
+
+- pg_stat_statements (1.10) - Query performance tracking
+- auto_explain - Automatic slow query logging (>500ms)
+
+### Backup System
+
+- **Location**: /var/backups/postgresql/
+- **Format**: pg_dump custom format, compression level 9
+- **Retention**: 7 days daily, 4 weeks weekly
+- **Verification**: Automatic integrity check after each backup
+
+### Self-Healing Health Checks
+
+- PostgreSQL service status (auto-restart if down)
+- Connection count (alert >180/200)
+- Long-running queries (>5 min)
+- Disk space (<10% warning)
+- Table bloat (>30% warning)
+
+### Documentation Created
+
+- infrastructure/database/AUTONOMOUS_POSTGRESQL.md
+
+---
+
+## � Control Plane Deployment (2025-12-14)
+
+**Status:** Operator control plane fully deployed and operational at `admin.apexmediation.ee`
+
+### Architecture Changes
+
+| Component | Before | After |
+|-----------|--------|-------|
+| Admin Routes | `/api/v1/admin/*` on customer API | Completely removed (410 GONE) |
+| Operator Service | None | `control-plane` on port 4000 |
+| Operator Auth | Shared JWT | Separate `OPERATOR_JWT_SECRET` |
+| Network Access | No restrictions | IP allowlist via Caddy + app |
+| Hostname | N/A | `admin.apexmediation.ee` |
+
+### Security Implementation
+
+- **Complete separation**: Customer API has zero admin functionality
+- **IP allowlisting**: Control plane only accessible from whitelisted IPs
+- **Stealth mode**: Non-allowed IPs receive HTTP 404 (not 403)
+- **Separate JWT realm**: Operator tokens incompatible with customer tokens
+- **8-hour token expiry**: Operators must re-authenticate frequently
+- **Typed confirmations**: Dangerous actions require exact confirmation string
+
+### Database Roles Created
+
+| Role | Purpose | Privileges |
+|------|---------|------------|
+| `apex_readonly` | Telemetry, monitoring | SELECT on all tables |
+| `apex_operator` | Partition management | SELECT, INSERT, UPDATE on system tables |
+| `apex_breakglass` | Emergency access | `pg_signal_backend` for session termination |
+
+### Control Plane Features
+
+- **Dashboard**: Comprehensive system overview (DB, host, app metrics)
+- **Telemetry**: Real-time database, host, and application telemetry
+- **Partition Management**: Create, maintain, and drop table partitions
+- **Action Gateway**: Tiered actions with audit logging
+- **Autopilot**: Automatic partition maintenance
+
+### Files Changed
+
+**New Files:**
+
+- `control-plane/` - Complete operator service
+- `docs/Architecture/CONTROL_PLANE.md` - Architecture documentation
+- `docker-compose.control-plane.yml` - Docker Compose override
+- `backend/src/routes/admin.routes.deprecated.ts` - 410 GONE stub
+
+**Modified Files:**
+
+- `backend/src/routes/index.ts` - Routes to deprecated stub
+- `docs/Monitoring/MONITORING_INFRASTRUCTURE.md` - Updated to reference control plane
+
+### Break-Glass Operator
+
+Initial break-glass operator created with maximum clearance for emergency access.
+
+### Documentation
+
+See [Control Plane Architecture](docs/Architecture/CONTROL_PLANE.md) for:
+
+- Network architecture diagram
+- Security layers explanation
+- Action tier system
+- API reference
+- Deployment guide
+
+---
+
+## �🔄 Documentation Sweep: DigitalOcean → Hetzner (2025-12-13)
 
 **Status:** All scripts and documentation updated to reflect Hetzner production infrastructure.
 

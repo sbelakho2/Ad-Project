@@ -8,17 +8,22 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
 
-## Current Production Status (2025-12-13)
+## Current Production Status (2025-12-14)
 
 | Component | Status | Details |
 |-----------|--------|---------|
 | Backend API | ✅ Running | Port 8080, PostgreSQL/Redis/Queues UP |
 | Console Frontend | ✅ Running | Port 3000, HTTP 200 |
+| **Control Plane** | ✅ Running | Port 4000, `admin.apexmediation.ee` (IP-restricted) |
 | PostgreSQL 16 | ✅ Running | DB Server, database: `adproject`, 139+ tables |
 | Redis | ✅ Running | App Server, port 6379, password auth |
 | Caddy | ✅ Running | Auto Let's Encrypt for all domains |
 | Prometheus | ✅ Running | Port 9090, 7/7 targets UP |
 | Grafana | ✅ Running | Port 3001 |
+
+> **Operator Access:** The Control Plane at `https://admin.apexmediation.ee` provides operator telemetry and actions.
+> Access requires IP allowlisting and separate operator authentication.
+> See [Control Plane Architecture](../../Architecture/CONTROL_PLANE.md) for details.
 
 ---
 
