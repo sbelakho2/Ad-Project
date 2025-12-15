@@ -3,11 +3,15 @@
 import { motion } from 'framer-motion';
 import {
   Box,
+  CheckCircle,
+  Download,
+  FileText,
   GitBranch,
   Key,
   Lock,
   Search,
   ShieldCheck,
+  Target,
   Users2,
   Zap,
 } from 'lucide-react';
@@ -181,6 +185,61 @@ function PillarsSection() {
                 {pillar.description}
               </p>
             </motion.div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProofStripSection() {
+  const proofItems = [
+    {
+      icon: Target,
+      title: 'Public SLO Targets',
+      description: '99.9% availability, <50ms latency, 95% pod fill',
+      href: '/slo',
+    },
+    {
+      icon: Key,
+      title: 'Signed Logs',
+      description: 'Cryptographically verifiable auction decisions',
+      href: '/docs/verification',
+    },
+    {
+      icon: Download,
+      title: 'Security Pack',
+      description: 'Architecture, threat model, compliance docs',
+      href: '/security-pack',
+    },
+    {
+      icon: FileText,
+      title: 'Playback Matrix',
+      description: '20+ certified platforms and players',
+      href: '/docs/playback-matrix',
+    },
+  ];
+
+  return (
+    <section className="py-12 bg-gray-900">
+      <div className="container mx-auto px-4">
+        <div className="text-center mb-8">
+          <p className="text-sm font-medium text-gray-400 uppercase tracking-wide">
+            Verify before you buy
+          </p>
+        </div>
+        <div className="grid md:grid-cols-4 gap-6 max-w-5xl mx-auto">
+          {proofItems.map((item, index) => (
+            <motion.a
+              key={item.title}
+              href={item.href}
+              {...getRevealProps(index * 0.1)}
+              className="bg-gray-800 rounded-xl p-5 text-center hover:bg-gray-700 transition-colors group"
+            >
+              <item.icon className="w-8 h-8 text-brand-400 mx-auto mb-3 group-hover:text-brand-300" />
+              <h3 className="font-semibold text-white mb-1">{item.title}</h3>
+              <p className="text-xs text-gray-400">{item.description}</p>
+            </motion.a>
           ))}
         </div>
       </div>
@@ -368,7 +427,7 @@ function FinalCTASection() {
             Ready to maximize your ad revenue?
           </h2>
           <p className="text-lg text-brand-100 mb-8">
-            Join studios already using ApexMediation to optimize fill rates, increase eCPM, and get full transparency into their ad stack.
+            Evaluate ApexMediation in 30 minutes. Signed logs. Public SLOs. No lock-in.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <a
@@ -404,6 +463,7 @@ export default function HomePage() {
 
         <HeroSection />
         <PillarsSection />
+        <ProofStripSection />
         <DesignPartnerSection />
         <HowItWorksSection />
         <ReliabilitySection />

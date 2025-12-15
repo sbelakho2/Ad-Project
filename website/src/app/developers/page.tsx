@@ -162,11 +162,11 @@ export default function DevelopersPage() {
                   View on GitHub
                 </a>
                 <a
-                  href="/contact"
+                  href="/docs/playback-matrix"
                   className="inline-flex items-center gap-2 bg-gray-100 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-200 transition-colors"
                 >
                   <BookOpen className="w-5 h-5" />
-                  Docs (coming soon)
+                  View Documentation
                 </a>
               </div>
             </motion.div>

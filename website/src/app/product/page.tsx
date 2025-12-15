@@ -350,7 +350,7 @@ export default function ProductPage() {
                     Explore SDKs
                   </a>
                   <a href="https://console.apexmediation.ee" className="btn-secondary px-6 py-3" target="_blank" rel="noopener noreferrer">
-                    Console demo (coming soon)
+                    Open Console
                   </a>
                 </div>
               </motion.div>

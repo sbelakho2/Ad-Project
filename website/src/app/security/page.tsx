@@ -96,7 +96,7 @@ const complianceBadges = [
   { name: 'GDPR Compliant', description: 'Full EU data protection compliance', status: 'live' },
   { name: 'CCPA Ready', description: 'California Consumer Privacy Act support', status: 'live' },
   { name: 'SOC 2 Type II', description: 'Certification in progress', status: 'planned' },
-  { name: 'IAB TCF 2.0', description: 'Transparency & Consent Framework', status: 'live' },
+  { name: 'IAB TCF 2.2', description: 'Transparency & Consent Framework', status: 'live' },
 ];
 
 export default function SecurityPage() {
@@ -205,14 +205,14 @@ export default function SecurityPage() {
                     We treat downtime as seriously as you do. Our infrastructure is designed 
                     for high availability with automatic failover and multi-region redundancy.
                   </p>
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 flex items-start gap-3">
-                    <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+                  <div className="bg-brand-50 border border-brand-200 rounded-xl p-4 flex items-start gap-3">
+                    <ShieldCheck className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
                     <div>
-                      <p className="font-semibold text-yellow-800">Real-time status</p>
-                      <p className="text-sm text-yellow-700">
-                        Check our status page at{' '}
-                        <a href="https://status.apexmediation.ee" className="underline">
-                          status.apexmediation.ee
+                      <p className="font-semibold text-brand-800">SLO Dashboard</p>
+                      <p className="text-sm text-brand-700">
+                        View our public SLO commitments at{' '}
+                        <a href="/slo" className="underline">
+                          apexmediation.ee/slo
                         </a>
                       </p>
                     </div>
@@ -285,16 +285,16 @@ export default function SecurityPage() {
                 </p>
                 <div className="flex flex-wrap justify-center gap-4">
                   <a
-                    href="/product#transparency"
+                    href="/security-pack"
                     className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
                   >
-                    Learn about cryptographic logs
+                    Download Security Pack
                   </a>
                   <a
-                    href="/contact"
+                    href="/docs/verification"
                     className="inline-flex items-center gap-2 border border-gray-300 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
                   >
-                    Request security review
+                    Learn about signed logs
                   </a>
                 </div>
               </motion.div>

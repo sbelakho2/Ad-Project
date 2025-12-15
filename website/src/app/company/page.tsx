@@ -47,7 +47,7 @@ const values = [
 ];
 
 const stats = [
-  { label: 'Impressions processed monthly', value: '1B+' },
+  { label: 'Public SLO targets', value: '5' },
   { label: 'Uptime SLA', value: '99.9%' },
   { label: 'Median auction latency', value: '<50ms' },
   { label: 'Network integrations', value: '15+' },
