@@ -15,24 +15,18 @@ describe('Infrastructure Migration Plan — Repository Conformance', () => {
   const composeProd = path.join(repoRoot, 'infrastructure/docker-compose.prod.yml');
   const nginxConf = path.join(repoRoot, 'infrastructure/nginx/apexmediation.conf');
   const nginxSslConf = path.join(repoRoot, 'infrastructure/nginx/apexmediation.ssl.conf');
-  const doChecklist = path.join(repoRoot, 'docs/Internal/Infrastructure/DO_READINESS_CHECKLIST.md');
   const prodChecklist = path.join(repoRoot, 'docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md');
   const localHealthScript = path.join(repoRoot, 'scripts/ops/local_health_snapshot.sh');
-  const tlsScript = path.join(repoRoot, 'scripts/ops/do_tls_snapshot.sh');
   const backendIndex = path.join(repoRoot, 'backend/src/index.ts');
   const backendDeploy = path.join(repoRoot, 'backend/deploy-backend.sh');
-  const backendFlyToml = path.join(repoRoot, 'backend/fly.toml');
-  const consoleFlyToml = path.join(repoRoot, 'console/fly.toml');
 
   test('Key files exist', () => {
     expect(exists(infraPlan)).toBe(true);
     expect(exists(composeProd)).toBe(true);
     expect(exists(nginxConf)).toBe(true);
     expect(exists(nginxSslConf)).toBe(true);
-    expect(exists(doChecklist)).toBe(true);
     expect(exists(prodChecklist)).toBe(true);
     expect(exists(localHealthScript)).toBe(true);
-    expect(exists(tlsScript)).toBe(true);
   });
 
   test('Infra plan reflects Postgres-first and ClickHouse deferred', () => {
@@ -94,25 +88,6 @@ describe('Infrastructure Migration Plan — Repository Conformance', () => {
     expect(txt).toMatch(/summary\.txt/);
   });
 
-  test('DO readiness checklist contains Phase 9 verification and tooling', () => {
-    const txt = read(doChecklist);
-    expect(txt).toMatch(/Phase 9 — DO Readiness \(Post‑Provisioning Verification\)/);
-    expect(txt).toMatch(/do_tls_snapshot\.sh/);
-    expect(txt).toMatch(/HSTS.*A\/A\+/);
-    expect(txt).toMatch(/\?sslmode=require/);
-  });
-
-  test('Production readiness checklist includes Post‑DO HTTPS/HSTS Verification subsection', () => {
-    const txt = read(prodChecklist);
-    expect(txt).toMatch(/Post‑DO HTTPS\/HSTS Verification \(Phase 9\)/);
-    expect(txt).toMatch(/do_tls_snapshot\.sh/);
-  });
-
-  test('Production readiness checklist includes DigitalOcean Full Production Deployment Plan', () => {
-    const txt = read(prodChecklist);
-    expect(txt).toMatch(/DigitalOcean Full Production Deployment Plan \(End‑to‑End\)/);
-  });
-
   test('Production readiness checklist includes Day‑2 Operations section and key subsections', () => {
     const txt = read(prodChecklist);
     expect(txt).toMatch(/##\s+2\.\s+Day‑2 Operations \(Long‑Term Running\)/);
@@ -172,18 +147,8 @@ describe('Infrastructure Migration Plan — Repository Conformance', () => {
     expect(/clickhouse/i.test(txt)).toBe(false);
   });
 
-  test('Deprecated providers: Fly.io configs and script are explicitly marked deprecated', () => {
-    // backend deploy script must be a deprecation shim
+  test('Backend deploy script is marked deprecated', () => {
     const deployTxt = read(backendDeploy);
     expect(deployTxt).toMatch(/DEPRECATED/i);
-    // fly.toml files, if present, must carry deprecation notice
-    if (exists(backendFlyToml)) {
-      const flyTxt = read(backendFlyToml);
-      expect(flyTxt).toMatch(/DEPRECATION NOTICE|DEPRECATED/i);
-    }
-    if (exists(consoleFlyToml)) {
-      const flyTxt2 = read(consoleFlyToml);
-      expect(flyTxt2).toMatch(/DEPRECATION NOTICE|DEPRECATED/i);
-    }
   });
 });

@@ -1,2 +1,0 @@
-[INFO] Writing evidence to: /Users/sabelakhoua/IdeaProjects/Ad-Project/docs/Internal/Deployment/do-readiness-2025-12-01
-[INFO] Writing evidence to: /Users/sabelakhoua/IdeaProjects/Ad-Project/docs/Internal/Deployment/do-readiness-2025-12-01

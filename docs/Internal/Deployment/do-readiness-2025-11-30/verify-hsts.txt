@@ -1,1 +1,0 @@
-[STEP] Root path headers (Strict-Transport-Security expected after gate)

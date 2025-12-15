@@ -1,2 +1,0 @@
-[STEP] HTTPS headers (https://api.apexmediation.ee)
-[STEP] Server certificate (openssl s_client)
