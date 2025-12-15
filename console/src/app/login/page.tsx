@@ -12,8 +12,21 @@ const DEMO_LOGIN_ENABLED = process.env.NEXT_PUBLIC_DEMO_LOGIN === 'true'
 const IS_PRODUCTION_BUILD = process.env.NODE_ENV === 'production'
 const CAN_SHOW_DEMO_MODE = DEMO_LOGIN_ENABLED && !IS_PRODUCTION_BUILD
 
+// Check if we're on the admin subdomain
+function isAdminSubdomain(): boolean {
+  if (typeof window === 'undefined') return false
+  return window.location.hostname.startsWith('admin.')
+}
+
 export default function LoginPage() {
   const router = useRouter()
+  
+  // Redirect admin subdomain users to operator login
+  useEffect(() => {
+    if (isAdminSubdomain()) {
+      router.replace('/admin/login')
+    }
+  }, [router])
   const [email, setEmail] = useState(() => (CAN_SHOW_DEMO_MODE ? 'demo@apexmediation.ee' : ''))
   const [password, setPassword] = useState(() => (CAN_SHOW_DEMO_MODE ? 'demo' : ''))
   const [isLoading, setIsLoading] = useState(false)
