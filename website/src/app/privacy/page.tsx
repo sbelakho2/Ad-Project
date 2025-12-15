@@ -7,23 +7,55 @@ import CookieBanner from '@/components/CookieBanner';
 const LAST_UPDATED = '2025-12-12';
 
 export default function PrivacyPolicyPage() {
+  const sections = [
+    { id: 'who-we-are', label: '1. Who we are' },
+    { id: 'roles', label: '2. Roles (Controller vs Processor)' },
+    { id: 'data-collected', label: '3. Data we collect' },
+    { id: 'purposes', label: '4. Purposes and legal bases' },
+    { id: 'sharing', label: '5. Sharing and subprocessors' },
+    { id: 'transfers', label: '6. International transfers' },
+    { id: 'security', label: '7. Security' },
+    { id: 'retention', label: '8. Retention' },
+    { id: 'rights', label: '9. Your rights' },
+    { id: 'cookies', label: '10. Cookies' },
+    { id: 'changes', label: '11. Changes' },
+  ];
+
   return (
     <>
       <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
+        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
           <HomeNav />
         </div>
 
-        <section className="py-14 md:py-20">
+        <section className="py-12 md:py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-3xl">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight">
-                Privacy Policy
-              </h1>
-              <p className="mt-4 text-sm text-gray-600">Last updated: {LAST_UPDATED}</p>
+            <div className="flex gap-12 max-w-6xl mx-auto">
+              {/* Sticky TOC */}
+              <aside className="hidden lg:block w-64 flex-shrink-0">
+                <nav className="sticky top-24">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">On this page</p>
+                  <ul className="space-y-2 text-sm">
+                    {sections.map((s) => (
+                      <li key={s.id}>
+                        <a href={`#${s.id}`} className="text-gray-600 hover:text-brand-600 transition-colors">
+                          {s.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </nav>
+              </aside>
 
-              <div className="mt-10 space-y-8">
-                <section className="space-y-3">
+              {/* Content */}
+              <div className="flex-1 max-w-prose">
+                <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight">
+                  Privacy Policy
+                </h1>
+                <p className="mt-4 text-sm text-gray-600">Last updated: {LAST_UPDATED}</p>
+
+                <div className="mt-10 space-y-8 legal-prose">
+                <section id="who-we-are" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">1) Who we are</h2>
                   <p className="text-gray-700">
                     ApexMediation is a brand owned and operated by Bel Consulting OÜ (Estonia) (&quot;we&quot;, &quot;us&quot;).
@@ -32,15 +64,15 @@ export default function PrivacyPolicyPage() {
                   </p>
                   <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
                     <p className="font-semibold text-gray-900">Controller contact</p>
-                    <p className="mt-1">Bel Consulting OÜ</p>
-                    <p>Narva mnt 5, 10117 Tallinn, Estonia</p>
+                    <p className="mt-1">Bel Consulting OÜ (Reg. 16192499)</p>
+                    <p>Sakala 7-2, EE-10141 Tallinn, Estonia</p>
                     <p>
                       Privacy inquiries: <a className="underline" href="mailto:security@apexmediation.ee">security@apexmediation.ee</a>
                     </p>
                   </div>
                 </section>
 
-                <section className="space-y-3">
+                <section id="roles" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">2) Roles under GDPR (Controller vs Processor)</h2>
                   <p className="text-gray-700">
                     Depending on the context, we act as:
@@ -62,7 +94,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="data-collected" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">3) Data we collect</h2>
                   <p className="text-gray-700">
                     The data we process depends on how you interact with the Services.
@@ -98,7 +130,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="purposes" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">4) Purposes and legal bases</h2>
                   <ul className="list-disc pl-6 text-gray-700 space-y-2">
                     <li>
@@ -119,7 +151,7 @@ export default function PrivacyPolicyPage() {
                   </ul>
                 </section>
 
-                <section className="space-y-3">
+                <section id="sharing" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">5) Sharing and subprocessors</h2>
                   <p className="text-gray-700">
                     We may share data with service providers (subprocessors) that help us host, monitor, and
@@ -132,7 +164,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="transfers" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">6) International transfers</h2>
                   <p className="text-gray-700">
                     We are based in the EEA (Estonia). Some vendors may process data outside the EEA.
@@ -141,7 +173,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="security" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">7) Security</h2>
                   <p className="text-gray-700">
                     We use technical and organizational measures designed to protect data, including access
@@ -150,7 +182,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="retention" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">8) Retention</h2>
                   <p className="text-gray-700">
                     We keep personal data only as long as necessary for the purposes described above,
@@ -160,7 +192,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="rights" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">9) Your rights</h2>
                   <p className="text-gray-700">
                     If we act as Controller for your data, you may have rights under GDPR, including access,
@@ -173,7 +205,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="cookies" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">10) Cookies</h2>
                   <p className="text-gray-700">
                     We use cookies and similar technologies for basic site functionality and (optionally)
@@ -181,7 +213,7 @@ export default function PrivacyPolicyPage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="changes" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">11) Changes</h2>
                   <p className="text-gray-700">
                     We may update this Policy to reflect changes in our Services or legal requirements.
@@ -196,6 +228,7 @@ export default function PrivacyPolicyPage() {
                   This Privacy Policy is provided for transparency and operational clarity. It is not legal advice.
                   If you need legal guidance for your specific situation, consult a qualified lawyer.
                 </p>
+              </div>
               </div>
             </div>
           </div>

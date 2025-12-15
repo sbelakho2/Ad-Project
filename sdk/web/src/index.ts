@@ -82,3 +82,6 @@ export {
   createDefaultConfig,
   type SDKConfig,
 };
+
+// SSAI (Server-Side Ad Insertion) support
+export * as ssai from './ssai';

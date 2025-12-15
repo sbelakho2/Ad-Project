@@ -373,7 +373,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <div className="text-center mt-8 text-sm text-gray-600">
-          <p>© 2025 ApexMediation. All rights reserved.</p>
+          <p>© 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ.</p>
           {(cooldownRemaining > 0 || failedAttempts > 0) && (
             <p className="mt-1 text-amber-600" aria-live="polite">
               {cooldownRemaining > 0

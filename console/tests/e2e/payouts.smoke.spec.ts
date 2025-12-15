@@ -107,10 +107,14 @@ test.describe('Payouts Settings — confirmation modal flow', () => {
     await expect(dialog).toBeHidden()
     expect(putCalled).toBeFalsy()
 
-    // Click Save again → modal → Confirm & Save
+    // Click Save again → modal → type CONFIRM → Confirm & Save
     await page.getByRole('button', { name: 'Save Settings' }).click()
     const dialog2 = page.getByRole('dialog', { name: /Confirm sensitive account changes/i })
     await expect(dialog2).toBeVisible()
+    
+    // The confirm button is disabled until user types "CONFIRM"
+    const confirmInput = dialog2.locator('input#confirm-input')
+    await confirmInput.fill('CONFIRM')
     await dialog2.getByRole('button', { name: /Confirm & Save/i }).click()
 
     // Success message appears and PUT was called once

@@ -15,6 +15,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import { MediationFlowCard } from '@/components/VisualCard';
 
 // Animation helpers - use animate for reliable rendering
 const getRevealProps = (delay = 0) => ({
@@ -109,36 +110,43 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <section className="relative py-20 md:py-32">
-      <div className="container mx-auto px-4 text-center">
-        <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
-          <p className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-50 text-brand-700 text-sm font-medium mb-6">
-            ✓ Free to start · No credit card required
-          </p>
-          <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
-            Ad mediation that maximizes your revenue—transparently.
-          </h1>
-          <p className="text-xl md:text-2xl text-gray-600 mb-8 max-w-3xl mx-auto">
-            ApexMediation optimizes every ad request across your networks with ML-powered waterfalls, real-time analytics, and verifiable auction logs. Keep your existing ad network relationships—we handle the optimization.
-          </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-4">
-            <a
-              href="/signup"
-              className="btn-primary px-8 py-4 text-lg font-semibold"
-            >
-              Get started free
-            </a>
-            <a
-              href="/contact"
-              className="btn-secondary px-8 py-4 text-lg font-semibold"
-            >
-              Talk with our team
-            </a>
-          </div>
-          <p className="text-sm text-gray-500">
-            Trusted by mobile and CTV publishers who want full visibility into their ad stack.
-          </p>
-        </motion.div>
+    <section className="relative py-16 md:py-24 bg-gradient-to-b from-gray-900 to-gray-800">
+      <div className="container mx-auto px-4">
+        <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
+          {/* Left: Copy */}
+          <motion.div {...getRevealProps(0)} className="max-w-xl">
+            <p className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-600/20 text-brand-300 text-sm font-medium mb-6">
+              ✓ Free to start · No credit card required
+            </p>
+            <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold text-white leading-tight mb-6">
+              Ad mediation that maximizes your revenue—transparently.
+            </h1>
+            <p className="text-xl text-gray-300 mb-6 max-w-[55ch]">
+              ApexMediation optimizes every ad request across your networks with ML-powered waterfalls, real-time analytics, and verifiable auction logs.
+            </p>
+            <div className="flex flex-col sm:flex-row items-start gap-4 mb-4">
+              <a
+                href="/signup"
+                className="btn-primary px-8 py-4 text-lg font-semibold"
+              >
+                Get started free
+              </a>
+              <a
+                href="/contact"
+                className="bg-white/10 text-white border border-white/20 px-8 py-4 text-lg font-semibold rounded-lg hover:bg-white/20 transition-colors"
+              >
+                Talk with our team
+              </a>
+            </div>
+            <p className="text-sm text-gray-400">
+              Built for mobile and CTV publishers who demand auditability and control.
+            </p>
+          </motion.div>
+          {/* Right: Visual Card */}
+          <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
+            <MediationFlowCard className="ml-auto max-w-md" />
+          </motion.div>
+        </div>
       </div>
     </section>
   );
@@ -146,9 +154,9 @@ function HeroSection() {
 
 function PillarsSection() {
   return (
-    <section className="py-20 bg-gray-50">
+    <section className="py-16 bg-gray-50">
       <div className="container mx-auto px-4">
-        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+        <motion.div {...getRevealProps(0)} className="text-center mb-12">
           <p className="text-sm font-semibold text-brand-600 uppercase tracking-wide mb-2">
             Why publishers choose ApexMediation
           </p>
@@ -180,28 +188,57 @@ function PillarsSection() {
   );
 }
 
-function SocialProofSection() {
+function DesignPartnerSection() {
+  const partnerBenefits = [
+    {
+      icon: Users2,
+      title: 'White-glove onboarding',
+      description: 'Personal integration support from our engineering team. We\'ll help you set up, migrate, and optimize.',
+    },
+    {
+      icon: GitBranch,
+      title: 'Migration Studio access',
+      description: 'Test your existing waterfall against Apex side-by-side before switching any live traffic.',
+    },
+    {
+      icon: ShieldCheck,
+      title: 'Signed log verification',
+      description: 'Every auction is cryptographically signed. Verify any decision independently—no trust required.',
+    },
+  ];
+
   return (
-    <section className="py-20">
-      <div className="container mx-auto px-4 text-center">
-        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
-          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-            Built with real studios, for real problems.
+    <section className="py-16">
+      <div className="container mx-auto px-4">
+        <motion.div {...getRevealProps(0)} className="text-center mb-12">
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+            Built with design partners, for real problems.
           </h2>
-          <p className="text-lg text-gray-600 mb-12">
-            ApexMediation is shaped together with a small group of design-partner studios across mobile games, utilities and CTV apps. We prioritize the issues they actually hit in production: SDK crashes, opaque revenue swings, network disputes and painful migrations.
+          <p className="text-lg text-gray-600 max-w-prose mx-auto">
+            We&apos;re working closely with a small group of studios across mobile games, utilities, and CTV apps. 
+            Together we&apos;re solving the issues they actually hit in production: SDK crashes, opaque revenue swings, 
+            network disputes, and painful migrations.
           </p>
-          <div className="bg-gray-100 rounded-xl p-8 border-2 border-dashed border-gray-300">
-            <img
-              src="/api/brand/logo"
-              alt="ApexMediation"
-              className="h-12 w-auto mx-auto"
-            />
-            <p className="text-sm text-gray-400 mt-2">
-              Use this area later for studio logos, quotes, case studies.
-            </p>
-          </div>
         </motion.div>
+        <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+          {partnerBenefits.map((benefit, index) => (
+            <motion.div
+              key={benefit.title}
+              {...getRevealProps(index * 0.1)}
+              className="bg-gray-50 rounded-xl p-6 border border-gray-100"
+            >
+              <div className="w-12 h-12 rounded-lg bg-brand-100 flex items-center justify-center mb-4">
+                <benefit.icon className="w-6 h-6 text-brand-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {benefit.title}
+              </h3>
+              <p className="text-gray-600 text-sm leading-relaxed">
+                {benefit.description}
+              </p>
+            </motion.div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -209,9 +246,9 @@ function SocialProofSection() {
 
 function HowItWorksSection() {
   return (
-    <section className="py-20 bg-gray-50">
+    <section className="py-16 bg-gray-50">
       <div className="container mx-auto px-4">
-        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+        <motion.div {...getRevealProps(0)} className="text-center mb-12">
           <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
             How ApexMediation fits into your stack
           </h2>
@@ -244,15 +281,15 @@ function HowItWorksSection() {
 
 function ReliabilitySection() {
   return (
-    <section className="py-20">
+    <section className="py-16">
       <div className="container mx-auto px-4">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-prose mx-auto">
           <motion.div {...getRevealProps(0)}>
             <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
               Avoid the next &quot;over-the-air SDK crash&quot; headline.
             </h2>
             <p className="text-lg text-gray-600 mb-8">
-              Ad SDKs are a common cause of ANRs, crashes and mysterious revenue drops. ApexMediation is built by engineers with deep experience in high-reliability systems and battery-sensitive mobile apps, and backed by decades of technology work at our parent group.
+              Ad SDKs are a common cause of ANRs, crashes and mysterious revenue drops. ApexMediation is built by engineers with deep experience in high-reliability systems and battery-sensitive mobile apps.
             </p>
             <ul className="space-y-4">
               {reliabilityBullets.map((bullet, index) => (
@@ -271,9 +308,9 @@ function ReliabilitySection() {
 
 function AudienceSection() {
   return (
-    <section className="py-20 bg-gray-50">
+    <section className="py-16 bg-gray-50">
       <div className="container mx-auto px-4">
-        <motion.div {...getRevealProps(0)} className="text-center mb-16">
+        <motion.div {...getRevealProps(0)} className="text-center mb-12">
           <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
             Who gets the most value
           </h2>
@@ -304,9 +341,9 @@ function AudienceSection() {
 
 function PricingTeaserSection() {
   return (
-    <section className="py-20">
+    <section className="py-16">
       <div className="container mx-auto px-4 text-center">
-        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+        <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
           <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
             Simple, transparent pricing.
           </h2>
@@ -324,9 +361,9 @@ function PricingTeaserSection() {
 
 function FinalCTASection() {
   return (
-    <section className="py-20 bg-brand-600">
+    <section className="py-16 bg-brand-600">
       <div className="container mx-auto px-4 text-center">
-        <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+        <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
           <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
             Ready to maximize your ad revenue?
           </h2>
@@ -367,7 +404,7 @@ export default function HomePage() {
 
         <HeroSection />
         <PillarsSection />
-        <SocialProofSection />
+        <DesignPartnerSection />
         <HowItWorksSection />
         <ReliabilitySection />
         <AudienceSection />

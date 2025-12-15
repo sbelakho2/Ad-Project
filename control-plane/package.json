@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": ["control-plane", "admin", "internal", "operator"],
-  "author": "ApexMediation",
+  "author": "Bel Consulting OÜ <hello@apexmediation.ee> (https://apexmediation.ee)",
   "license": "PROPRIETARY",
   "private": true,
   "engines": {

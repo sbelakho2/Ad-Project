@@ -11,16 +11,16 @@ const SITE_ORIGIN = 'https://apexmediation.ee';
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_ORIGIN),
-  title: 'ApexMediation - Enterprise Ad Mediation Platform',
-  description: 'Maximize your ad revenue with transparent mediation, fraud protection, and developer-first tools.',
-  keywords: ['ad mediation', 'mobile ads', 'Unity ads', 'iOS ads', 'Android ads', 'ad monetization'],
+  title: 'ApexMediation — Transparent Ad Mediation with Verifiable Auction Logs',
+  description: 'Ad mediation for mobile, CTV, and web publishers. ML-powered optimization, real-time analytics, and cryptographically verifiable auction logs—without taking your network payouts.',
+  keywords: ['ad mediation', 'mobile ads', 'Unity ads', 'iOS ads', 'Android ads', 'ad monetization', 'CTV advertising', 'transparent mediation'],
   authors: [{ name: 'Bel Consulting OÜ' }],
   alternates: {
     canonical: SITE_ORIGIN,
   },
   openGraph: {
-    title: 'ApexMediation - Enterprise Ad Mediation Platform',
-    description: 'Maximize your ad revenue with transparent mediation, fraud protection, and developer-first tools.',
+    title: 'ApexMediation — Transparent Ad Mediation with Verifiable Auction Logs',
+    description: 'Ad mediation for mobile, CTV, and web publishers. ML-powered optimization, real-time analytics, and cryptographically verifiable auction logs—without taking your network payouts.',
     url: SITE_ORIGIN,
     siteName: 'ApexMediation',
     images: [
@@ -35,8 +35,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'ApexMediation - Enterprise Ad Mediation Platform',
-    description: 'Maximize your ad revenue with transparent mediation, fraud protection, and developer-first tools.',
+    title: 'ApexMediation — Transparent Ad Mediation with Verifiable Auction Logs',
+    description: 'Ad mediation for mobile, CTV, and web publishers. ML-powered optimization, real-time analytics, and cryptographically verifiable auction logs.',
     images: ['/og-image.png'],
   },
   robots: {
@@ -61,9 +61,9 @@ export default function RootLayout({
       <body>
         <SkipToContent />
         <ThemeProvider>
-          <main id="main-content" tabIndex={-1}>
+          <div id="main-content" tabIndex={-1}>
             {children}
-          </main>
+          </div>
         </ThemeProvider>
       </body>
     </html>

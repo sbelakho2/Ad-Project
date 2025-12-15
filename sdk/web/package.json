@@ -1,7 +1,7 @@
 {
   "name": "@rivalapex/web-sdk",
   "version": "0.1.0",
-  "description": "Rival Apex Mediation Web SDK (consent, auction client, errors, events)",
+  "description": "ApexMediation Web SDK (consent, auction client, errors, events)",
   "private": false,
   "type": "module",
   "main": "dist/index.umd.js",

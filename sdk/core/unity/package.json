@@ -5,8 +5,8 @@
   "description": "Unity Editor + runtime package for Platform Mediation (Editor tools + runtime SDK)",
   "unity": "2020.3",
   "author": {
-    "name": "Platform",
-    "email": "dev@platform.com"
+    "name": "Bel Consulting OÜ",
+    "email": "support@apexmediation.ee"
   },
   "keywords": ["mediation","ads","platform","editor"],
   "dependencies": {

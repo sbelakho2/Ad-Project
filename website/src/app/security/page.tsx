@@ -93,10 +93,10 @@ const reliabilityMetrics = [
 ];
 
 const complianceBadges = [
-  { name: 'GDPR Compliant', description: 'Full EU data protection compliance' },
-  { name: 'CCPA Ready', description: 'California Consumer Privacy Act support' },
-  { name: 'SOC 2 Type II', description: 'Certification in progress' },
-  { name: 'IAB TCF 2.0', description: 'Transparency & Consent Framework' },
+  { name: 'GDPR Compliant', description: 'Full EU data protection compliance', status: 'live' },
+  { name: 'CCPA Ready', description: 'California Consumer Privacy Act support', status: 'live' },
+  { name: 'SOC 2 Type II', description: 'Certification in progress', status: 'planned' },
+  { name: 'IAB TCF 2.0', description: 'Transparency & Consent Framework', status: 'live' },
 ];
 
 export default function SecurityPage() {
@@ -108,16 +108,16 @@ export default function SecurityPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-32 bg-gradient-to-b from-gray-900 to-gray-800">
+        <section className="py-16 md:py-20">
           <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
-              <div className="w-20 h-20 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
-                <ShieldCheck className="w-10 h-10 text-white" />
+            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
+              <div className="w-16 h-16 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <ShieldCheck className="w-8 h-8 text-white" />
               </div>
-              <h1 className="text-4xl md:text-6xl font-bold text-white leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
                 Security that scales with your trust.
               </h1>
-              <p className="text-xl md:text-2xl text-gray-300 max-w-3xl mx-auto">
+              <p className="text-xl text-gray-600">
                 We believe mediation should be verifiable, not just trustworthy. 
                 Every auction is cryptographically signed. Every decision is auditable.
               </p>
@@ -126,13 +126,13 @@ export default function SecurityPage() {
         </section>
 
         {/* Security Pillars */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <motion.div {...getRevealProps(0)} className="text-center mb-16">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                 Security by design
               </h2>
-              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
                 Security isn&apos;t a feature we added—it&apos;s how we built the platform from day one.
               </p>
             </motion.div>
@@ -164,13 +164,13 @@ export default function SecurityPage() {
         </section>
 
         {/* Privacy */}
-        <section className="py-20 bg-gray-50">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
-            <motion.div {...getRevealProps(0)} className="text-center mb-16">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                 Privacy-first architecture
               </h2>
-              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
                 We believe privacy and monetization can coexist. 
                 Your users&apos; data stays in your hands.
               </p>
@@ -238,13 +238,13 @@ export default function SecurityPage() {
         </section>
 
         {/* Compliance */}
-        <section className="py-20 bg-gray-900">
+        <section className="py-16 bg-gray-900">
           <div className="container mx-auto px-4">
             <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
                 Compliance & certifications
               </h2>
-              <p className="text-lg text-gray-400 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-400 max-w-prose mx-auto">
                 We meet the standards your legal and security teams require.
               </p>
             </motion.div>
@@ -254,8 +254,13 @@ export default function SecurityPage() {
                 <motion.div
                   key={badge.name}
                   {...getRevealProps(index * 0.1)}
-                  className="bg-gray-800 rounded-xl p-6 text-center"
+                  className="bg-gray-800 rounded-xl p-6 text-center relative"
                 >
+                  {badge.status === 'planned' && (
+                    <span className="absolute top-2 right-2 text-xs bg-yellow-500 text-yellow-900 px-2 py-0.5 rounded font-medium">
+                      In progress
+                    </span>
+                  )}
                   <Lock className="w-8 h-8 text-brand-400 mx-auto mb-3" />
                   <h3 className="font-bold text-white mb-1">{badge.name}</h3>
                   <p className="text-sm text-gray-400">{badge.description}</p>
@@ -266,15 +271,15 @@ export default function SecurityPage() {
         </section>
 
         {/* Audit & Verification */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-4xl mx-auto text-center">
+            <div className="max-w-prose mx-auto text-center">
               <motion.div {...getRevealProps(0)}>
-                <Eye className="w-16 h-16 text-brand-600 mx-auto mb-6" />
+                <Eye className="w-12 h-12 text-brand-600 mx-auto mb-6" />
                 <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
                   Don&apos;t trust us. Verify.
                 </h2>
-                <p className="text-lg text-gray-600 mb-8 max-w-2xl mx-auto">
+                <p className="text-lg text-gray-600 mb-8">
                   Every auction produces a cryptographically signed log. Export it, verify it, 
                   audit it independently. We built Apex for publishers who demand proof, not promises.
                 </p>

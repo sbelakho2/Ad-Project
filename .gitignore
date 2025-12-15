@@ -184,3 +184,16 @@ data/**/cache/**
 
 # Bundle analyzer
 bundle-report/
+# Screenshots (test artifacts)
+website/screenshots/
+console/screenshots/
+**/screenshots/*.png
+**/screenshots/*.jpg
+
+# Tar archives
+*.tar.gz
+*.tar.bz2
+*.tgz
+
+# Visual test snapshots (Playwright)
+*-snapshots/

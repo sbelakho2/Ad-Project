@@ -13,6 +13,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import { RetentionMatrixCard } from '@/components/VisualCard';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -119,23 +120,23 @@ export default function PricingPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-32">
+        <section className="py-16 md:py-20">
           <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
-              <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
+            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
                 Transparent pricing for a transparent mediation layer.
               </h1>
-              <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto">
-                Networks pay you directly. We charge a predictable platform fee based on your usage.
+              <p className="text-xl text-gray-600">
+                Networks pay you directly—100% of your ad revenue is yours. We charge a predictable platform fee based on your usage.
               </p>
             </motion.div>
           </div>
         </section>
 
         {/* Pricing Tiers */}
-        <section className="py-20 bg-gray-50">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
-            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8 max-w-7xl mx-auto">
+            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-7xl mx-auto">
               {pricingTiers.map((tier, index) => (
                 <motion.div
                   key={tier.name}
@@ -193,8 +194,83 @@ export default function PricingPage() {
           </div>
         </section>
 
+        {/* Fee Calculator Example */}
+        <section className="py-16">
+          <div className="container mx-auto px-4">
+            <div className="max-w-4xl mx-auto">
+              <motion.div {...getRevealProps(0)} className="text-center mb-12">
+                <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                  See what you&apos;d pay
+                </h2>
+                <p className="text-lg text-gray-600 max-w-prose mx-auto">
+                  <strong>Platform fee</strong> is calculated on your mediated ad revenue—the total you receive from networks via ApexMediation.
+                </p>
+              </motion.div>
+              <motion.div {...getRevealProps(0.1)} className="grid md:grid-cols-3 gap-6">
+                <div className="bg-gray-50 rounded-xl p-6 text-center">
+                  <p className="text-sm text-gray-500 mb-2">$5k/mo mediated</p>
+                  <p className="text-3xl font-bold text-gray-900 mb-1">$0</p>
+                  <p className="text-sm text-brand-600">Free tier</p>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-6 text-center">
+                  <p className="text-sm text-gray-500 mb-2">$50k/mo mediated</p>
+                  <p className="text-3xl font-bold text-gray-900 mb-1">$1,250</p>
+                  <p className="text-sm text-brand-600">Growth @ 2.5%</p>
+                </div>
+                <div className="bg-gray-50 rounded-xl p-6 text-center">
+                  <p className="text-sm text-gray-500 mb-2">$500k/mo mediated</p>
+                  <p className="text-3xl font-bold text-gray-900 mb-1">$10,000</p>
+                  <p className="text-sm text-brand-600">Scale @ 2.0%</p>
+                </div>
+              </motion.div>
+              <motion.p {...getRevealProps(0.2)} className="text-center text-sm text-gray-500 mt-6">
+                Your ad networks pay you directly. We never touch your revenue—only charge a platform fee.
+              </motion.p>
+            </div>
+          </div>
+        </section>
+
+        {/* Retention Matrix */}
+        <section className="py-16 bg-gray-50">
+          <div className="container mx-auto px-4">
+            <div className="max-w-4xl mx-auto">
+              <div className="grid lg:grid-cols-2 gap-12 items-center">
+                <motion.div {...getRevealProps(0)}>
+                  <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                    Log retention by plan
+                  </h2>
+                  <p className="text-lg text-gray-600 mb-6 max-w-prose">
+                    Auction logs and analytics are retained based on your plan. Higher plans get longer retention for compliance and reconciliation.
+                  </p>
+                  <ul className="space-y-3 text-gray-700">
+                    <li className="flex items-start gap-2">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span><strong>Starter:</strong> 30-day log retention</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span><strong>Growth:</strong> 90-day log retention</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span><strong>Scale:</strong> 1-year log retention</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span><strong>Enterprise:</strong> Custom retention + data residency</span>
+                    </li>
+                  </ul>
+                </motion.div>
+                <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
+                  <RetentionMatrixCard className="ml-auto max-w-sm" />
+                </motion.div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {/* FAQ */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-3xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-12">

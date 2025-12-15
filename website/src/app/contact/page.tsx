@@ -13,6 +13,7 @@ import { useState } from 'react';
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import { ContactBenefitsCard } from '@/components/VisualCard';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -61,15 +62,15 @@ export default function ContactPage() {
   return (
     <>
       <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
+        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
           <HomeNav />
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-28">
+        <section className="py-16 md:py-20">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-4">
                 Let&apos;s talk.
               </h1>
               <p className="text-xl text-gray-600">
@@ -127,9 +128,9 @@ export default function ContactPage() {
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-1">Office</h3>
                         <p className="text-gray-600">
-                          Bel Consulting OÜ<br />
-                          Narva mnt 5, 10117<br />
-                          Tallinn, Estonia
+                          Bel Consulting OÜ (Reg. 16192499)<br />
+                          Sakala 7-2<br />
+                          EE-10141 Tallinn, Estonia
                         </p>
                       </div>
                     </div>
@@ -137,7 +138,7 @@ export default function ContactPage() {
 
                   <div className="pt-6 border-t border-gray-200">
                     <h3 className="font-semibold text-gray-900 mb-3">How we can help</h3>
-                    <ul className="space-y-2 text-gray-600">
+                    <ul className="space-y-2 text-gray-600 mb-6">
                       <li className="flex items-center gap-2">
                         <MessageSquare className="w-4 h-4 text-brand-600" />
                         SDK integration & migration
@@ -155,6 +156,7 @@ export default function ContactPage() {
                         Custom enterprise requirements
                       </li>
                     </ul>
+                    <ContactBenefitsCard className="mt-4" />
                   </div>
                 </motion.div>
 

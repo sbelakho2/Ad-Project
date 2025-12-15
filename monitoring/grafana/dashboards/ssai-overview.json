@@ -1,0 +1,283 @@
+{
+  "title": "SSAI Overview",
+  "uid": "ssai-overview",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Sessions",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(ssai_sessions_active)",
+          "legendFormat": "Active"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Sessions Created (24h)",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(increase(ssai_sessions_created_total[24h]))",
+          "legendFormat": "Created"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Fill Rate",
+      "type": "gauge",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "avg(ssai_sli_fill_rate)",
+          "legendFormat": "Fill Rate"
+        }
+      ],
+      "options": {
+        "minValue": 0,
+        "maxValue": 1,
+        "thresholds": [
+          { "value": 0, "color": "red" },
+          { "value": 0.7, "color": "yellow" },
+          { "value": 0.9, "color": "green" }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "title": "Availability",
+      "type": "gauge",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "ssai_sli_availability",
+          "legendFormat": "Availability"
+        }
+      ],
+      "options": {
+        "minValue": 0,
+        "maxValue": 1,
+        "thresholds": [
+          { "value": 0, "color": "red" },
+          { "value": 0.99, "color": "yellow" },
+          { "value": 0.999, "color": "green" }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "title": "P99 Latency",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "ssai_sli_latency_p99_ms{operation=\"manifest\"}",
+          "legendFormat": "Manifest P99"
+        }
+      ],
+      "unit": "ms"
+    },
+    {
+      "id": 6,
+      "title": "Error Rate",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "targets": [
+        {
+          "expr": "ssai_sli_error_rate{category=\"all\"}",
+          "legendFormat": "Error Rate"
+        }
+      ],
+      "unit": "percentunit"
+    },
+    {
+      "id": 7,
+      "title": "Session Creation Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(ssai_sessions_created_total[5m])) by (protocol)",
+          "legendFormat": "{{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Manifest Latency Distribution",
+      "type": "heatmap",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(ssai_manifest_latency_ms_bucket[5m])) by (le)",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Pod Decisions by Result",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 10, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(ssai_pod_decisions_total[5m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "No-Fill Reasons",
+      "type": "piechart",
+      "gridPos": { "x": 8, "y": 10, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(increase(ssai_no_fill_total[1h])) by (reason)",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Partner Health",
+      "type": "table",
+      "gridPos": { "x": 16, "y": 10, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "ssai_circuit_breaker_state",
+          "legendFormat": "{{partner_id}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {}
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Fill Rate by Partner",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "ssai_fill_rate",
+          "legendFormat": "{{partner_id}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Partner Latency (P99)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ssai_partner_latency_ms_bucket[5m])) by (partner_id, le))",
+          "legendFormat": "{{partner_id}}"
+        }
+      ],
+      "unit": "ms"
+    },
+    {
+      "id": 14,
+      "title": "Stitching Operations",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 22, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(ssai_stitching_operations_total[5m])) by (protocol, mode)",
+          "legendFormat": "{{protocol}} - {{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Discontinuities per Manifest",
+      "type": "histogram",
+      "gridPos": { "x": 8, "y": 22, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "ssai_discontinuity_count_bucket",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Beacon Success Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 22, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "1 - (sum(rate(ssai_beacon_errors_total[5m])) / sum(rate(ssai_beacons_fired_total[5m])))",
+          "legendFormat": "Success Rate"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Errors by Type",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(ssai_manifest_errors_total[5m])) by (error_type)",
+          "legendFormat": "Manifest: {{error_type}}"
+        },
+        {
+          "expr": "sum(rate(ssai_stitching_errors_total[5m])) by (error_type)",
+          "legendFormat": "Stitching: {{error_type}}"
+        },
+        {
+          "expr": "sum(rate(ssai_partner_errors_total[5m])) by (error_type)",
+          "legendFormat": "Partner: {{error_type}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Session Duration Distribution",
+      "type": "histogram",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "ssai_session_duration_seconds_bucket",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "unit": "s"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "partner_id",
+        "type": "query",
+        "query": "label_values(ssai_partner_requests_total, partner_id)"
+      },
+      {
+        "name": "protocol",
+        "type": "custom",
+        "options": ["hls", "dash"],
+        "current": "hls"
+      },
+      {
+        "name": "tenant_id",
+        "type": "query",
+        "query": "label_values(ssai_sessions_created_total, tenant_id)"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s"
+}

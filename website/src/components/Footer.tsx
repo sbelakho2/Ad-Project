@@ -20,9 +20,10 @@ export default function Footer() {
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
             <div className="mt-6 text-xs text-gray-500">
-              <p>Harju maakond, Tallinn</p>
-              <p>Kesklinna linnaosa, Narva mnt 5</p>
-              <p>10117, Estonia</p>
+              <p className="font-medium">Bel Consulting OÜ</p>
+              <p>Sakala 7-2</p>
+              <p>EE-10141 Tallinn, Estonia</p>
+              <p className="mt-1">Reg. 16192499</p>
             </div>
           </div>
 
@@ -44,9 +45,9 @@ export default function Footer() {
               Resources
             </h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="https://docs.apexmediation.ee" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
+              <li><a href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/docs" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
               <li><a href="https://github.com/sbelakho2/apex-mediation-platform" className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
-              <li><a href="https://status.apexmediation.ee" className="text-brand-600 hover:text-brand-700 hover:underline">Status</a></li>
+              <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
           </div>
 
@@ -97,7 +98,7 @@ export default function Footer() {
         <div className="border-t pt-8" style={{borderColor:'var(--gray-200)'}}>
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <p className="text-sm text-gray-600">
-              © 2025 ApexMediation. All rights reserved.
+              © 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ.
             </p>
             <div className="flex gap-6 text-sm">
               <a href="/privacy" className="text-brand-600 hover:text-brand-700 transition-colors">Privacy</a>

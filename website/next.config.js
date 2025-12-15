@@ -46,7 +46,7 @@ const nextConfig = {
     const enableGA = process.env.NEXT_PUBLIC_ENABLE_GA === 'true'
     const enableHotjar = process.env.NEXT_PUBLIC_ENABLE_HOTJAR === 'true'
 
-    const scriptSrc = ["'self'"]
+    const scriptSrc = ["'self'", "'unsafe-inline'", "'unsafe-eval'"]
     const connectSrc = ["'self'", 'https:']
     const imgSrc = ["'self'", 'data:', 'https:']
 

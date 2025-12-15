@@ -18,6 +18,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import { SignatureChainCard, MigrationPipelineCard, CircuitBreakerCard } from '@/components/VisualCard';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -26,10 +27,10 @@ const getRevealProps = (delay = 0) => ({
 });
 
 const byoKeyPoints = [
-  'Keep all your ad network accounts, contracts, and 100% of payouts.',
-  'We optimize how your networks compete—we never resell your demand.',
-  'Works with all major networks: AdMob, AppLovin, Unity, Meta, and more.',
-  'Add or remove networks anytime without touching your ApexMediation setup.',
+  'You own all ad network accounts, contracts and payouts.',
+  'ApexMediation never arbitrages or resells your demand.',
+  'Our adapters and S2S integrations are built to be network-agnostic.',
+  'You can swap networks in and out without touching our commercial terms.',
 ];
 
 const transparencySubsections = [
@@ -111,123 +112,189 @@ export default function ProductPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-32">
+        <section className="py-16 md:py-20">
           <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
-              <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
-                Smart mediation that maximizes your revenue.
+            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+                One mediation layer. Your networks. Your rules.
               </h1>
-              <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto">
-                ApexMediation optimizes every ad request with ML-powered waterfalls, reliable SDKs, and real-time analytics—while you keep full control of your ad network relationships.
+              <p className="text-xl text-gray-600">
+                ApexMediation is the neutral orchestration layer between your apps and your ad networks, with SDKs tuned for reliability and a console built for serious teams.
               </p>
             </motion.div>
           </div>
         </section>
 
-        {/* Your Networks, Your Revenue */}
-        <section className="py-20 bg-gray-50">
+        {/* BYO Model - two column with card */}
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
-            <div className="max-w-4xl mx-auto">
-              <motion.div {...getRevealProps(0)}>
-                <div className="flex items-center gap-3 mb-4">
-                  <Box className="w-8 h-8 text-brand-600" />
-                  <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-                    Your networks. Your revenue. Your control.
-                  </h2>
-                </div>
-                <p className="text-lg text-gray-600 mb-8">
-                  Your existing contracts, accounts, and payouts stay exactly as they are. ApexMediation focuses on optimization and infrastructure—you keep full ownership of your demand.
-                </p>
-                <ul className="space-y-3">
-                  {byoKeyPoints.map((point, index) => (
-                    <li key={index} className="flex items-start gap-3">
-                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-1" />
-                      <span className="text-gray-700">{point}</span>
-                    </li>
-                  ))}
-                </ul>
-              </motion.div>
+            <div className="max-w-6xl mx-auto">
+              <div className="grid lg:grid-cols-2 gap-12 items-start">
+                <motion.div {...getRevealProps(0)}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Box className="w-8 h-8 text-brand-600" />
+                    <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                      BYO: Bring Your Own demand.
+                    </h2>
+                  </div>
+                  <p className="text-lg text-gray-600 mb-6 max-w-prose">
+                    Managed demand bundles networks under one vendor. BYO mediation keeps you in charge of your ad relationships—ApexMediation handles the infrastructure.
+                  </p>
+                  <ul className="space-y-3">
+                    {byoKeyPoints.map((point, index) => (
+                      <li key={index} className="flex items-start gap-3">
+                        <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-1" />
+                        <span className="text-gray-700">{point}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </motion.div>
+                <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
+                  <CircuitBreakerCard className="ml-auto max-w-sm" />
+                </motion.div>
+              </div>
             </div>
           </div>
         </section>
 
-        {/* Cryptographic Transparency */}
-        <section className="py-20">
+        {/* Cryptographic Transparency - two column with card */}
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-4xl mx-auto">
-              <motion.div {...getRevealProps(0)}>
-                <div className="flex items-center gap-3 mb-4">
-                  <Lock className="w-8 h-8 text-brand-600" />
-                  <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-                    Cryptographic transparency: prove what ran.
-                  </h2>
-                </div>
-                <p className="text-lg text-gray-600 mb-8">
-                  Each auction ApexMediation runs produces a tamper-evident record: bids received, waterfall order, floor prices, and the winning decision. These records are hashed and signed, so they can&apos;t be silently altered after the fact.
-                </p>
-                <div className="grid md:grid-cols-3 gap-6">
-                  {transparencySubsections.map((item, index) => (
-                    <motion.div
-                      key={item.title}
-                      {...getRevealProps(index * 0.1)}
-                      className="bg-gray-50 rounded-xl p-6"
-                    >
-                      <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                        {item.title}
-                      </h3>
-                      <p className="text-gray-600 text-sm">
-                        {item.description}
-                      </p>
-                    </motion.div>
-                  ))}
-                </div>
-              </motion.div>
+            <div className="max-w-6xl mx-auto">
+              <div className="grid lg:grid-cols-2 gap-12 items-start">
+                <motion.div {...getRevealProps(0)} className="hidden lg:block">
+                  <SignatureChainCard className="max-w-sm" />
+                </motion.div>
+                <motion.div {...getRevealProps(0.1)}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Lock className="w-8 h-8 text-brand-600" />
+                    <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                      Cryptographic transparency.
+                    </h2>
+                  </div>
+                  <p className="text-lg text-gray-600 mb-6 max-w-prose">
+                    Each auction produces a tamper-evident record: bids, waterfall order, floors, and the winning decision. These records are hashed and signed.
+                  </p>
+                  <div className="space-y-4">
+                    {transparencySubsections.map((item) => (
+                      <div key={item.title} className="bg-gray-50 rounded-lg p-4">
+                        <h3 className="font-semibold text-gray-900 mb-1">{item.title}</h3>
+                        <p className="text-gray-600 text-sm">{item.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              </div>
             </div>
           </div>
         </section>
 
-        {/* Migration Studio */}
-        <section className="py-20 bg-gray-50">
+        {/* Migration Studio - two column with card */}
+        <section className="py-16 bg-gray-50">
+          <div className="container mx-auto px-4">
+            <div className="max-w-6xl mx-auto">
+              <div className="grid lg:grid-cols-2 gap-12 items-start">
+                <motion.div {...getRevealProps(0)}>
+                  <div className="flex items-center gap-3 mb-4">
+                    <GitBranch className="w-8 h-8 text-brand-600" />
+                    <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                      Migration Studio.
+                    </h2>
+                  </div>
+                  <p className="text-lg text-gray-600 mb-6 max-w-prose">
+                    Most teams stay on their existing mediation for one reason: fear. Migration Studio is built to reduce that fear.
+                  </p>
+                  <ul className="space-y-3 mb-6">
+                    {migrationCapabilities.map((cap, index) => (
+                      <li key={index} className="flex items-start gap-3">
+                        <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-1" />
+                        <span className="text-gray-700">{cap}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-gray-700 font-medium">
+                    Result: you never have to &quot;flip the big switch&quot; all at once.
+                  </p>
+                </motion.div>
+                <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
+                  <MigrationPipelineCard className="ml-auto max-w-sm" />
+                </motion.div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Comparison Table */}
+        <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-4xl mx-auto">
-              <motion.div {...getRevealProps(0)}>
-                <div className="flex items-center gap-3 mb-4">
-                  <GitBranch className="w-8 h-8 text-brand-600" />
-                  <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-                    Migration Studio: change mediation without breaking anything.
-                  </h2>
-                </div>
-                <p className="text-lg text-gray-600 mb-8">
-                  Most teams stay on their existing mediation for one reason: fear. Fear that changing will break monetization, crash apps, or tank ARPDAU. Migration Studio is built to reduce that fear.
+              <motion.div {...getRevealProps(0)} className="text-center mb-12">
+                <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                  ApexMediation vs. legacy mediators
+                </h2>
+                <p className="text-lg text-gray-600">
+                  See how we compare on the things that matter.
                 </p>
-                <ul className="space-y-3 mb-6">
-                  {migrationCapabilities.map((cap, index) => (
-                    <li key={index} className="flex items-start gap-3">
-                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-1" />
-                      <span className="text-gray-700">{cap}</span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-gray-700 font-medium">
-                  Result: you never have to &quot;flip the big switch&quot; all at once.
-                </p>
+              </motion.div>
+              <motion.div {...getRevealProps(0.1)} className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="border-b-2 border-gray-200">
+                      <th className="text-left py-4 px-4 font-semibold text-gray-900">Feature</th>
+                      <th className="text-center py-4 px-4 font-semibold text-brand-600 bg-brand-50 rounded-t-lg">ApexMediation</th>
+                      <th className="text-center py-4 px-4 font-semibold text-gray-500">Legacy Mediators</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm">
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">Keep your ad network contracts</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">Sometimes</td>
+                    </tr>
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">Signed, verifiable auction logs</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">No</td>
+                    </tr>
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">Per-placement gradual migration</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">Rarely</td>
+                    </tr>
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">Per-adapter circuit breakers</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">No</td>
+                    </tr>
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">Data warehouse export</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">Limited</td>
+                    </tr>
+                    <tr className="border-b border-gray-100">
+                      <td className="py-3 px-4 text-gray-700">No revenue share / take rate</td>
+                      <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
+                      <td className="py-3 px-4 text-center text-gray-400">Hidden fees common</td>
+                    </tr>
+                  </tbody>
+                </table>
               </motion.div>
             </div>
           </div>
         </section>
 
         {/* SDKs */}
-        <section className="py-20">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
             <div className="max-w-5xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-12">
                 <div className="flex items-center justify-center gap-3 mb-4">
                   <Zap className="w-8 h-8 text-brand-600" />
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
-                    SDKs that feel like high-quality framework code—not an afterthought.
+                    SDKs that just work.
                   </h2>
                 </div>
-                <p className="text-lg text-gray-600 max-w-3xl mx-auto">
+                <p className="text-lg text-gray-600 max-w-prose mx-auto">
                   We design the ApexMediation SDKs to be predictable, well-behaved citizens of your app.
                 </p>
               </motion.div>
@@ -260,9 +327,9 @@ export default function ProductPage() {
         </section>
 
         {/* Observability */}
-        <section className="py-20 bg-gray-50">
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-4xl mx-auto">
+            <div className="max-w-prose mx-auto">
               <motion.div {...getRevealProps(0)}>
                 <div className="flex items-center gap-3 mb-4">
                   <Search className="w-8 h-8 text-brand-600" />
@@ -278,9 +345,12 @@ export default function ProductPage() {
                     </li>
                   ))}
                 </ul>
-                <div className="mt-8">
+                <div className="mt-8 flex gap-4">
                   <a href="/developers" className="btn-primary px-6 py-3">
-                    Explore console screenshots →
+                    Explore SDKs
+                  </a>
+                  <a href="https://console.apexmediation.ee" className="btn-secondary px-6 py-3" target="_blank" rel="noopener noreferrer">
+                    Console demo (coming soon)
                   </a>
                 </div>
               </motion.div>

@@ -452,7 +452,7 @@ Body: {
             <section className="rounded-3xl bg-white p-8 text-gray-900 shadow-xl ring-1 ring-gray-200 space-y-3">
               <h2 className="text-h3 font-bold uppercase">What the platform fee covers</h2>
               <ul className="list-disc space-y-3 pl-6 text-sm text-gray-700">
-                <li>Credential vault, adapter orchestration, Config-as-Code, and the single SDK that powers every supported network.</li>
+                <li>Credential vault, adapter orchestration, Config-as-Code, and unified API access to every supported network.</li>
                 <li>Observability + fraud stack: telemetry, debugger replays, Migration Studio, redaction-ready reconciliation exports.</li>
                 <li>Transparency + compliance: signed proofs, consent tooling (GDPR/TCF, COPPA, US-GPP), and audit-friendly logging.</li>
                 <li>Finance automation: tier-aware billing, NET 30 payouts, €/$100 minimums, SEPA/SWIFT wiring, and Stripe portal access.</li>
@@ -526,9 +526,9 @@ Body: {
             </section>
           </div>
           <section className="mt-10 rounded-3xl bg-white/10 p-8 text-sm text-white/80">
-            <h2 className="text-sm font-bold uppercase text-brand-100">Status Dashboard</h2>
+            <h2 className="text-sm font-bold uppercase text-brand-100">Need Help?</h2>
             <p className="mt-3">
-              Subscribe to incident updates at <a href="https://status.apexmediation.ee" className="underline">status.apexmediation.ee</a>. We publish RCA documents within 48 hours of every incident.
+              For security questions or to report vulnerabilities, email <a href="mailto:security@apexmediation.ee" className="underline">security@apexmediation.ee</a>. We publish RCA documents within 48 hours of every incident.
             </p>
           </section>
         </PageLayout>

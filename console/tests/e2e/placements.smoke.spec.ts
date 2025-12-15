@@ -155,21 +155,66 @@ async function stubPlacementApi(
     return respondJson(route, 200, { data: FEATURE_FLAGS, success: true })
   })
 
-  await page.route('**/placements', async (route) => {
+  // Mock auth/me endpoint required by Navigation component
+  await page.route('**/auth/me', async (route) => {
+    console.log('[mock] GET /auth/me')
+    return respondJson(route, 200, {
+      success: true,
+      data: {
+        userId: 'usr-test',
+        email: 'test@example.com',
+        role: 'publisher',
+        publisherId: CURRENT_PUBLISHER_ID,
+      },
+    })
+  })
+
+  // Mock billing usage endpoint for plan access
+  await page.route('**/billing/usage/**', async (route) => {
+    return respondJson(route, 200, {
+      current_period: {
+        start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        impressions: 100000,
+        api_calls: 50000,
+        data_transfer_gb: 10,
+      },
+      overages: {
+        impressions: { amount: 0, cost: 0 },
+        api_calls: { amount: 0, cost: 0 },
+        data_transfer: { amount: 0, cost: 0 },
+        total_overage_cost: 0,
+      },
+      subscription: {
+        plan_type: 'growth',
+        included_impressions: 500000,
+        included_api_calls: 100000,
+        included_data_transfer_gb: 50,
+      },
+    })
+  })
+
+  // Only intercept API calls, not page navigations
+  // Match /api/v1/placements with or without query params
+  await page.route(/\/api\/v1\/placements(\?|$)/, async (route) => {
     const request = route.request()
     const method = request.method().toUpperCase()
 
     if (method === 'GET') {
-      console.log('[mock] GET /placements')
       const data = Array.from(placementStore.values()).filter(
         (placement) => placement.publisherId === CURRENT_PUBLISHER_ID
       )
+      console.log('[mock] GET /api/v1/placements - returning', data.length, 'items')
+      // Match the expected response structure - items instead of data
       return respondJson(route, 200, {
-        data,
-        total: data.length,
-        page: 1,
-        pageSize: data.length || 20,
-        hasMore: false,
+        success: true,
+        data: {
+          items: data,
+          total: data.length,
+          page: 1,
+          pageSize: data.length || 20,
+          hasMore: false,
+        },
       })
     }
 
@@ -195,7 +240,16 @@ async function stubPlacementApi(
     return route.continue()
   })
 
-  await page.route('**/placements/*', async (route) => {
+  await page.route('**/api/v1/placements/formats*', async (route) => {
+    console.log('[mock] GET /api/v1/placements/formats')
+    return respondJson(route, 200, {
+      banner: ['320x50', '300x250', '728x90'],
+      interstitial: ['fullscreen'],
+      rewarded: ['rewarded-video', 'rewarded-interstitial'],
+    })
+  })
+
+  await page.route(/\/api\/v1\/placements\/[^/]+$/, async (route) => {
     const request = route.request()
     const method = request.method().toUpperCase()
     const pathname = pathFrom(request.url())

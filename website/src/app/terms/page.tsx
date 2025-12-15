@@ -7,24 +7,58 @@ import CookieBanner from '@/components/CookieBanner';
 const LAST_UPDATED = '2025-12-12';
 
 export default function TermsOfServicePage() {
+  const sections = [
+    { id: 'agreement', label: '1. Agreement' },
+    { id: 'eligibility', label: '2. Who may use the Services' },
+    { id: 'accounts', label: '3. Accounts & API keys' },
+    { id: 'acceptable-use', label: '4. Acceptable use' },
+    { id: 'responsibilities', label: '5. Publisher responsibilities' },
+    { id: 'fees', label: '6. Fees and billing' },
+    { id: 'ip', label: '7. Intellectual property' },
+    { id: 'data-protection', label: '8. Data protection' },
+    { id: 'availability', label: '9. Availability & support' },
+    { id: 'liability', label: '10. Limitation of liability' },
+    { id: 'termination', label: '11. Termination' },
+    { id: 'governing-law', label: '12. Governing law' },
+    { id: 'contact', label: '13. Contact' },
+  ];
+
   return (
     <>
       <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
+        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
           <HomeNav />
         </div>
 
-        <section className="py-14 md:py-20">
+        <section className="py-12 md:py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-3xl">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight">
-                Terms of Service
-              </h1>
-              <p className="mt-4 text-sm text-gray-600">Last updated: {LAST_UPDATED}</p>
+            <div className="flex gap-12 max-w-6xl mx-auto">
+              {/* Sticky TOC */}
+              <aside className="hidden lg:block w-64 flex-shrink-0">
+                <nav className="sticky top-24">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">On this page</p>
+                  <ul className="space-y-2 text-sm">
+                    {sections.map((s) => (
+                      <li key={s.id}>
+                        <a href={`#${s.id}`} className="text-gray-600 hover:text-brand-600 transition-colors">
+                          {s.label}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </nav>
+              </aside>
 
-              <div className="mt-10 space-y-8">
-                <section className="space-y-3">
-                  <h2 className="text-2xl font-bold text-gray-900">1) Agreement</h2>
+              {/* Content */}
+              <div className="flex-1 max-w-prose">
+                <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight">
+                  Terms of Service
+                </h1>
+                <p className="mt-4 text-sm text-gray-600">Last updated: {LAST_UPDATED}</p>
+
+                <div className="mt-10 space-y-8 legal-prose">
+                  <section id="agreement" className="space-y-3">
+                    <h2 className="text-2xl font-bold text-gray-900">1) Agreement</h2>
                   <p className="text-gray-700">
                     These Terms of Service (&quot;Terms&quot;) govern your access to and use of the ApexMediation
                     website, Console, SDKs, APIs, and related services (the &quot;Services&quot;), operated by Bel
@@ -36,7 +70,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="eligibility" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">2) Who may use the Services</h2>
                   <p className="text-gray-700">
                     The Services are intended for businesses and developers. If you are using the Services
@@ -45,7 +79,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="accounts" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">3) Accounts, authentication, and API keys</h2>
                   <ul className="list-disc pl-6 text-gray-700 space-y-2">
                     <li>You are responsible for keeping credentials and API keys secure.</li>
@@ -54,7 +88,7 @@ export default function TermsOfServicePage() {
                   </ul>
                 </section>
 
-                <section className="space-y-3">
+                <section id="acceptable-use" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">4) Acceptable use</h2>
                   <p className="text-gray-700">You agree not to:</p>
                   <ul className="list-disc pl-6 text-gray-700 space-y-2">
@@ -66,7 +100,7 @@ export default function TermsOfServicePage() {
                   </ul>
                 </section>
 
-                <section className="space-y-3">
+                <section id="responsibilities" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">5) Publisher responsibilities</h2>
                   <p className="text-gray-700">
                     You are responsible for your apps/sites, your end users, and your compliance obligations
@@ -79,7 +113,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="fees" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">6) Fees and billing</h2>
                   <p className="text-gray-700">
                     Fees, billing cycles, and plan details are described on our pricing pages, documentation,
@@ -87,7 +121,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="ip" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">7) Intellectual property</h2>
                   <p className="text-gray-700">
                     We own the Services, including the Console and our SDKs, except for third-party
@@ -95,7 +129,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="data-protection" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">8) Data protection</h2>
                   <p className="text-gray-700">
                     Our <a className="underline" href="/privacy">Privacy Policy</a> describes how we handle personal data.
@@ -104,7 +138,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="availability" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">9) Availability and support</h2>
                   <p className="text-gray-700">
                     We aim to provide a reliable service, but the Services are provided on an “as is” and
@@ -113,7 +147,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="liability" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">10) Limitation of liability</h2>
                   <p className="text-gray-700">
                     To the maximum extent permitted by law, we are not liable for indirect, incidental,
@@ -124,7 +158,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="termination" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">11) Termination</h2>
                   <p className="text-gray-700">
                     You may stop using the Services at any time. We may suspend or terminate access if you
@@ -132,7 +166,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="governing-law" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">12) Governing law</h2>
                   <p className="text-gray-700">
                     These Terms are governed by the laws of Estonia, without regard to conflict of law
@@ -140,7 +174,7 @@ export default function TermsOfServicePage() {
                   </p>
                 </section>
 
-                <section className="space-y-3">
+                <section id="contact" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">13) Contact</h2>
                   <p className="text-gray-700">
                     Questions about these Terms: <a className="underline" href="mailto:legal@apexmediation.ee">legal@apexmediation.ee</a>
@@ -149,14 +183,15 @@ export default function TermsOfServicePage() {
                     Bel Consulting OÜ, Narva mnt 5, 10117 Tallinn, Estonia
                   </p>
                 </section>
-              </div>
+                </div>
 
-              <div className="mt-10 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-                <p className="font-semibold text-gray-900">Not legal advice</p>
-                <p className="mt-1">
-                  These Terms are provided for operational clarity and are not legal advice.
-                  If you need legal guidance, consult a qualified lawyer.
-                </p>
+                <div className="mt-10 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                  <p className="font-semibold text-gray-900">Not legal advice</p>
+                  <p className="mt-1">
+                    These Terms are provided for operational clarity and are not legal advice.
+                    If you need legal guidance, consult a qualified lawyer.
+                  </p>
+                </div>
               </div>
             </div>
           </div>

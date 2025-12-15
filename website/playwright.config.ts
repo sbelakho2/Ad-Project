@@ -18,11 +18,19 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
+    // Desktop browsers
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
     { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    // Mobile phones
     { name: 'mobile-chrome', use: { ...devices['Pixel 5'] } },
     { name: 'mobile-safari', use: { ...devices['iPhone 12'] } },
+    { name: 'iphone-se', use: { ...devices['iPhone SE'] } },
+    { name: 'iphone-14', use: { ...devices['iPhone 14'] } },
+    { name: 'galaxy-s8', use: { ...devices['Galaxy S8'] } },
+    // Tablets
+    { name: 'ipad', use: { ...devices['iPad (gen 7)'] } },
+    { name: 'ipad-pro', use: { ...devices['iPad Pro 11'] } },
   ],
   webServer: {
     command: `npm run dev -- -p ${PLAYWRIGHT_PORT}`,

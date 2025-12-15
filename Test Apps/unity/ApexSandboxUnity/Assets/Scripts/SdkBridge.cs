@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Rival Apex
+// Copyright (c) 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ.
 // Unity-side bridge to native iOS/Android SDKs with Editor/Unknown platform simulation.
 using System;
 using System.Runtime.InteropServices;

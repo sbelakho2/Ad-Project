@@ -1,67 +1,101 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { usePathname } from 'next/navigation';
+import { useState, useEffect } from 'react';
 
 /**
- * Homepage navigation
- * Reference: Design.md § "Main Navigation"
+ * Homepage navigation - cleaned up and simplified
  */
 export default function HomeNav() {
+  const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Close menu on route change
+  useEffect(() => {
+    setMobileMenuOpen(false);
+    document.body.style.overflow = '';
+  }, [pathname]);
+
+  // Handle body scroll lock
+  useEffect(() => {
+    if (mobileMenuOpen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [mobileMenuOpen]);
 
   const navItems = [
     { label: 'Product', href: '/product' },
+    { label: 'Features', href: '/features' },
     { label: 'Pricing', href: '/pricing' },
     { label: 'Developers', href: '/developers' },
     { label: 'Security', href: '/security' },
     { label: 'Company', href: '/company' },
   ];
 
-  return (
-    <nav className="relative z-20">
-      {/* Desktop Navigation */}
-      <div className="hidden md:flex items-center justify-center gap-8 py-6">
-        <Link href="/" className="mr-4">
-          <img src="/api/brand/logo" alt="ApexMediation" className="h-12 w-auto" />
-        </Link>
-        {navItems.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className="text-gray-700 font-semibold text-sm tracking-wide hover:text-brand-600 hover:underline decoration-2 underline-offset-4 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
-          >
-            {item.label}
-          </Link>
-        ))}
+  const isActive = (href: string) => pathname === href;
 
-        <div className="flex items-center gap-4 ml-4">
-          <Link
-            href="/signin"
-            className="text-gray-700 font-semibold text-sm hover:text-brand-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
-          >
-            Sign In
-          </Link>
-          <Link
-            href="/signup"
-            className="btn-primary px-6 py-2 font-semibold text-sm hover:shadow-lg transition-all"
-          >
-            Sign Up
-          </Link>
+  const toggleMenu = () => {
+    setMobileMenuOpen(prev => !prev);
+  };
+
+  const closeMenu = () => {
+    setMobileMenuOpen(false);
+  };
+
+  return (
+    <nav className="relative" style={{ zIndex: 50 }} aria-label="Main navigation">
+      {/* Desktop Navigation */}
+      <div className="hidden md:flex items-center justify-between w-full py-6">
+        <Link href="/" className="flex-shrink-0">
+          <img src="/api/brand/logo" alt="ApexMediation" className="h-44 w-auto" />
+        </Link>
+        <div className="flex items-center gap-8">
+          {navItems.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={isActive(item.href) ? 'page' : undefined}
+              className={`text-gray-700 font-semibold text-sm tracking-wide hover:text-brand-600 hover:underline decoration-2 underline-offset-4 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600 ${isActive(item.href) ? 'text-brand-600 underline' : ''}`}
+            >
+              {item.label}
+            </Link>
+          ))}
+
+          <div className="flex items-center gap-4 ml-4">
+            <Link
+              href="/signin"
+              className="text-gray-700 font-semibold text-sm hover:text-brand-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
+            >
+              Sign In
+            </Link>
+            <Link
+              href="/signup"
+              className="btn-primary px-6 py-2 font-semibold text-sm hover:shadow-lg transition-all"
+            >
+              Sign Up
+            </Link>
+          </div>
         </div>
       </div>
 
       {/* Mobile Navigation */}
       <div className="md:hidden flex items-center justify-between py-4">
         <Link href="/" className="flex items-center gap-2">
-          <img src="/api/brand/logo" alt="ApexMediation" className="h-10 w-auto" />
+          <img src="/api/brand/logo" alt="ApexMediation" className="h-28 w-auto" />
         </Link>
         <button
-          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-          className="text-gray-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+          type="button"
+          onClick={toggleMenu}
+          className="text-gray-700 p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
           aria-expanded={mobileMenuOpen}
-          aria-controls="primary-navigation"
-          aria-label="Toggle menu"
+          aria-controls="mobile-navigation"
+          aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
         >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             {mobileMenuOpen ? (
@@ -77,23 +111,30 @@ export default function HomeNav() {
       {mobileMenuOpen && (
         <>
           <div
-            className="fixed inset-0 bg-black/50 z-40 md:hidden"
-            onClick={() => setMobileMenuOpen(false)}
+            className="fixed inset-0 bg-black/50 md:hidden"
+            style={{ zIndex: 9998 }}
+            onClick={closeMenu}
+            aria-hidden="true"
           />
           <div
-            id="primary-navigation"
-            className="fixed left-0 top-0 bottom-0 w-64 bg-brand-600 text-white z-50 p-6 md:hidden"
+            id="mobile-navigation"
+            className="fixed left-0 top-0 bottom-0 w-72 bg-brand-600 text-white md:hidden p-6"
+            style={{ zIndex: 9999 }}
             role="dialog"
             aria-modal="true"
+            aria-label="Mobile navigation"
           >
-          <div className="flex justify-between items-center mb-8">
+            <div className="flex justify-between items-center mb-8">
               <span className="text-brand-100 font-bold uppercase text-lg">Menu</span>
               <button
-                onClick={() => setMobileMenuOpen(false)}
-                className="text-brand-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                type="button"
+                onClick={closeMenu}
+                className="text-brand-100 p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
                 aria-label="Close menu"
               >
-                ×
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
             </div>
             <div className="flex flex-col gap-4">
@@ -101,8 +142,9 @@ export default function HomeNav() {
                 <Link
                   key={item.href}
                   href={item.href}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="text-brand-100 font-bold uppercase text-sm py-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                  onClick={closeMenu}
+                  aria-current={isActive(item.href) ? 'page' : undefined}
+                  className={`text-brand-100 font-bold uppercase text-sm py-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${isActive(item.href) ? 'underline' : ''}`}
                 >
                   {item.label}
                 </Link>
@@ -110,14 +152,14 @@ export default function HomeNav() {
               <hr className="border-white/20 my-2" />
               <Link
                 href="/signin"
-                onClick={() => setMobileMenuOpen(false)}
+                onClick={closeMenu}
                 className="text-brand-100 font-bold uppercase text-sm py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
               >
                 Sign In
               </Link>
               <Link
                 href="/signup"
-                onClick={() => setMobileMenuOpen(false)}
+                onClick={closeMenu}
                 className="btn-primary px-6 py-2 font-bold uppercase text-sm text-center"
               >
                 Sign Up

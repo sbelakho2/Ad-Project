@@ -374,7 +374,7 @@ npm start
 
 ## License
 
-Proprietary - All rights reserved
+Proprietary - © 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ. All rights reserved.
 
 ## Support
 

@@ -144,29 +144,29 @@ export default function DevelopersPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-32 bg-gradient-to-b from-gray-50 to-white">
+        <section className="py-16 md:py-20 bg-gradient-to-b from-gray-50 to-white">
           <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
-              <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
+            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
                 SDKs built for ad teams who ship.
               </h1>
-              <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto mb-8">
-                Integrate once. Your networks, your revenue, your control.
+              <p className="text-xl text-gray-600 mb-8">
+                Integrate once. Bring your own networks. Keep full control.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a
-                  href="https://docs.apexmediation.ee"
-                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
-                >
-                  <BookOpen className="w-5 h-5" />
-                  Read the docs
-                </a>
-                <a
                   href="https://github.com/sbelakho2/apex-mediation-platform"
-                  className="inline-flex items-center gap-2 bg-gray-900 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-800 transition-colors"
+                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
                 >
                   <GitBranch className="w-5 h-5" />
                   View on GitHub
+                </a>
+                <a
+                  href="/contact"
+                  className="inline-flex items-center gap-2 bg-gray-100 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-200 transition-colors"
+                >
+                  <BookOpen className="w-5 h-5" />
+                  Docs (coming soon)
                 </a>
               </div>
             </motion.div>
@@ -174,13 +174,13 @@ export default function DevelopersPage() {
         </section>
 
         {/* SDKs */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <motion.div {...getRevealProps(0)} className="text-center mb-16">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                 SDKs for every platform
               </h2>
-              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
                 All SDKs are fully open-source, consistently designed, and documented.
               </p>
             </motion.div>
@@ -222,13 +222,13 @@ export default function DevelopersPage() {
         </section>
 
         {/* Quick Start */}
-        <section className="py-20 bg-gray-900 text-white">
+        <section className="py-16 bg-gray-900 text-white">
           <div className="container mx-auto px-4">
             <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold mb-4">
                 Quick start
               </h2>
-              <p className="text-lg text-gray-400 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-400 max-w-prose mx-auto">
                 Get up and running in minutes with platform-specific examples.
               </p>
             </motion.div>
@@ -256,13 +256,13 @@ export default function DevelopersPage() {
         </section>
 
         {/* Developer Tools */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
-            <motion.div {...getRevealProps(0)} className="text-center mb-16">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                 Developer tools
               </h2>
-              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
                 Everything you need to build, test, and debug your integration.
               </p>
             </motion.div>
@@ -286,21 +286,21 @@ export default function DevelopersPage() {
         </section>
 
         {/* CTA */}
-        <section className="py-20 bg-brand-600">
+        <section className="py-16 bg-brand-600">
           <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <h2 className="text-3xl md:text-4xl font-bold text-white mb-6">
                 Ready to integrate?
               </h2>
               <p className="text-xl text-brand-100 mb-8">
-                Start with our getting started guide or reach out if you need help.
+                Start with our GitHub repo or reach out if you need help.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a
-                  href="https://docs.apexmediation.ee/quickstart"
+                  href="https://github.com/sbelakho2/apex-mediation-platform"
                   className="inline-flex items-center gap-2 bg-white text-brand-600 px-6 py-3 rounded-lg font-semibold hover:bg-brand-50 transition-colors"
                 >
-                  Getting started guide
+                  View on GitHub
                 </a>
                 <a
                   href="/contact"

@@ -107,4 +107,4 @@ public class AdManager : MonoBehaviour
 
 ## License
 
-Copyright © 2025 Rival Apex Mediation. All rights reserved.
+© 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ. All rights reserved.

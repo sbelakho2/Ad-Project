@@ -10,7 +10,7 @@ export default function CookiePolicyPage() {
   return (
     <>
       <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
+        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
           <HomeNav />
         </div>
 

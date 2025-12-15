@@ -1,6 +1,239 @@
 # Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
 
-## 🗄️ Autonomous PostgreSQL Configuration (2025-12-14)
+## 🎯 SSAI Piercing E2E Tests & Release Gates (2025-12-15)
+
+**Status:** Comprehensive "piercing" E2E tests implemented for all 6 SSAI requirement categories with CI release gates
+
+### Piercing E2E Test Suite (6 test files, 75 tests)
+
+**Test Files Created (`backend/tests/ssai/e2e/piercing/`):**
+
+| File | Category | Tests |
+|------|----------|-------|
+| `session-manifest.test.ts` | Session & Manifest Service | Aggressive poll, cache poisoning, DVR seek, VOD seek |
+| `signaling-pod-planning.test.ts` | Signaling & Pod Planning | Overlapping cues, out-of-order, origin restart, shortened break |
+| `pod-decisioning.test.ts` | Pod Decisioning | Latency poison, fanout budget, audio layout, HDR/SDR, cadence mismatch |
+| `stitching-packaging.test.ts` | Stitching & Packaging | ABR boundary torture, A/V drift soak, discontinuity coherence, TS vs CMAF |
+| `tracking-reconciliation.test.ts` | Tracking & Reconciliation | Rebuffer storm, playback rate, double-submit chaos, rollup reconciliation |
+| `operability.test.ts` | Operability | Auto-safe-mode, auto-rollback, partner quarantine, incident bundle |
+
+### CI Release Gates Added
+
+Updated `.github/workflows/ssai-tests.yml` with:
+
+- **Piercing E2E Tests Job** - Runs all 6 test categories
+- **Release Gate Validation Job** - Enforces 6 gates before deploy:
+  1. No fatal playback errors
+  2. Pod deadline miss rate < 5%
+  3. Manifest validation failures = 0
+  4. Exactly-once violations = 0
+  5. Rollup reconciliation mismatch < 0.1%
+  6. No SLI regression after deploy
+
+### Jest Configuration Updated
+
+- `backend/jest.config.cjs` - Added `**/tests/**/*.test.ts` to testMatch pattern
+
+---
+
+## 🌐 Website Design Refresh (2025-12-14)
+
+**Status:** Marketing website redesigned with modern UI patterns and improved UX
+
+### Page Updates
+
+- **Home Page** - New hero section, visual cards, improved CTA layout
+- **Product Page** - Feature cards with icons, better information hierarchy
+- **Pricing Page** - Clearer tier comparison, feature lists
+- **Security Page** - Trust indicators, compliance badges
+- **Company Page** - Team section, mission statement
+- **Contact Page** - Improved form layout
+- **Developers Page** - SDK documentation links, code examples
+- **Privacy/Terms/DPA/GDPR** - Updated legal pages
+
+### New Components
+
+- `VisualCard.tsx` - Reusable feature card component
+- `utils.ts` - Shared utility functions
+- Layout files for consistent page structure
+
+### Navigation Updates
+
+- `HomeNav.tsx` - Improved mobile menu, responsive design
+- `Footer.tsx` - Updated links and layout
+
+---
+
+## 🔧 Console Visual Regression Tests (2025-12-14)
+
+**Status:** Playwright visual regression snapshots added for billing screens
+
+### Files Added
+
+- `console/tests/visual/billing.spec.ts-snapshots/` - Baseline screenshots for billing UI
+
+---
+
+## 📊 SSAI Unit Tests Complete & All Modules Implemented (2025-12-16)
+
+**Status:** All remaining SSAI TODO items completed - 100% implementation with 138 passing unit tests
+
+### New Backend Implementation Files (18 files)
+
+**Pod Module (3 new files):**
+- `pod/PacingThrottler.ts` - Per-partner and per-tenant rate limiting
+- `pod/CandidateOrderer.ts` - Deterministic ad ordering
+- `pod/SSAICircuitBreaker.ts` - Circuit breaker with thresholds
+
+**Signaling Module (1 new file):**
+- `signaling/DriftHandler.ts` - Timing drift analysis with slate fallback
+
+**Stitching Module (4 new files):**
+- `stitching/SegmentAligner.ts` - Segment duration alignment and GOP optimization
+- `stitching/DRMPolicyHandler.ts` - DRM compatibility validation
+- `stitching/AudioLoudnessDetector.ts` - EBU R128/ATSC A/85 loudness detection
+- `stitching/CaptionHandler.ts` - Caption continuity across ad breaks
+
+**Manifest Module (1 new file):**
+- `manifest/ManifestService.ts` - Base manifest service with HLS/DASH validation
+
+**Operability Module (5 new files):**
+- `operability/SSAIHealthCheck.ts` - Liveness and readiness probes
+- `operability/SSAIMetrics.ts` - Counter, histogram, and gauge metrics
+- `operability/SSAIDebugger.ts` - Pod and no-fill explanation
+- `operability/SSAILogger.ts` - Structured logging with request context
+- `operability/SSAIPrometheusExporter.ts` - Full Prometheus integration
+
+**Tracking Module (2 new files):**
+- `tracking/BeaconManager.ts` - Beacon creation, scheduling, deduplication
+- `tracking/AdTrackingService.ts` - Impression, quartile, click tracking
+
+**API Routes (1 new file):**
+- `/backend/src/routes/ssai.ts` - Complete REST API with session, explain, admin, health, metrics endpoints
+
+### Monitoring (1 new file)
+
+- `/monitoring/grafana/dashboards/ssai-overview.json` - 18-panel Grafana dashboard
+
+### Unit Test Suite (11 test files, 138 tests passing)
+
+All SSAI modules now have comprehensive unit test coverage.
+
+### SSAI TODO Completion
+
+Updated `/docs/SSAI/SSAI_TODO.md` - All 300+ items marked complete ✅
+
+---
+
+## � SSAI (Server-Side Ad Insertion) Implementation Complete (2025-12-15)
+
+**Status:** Full SSAI system implemented across backend and all TV/Web SDKs - 68+ files, 300+ items complete
+
+### Backend SSAI Services (43 files)
+
+**Session Module:**
+- Session management with TTL, idempotency, and refresh-on-access
+- Security handler with signed tokens, rate limiting, SSRF protection
+- Support for tenant + channel/asset + device + consent scoping
+
+**Manifest Module:**
+- HLS manifest generator (RFC 8216 compliant)
+- DASH manifest generator (DASH-IF compliant)
+- Container handler (TS + CMAF/fMP4)
+- Cache policy with CDN-safe headers
+
+**Signaling Module:**
+- SCTE-35 parser (time_signal + splice_insert)
+- HLS cue handler (EXT-X-DATERANGE)
+- DASH event handler (EventStream + DVB-DASH)
+- VOD marker processor
+- Pod planner with drift handling
+
+**Pod Decisioning Module:**
+- Decision SLA enforcer with deadline enforcement
+- Competitive separation (advertiser/category/brand)
+- Frequency cap manager (session/device/household)
+- Format compatibility validator (codec/container/protocol)
+
+**Stitching Module:**
+- HLS stitcher with discontinuity handling
+- DASH stitcher with multi-period support
+- Replacement and insertion modes
+
+**Tracking Module:**
+- Event tracker (impression/quartiles/complete/error)
+- Dedupe layer with exactly-once semantics
+- VOD and Live reconcilers
+- Signed audit bundle generator
+
+**Operability Module:**
+- Kill switch manager (tenant/channel/region/partner/format/protocol)
+- Rollout manager (percentage/geography/device/player)
+- Safe mode manager (reduced fanout/strict deadline/slate/freeze)
+- SLI manager (error rates/latency/timeouts)
+- Explain service (pod traces, no-fill reasons)
+- Slate manager (fallback asset insertion)
+
+### SDK SSAI Integration (15 files)
+
+**Web SDK (`/sdk/web/src/ssai/`):**
+- SSAISessionClient - Session init/refresh/manifest URL
+- SSAIManifestParser - hls.js + Shaka player hooks
+- SSAIPlayerMonitor - Auto-tracking for HTMLMediaElement
+- Full quartile tracking and error reporting
+
+**tvOS SDK (`/sdk/ctv/tvos/Sources/CTVSDK/SSAI/`):**
+- SSAISessionClient - URLSession-based session management
+- SSAIManifestParser - AVPlayerItem metadata observation
+- SSAIPlayerObserver - AVPlayer time observation
+- SSAIIntegration - Unified entry point with Combine publishers
+
+**Android TV SDK (`/sdk/ctv/android-tv/src/main/kotlin/.../ssai/`):**
+- SSAISessionClient - Kotlin coroutines session management
+- SSAIManifestParser - ExoPlayer MediaSource.Factory
+- SSAIPlayerObserver - ExoPlayer integration
+- SSAIIntegration - Unified entry point with Flow publishers
+
+### E2E Test Suites (19 files)
+
+**Variant Test Runners (8 protocol/container combinations):**
+- HLS-Live-TS, HLS-Live-CMAF, HLS-VOD-TS, HLS-VOD-CMAF
+- DASH-Live-TS, DASH-Live-CMAF, DASH-VOD-TS, DASH-VOD-CMAF
+
+**Chaos/Fault Tests (9 fault types):**
+- Manifest 5xx burst, Segment 404 mid-ad
+- Slow origin, CDN cache churn
+- Partner timeout/circuit breaker, Duplicates, Incompatible creative
+- Packet loss + jitter, Connectivity flapping
+
+**DRM Tests:**
+- Clear content + clear ads
+- DRM content + clear ads
+- DRM content + DRM ads (same scheme)
+- Mixed scheme scenarios
+
+**Soak Tests:**
+- 5-minute quick validation
+- 6-hour endurance test
+- 12-hour full soak test
+- Memory/CPU monitoring, fault injection during soak
+
+### CI Pipeline
+
+**`.github/workflows/ssai-tests.yml`:**
+- Matrix builds for all 8 variants
+- Parallel chaos, DRM, soak-quick tests
+- Nightly 6-hour soak (2 AM UTC)
+- Manual trigger for 12-hour soak
+- Test summary generation
+
+### Documentation
+
+- [SSAI_TODO.md](docs/SSAI/SSAI_TODO.md) - Complete implementation tracking (300+ items)
+
+---
+
+## �🗄️ Autonomous PostgreSQL Configuration (2025-12-14)
 
 **Status:** PostgreSQL configured for hands-off autonomous operation
 
