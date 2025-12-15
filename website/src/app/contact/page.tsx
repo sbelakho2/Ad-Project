@@ -67,7 +67,7 @@ export default function ContactPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-4">
@@ -270,7 +270,7 @@ export default function ContactPage() {
                         <button
                           type="submit"
                           disabled={isSubmitting}
-                          className="w-full bg-brand-600 text-white py-4 rounded-lg font-semibold hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                          className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                         >
                           {isSubmitting ? (
                             <>

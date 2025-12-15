@@ -379,7 +379,7 @@ export default function FeaturesPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-20 md:py-32">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
               <div className="w-20 h-20 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
@@ -401,7 +401,7 @@ export default function FeaturesPage() {
         <PlatformTabsSection />
 
         {/* SDK Integration - TOP FEATURE #1 */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-16">
@@ -483,7 +483,7 @@ export default function FeaturesPage() {
         </section>
 
         {/* Consent Handling - TOP FEATURE #2 */}
-        <section className="py-20 bg-gradient-to-b from-gray-50 to-white">
+        <section className="py-16 bg-gradient-to-b from-gray-50 to-white">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-16">
@@ -880,13 +880,13 @@ rtb_errors{code="timeout"}           2`}
               <div className="flex flex-wrap justify-center gap-4">
                 <a
                   href="/contact"
-                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-8 py-4 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                  className="btn-primary"
                 >
                   Request a demo
                 </a>
                 <a
                   href="/developers"
-                  className="inline-flex items-center gap-2 border border-gray-300 text-gray-700 px-8 py-4 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
+                  className="btn-secondary"
                 >
                   Read the docs
                 </a>

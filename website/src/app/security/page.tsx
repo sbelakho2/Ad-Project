@@ -108,7 +108,7 @@ export default function SecurityPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="w-16 h-16 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
@@ -193,7 +193,7 @@ export default function SecurityPage() {
         </section>
 
         {/* Reliability */}
-        <section className="py-20">
+        <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid md:grid-cols-2 gap-12 items-center">
@@ -324,13 +324,13 @@ export default function SecurityPage() {
               <motion.div {...getRevealProps(0.2)} className="flex flex-wrap justify-center gap-4">
                 <a
                   href="/security-pack"
-                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                  className="btn-primary"
                 >
                   Download Security Pack
                 </a>
                 <a
                   href="/docs/verification"
-                  className="inline-flex items-center gap-2 border border-gray-300 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
+                  className="btn-secondary"
                 >
                   Learn about signed logs
                 </a>

@@ -114,7 +114,7 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <section className="relative py-16 md:py-24 bg-gradient-to-b from-gray-900 to-gray-800">
+    <section className="relative py-16 md:py-16 bg-gradient-to-b from-gray-900 to-gray-800">
       <div className="container mx-auto px-4">
         <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
           {/* Left: Copy */}
@@ -336,6 +336,29 @@ function DesignPartnerSection() {
               </p>
             </motion.div>
           ))}
+        </div>
+
+        <div className="mt-10 max-w-3xl mx-auto bg-white rounded-xl p-6 border border-gray-100 shadow-sm">
+          <h3 className="text-xl font-semibold text-gray-900 mb-3">Design Partner Program</h3>
+          <ul className="space-y-2 text-gray-700">
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+              <span>White-glove onboarding and integration support</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+              <span>Side-by-side migration testing with instant rollback</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+              <span>Signed log verification for every auction decision</span>
+            </li>
+          </ul>
+          <div className="mt-5">
+            <a href="/contact" className="btn-primary px-6 py-3 text-base font-semibold">
+              Apply to the Design Partner Program
+            </a>
+          </div>
         </div>
       </div>
     </section>

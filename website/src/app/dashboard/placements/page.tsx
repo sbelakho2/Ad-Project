@@ -632,7 +632,7 @@ function PlacementModal({
             <p className="text-sm text-gray-700">Quickly create a new placement. You can refine details later.</p>
             <div className="flex flex-wrap gap-3">
               {(['banner','interstitial','rewarded','native'] as Placement['format'][]).map((fmt) => (
-                <button key={fmt} className="px-4 py-2 border rounded text-sm font-medium hover:bg-gray-50" onClick={async () => { await onCreate({ name: `${fmt} placement`, app: 'Default App', format: fmt }); }}>
+                <button key={fmt} className="btn-secondary text-sm" onClick={async () => { await onCreate({ name: `${fmt} placement`, app: 'Default App', format: fmt }); }}>
                   Create {fmt}
                 </button>
               ))}

@@ -62,14 +62,14 @@ export default function CompanyPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
                 Mediation shouldn&apos;t mean compromise.
               </h1>
               <p className="text-xl text-gray-600">
-                Apex Mediation was founded by ads engineers who were tired of mediators that weren&apos;t built for publishers.
+                ApexMediation was founded by ads engineers who were tired of mediators that weren&apos;t built for publishers.
               </p>
             </motion.div>
           </div>
@@ -99,7 +99,7 @@ export default function CompanyPage() {
                       mediation layer is a tool, not a gatekeeper.
                     </p>
                     <p className="text-gray-600 leading-relaxed">
-                      Today, Apex Mediation is being built alongside design-partner studios who demand 
+                      Today, ApexMediation is being built alongside design-partner studios who demand 
                       transparency, reliability, and the flexibility to run their ad stack their way.
                     </p>
                   </div>
@@ -234,7 +234,7 @@ export default function CompanyPage() {
               </p>
               <a
                 href="/contact"
-                className="inline-flex items-center gap-2 bg-brand-600 text-white px-8 py-4 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                className="btn-primary"
               >
                 Get in touch
               </a>

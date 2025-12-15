@@ -34,7 +34,7 @@ export default function VerificationPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20 bg-gradient-to-b from-gray-50 to-white">
+        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">

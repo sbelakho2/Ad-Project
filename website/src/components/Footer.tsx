@@ -45,7 +45,7 @@ export default function Footer() {
               Resources
             </h3>
             <ul className="space-y-2 text-sm">
-              <li><a href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/docs" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
+              <li><a href="/docs" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
               <li><a href="https://github.com/sbelakho2/apex-mediation-platform" className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>

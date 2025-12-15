@@ -160,7 +160,7 @@ export default function DevelopersPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20 bg-gradient-to-b from-gray-50 to-white">
+        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
@@ -172,14 +172,14 @@ export default function DevelopersPage() {
               <div className="flex flex-wrap justify-center gap-4">
                 <a
                   href="https://github.com/sbelakho2/apex-mediation-platform"
-                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                  className="btn-primary inline-flex items-center gap-2"
                 >
                   <GitBranch className="w-5 h-5" />
                   View on GitHub
                 </a>
                 <a
                   href="/docs/playback-matrix"
-                  className="inline-flex items-center gap-2 bg-gray-100 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-200 transition-colors"
+                  className="btn-secondary inline-flex items-center gap-2"
                 >
                   <BookOpen className="w-5 h-5" />
                   View Documentation

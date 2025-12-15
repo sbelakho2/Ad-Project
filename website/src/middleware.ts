@@ -15,7 +15,31 @@ const publicAuthPaths = ['/api/auth/login', '/api/auth/signup', '/api/auth/me', 
 const authPaths = ['/signin', '/signup'];
 
 export async function middleware(request: NextRequest) {
+  const hostname = request.headers.get('host') || '';
   const { pathname } = request.nextUrl;
+
+  // Host-based routing for marketing subdomains.
+  // These subdomains are served by the same Next.js app; we rewrite paths so they resolve.
+  // - docs.apexmediation.ee/foo -> /docs/foo
+  // - status.apexmediation.ee/foo -> /status/foo
+  if (!pathname.startsWith('/api')) {
+    const isDocsHost = hostname.startsWith('docs.');
+    const isStatusHost = hostname.startsWith('status.');
+
+    if (isDocsHost) {
+      const nextPath = pathname === '/' ? '/docs' : pathname.startsWith('/docs') ? pathname : `/docs${pathname}`;
+      const url = request.nextUrl.clone();
+      url.pathname = nextPath;
+      return NextResponse.rewrite(url);
+    }
+
+    if (isStatusHost) {
+      const nextPath = pathname === '/' ? '/status' : pathname.startsWith('/status') ? pathname : `/status${pathname}`;
+      const url = request.nextUrl.clone();
+      url.pathname = nextPath;
+      return NextResponse.rewrite(url);
+    }
+  }
 
   // Get token from cookie
   const token = request.cookies.get('session')?.value;

@@ -108,7 +108,7 @@ export default function SLOPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-green-100 text-green-700 text-sm font-medium mb-6">
@@ -277,8 +277,8 @@ export default function SLOPage() {
                   For real-time status and incident updates, visit our status page.
                 </p>
                 <a
-                  href="https://status.apexmediation.ee"
-                  className="inline-flex items-center gap-2 px-6 py-3 bg-brand-600 text-white rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                  href="/status"
+                  className="btn-primary inline-flex items-center gap-2"
                 >
                   <Activity className="w-5 h-5" />
                   View Status Page

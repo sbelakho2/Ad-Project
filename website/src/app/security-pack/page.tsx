@@ -128,7 +128,7 @@ export default function SecurityPackPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20 bg-gradient-to-b from-gray-50 to-white">
+        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
@@ -143,7 +143,7 @@ export default function SecurityPackPage() {
               </p>
               <a
                 href="/downloads/apex-security-pack.pdf"
-                className="inline-flex items-center gap-2 px-8 py-4 bg-brand-600 text-white rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                className="btn-primary inline-flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
                 Download Security Pack (PDF)

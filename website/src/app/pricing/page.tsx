@@ -128,7 +128,7 @@ export default function PricingPage() {
         </div>
 
         {/* Hero */}
-        <section className="py-16 md:py-20">
+        <section className="py-16 md:py-16">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
