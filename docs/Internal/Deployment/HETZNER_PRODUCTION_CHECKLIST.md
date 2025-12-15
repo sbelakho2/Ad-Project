@@ -7,19 +7,29 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > - **DB Server:** 77.42.44.35  
 > - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
+> - **Project Path:** `/opt/adproject` (NOT `/opt/apex`)
+> - **Deployment:** Tarball upload (no git on server)
+> - **Compose File:** `docker-compose.hetzner.yml` (not `docker-compose.yml`)
 
-## Current Production Status (2025-12-14)
+## Current Production Status (2025-12-15)
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| Backend API | ✅ Running | Port 8080, PostgreSQL/Redis/Queues UP |
-| Console Frontend | ✅ Running | Port 3000, HTTP 200 |
-| **Control Plane** | ✅ Running | Port 4000, `admin.apexmediation.ee` (IP-restricted) |
-| PostgreSQL 16 | ✅ Running | DB Server, database: `adproject`, 139+ tables |
-| Redis | ✅ Running | App Server, port 6379, password auth |
-| Caddy | ✅ Running | Auto Let's Encrypt for all domains |
-| Prometheus | ✅ Running | Port 9090, 7/7 targets UP |
-| Grafana | ✅ Running | Port 3001 |
+| Component | Status | Port | Details |
+|-----------|--------|------|---------|
+| Backend API | ✅ Running | 8080 | PostgreSQL/Redis/Queues UP |
+| Console Frontend | ✅ Running | 3000 | Next.js standalone |
+| Website | ✅ Running | 3002 | Marketing site (Grafana uses 3001) |
+| **Control Plane** | ✅ Running | 4000 | Systemd service, IP-restricted |
+| PostgreSQL 16 | ✅ Running | 5432 | DB Server (system service, not Docker) |
+| Redis | ✅ Running | 6379 | App Server (system service, not Docker) |
+| Caddy | ✅ Running | 80/443 | Auto Let's Encrypt for all domains |
+| Prometheus | ✅ Running | 9090 | Monitoring |
+| Grafana | ✅ Running | 3001 | Dashboards |
+
+> **⚠️ Important Notes:**
+> - Redis and PostgreSQL run as **system services**, NOT Docker containers
+> - Use `docker-compose.hetzner.yml` to avoid port conflicts
+> - Website runs on port **3002** (Grafana uses 3001)
+> - Control Plane runs as **systemd service**, not Docker
 
 > **Operator Access:** The Control Plane at `https://admin.apexmediation.ee` provides operator telemetry and actions.
 > Access requires IP allowlisting and separate operator authentication.
@@ -282,45 +292,146 @@ ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adprojec
 
 ## 8. Deployment Procedure
 
-### 8.1 Deploy Backend
+> **IMPORTANT:** The production server does NOT have git access. Deployment is done via tarball upload.
+> Use `docker-compose.hetzner.yml` (not `docker-compose.yml`) as it excludes Postgres/Redis containers
+> (they run as system services).
+
+### 8.1 Quick Reference - Working Commands
 
 ```bash
-# SSH to app server
+# From your local machine:
+
+# 1. Create deployment tarball
+tar -czvf /tmp/deploy.tar.gz --exclude='node_modules' --exclude='.next' --exclude='dist' \
+  backend/src backend/package.json \
+  console/src console/package.json \
+  website/src website/package.json \
+  control-plane/src control-plane/package.json
+
+# 2. Upload to production
+scp -i ~/.ssh/hetzner-db-mac /tmp/deploy.tar.gz root@46.62.252.96:/opt/adproject/
+
+# 3. Deploy (SSH in and run)
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
-# Navigate to project
-cd /opt/apex
+cd /opt/adproject
+tar -xzvf deploy.tar.gz
+docker compose -f docker-compose.hetzner.yml build backend console
+docker compose -f docker-compose.hetzner.yml up -d backend console
 
-# Pull latest changes
-git pull origin main
+# 4. Verify
+curl http://localhost:8080/health
+curl -I http://localhost:3000
+```
 
-# Rebuild and restart backend
-docker compose build backend
-docker compose up -d backend
+### 8.2 Deploy Backend
+
+```bash
+# From local machine
+cd /path/to/Ad-Project
+
+# Create backend-only tarball
+tar -czvf /tmp/backend-deploy.tar.gz --exclude='node_modules' \
+  backend/src backend/package.json backend/tsconfig.json
+
+# Upload
+scp -i ~/.ssh/hetzner-db-mac /tmp/backend-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+
+# SSH and deploy
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject
+tar -xzvf backend-deploy.tar.gz
+docker compose -f docker-compose.hetzner.yml build backend
+docker compose -f docker-compose.hetzner.yml up -d backend
 
 # Verify health
 curl http://localhost:8080/health
 ```
 
-### 8.2 Deploy Console
+### 8.3 Deploy Console
 
 ```bash
-# SSH to app server
+# From local machine
+tar -czvf /tmp/console-deploy.tar.gz --exclude='node_modules' --exclude='.next' \
+  console/src console/package.json console/next.config.js console/tsconfig.json
+
+scp -i ~/.ssh/hetzner-db-mac /tmp/console-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject
+tar -xzvf console-deploy.tar.gz
+docker compose -f docker-compose.hetzner.yml build console
+docker compose -f docker-compose.hetzner.yml up -d console
 
-# Navigate to project
-cd /opt/apex
-
-# Pull latest changes
-git pull origin main
-
-# Rebuild and restart console
-docker compose build console
-docker compose up -d console
-
-# Verify health
-curl http://localhost:3000
+curl -I http://localhost:3000
 ```
+
+### 8.4 Deploy Website
+
+```bash
+# Website runs on port 3002 (Grafana uses 3001)
+# From local machine
+tar -czvf /tmp/website-deploy.tar.gz --exclude='node_modules' --exclude='.next' \
+  website/src website/package.json website/next.config.js
+
+scp -i ~/.ssh/hetzner-db-mac /tmp/website-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject
+tar -xzvf website-deploy.tar.gz
+
+# Build and run (website is not in hetzner compose, run manually)
+docker build -t adproject-website:latest ./website
+docker rm -f adproject-website-1 2>/dev/null
+docker run -d --name adproject-website-1 --network adproject_apex-net \
+  -p 3002:3001 -e NODE_ENV=production adproject-website:latest
+
+curl -I http://localhost:3002
+```
+
+### 8.5 Deploy Control Plane
+
+```bash
+# Control plane runs as systemd service, not Docker
+# From local machine
+tar -czvf /tmp/control-plane-deploy.tar.gz --exclude='node_modules' \
+  control-plane/src control-plane/package.json control-plane/tsconfig.json control-plane/migrations
+
+scp -i ~/.ssh/hetzner-db-mac /tmp/control-plane-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject
+tar -xzvf control-plane-deploy.tar.gz
+cd control-plane
+npm install
+npm run build
+systemctl restart control-plane
+
+# Verify
+curl http://localhost:4000/health
+systemctl status control-plane
+```
+
+### 8.6 Port Reference
+
+| Service | Container Port | Host Port | Notes |
+|---------|---------------|-----------|-------|
+| Backend | 8080 | 8080 | API server |
+| Console | 3000 | 3000 | Next.js standalone |
+| Website | 3001 | 3002 | Grafana uses 3001 |
+| Control Plane | 4000 | 4000 | Systemd service (not Docker) |
+| Redis | 6379 | 6379 | System service (not Docker) |
+| PostgreSQL | 5432 | 5432 | DB server (not Docker) |
+| Grafana | 3000 | 3001 | Monitoring |
+| Prometheus | 9090 | 9090 | Monitoring |
+
+### 8.7 Compose Files Reference
+
+| File | Purpose | Use When |
+|------|---------|----------|
+| `docker-compose.yml` | Local development | Running locally with Docker Postgres/Redis |
+| `docker-compose.hetzner.yml` | Production | Hetzner server (excludes Postgres/Redis) |
+| `docker-compose.dev.yml` | Dev overlay | Local development with volume mounts |
 
 ---
 
