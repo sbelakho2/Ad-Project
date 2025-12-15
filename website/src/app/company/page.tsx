@@ -47,10 +47,10 @@ const values = [
 ];
 
 const stats = [
-  { label: 'Public SLO targets', value: '5' },
-  { label: 'Uptime SLA', value: '99.9%' },
-  { label: 'Median auction latency', value: '<50ms' },
-  { label: 'Network integrations', value: '15+' },
+  { label: 'Open-source SDKs', value: '6' },
+  { label: 'Certified platforms', value: '20+' },
+  { label: 'Signed verification', value: '✓' },
+  { label: 'Design partner slots', value: '3' },
 ];
 
 export default function CompanyPage() {
@@ -212,7 +212,7 @@ export default function CompanyPage() {
                       </li>
                       <li className="flex items-center gap-2">
                         <Scale className="w-4 h-4 text-brand-600" />
-                        SOC 2 Type II certification in progress
+                        Signed-log verification
                       </li>
                     </ul>
                   </div>

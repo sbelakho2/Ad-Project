@@ -28,23 +28,39 @@ const sdks = [
     platform: 'Android',
     icon: Smartphone,
     color: 'bg-green-500',
-    repo: 'apex-mediation-android-sdk',
+    repo: 'apex-mediation-platform',
     description: 'Kotlin-first SDK for Android apps targeting API 21+.',
     features: ['Compose & View support', 'Kotlin coroutines', 'ProGuard rules included'],
+  },
+  {
+    platform: 'Android TV',
+    icon: Smartphone,
+    color: 'bg-green-600',
+    repo: 'apex-mediation-platform',
+    description: 'Lean-back optimized SDK for Android TV and Fire TV.',
+    features: ['D-pad navigation', 'Large screen layouts', 'Same Kotlin API'],
   },
   {
     platform: 'iOS',
     icon: Smartphone,
     color: 'bg-blue-500',
-    repo: 'apex-mediation-ios-sdk',
+    repo: 'apex-mediation-platform',
     description: 'Swift SDK for iOS 14+ with full SwiftUI support.',
     features: ['Swift async/await', 'SwiftUI views', 'Privacy manifests included'],
+  },
+  {
+    platform: 'tvOS',
+    icon: Smartphone,
+    color: 'bg-blue-600',
+    repo: 'apex-mediation-platform',
+    description: 'Native tvOS SDK for Apple TV apps.',
+    features: ['Focus engine support', 'Top Shelf integration', 'Same Swift API'],
   },
   {
     platform: 'Unity',
     icon: Puzzle,
     color: 'bg-purple-500',
-    repo: 'apex-mediation-unity-plugin',
+    repo: 'apex-mediation-platform',
     description: 'C# plugin for Unity 2021+ with native bridge.',
     features: ['IL2CPP support', 'Editor testing', 'Auto-dependency resolution'],
   },
@@ -52,7 +68,7 @@ const sdks = [
     platform: 'Web (JS/TS)',
     icon: Code,
     color: 'bg-yellow-500',
-    repo: 'apex-mediation-web-sdk',
+    repo: 'apex-mediation-platform',
     description: 'TypeScript SDK for web apps and PWAs.',
     features: ['Tree-shakeable', 'Zero dependencies', 'Server-side rendering safe'],
   },
@@ -173,6 +189,54 @@ export default function DevelopersPage() {
           </div>
         </section>
 
+        {/* Quickstarts */}
+        <section className="py-16 bg-gray-50">
+          <div className="container mx-auto px-4">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
+              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                Quickstarts
+              </h2>
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
+                Get up and running in minutes with platform-specific guides.
+              </p>
+            </motion.div>
+
+            <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-12">
+              <motion.a
+                href="/docs/playback-matrix#web-video"
+                {...getRevealProps(0.1)}
+                className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
+              >
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
+                    <Code className="w-5 h-5 text-yellow-600" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 group-hover:text-brand-600">Web Video SSAI Quickstart</h3>
+                </div>
+                <p className="text-gray-600 text-sm">
+                  Integrate SSAI for HLS/DASH streams in your web player. Works with hls.js, dash.js, Video.js, and more.
+                </p>
+              </motion.a>
+
+              <motion.a
+                href="/docs/playback-matrix#ctv"
+                {...getRevealProps(0.15)}
+                className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
+              >
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+                    <Smartphone className="w-5 h-5 text-purple-600" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 group-hover:text-brand-600">CTV SSAI Quickstart</h3>
+                </div>
+                <p className="text-gray-600 text-sm">
+                  Set up server-side ad insertion for Apple TV, Fire TV, Android TV, Roku, and smart TVs.
+                </p>
+              </motion.a>
+            </div>
+          </div>
+        </section>
+
         {/* SDKs */}
         <section className="py-16">
           <div className="container mx-auto px-4">
@@ -199,10 +263,10 @@ export default function DevelopersPage() {
                     <div>
                       <h3 className="text-xl font-bold text-gray-900">{sdk.platform}</h3>
                       <a
-                        href={`https://github.com/bel-consulting/${sdk.repo}`}
+                        href={`https://github.com/sbelakho2/${sdk.repo}`}
                         className="text-sm text-brand-600 hover:underline"
                       >
-                        bel-consulting/{sdk.repo}
+                        sbelakho2/{sdk.repo}
                       </a>
                     </div>
                   </div>
@@ -282,6 +346,51 @@ export default function DevelopersPage() {
                 </motion.div>
               ))}
             </div>
+          </div>
+        </section>
+
+        {/* Certified Playback Matrix */}
+        <section className="py-16 bg-gray-50">
+          <div className="container mx-auto px-4">
+            <motion.div {...getRevealProps(0)} className="text-center mb-12">
+              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+                Certified playback matrix
+              </h2>
+              <p className="text-lg text-gray-600 max-w-prose mx-auto">
+                20+ platforms and players tested and documented. Know exactly what works before you ship.
+              </p>
+            </motion.div>
+
+            <motion.div {...getRevealProps(0.1)} className="max-w-4xl mx-auto">
+              <div className="bg-white rounded-xl p-6 border border-gray-200">
+                <div className="grid md:grid-cols-3 gap-6 text-center">
+                  <div>
+                    <div className="text-3xl font-bold text-brand-600 mb-2">6</div>
+                    <div className="text-gray-600 font-medium">SDK platforms</div>
+                    <div className="text-sm text-gray-500">iOS, tvOS, Android, Android TV, Unity, Web</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-brand-600 mb-2">8+</div>
+                    <div className="text-gray-600 font-medium">Video players</div>
+                    <div className="text-sm text-gray-500">hls.js, dash.js, ExoPlayer, AVPlayer, Video.js</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-brand-600 mb-2">4</div>
+                    <div className="text-gray-600 font-medium">Stream formats</div>
+                    <div className="text-sm text-gray-500">HLS, DASH, TS, CMAF</div>
+                  </div>
+                </div>
+                <div className="mt-6 text-center">
+                  <a
+                    href="/docs/playback-matrix"
+                    className="inline-flex items-center gap-2 text-brand-600 font-semibold hover:underline"
+                  >
+                    <BookOpen className="w-4 h-4" />
+                    View full playback matrix →
+                  </a>
+                </div>
+              </div>
+            </motion.div>
           </div>
         </section>
 

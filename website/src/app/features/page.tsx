@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity,
@@ -12,11 +13,13 @@ import {
   GitBranch,
   Layers,
   Lock,
+  Monitor,
   Search,
   Shield,
   ShieldCheck,
   Smartphone,
   Sparkles,
+  Tv,
   Zap,
 } from 'lucide-react';
 
@@ -238,6 +241,135 @@ A/B Test:   Statistical significance`}
   );
 }
 
+const platformTabs = [
+  {
+    id: 'ctv',
+    label: 'CTV SSAI',
+    icon: Tv,
+    outcomes: [
+      'Server-side ad insertion for Apple TV, Fire TV, Roku, Android TV',
+      'Live & VOD support with HLS and DASH manifests',
+      'Signed logs for every insertion decision',
+    ],
+    diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│  CTV App     │───▶│  Apex SSAI  │───▶│  Stitched    │
+│  (Player)    │    │  Server     │    │  Stream      │
+└──────────────┘    └─────────────┘    └──────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  Ad Server  │
+                    └─────────────┘`,
+    docsLink: '/docs/playback-matrix#ctv',
+  },
+  {
+    id: 'web',
+    label: 'Web Video',
+    icon: Monitor,
+    outcomes: [
+      'TypeScript SDK for hls.js, dash.js, Video.js, and native players',
+      'VAST/VPAID support with waterfall optimization',
+      'Real-time analytics and debug panel in browser',
+    ],
+    diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│  Web Player  │───▶│  Apex SDK   │───▶│  Ad Request  │
+│  (Browser)   │    │  (TS/JS)    │    │  + Response  │
+└──────────────┘    └─────────────┘    └──────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  Analytics  │
+                    └─────────────┘`,
+    docsLink: '/docs/playback-matrix#web-video',
+  },
+  {
+    id: 'mobile',
+    label: 'Mobile Apps',
+    icon: Smartphone,
+    outcomes: [
+      'Native SDKs for iOS, Android, Unity with async/await APIs',
+      'Background-only network calls, never blocks main thread',
+      'Circuit breakers and per-adapter timeouts',
+    ],
+    diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│  Mobile App  │───▶│  Apex SDK   │───▶│  Ad Networks │
+│  (Native)    │    │  (Native)   │    │  (8+)        │
+└──────────────┘    └─────────────┘    └──────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  Console    │
+                    └─────────────┘`,
+    docsLink: '/developers',
+  },
+];
+
+function PlatformTabsSection() {
+  const [activeTab, setActiveTab] = useState('ctv');
+  const activePlatform = platformTabs.find(t => t.id === activeTab) || platformTabs[0];
+
+  return (
+    <section className="py-16 bg-gray-50">
+      <div className="container mx-auto px-4">
+        <div className="max-w-4xl mx-auto">
+          {/* Tab buttons */}
+          <motion.div {...getRevealProps(0)} className="flex justify-center gap-2 mb-12">
+            {platformTabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-6 py-3 rounded-lg font-semibold transition-colors ${
+                  activeTab === tab.id
+                    ? 'bg-brand-600 text-white'
+                    : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <tab.icon className="w-5 h-5" />
+                {tab.label}
+              </button>
+            ))}
+          </motion.div>
+
+          {/* Tab content */}
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="bg-white rounded-xl p-8 border border-gray-200"
+          >
+            <div className="grid md:grid-cols-2 gap-8">
+              {/* Outcomes */}
+              <div>
+                <h3 className="text-xl font-bold text-gray-900 mb-4">What you get</h3>
+                <ul className="space-y-3">
+                  {activePlatform.outcomes.map((outcome, i) => (
+                    <li key={i} className="flex items-start gap-3">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span className="text-gray-700">{outcome}</span>
+                    </li>
+                  ))}
+                </ul>
+                <a
+                  href={activePlatform.docsLink}
+                  className="inline-flex items-center gap-2 mt-6 text-brand-600 font-semibold hover:underline"
+                >
+                  How to validate →
+                </a>
+              </div>
+
+              {/* Diagram */}
+              <div>
+                <h3 className="text-xl font-bold text-gray-900 mb-4">Architecture</h3>
+                <div className="bg-gray-900 rounded-lg p-4 font-mono text-xs text-gray-300 overflow-x-auto">
+                  <pre>{activePlatform.diagram}</pre>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function FeaturesPage() {
   return (
     <>
@@ -264,6 +396,9 @@ export default function FeaturesPage() {
             </motion.div>
           </div>
         </section>
+
+        {/* Platform Tabs */}
+        <PlatformTabsSection />
 
         {/* SDK Integration - TOP FEATURE #1 */}
         <section className="py-20">

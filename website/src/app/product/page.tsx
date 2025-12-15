@@ -326,6 +326,51 @@ export default function ProductPage() {
           </div>
         </section>
 
+        {/* CTV & Web Video SSAI */}
+        <section className="py-16">
+          <div className="container mx-auto px-4">
+            <div className="max-w-5xl mx-auto">
+              <motion.div {...getRevealProps(0)}>
+                <div className="flex items-center gap-3 mb-4">
+                  <Tv className="w-8 h-8 text-brand-600" />
+                  <h2 className="text-3xl md:text-4xl font-bold text-gray-900">
+                    For CTV & Web Video: SSAI that&apos;s debuggable
+                  </h2>
+                </div>
+                <p className="text-lg text-gray-600 mb-6 max-w-prose">
+                  Server-side ad insertion should be deterministic and auditable. ApexMediation provides full visibility into every ad decision.
+                </p>
+                <div className="grid md:grid-cols-2 gap-8 mb-8">
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <h3 className="font-semibold text-gray-900 mb-3">Deterministic behavior</h3>
+                    <p className="text-gray-600 text-sm">
+                      Same inputs produce same outputs. Reproduce any ad decision with the exact context.
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <h3 className="font-semibold text-gray-900 mb-3">Explainable traces</h3>
+                    <p className="text-gray-600 text-sm">
+                      Every SSAI decision includes a full trace: waterfall order, bid responses, winner selection.
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <h3 className="font-semibold text-gray-900 mb-3">Signed evidence</h3>
+                    <p className="text-gray-600 text-sm">
+                      Cryptographically signed logs for every insertion. Dispute-ready documentation.
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <h3 className="font-semibold text-gray-900 mb-3">Safe-mode & rollback</h3>
+                    <p className="text-gray-600 text-sm">
+                      Automatic fallback to safe configurations. Instant rollback if guardrails trigger.
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          </div>
+        </section>
+
         {/* Observability */}
         <section className="py-16">
           <div className="container mx-auto px-4">
@@ -351,6 +396,9 @@ export default function ProductPage() {
                   </a>
                   <a href="https://console.apexmediation.ee" className="btn-secondary px-6 py-3" target="_blank" rel="noopener noreferrer">
                     Open Console
+                  </a>
+                  <a href="/docs/playback-matrix" className="btn-secondary px-6 py-3">
+                    Console Quick Start
                   </a>
                 </div>
               </motion.div>

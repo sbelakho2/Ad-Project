@@ -88,15 +88,15 @@ const privacyFeatures = [
 const reliabilityMetrics = [
   { label: 'Uptime SLA', value: '99.9%', icon: CheckCircle },
   { label: 'Median latency', value: '<50ms', icon: Zap },
-  { label: 'Multi-region', value: '3 zones', icon: Server },
+  { label: 'Regions', value: 'DE + FI', icon: Server },
   { label: 'Auto-failover', value: '<30s', icon: RefreshCw },
 ];
 
 const complianceBadges = [
   { name: 'GDPR Compliant', description: 'Full EU data protection compliance', status: 'live' },
   { name: 'CCPA Ready', description: 'California Consumer Privacy Act support', status: 'live' },
-  { name: 'SOC 2 Type II', description: 'Certification in progress', status: 'planned' },
   { name: 'IAB TCF 2.2', description: 'Transparency & Consent Framework', status: 'live' },
+  { name: 'COPPA Compliant', description: 'Children\'s privacy protection', status: 'live' },
 ];
 
 export default function SecurityPage() {
@@ -256,11 +256,6 @@ export default function SecurityPage() {
                   {...getRevealProps(index * 0.1)}
                   className="bg-gray-800 rounded-xl p-6 text-center relative"
                 >
-                  {badge.status === 'planned' && (
-                    <span className="absolute top-2 right-2 text-xs bg-yellow-500 text-yellow-900 px-2 py-0.5 rounded font-medium">
-                      In progress
-                    </span>
-                  )}
                   <Lock className="w-8 h-8 text-brand-400 mx-auto mb-3" />
                   <h3 className="font-bold text-white mb-1">{badge.name}</h3>
                   <p className="text-sm text-gray-400">{badge.description}</p>
@@ -273,8 +268,8 @@ export default function SecurityPage() {
         {/* Audit & Verification */}
         <section className="py-16">
           <div className="container mx-auto px-4">
-            <div className="max-w-prose mx-auto text-center">
-              <motion.div {...getRevealProps(0)}>
+            <div className="max-w-4xl mx-auto">
+              <motion.div {...getRevealProps(0)} className="text-center mb-12">
                 <Eye className="w-12 h-12 text-brand-600 mx-auto mb-6" />
                 <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
                   Don&apos;t trust us. Verify.
@@ -283,20 +278,62 @@ export default function SecurityPage() {
                   Every auction produces a cryptographically signed log. Export it, verify it, 
                   audit it independently. We built Apex for publishers who demand proof, not promises.
                 </p>
-                <div className="flex flex-wrap justify-center gap-4">
-                  <a
-                    href="/security-pack"
-                    className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
-                  >
-                    Download Security Pack
-                  </a>
-                  <a
-                    href="/docs/verification"
-                    className="inline-flex items-center gap-2 border border-gray-300 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
-                  >
-                    Learn about signed logs
-                  </a>
+              </motion.div>
+
+              {/* Security Pack Contents */}
+              <motion.div {...getRevealProps(0.1)} className="bg-gray-50 rounded-xl p-8 mb-8">
+                <h3 className="text-xl font-bold text-gray-900 mb-4 text-center">
+                  Security Pack Contents
+                </h3>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">System architecture diagram</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Threat model & mitigations</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Data flow documentation</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Encryption & key management</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">GDPR/CCPA compliance checklist</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Penetration test summary</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Signed log verification guide</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                    <span className="text-gray-700">Vendor security questionnaire</span>
+                  </div>
                 </div>
+              </motion.div>
+
+              <motion.div {...getRevealProps(0.2)} className="flex flex-wrap justify-center gap-4">
+                <a
+                  href="/security-pack"
+                  className="inline-flex items-center gap-2 bg-brand-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-brand-700 transition-colors"
+                >
+                  Download Security Pack
+                </a>
+                <a
+                  href="/docs/verification"
+                  className="inline-flex items-center gap-2 border border-gray-300 text-gray-700 px-6 py-3 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
+                >
+                  Learn about signed logs
+                </a>
               </motion.div>
             </div>
           </div>

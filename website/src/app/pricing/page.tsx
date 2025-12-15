@@ -98,6 +98,14 @@ const faqs = [
     answer: 'No. Your ad networks pay you directly—100% of your ad revenue is yours. We charge a simple platform fee for the mediation layer.',
   },
   {
+    question: 'How is SSAI priced for Web and CTV?',
+    answer: 'SSAI pricing follows the same model as mobile mediation—based on mediated revenue, not impressions. Whether you\'re serving HLS or DASH, live or VOD, the fee structure is identical.',
+  },
+  {
+    question: 'Retention vs. compliance—what do I need?',
+    answer: 'Starter (30 days) is fine for most debugging. Growth (90 days) covers typical payment cycles. Scale (1 year) meets most compliance requirements. Enterprise offers custom retention and data residency.',
+  },
+  {
     question: 'What happens if I exceed the Starter limit?',
     answer: 'We\'ll let you know before you hit the limit and discuss upgrade options. No surprise charges.',
   },

@@ -145,6 +145,11 @@ function HeroSection() {
             <p className="text-sm text-gray-400">
               Built for mobile and CTV publishers who demand auditability and control.
             </p>
+            <p className="text-sm text-gray-400 mt-2">
+              <a href="/security-pack" className="text-brand-300 hover:text-brand-200 underline">
+                Download the Security Pack →
+              </a>
+            </p>
           </motion.div>
           {/* Right: Visual Card */}
           <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
@@ -187,6 +192,40 @@ function PillarsSection() {
             </motion.div>
           ))}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function SSAICoverageSection() {
+  return (
+    <section className="py-16 bg-white">
+      <div className="container mx-auto px-4">
+        <motion.div {...getRevealProps(0)} className="text-center mb-12">
+          <p className="text-sm font-semibold text-brand-600 uppercase tracking-wide mb-2">
+            Web + CTV SSAI (Live & VOD)
+          </p>
+          <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
+            Supported today
+          </h2>
+          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+            Full SSAI coverage for HLS and DASH across live and VOD streams.
+          </p>
+        </motion.div>
+
+        <motion.div {...getRevealProps(0.1)} className="max-w-3xl mx-auto">
+          <div className="bg-gray-900 rounded-xl p-6 font-mono text-sm">
+            <div className="text-gray-400 mb-4 text-center font-semibold">SSAI Coverage Matrix</div>
+            <div className="overflow-x-auto">
+              <pre className="text-gray-300">
+{`       Live  VOD   TS    CMAF
+HLS    ✅    ✅    ✅    ✅
+DASH   ✅    ✅    ✅    ✅
+DRM    ✅ Clear  (Policy-based for DRM streams)`}
+              </pre>
+            </div>
+          </div>
+        </motion.div>
       </div>
     </section>
   );
@@ -463,6 +502,7 @@ export default function HomePage() {
 
         <HeroSection />
         <PillarsSection />
+        <SSAICoverageSection />
         <ProofStripSection />
         <DesignPartnerSection />
         <HowItWorksSection />
