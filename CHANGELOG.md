@@ -314,17 +314,22 @@ Updated `/docs/SSAI/SSAI_TODO.md` - All 300+ items marked complete ✅
 | Admin Routes | `/api/v1/admin/*` on customer API | Completely removed (410 GONE) |
 | Operator Service | None | `control-plane` on port 4000 |
 | Operator Auth | Shared JWT | Separate `OPERATOR_JWT_SECRET` |
-| Network Access | No restrictions | IP allowlist via Caddy + app |
+| Network Access | No restrictions | Operator auth + device approvals (no IP allowlisting) |
 | Hostname | N/A | `admin.apexmediation.ee` |
 
 ### Security Implementation
 
 - **Complete separation**: Customer API has zero admin functionality
-- **IP allowlisting**: Control plane only accessible from whitelisted IPs
-- **Stealth mode**: Non-allowed IPs receive HTTP 404 (not 403)
+- **No IP allowlisting**: Access is controlled via operator authentication
+- **Device whitelist + email approval**: New devices require confirmation sent to `contact@apexmediation.ee`
 - **Separate JWT realm**: Operator tokens incompatible with customer tokens
 - **8-hour token expiry**: Operators must re-authenticate frequently
 - **Typed confirmations**: Dangerous actions require exact confirmation string
+
+### Operator Device Management
+
+- Added authenticated endpoints to list/revoke trusted devices: `GET /api/v1/devices`, `POST /api/v1/devices/:id/revoke`
+- Control Plane UI now surfaces trusted devices and allows revocation
 
 ### Database Roles Created
 

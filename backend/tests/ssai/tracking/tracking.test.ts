@@ -1,13 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
-import { 
-  EventTracker, 
-  TrackingResult, 
-  QuartileProgress 
-} from '../../../../src/services/ssai/tracking/EventTracker';
-import { DedupeLayer } from '../../../../src/services/ssai/tracking/DedupeLayer';
-import { VODReconciler } from '../../../../src/services/ssai/tracking/VODReconciler';
-import { LiveReconciler } from '../../../../src/services/ssai/tracking/LiveReconciler';
-import { AuditBundleGenerator } from '../../../../src/services/ssai/tracking/AuditBundleGenerator';
+import { EventTracker } from '../../../src/services/ssai/tracking/EventTracker';
+import { TrackingResult, QuartilePosition } from '../../../src/services/ssai/tracking/types';
+import { DedupeLayer } from '../../../src/services/ssai/tracking/DedupeLayer';
+import { VODReconciler } from '../../../src/services/ssai/tracking/VODReconciler';
+import { LiveReconciler } from '../../../src/services/ssai/tracking/LiveReconciler';
+import { AuditBundleGenerator } from '../../../src/services/ssai/tracking/AuditBundleGenerator';
 
 // Mock fetch
 const mockFetch = jest.fn();

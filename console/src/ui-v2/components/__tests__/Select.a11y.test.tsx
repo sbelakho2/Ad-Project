@@ -1,7 +1,10 @@
 import React from 'react'
 import { render } from '@testing-library/react'
-import { axe, toHaveNoViolations } from 'jest-axe'
+import * as jestAxe from 'jest-axe'
 import { Select } from '../Select'
+
+const axe = jestAxe.axe
+const toHaveNoViolations = (jestAxe as any).toHaveNoViolations
 
 expect.extend(toHaveNoViolations)
 

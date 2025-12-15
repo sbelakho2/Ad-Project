@@ -368,7 +368,7 @@ If you are provisioning a brand‑new droplet and managed services, follow this 
 - [ ] Configure Nginx routing for `api.apexmediation.ee`, `console.apexmediation.ee`.
 
 #### A.1.1 HTTPS/HSTS Verification
-Follow section 0.0.0 for TLS/HSTS enablement and evidence capture; do not duplicate steps here. Protect `/metrics` via IP allowlist or Basic Auth snippet as part of Nginx HTTPS server blocks.
+Follow section 0.0.0 for TLS/HSTS enablement and evidence capture; do not duplicate steps here. Protect `/metrics` via Basic Auth snippet as part of Nginx HTTPS server blocks.
 
 ### A.2 Database — Managed PostgreSQL
 - [ ] Create DigitalOcean Managed PostgreSQL cluster (Basic/Dev plan, same region, 10–20 GB storage) via CLI:
@@ -505,6 +505,7 @@ Data Plane Verification
 - [ ] Database TLS: run `npm run verify:db --workspace backend` and then migrations
 - [ ] Redis isolation: `npm run verify:redis --workspace backend` and external `nmap` on `6379` (expect closed/filtered)
 - [ ] Protect `/metrics` (Basic Auth or IP allowlist) and capture 401/403 proof
+- [ ] Protect `/metrics` (Basic Auth) and capture 401 proof
 
 Evidence & Changelog
 - [ ] Store evidence under `docs/Internal/Deployment/do-readiness-YYYY-MM-DD/`
@@ -529,6 +530,7 @@ References
 - [ ] `DATABASE_URL` enforces TLS (`?sslmode=require`) and migrations applied successfully
 - [ ] Redis not publicly reachable (external nmap shows 6379 closed/filtered); in-cluster AUTH verified
 - [ ] `/metrics` protected (401 Basic or 403 IP allowlist) from public Internet
+- [ ] `/metrics` protected (401 Basic Auth) from public Internet
 - [ ] Evidence bundle stored under `docs/Internal/Deployment/do-readiness-YYYY-MM-DD/` and referenced in `CHANGELOG.md`
 - [ ] CI “policy guard” green: provider content guard and infra plan tests pass (`npm run test:infra`)
 

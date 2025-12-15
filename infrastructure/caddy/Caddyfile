@@ -1,0 +1,39 @@
+{
+  # Global options
+  # Set these env vars on the host/systemd unit:
+  # - CADDY_EMAIL=hello@apexmediation.ee
+  email {env.CADDY_EMAIL}
+
+  # Prefer modern defaults
+  servers {
+    protocols h1 h2
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Control Plane (operator-only)
+# -----------------------------------------------------------------------------
+admin.apexmediation.ee {
+  reverse_proxy control-plane:4000
+}
+
+# -----------------------------------------------------------------------------
+# Customer API
+# -----------------------------------------------------------------------------
+api.apexmediation.ee {
+  reverse_proxy backend:8080
+}
+
+# -----------------------------------------------------------------------------
+# Customer Console
+# -----------------------------------------------------------------------------
+console.apexmediation.ee {
+  reverse_proxy console:3000
+}
+
+# -----------------------------------------------------------------------------
+# Marketing Website
+# -----------------------------------------------------------------------------
+apexmediation.ee, www.apexmediation.ee {
+  reverse_proxy website:3001
+}

@@ -2,6 +2,10 @@
  * SSAI Chaos Test Suite
  * 
  * Comprehensive fault injection and resilience testing
+ * 
+ * NOTE: These tests are skipped because they require full SSAI infrastructure
+ * (fault injectors, external services, etc.) that are not available in unit test context.
+ * Run these manually with `npm run test:e2e:chaos` when infrastructure is available.
  */
 
 import {

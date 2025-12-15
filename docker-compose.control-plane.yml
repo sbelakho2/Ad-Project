@@ -23,9 +23,20 @@ services:
       # (JSON map is also accepted for backward compatibility)
       # Generate with: node -e "console.log(require('bcryptjs').hashSync('password', 12))"
       - OPERATOR_CREDENTIALS=${OPERATOR_CREDENTIALS:?OPERATOR_CREDENTIALS is required}
-      
-      # IP Allowlist (comma-separated CIDR blocks)
-      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:-127.0.0.1/32,::1/128}
+
+      # Device approvals (email-confirm new devices)
+      - DEVICE_APPROVAL_ENABLED=${DEVICE_APPROVAL_ENABLED:-true}
+      - DEVICE_APPROVAL_EMAIL_TO=contact@apexmediation.ee
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-https://admin.apexmediation.ee}
+      - DEVICE_CHALLENGE_TTL_MINUTES=${DEVICE_CHALLENGE_TTL_MINUTES:-30}
+
+      # SMTP (required when DEVICE_APPROVAL_ENABLED=true)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - EMAIL_FROM=${EMAIL_FROM:-contact@apexmediation.ee}
       
       # Database (READ-ONLY role for monitoring)
       - DB_HOST=${DB_HOST:-postgres}
@@ -54,7 +65,7 @@ services:
       - postgres
     networks:
       - ad-stack
-    # Do NOT expose to public internet directly - goes through Caddy with IP allowlist
+    # Do NOT expose to public internet directly - goes through edge reverse proxy
     profiles:
       - production
       - control-plane

@@ -15,9 +15,24 @@ const envSchema = z.object({
   OPERATOR_JWT_SECRET: z.string().min(32),
   OPERATOR_SESSION_TTL_HOURS: z.string().default('4'),
   OPERATOR_CREDENTIALS: z.string().optional(), // email:hash pairs
-  
-  // IP Allowlist
-  ALLOWED_IPS: z.string().default('127.0.0.1/32,::1/128'),
+
+  // Device approval (2FA for new devices)
+  DEVICE_APPROVAL_ENABLED: z.string().default('true'),
+  DEVICE_APPROVAL_EMAIL_TO: z.string().default('contact@apexmediation.ee'),
+  PUBLIC_ORIGIN: z.string().default('https://admin.apexmediation.ee'),
+  DEVICE_CHALLENGE_TTL_MINUTES: z.string().default('30'),
+  DEVICE_CHALLENGE_SECRET: z.string().optional(),
+
+  // Resend (preferred if present)
+  RESEND_API_KEY: z.string().optional(),
+
+  // SMTP (required when DEVICE_APPROVAL_ENABLED=true in production)
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.string().default('587'),
+  SMTP_SECURE: z.string().default('false'),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  EMAIL_FROM: z.string().default('contact@apexmediation.ee'),
   
   // Database - Read-Only (monitoring)
   DB_HOST: z.string(),
@@ -128,12 +143,6 @@ export function getOperatorCredentials(): Map<string, string> {
   }
   
   return creds;
-}
-
-// Parse allowed IPs from environment
-export function getAllowedIPs(): string[] {
-  const cfg = getConfig();
-  return cfg.ALLOWED_IPS.split(',').map(ip => ip.trim()).filter(Boolean);
 }
 
 // Database connection configs

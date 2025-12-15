@@ -196,7 +196,7 @@ describe('Billing Routes', () => {
   });
 
   describe('POST /api/v1/billing/reconcile', () => {
-    it('should trigger reconciliation', async () => {
+    it('should return 403 since reconciliation is operator-only', async () => {
       const response = await request(app)
         .post('/api/v1/billing/reconcile')
         .send({
@@ -205,10 +205,9 @@ describe('Billing Routes', () => {
           period_end: '2025-11-30T23:59:59Z',
         })
         .set('Idempotency-Key', 'reconcile-test-key-123')
-        .expect(200);
+        .expect(403);
 
-      expect(response.body).toHaveProperty('status');
-      expect(response.body.status).toBe('completed');
+      expect(response.body).toHaveProperty('error');
     });
   });
 

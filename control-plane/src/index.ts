@@ -1,14 +1,13 @@
 /**
  * CONTROL PLANE - MAIN ENTRY POINT
- * 
+ *
  * Separate control plane service for system administration.
  * Runs on its own port (4000) with its own hostname (admin.apexmediation.ee)
- * 
+ *
  * Security layers:
- * 1. IP allowlist - returns 404 for non-allowed IPs
- * 2. Operator JWT authentication - separate from customer auth
- * 3. Tiered action permissions - confirmation required for dangerous ops
- * 4. Full audit logging with 7-year retention
+ * 1. Operator JWT authentication - separate from customer auth
+ * 2. Tiered action permissions - confirmation required for dangerous ops
+ * 3. Full audit logging with 7-year retention
  */
 
 import express, { Request, Response, NextFunction } from 'express';
@@ -18,7 +17,6 @@ import compression from 'compression';
 
 import { loadConfig } from './config';
 import { logger, logAudit } from './logger';
-import { ipAllowlist } from './auth';
 import { initializePools, closePools, getReadOnlyPool } from './database';
 import routes from './routes';
 
@@ -56,10 +54,6 @@ app.use(cors({
 
 // Trust proxy for accurate IP detection behind Caddy/nginx
 app.set('trust proxy', true);
-
-// IP Allowlist - FIRST security check
-// Returns 404 for non-allowed IPs (stealth mode)
-app.use(ipAllowlist);
 
 // ============================================
 // STANDARD MIDDLEWARE
@@ -143,7 +137,6 @@ app.get('/admin/login', (req: Request, res: Response) => {
 
         <div class="foot">
           <div>All operator actions are logged.</div>
-          <div class="muted">If you see 404s, your IP may not be allowlisted.</div>
         </div>
       </div>
     </div>
@@ -174,9 +167,17 @@ app.get('/admin/', (req: Request, res: Response) => {
       .card { background: #0f172a; border: 1px solid #1f2a44; border-radius: 14px; padding: 16px; }
       .row { display:flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
       .pill { padding: 6px 10px; border-radius: 999px; border: 1px solid #334155; background: #0b1224; font-size: 12px; }
+      h2 { margin: 0 0 10px; font-size: 14px; color: #e5e7eb; }
       pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #d1d5db; }
       .err { display:none; margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid #7f1d1d; background: rgba(127,29,29,.35); color: #fecaca; font-size: 13px; }
       .muted { color: #94a3b8; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      th, td { padding: 8px 8px; border-top: 1px solid #1f2a44; vertical-align: top; }
+      th { text-align: left; color: #cbd5e1; font-weight: 600; }
+      td { color: #e5e7eb; }
+      .btn { display:inline-block; padding: 6px 10px; border-radius: 10px; border: 1px solid #334155; background: #0b1224; color: #e5e7eb; cursor: pointer; font-size: 12px; }
+      .btn-danger { border-color: #7f1d1d; background: rgba(127,29,29,.22); }
+      .tag { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #334155; background: #0b1224; color: #cbd5e1; font-size: 11px; }
     </style>
   </head>
   <body>
@@ -192,6 +193,18 @@ app.get('/admin/', (req: Request, res: Response) => {
       <div id="error" class="err"></div>
       <div class="card">
         <pre id="payload">Loading…</pre>
+      </div>
+
+      <div style="height: 14px;"></div>
+
+      <div class="row">
+        <div class="pill" id="devices-status">Loading…</div>
+        <div class="pill muted">API: /api/v1/devices</div>
+      </div>
+      <div id="devices-error" class="err"></div>
+      <div class="card">
+        <h2>Trusted devices</h2>
+        <div id="devices"></div>
       </div>
     </div>
     <script src="/static/admin-dashboard.js" defer></script>
@@ -221,6 +234,7 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
   res.setHeader('content-type', 'application/javascript; charset=utf-8');
   res.status(200).send(`
 (function () {
+  var DEVICE_KEY = 'controlPlaneDeviceId';
   var form = document.getElementById('login-form');
   var errorEl = document.getElementById('error');
   var submit = document.getElementById('submit');
@@ -229,6 +243,34 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
   function setError(msg) {
     errorEl.textContent = msg;
     errorEl.style.display = msg ? 'block' : 'none';
+  }
+
+  function toBase64Url(bytes) {
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    var b64 = btoa(bin);
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function getOrCreateDeviceId() {
+    try {
+      var existing = localStorage.getItem(DEVICE_KEY);
+      if (existing && existing.length >= 16) return existing;
+      var bytes = new Uint8Array(32);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      }
+      var id = toBase64Url(bytes);
+      localStorage.setItem(DEVICE_KEY, id);
+      return id;
+    } catch (e) {
+      // If storage is blocked, generate a per-session id.
+      var bytes2 = new Uint8Array(16);
+      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes2);
+      return toBase64Url(bytes2);
+    }
   }
 
   form.addEventListener('submit', async function (e) {
@@ -240,11 +282,13 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
     try {
       var username = document.getElementById('username').value;
       var password = document.getElementById('password').value;
+      var deviceId = getOrCreateDeviceId();
+      var deviceLabel = (navigator && navigator.userAgent) ? String(navigator.userAgent).slice(0, 120) : undefined;
 
       var resp = await fetch('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: username, password: password }),
+        body: JSON.stringify({ username: username, password: password, deviceId: deviceId, deviceLabel: deviceLabel }),
       });
 
       var data = null;
@@ -252,6 +296,9 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
 
       if (!resp.ok || !data || !data.token) {
         var msg = (data && (data.error || data.message)) ? (data.error || data.message) : 'Authentication failed';
+        if (data && data.error === 'DEVICE_CONFIRMATION_REQUIRED') {
+          msg = data.message || 'This device requires approval. Please check contact@apexmediation.ee and retry.';
+        }
         setError(msg);
         return;
       }
@@ -276,6 +323,9 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
   var statusEl = document.getElementById('status');
   var payloadEl = document.getElementById('payload');
   var errorEl = document.getElementById('error');
+  var devicesStatusEl = document.getElementById('devices-status');
+  var devicesEl = document.getElementById('devices');
+  var devicesErrorEl = document.getElementById('devices-error');
   if (!statusEl || !payloadEl || !errorEl) return;
 
   function setError(msg) {
@@ -285,6 +335,161 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
 
   function setStatus(msg) {
     statusEl.textContent = msg;
+  }
+
+  function setDevicesStatus(msg) {
+    if (devicesStatusEl) devicesStatusEl.textContent = msg;
+  }
+
+  function setDevicesError(msg) {
+    if (!devicesErrorEl) return;
+    devicesErrorEl.textContent = msg;
+    devicesErrorEl.style.display = msg ? 'block' : 'none';
+  }
+
+  function el(tag, text) {
+    var node = document.createElement(tag);
+    if (typeof text === 'string') node.textContent = text;
+    return node;
+  }
+
+  function fmtDate(value) {
+    if (!value) return '';
+    try {
+      var d = new Date(value);
+      if (isNaN(d.getTime())) return String(value);
+      return d.toISOString();
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  async function apiFetch(path, opts) {
+    var token = localStorage.getItem('controlPlaneToken');
+    if (!token) throw new Error('No token');
+    var headers = (opts && opts.headers) ? opts.headers : {};
+    headers.Authorization = 'Bearer ' + token;
+    if (!headers['content-type'] && opts && opts.method && opts.method !== 'GET') {
+      headers['content-type'] = 'application/json';
+    }
+    return fetch(path, Object.assign({}, opts || {}, { headers: headers }));
+  }
+
+  function renderDevices(devices) {
+    if (!devicesEl) return;
+    devicesEl.innerHTML = '';
+
+    if (!devices || !devices.length) {
+      devicesEl.appendChild(el('div', 'No trusted devices found.'));
+      return;
+    }
+
+    var table = document.createElement('table');
+    var thead = document.createElement('thead');
+    var trh = document.createElement('tr');
+    ['Label', 'Added', 'Last seen', 'Status', 'Action'].forEach(function (h) {
+      var th = document.createElement('th');
+      th.textContent = h;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    devices.forEach(function (d) {
+      var tr = document.createElement('tr');
+
+      var tdLabel = document.createElement('td');
+      tdLabel.appendChild(el('div', d.deviceLabel || 'Unknown device'));
+      if (d.userAgent) {
+        var ua = el('div', d.userAgent);
+        ua.style.color = '#94a3b8';
+        ua.style.fontSize = '11px';
+        ua.style.marginTop = '4px';
+        tdLabel.appendChild(ua);
+      }
+      tr.appendChild(tdLabel);
+
+      tr.appendChild(el('td', fmtDate(d.addedAt)));
+      tr.appendChild(el('td', fmtDate(d.lastSeenAt)));
+
+      var tdStatus = document.createElement('td');
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = d.revokedAt ? ('Revoked') : ('Active');
+      tdStatus.appendChild(tag);
+      tr.appendChild(tdStatus);
+
+      var tdAction = document.createElement('td');
+      if (!d.revokedAt) {
+        var btn = document.createElement('button');
+        btn.className = 'btn btn-danger';
+        btn.textContent = 'Revoke';
+        btn.addEventListener('click', async function () {
+          var ok = window.confirm('Revoke this device? It will require email approval to log in from it again.');
+          if (!ok) return;
+          setDevicesError('');
+          setDevicesStatus('Revoking…');
+          try {
+            var r = await apiFetch('/api/v1/devices/' + encodeURIComponent(String(d.id)) + '/revoke', {
+              method: 'POST',
+              body: JSON.stringify({ reason: 'revoked via UI' }),
+            });
+            if (r.status === 401) {
+              localStorage.removeItem('controlPlaneToken');
+              window.location.assign('/admin/login');
+              return;
+            }
+            var data = null;
+            try { data = await r.json(); } catch (_) {}
+            if (!r.ok) {
+              setDevicesStatus('Error');
+              setDevicesError((data && data.error) ? data.error : 'Failed to revoke');
+              return;
+            }
+            await loadDevices();
+          } catch (e) {
+            setDevicesStatus('Error');
+            setDevicesError('Network error');
+          }
+        });
+        tdAction.appendChild(btn);
+      } else {
+        tdAction.appendChild(el('span', ''));
+      }
+      tr.appendChild(tdAction);
+
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    devicesEl.appendChild(table);
+  }
+
+  async function loadDevices() {
+    if (!devicesStatusEl || !devicesEl || !devicesErrorEl) return;
+    try {
+      setDevicesError('');
+      setDevicesStatus('Loading devices…');
+      var resp = await apiFetch('/api/v1/devices', { method: 'GET' });
+      if (resp.status === 401) {
+        localStorage.removeItem('controlPlaneToken');
+        window.location.assign('/admin/login');
+        return;
+      }
+      var data = await resp.json();
+      if (!resp.ok) {
+        setDevicesStatus('Error');
+        setDevicesError((data && data.error) ? data.error : 'Failed to load devices');
+        renderDevices([]);
+        return;
+      }
+      setDevicesStatus('OK');
+      renderDevices((data && data.devices) ? data.devices : []);
+    } catch (err) {
+      setDevicesStatus('Error');
+      setDevicesError('Network error');
+    }
   }
 
   async function run() {
@@ -318,6 +523,8 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
 
       setStatus('OK');
       payloadEl.textContent = JSON.stringify(data, null, 2);
+
+      await loadDevices();
     } catch (err) {
       setStatus('Error');
       setError('Network error');
@@ -446,7 +653,6 @@ async function startServer() {
       logger.info(`Control plane started`, {
         port: config.PORT,
         nodeEnv: config.NODE_ENV,
-        allowedIPs: config.ALLOWED_IPS.split(',').length,
       });
       
       console.log(`
@@ -456,7 +662,7 @@ async function startServer() {
 ║  Status:    RUNNING                                          ║
 ║  Port:      ${config.PORT}                                          ║
 ║  Env:       ${config.NODE_ENV.padEnd(50)}║
-║  Auth:      IP Allowlist + Operator JWT                      ║
+║  Auth:      Operator JWT                                     ║
 ║  DB Roles:  read-only, operator, break-glass                 ║
 ╚══════════════════════════════════════════════════════════════╝
       `);

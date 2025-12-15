@@ -158,7 +158,7 @@ Metrics endpoint protection (optional)
   - Ensure the compose file mounts the directory (already present): `./nginx/htpasswd:/etc/nginx/htpasswd:ro`
   - In `apexmediation.conf`, inside the `/metrics` location, uncomment `include /etc/nginx/snippets/metrics-basic-auth.conf;`.
   - Reload Nginx container.
-- Alternative: IP allowlist in the `/metrics` location; or mTLS later.
+- Alternative: mTLS for `/metrics` later.
 
 ### 1.5 Object Storage & Backups
 Goal: cheap, durable object storage for invoices, reports, and long-term backups.

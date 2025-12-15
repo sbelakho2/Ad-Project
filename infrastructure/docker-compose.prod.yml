@@ -20,9 +20,6 @@ services:
       # email:hash,email2:hash2 (JSON map also accepted)
       - OPERATOR_CREDENTIALS=${OPERATOR_CREDENTIALS:?OPERATOR_CREDENTIALS is required}
 
-      # IP Allowlist (comma-separated CIDRs)
-      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:?CONTROL_PLANE_ALLOWED_IPS is required}
-
       # Database (read-only)
       - DB_HOST=${DB_HOST:-postgres}
       - DB_PORT=${DB_PORT:-5432}
@@ -33,9 +30,21 @@ services:
 
       # Database (operator / break-glass) for actions
       - DB_OPERATOR_USER=${DB_OPERATOR_USER:-apex_operator}
-      - DB_OPERATOR_PASSWORD=${DB_OPERATOR_PASSWORD:-}
+      - DB_OPERATOR_PASSWORD=${DB_OPERATOR_PASSWORD:?DB_OPERATOR_PASSWORD required}
       - DB_BREAKGLASS_USER=${DB_BREAKGLASS_USER:-apex_breakglass}
       - DB_BREAKGLASS_PASSWORD=${DB_BREAKGLASS_PASSWORD:-}
+
+      # Device approvals (email-confirm new devices)
+      - DEVICE_APPROVAL_ENABLED=${DEVICE_APPROVAL_ENABLED:-true}
+      - DEVICE_APPROVAL_EMAIL_TO=contact@apexmediation.ee
+      - PUBLIC_ORIGIN=https://admin.apexmediation.ee
+      - DEVICE_CHALLENGE_TTL_MINUTES=${DEVICE_CHALLENGE_TTL_MINUTES:-30}
+      - SMTP_HOST=${SMTP_HOST:?SMTP_HOST required}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - EMAIL_FROM=${EMAIL_FROM:-contact@apexmediation.ee}
 
       # CORS (admin hostname)
       - CORS_ORIGIN=https://admin.apexmediation.ee

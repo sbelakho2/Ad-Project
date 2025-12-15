@@ -13,11 +13,11 @@ The Control Plane is a **completely separate service** from the customer-facing 
 ║                                                                            ║
 ║ OPERATOR (System Admin)              │ CUSTOMER (Console User)             ║
 ║ ─────────────────────────────────────┼─────────────────────────────────────║
-║ Auth: OPERATOR_EMAILS whitelist      │ Auth: NextAuth session + JWT        ║
-║ Auth: OPERATOR_SECRET token          │ RBAC: admin/publisher/readonly      ║
+║ Auth: Username/password              │ Auth: NextAuth session + JWT        ║
+║ Auth: Device whitelist + email 2FA   │ RBAC: admin/publisher/readonly      ║
 ║                                      │                                     ║
-║ Routes: /admin/* (console)           │ Routes: All other console routes    ║
-║ API: /api/v1/admin/* (backend)       │ API: /api/v1/* (excluding admin)    ║
+║ Routes: /admin/* (control-plane)     │ Routes: All other console routes    ║
+║ API: /api/v1/* (control-plane)       │ API: /api/v1/* (excluding admin)    ║
 ║                                      │                                     ║
 ║ Controls:                            │ Controls:                           ║
 ║   - System infrastructure            │   - Organization resources          ║
@@ -46,13 +46,13 @@ The Control Plane is a **completely separate service** from the customer-facing 
 │                                                                         │
 │  ┌──────────────────┐         ┌──────────────────────┐                 │
 │  │    CUSTOMERS     │         │     OPERATORS        │                 │
-│  │   (any IP)       │         │   (allowlisted IPs)  │                 │
+│  │   (any IP)       │         │ (operator accounts)  │                 │
 │  └────────┬─────────┘         └──────────┬───────────┘                 │
 │           │                              │                              │
 │           ▼                              ▼                              │
 │  ┌──────────────────┐         ┌──────────────────────┐                 │
 │  │ console.apex...  │         │ admin.apexmediation.ee│                │
-│  │ api.apex...      │         │ (IP allowlisted)     │                 │
+│  │ api.apex...      │         │ (operator-only)      │                 │
 │  └────────┬─────────┘         └──────────┬───────────┘                 │
 │           │                              │                              │
 │           ▼                              ▼                              │
@@ -61,7 +61,7 @@ The Control Plane is a **completely separate service** from the customer-facing 
 │  │     Port 8080    │         │      Port 4000       │                 │
 │  │                  │         │                      │                 │
 │  │  - Customer JWT  │         │  - Operator JWT      │                 │
-│  │  - No /admin     │         │  - IP allowlist      │                 │
+│  │  - No /admin     │         │                      │                 │
 │  │  - Customer data │         │  - Full telemetry    │                 │
 │  └────────┬─────────┘         └──────────┬───────────┘                 │
 │           │                              │                              │
@@ -83,12 +83,16 @@ The Control Plane is a **completely separate service** from the customer-facing 
 
 - **Separate hostname**: `admin.apexmediation.ee` vs `api.apexmediation.ee`
 - **Separate TLS certificate**: Independent certificate lifecycle
-- **IP Allowlisting**: Control plane only accessible from whitelisted IPs
-  - Caddy performs first-layer IP check
-  - Application performs second-layer IP check
-  - Returns HTTP 404 (not 403) for denied IPs (stealth mode)
+- **No IP allowlisting**: access is controlled via operator authentication
 
-### 2. Authentication Separation
+### 2. Device Approval (2FA for New Devices)
+
+- **Device whitelist**: each operator account has a list of trusted devices
+- **New device flow**: after username/password is correct, a new device must be approved via email
+- **Approval inbox**: confirmation email is sent to `contact@apexmediation.ee`
+- **Bootstrap rule**: the first trusted device for an operator is auto-enrolled to avoid lockout; additional devices require approval
+
+### 3. Authentication Separation
 
 | Aspect | Customer API | Control Plane |
 |--------|--------------|---------------|
@@ -100,7 +104,7 @@ The Control Plane is a **completely separate service** from the customer-facing 
 
 **Critical**: Customer JWTs are NOT accepted by the control plane. There is no token exchange or shared secret.
 
-### 3. Database Role Separation
+### 4. Database Role Separation
 
 The control plane uses three separate database roles with different privileges:
 
@@ -238,17 +242,33 @@ CREATE ROLE apex_breakglass WITH LOGIN PASSWORD 'breakglass_password';
 -- Grant appropriate permissions (see Database Role Separation above)
 ```
 
-2. Generate operator credentials:
+2. Apply control-plane migrations:
+
+- Run [control-plane/migrations/002_operator_trusted_devices.sql](control-plane/migrations/002_operator_trusted_devices.sql) to create the device whitelist + device approval challenge tables.
+
+3. Generate operator credentials:
 ```bash
 # Generate bcrypt hash for each operator
 node -e "console.log(require('bcryptjs').hashSync('secure_password', 12))"
 ```
 
-3. Set environment variables:
+4. Set environment variables:
 ```bash
 export OPERATOR_JWT_SECRET="$(openssl rand -base64 32)"
 export OPERATOR_CREDENTIALS='{"admin":"$2a$12$hash...","backup":"$2a$12$hash..."}'
-export CONTROL_PLANE_ALLOWED_IPS="1.2.3.4/32,5.6.7.8/32"
+
+# Device approvals
+export DEVICE_APPROVAL_ENABLED=true
+export DEVICE_APPROVAL_EMAIL_TO="contact@apexmediation.ee"
+export PUBLIC_ORIGIN="https://admin.apexmediation.ee"
+
+# SMTP (used to send device approval links)
+export SMTP_HOST="smtp.your-provider.tld"
+export SMTP_PORT=587
+export SMTP_SECURE=false
+export SMTP_USER=""
+export SMTP_PASS=""
+export EMAIL_FROM="contact@apexmediation.ee"
 ```
 
 ### Docker Deployment
@@ -262,17 +282,7 @@ docker-compose -f docker-compose.yml -f docker-compose.control-plane.yml up -d c
 
 ```caddyfile
 admin.apexmediation.ee {
-  # IP allowlist (first-layer check)
-  @allowed {
-    remote_ip 1.2.3.4/32 5.6.7.8/32
-  }
-  
-  handle @allowed {
-    reverse_proxy control-plane:4000
-  }
-  
-  # Return 404 for non-allowed IPs (stealth mode)
-  respond 404
+  reverse_proxy control-plane:4000
 }
 ```
 

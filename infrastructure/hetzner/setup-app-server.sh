@@ -295,7 +295,7 @@ systemctl enable nginx
 # -----------------------------------------------------------------------------
 echo "[7/12] Setting up application directories..."
 
-mkdir -p /opt/adproject/{backend,console,logs}
+mkdir -p /opt/adproject/{backend,console,console-run,logs}
 mkdir -p /var/log/adproject
 
 # Create environment files
@@ -375,8 +375,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/adproject/console
-ExecStart=/usr/bin/node /opt/adproject/console/.next/standalone/server.js
+WorkingDirectory=/opt/adproject/console-run
+ExecStart=/usr/bin/node /opt/adproject/console-run/server.js
 Restart=always
 RestartSec=10
 StandardOutput=append:/var/log/adproject/console.log
@@ -480,6 +480,15 @@ echo "Building console..."
 cd /opt/adproject/console
 pnpm install --frozen-lockfile
 pnpm build
+
+# Stage the Next.js standalone output into a runtime folder that matches the Docker layout.
+# Important: copy dotfolders (e.g. `.next`) from `.next/standalone`.
+rm -rf /opt/adproject/console-run
+mkdir -p /opt/adproject/console-run/.next
+cp -R .next/standalone/. /opt/adproject/console-run/
+rm -rf /opt/adproject/console-run/.next/static
+cp -R .next/static /opt/adproject/console-run/.next/static
+cp -R public /opt/adproject/console-run/public
 
 # Restart services
 echo "Restarting services..."

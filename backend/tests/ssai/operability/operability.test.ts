@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
-import { KillSwitchManager } from '../../../../src/services/ssai/operability/KillSwitchManager';
-import { RolloutManager } from '../../../../src/services/ssai/operability/RolloutManager';
-import { SafeModeManager } from '../../../../src/services/ssai/operability/SafeModeManager';
-import { SLIManager } from '../../../../src/services/ssai/operability/SLIManager';
-import { ExplainService } from '../../../../src/services/ssai/operability/ExplainService';
-import { SlateManager } from '../../../../src/services/ssai/operability/SlateManager';
+import { KillSwitchManager } from '../../../src/services/ssai/operability/KillSwitchManager';
+import { RolloutManager } from '../../../src/services/ssai/operability/RolloutManager';
+import { SafeModeManager } from '../../../src/services/ssai/operability/SafeModeManager';
+import { SLIManager } from '../../../src/services/ssai/operability/SLIManager';
+import { ExplainService } from '../../../src/services/ssai/operability/ExplainService';
+import { SlateManager } from '../../../src/services/ssai/operability/SlateManager';
 
 describe('SSAI Operability Module', () => {
   describe('KillSwitchManager', () => {

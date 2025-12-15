@@ -29,6 +29,7 @@ const sdks = [
     icon: Smartphone,
     color: 'bg-green-500',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/core/android',
     description: 'Kotlin-first SDK for Android apps targeting API 21+.',
     features: ['Compose & View support', 'Kotlin coroutines', 'ProGuard rules included'],
   },
@@ -37,6 +38,7 @@ const sdks = [
     icon: Smartphone,
     color: 'bg-green-600',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/core/android',
     description: 'Lean-back optimized SDK for Android TV and Fire TV.',
     features: ['D-pad navigation', 'Large screen layouts', 'Same Kotlin API'],
   },
@@ -45,6 +47,7 @@ const sdks = [
     icon: Smartphone,
     color: 'bg-blue-500',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/core/ios',
     description: 'Swift SDK for iOS 14+ with full SwiftUI support.',
     features: ['Swift async/await', 'SwiftUI views', 'Privacy manifests included'],
   },
@@ -53,6 +56,7 @@ const sdks = [
     icon: Smartphone,
     color: 'bg-blue-600',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/core/ios',
     description: 'Native tvOS SDK for Apple TV apps.',
     features: ['Focus engine support', 'Top Shelf integration', 'Same Swift API'],
   },
@@ -61,6 +65,7 @@ const sdks = [
     icon: Puzzle,
     color: 'bg-purple-500',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/core/unity',
     description: 'C# plugin for Unity 2021+ with native bridge.',
     features: ['IL2CPP support', 'Editor testing', 'Auto-dependency resolution'],
   },
@@ -69,6 +74,7 @@ const sdks = [
     icon: Code,
     color: 'bg-yellow-500',
     repo: 'apex-mediation-platform',
+    repoPath: 'sdk/web',
     description: 'TypeScript SDK for web apps and PWAs.',
     features: ['Tree-shakeable', 'Zero dependencies', 'Server-side rendering safe'],
   },
@@ -171,7 +177,7 @@ export default function DevelopersPage() {
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a
-                  href="https://github.com/sbelakho2/apex-mediation-platform"
+                  href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/sdk"
                   className="btn-primary inline-flex items-center gap-2"
                 >
                   <GitBranch className="w-5 h-5" />
@@ -263,10 +269,10 @@ export default function DevelopersPage() {
                     <div>
                       <h3 className="text-xl font-bold text-gray-900">{sdk.platform}</h3>
                       <a
-                        href={`https://github.com/sbelakho2/${sdk.repo}`}
+                        href={`https://github.com/sbelakho2/${sdk.repo}/tree/main/${sdk.repoPath}`}
                         className="text-sm text-brand-600 hover:underline"
                       >
-                        sbelakho2/{sdk.repo}
+                        {sdk.repoPath}
                       </a>
                     </div>
                   </div>

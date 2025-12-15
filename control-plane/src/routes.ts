@@ -2,8 +2,7 @@
  * CONTROL PLANE API ROUTES
  * 
  * All routes require:
- * 1. IP allowlist check (handled at app level)
- * 2. Operator JWT authentication
+ * 1. Operator JWT authentication
  * 
  * Route groups:
  * - /health - Basic healthcheck (no auth for load balancer)
@@ -12,7 +11,43 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { requireOperator, authenticateOperator } from './auth';
+import { requireOperator, verifyOperatorCredentials, issueOperatorToken } from './auth';
+import { logAudit } from './logger';
+import { createChallengeToken, hashDeviceId, isTrustedDevice, countDeviceHistory, touchDeviceSeen, trustDevice, createDeviceChallenge, confirmDeviceByToken, listTrustedDevices, revokeTrustedDeviceById } from './devices';
+import { getConfig } from './config';
+import { sendDeviceApprovalEmail } from './mailer';
+
+function sendConfirmHtml(res: Response, params: { title: string; heading: string; message: string; ok: boolean }): void {
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.status(params.ok ? 200 : 400).send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${params.title}</title>
+    <style>
+      :root { color-scheme: light; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: #f8fafc; color: #0f172a; }
+      .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+      .card { width: 100%; max-width: 620px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; }
+      h1 { margin: 0 0 8px; font-size: 18px; }
+      p { margin: 0 0 14px; color: #334155; line-height: 1.45; }
+      a.btn { display:inline-block; background: #2563eb; color: white; text-decoration:none; padding: 10px 14px; border-radius: 10px; font-weight: 600; }
+      .muted { color: #64748b; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>${params.heading}</h1>
+        <p>${params.message}</p>
+        <p><a class="btn" href="/admin/login">Return to login</a></p>
+        <p class="muted">ApexMediation Control Plane — operator access</p>
+      </div>
+    </div>
+  </body>
+</html>`);
+}
 
 // Telemetry adapters
 import {
@@ -99,22 +134,223 @@ router.get('/ready', asyncHandler(async (req: Request, res: Response) => {
  * Operator login
  */
 router.post('/api/v1/auth/login', asyncHandler(async (req: Request, res: Response) => {
-  const { username, password } = req.body;
+  const { username, password, deviceId, deviceLabel } = req.body;
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const userAgent = req.get('User-Agent');
+  const cfg = getConfig();
+  const deviceApprovalEnabled = cfg.DEVICE_APPROVAL_ENABLED === 'true';
   
   if (!username || !password) {
     res.status(400).json({ error: 'Username and password required' });
     return;
   }
-  
-  const result = await authenticateOperator(username, password, ip, userAgent);
-  
-  if (result) {
-    res.json({ token: result.token, expiresIn: `${result.expiresIn}s` });
-  } else {
-    res.status(401).json({ error: 'Authentication failed' });
+
+  if (deviceApprovalEnabled) {
+    if (!deviceId || typeof deviceId !== 'string' || deviceId.length < 16 || deviceId.length > 256) {
+      res.status(400).json({ error: 'Device ID required' });
+      return;
+    }
   }
+
+  const safeDeviceLabel = typeof deviceLabel === 'string' && deviceLabel.trim() ? deviceLabel.trim().slice(0, 120) : undefined;
+  
+  const verified = await verifyOperatorCredentials(username, password, ip, userAgent);
+
+  if (!verified) {
+    res.status(401).json({ error: 'Authentication failed' });
+    return;
+  }
+
+  const operatorEmail = verified.email;
+  const deviceHash = deviceId ? hashDeviceId(deviceId) : '';
+
+  if (deviceApprovalEnabled) {
+    const isTrusted = await isTrustedDevice(operatorEmail, deviceHash);
+
+    if (!isTrusted) {
+      const existing = await countDeviceHistory(operatorEmail);
+
+      // Bootstrap: only when the operator has never had a trusted device.
+      // If all devices were revoked, we still require email approval.
+      if (existing === 0) {
+        await trustDevice({
+          operatorEmail,
+          deviceHash,
+          deviceLabel: safeDeviceLabel,
+          userAgent,
+          addedVia: 'bootstrap',
+        });
+
+        const confirmUrl = `${cfg.PUBLIC_ORIGIN}/api/v1/devices/confirm?token=bootstrap`; // informational only
+        await sendDeviceApprovalEmail({
+          operatorEmail,
+          deviceLabel: safeDeviceLabel,
+          userAgent,
+          requestedIp: ip,
+          confirmUrl,
+          kind: 'bootstrap-notice',
+        });
+      } else {
+        // Require email approval for additional devices
+        const token = createChallengeToken();
+        await createDeviceChallenge({
+          operatorEmail,
+          deviceHash,
+          deviceLabel: safeDeviceLabel,
+          userAgent,
+          requestedIp: ip,
+          token,
+        });
+
+        const confirmUrl = `${cfg.PUBLIC_ORIGIN}/api/v1/devices/confirm?token=${encodeURIComponent(token)}`;
+
+        try {
+          await sendDeviceApprovalEmail({
+            operatorEmail,
+            deviceLabel: safeDeviceLabel,
+            userAgent,
+            requestedIp: ip,
+            confirmUrl,
+            kind: 'approval-required',
+          });
+        } catch (err) {
+          logAudit({
+            actor: operatorEmail,
+            action: 'device_approval_email_failed',
+            result: 'failure',
+            reason: (err as Error).message,
+            ip,
+            userAgent,
+          });
+          res.status(503).json({
+            error: 'DEVICE_APPROVAL_UNAVAILABLE',
+            message: 'Cannot send device approval email. Please contact support.',
+          });
+          return;
+        }
+
+        logAudit({
+          actor: operatorEmail,
+          action: 'login_attempt',
+          result: 'denied',
+          reason: 'Device not approved',
+          ip,
+          userAgent,
+        });
+
+        res.status(403).json({
+          error: 'DEVICE_CONFIRMATION_REQUIRED',
+          message: `New device requires approval. A confirmation email was sent to ${cfg.DEVICE_APPROVAL_EMAIL_TO}.`,
+        });
+        return;
+      }
+    }
+
+    await touchDeviceSeen(operatorEmail, deviceHash);
+  }
+
+  const issued = issueOperatorToken({ email: operatorEmail, ip, userAgent });
+  res.json({ token: issued.token, expiresIn: `${issued.expiresIn}s` });
+}));
+
+/**
+ * Device confirmation link (no operator auth)
+ * Sent to contact@apexmediation.ee
+ */
+router.get('/api/v1/devices/confirm', asyncHandler(async (req: Request, res: Response) => {
+  const token = (req.query.token as string | undefined) || '';
+  if (!token || token.length < 10) {
+    sendConfirmHtml(res, {
+      title: 'Invalid confirmation link',
+      heading: 'Invalid confirmation link',
+      message: 'This confirmation link is missing or malformed.',
+      ok: false,
+    });
+    return;
+  }
+
+  if (token === 'bootstrap') {
+    sendConfirmHtml(res, {
+      title: 'No action required',
+      heading: 'No action required',
+      message: 'This device was auto-enrolled as the first trusted device for that operator.',
+      ok: true,
+    });
+    return;
+  }
+
+  const result = await confirmDeviceByToken(token);
+  if (!result.ok) {
+    const msg =
+      result.reason === 'expired'
+        ? 'This confirmation link has expired.'
+        : result.reason === 'consumed'
+          ? 'This confirmation link was already used.'
+          : 'Invalid confirmation link.';
+    sendConfirmHtml(res, {
+      title: 'Device approval failed',
+      heading: 'Device approval failed',
+      message: msg,
+      ok: false,
+    });
+    return;
+  }
+
+  sendConfirmHtml(res, {
+    title: 'Device approved',
+    heading: 'Device approved',
+    message: 'This device is now trusted. Return to the login page and sign in from that device.',
+    ok: true,
+  });
+}));
+
+/**
+ * List trusted devices for the current operator
+ */
+router.get('/api/v1/devices', requireOperator, asyncHandler(async (req: Request, res: Response) => {
+  const operatorEmail = req.operator!.email;
+  const rows = await listTrustedDevices(operatorEmail);
+
+  res.json({
+    devices: rows.map((r) => ({
+      id: r.id,
+      deviceLabel: r.device_label,
+      userAgent: r.user_agent,
+      addedVia: r.added_via,
+      addedAt: r.added_at,
+      lastSeenAt: r.last_seen_at,
+      revokedAt: r.revoked_at,
+      revokedBy: r.revoked_by,
+      revokedReason: r.revoked_reason,
+    })),
+  });
+}));
+
+/**
+ * Revoke a trusted device by id (current operator only)
+ */
+router.post('/api/v1/devices/:id/revoke', requireOperator, asyncHandler(async (req: Request, res: Response) => {
+  const operatorEmail = req.operator!.email;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid device id' });
+    return;
+  }
+
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+  const ok = await revokeTrustedDeviceById({
+    operatorEmail,
+    deviceId: id,
+    revokedBy: operatorEmail,
+    revokedReason: reason,
+  });
+
+  if (!ok) {
+    res.status(404).json({ error: 'Device not found or already revoked' });
+    return;
+  }
+
+  res.json({ ok: true });
 }));
 
 /**
@@ -133,6 +369,9 @@ router.post('/api/v1/auth/refresh', requireOperator, asyncHandler(async (req: Re
 // Apply auth to all /api/v1/* routes except /auth/*
 router.use('/api/v1', (req: Request, res: Response, next: NextFunction) => {
   if (req.path.startsWith('/auth/')) {
+    return next();
+  }
+  if (req.path.startsWith('/devices/confirm')) {
     return next();
   }
   return requireOperator(req, res, next);
