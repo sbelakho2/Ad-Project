@@ -10,7 +10,21 @@ import { isFeatureEnabled } from '@/lib/featureFlags'
  * This hook gates the Admin Control Panel (operator cockpit) for SYSTEM OPERATORS ONLY.
  * It is completely separate from customer authentication and the customer RBAC system.
  * 
- * CRITICAL: Customer roles (viewer, admin, etc.) have NO access to the operator cockpit.
+ * ╔════════════════════════════════════════════════════════════════════════════╗
+ * ║ CRITICAL SEPARATION: OPERATOR vs CUSTOMER AUTHENTICATION                   ║
+ * ╠════════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                            ║
+ * ║ OPERATOR (System Admin)          │ CUSTOMER (Console User)                 ║
+ * ║ ─────────────────────────────────┼───────────────────────────────────────  ║
+ * ║ Uses: OPERATOR_EMAILS whitelist  │ Uses: NextAuth session + JWT            ║
+ * ║ Uses: OPERATOR_SECRET            │ Uses: Customer RBAC (admin/pub/readonly)║
+ * ║ Access: /admin/* routes          │ Access: All other console routes        ║
+ * ║ Controls: System infrastructure  │ Controls: Organization resources        ║
+ * ║ Scope: Company-wide privileged   │ Scope: Per-organization features        ║
+ * ║                                                                            ║
+ * ║ Customer 'admin' role ≠ Operator │ No customer role grants operator access ║
+ * ╚════════════════════════════════════════════════════════════════════════════╝
+ * 
  * The admin panel exposes company-privileged data and system controls that must be
  * restricted to authorized operators only.
  * 

@@ -89,8 +89,21 @@ export const authorize = (roles: Array<'admin' | 'publisher' | 'readonly'>) => {
  * This middleware restricts access to system operators only (not customer admins).
  * Operators are identified by email whitelist via OPERATOR_EMAILS environment variable.
  * 
- * CRITICAL: Customer roles (including 'admin') do NOT grant operator access.
- * The operator panel exposes company-privileged data and system controls.
+ * ╔════════════════════════════════════════════════════════════════════════════╗
+ * ║ CRITICAL: Customer 'admin' role does NOT equal operator access             ║
+ * ╠════════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                            ║
+ * ║ CUSTOMER ROLES (authorize middleware):                                     ║
+ * ║   - admin: Organization admin - billing, team, settings                    ║
+ * ║   - publisher: Standard user - placements, analytics, tools                ║
+ * ║   - readonly: View-only access                                             ║
+ * ║                                                                            ║
+ * ║ OPERATOR ACCESS (this middleware):                                         ║
+ * ║   - Requires email in OPERATOR_EMAILS whitelist                            ║
+ * ║   - Completely separate from customer RBAC system                          ║
+ * ║   - Controls system-wide infrastructure, reconciliation, admin panels      ║
+ * ║                                                                            ║
+ * ╚════════════════════════════════════════════════════════════════════════════╝
  */
 export const operatorOnly = () => {
   return (req: Request, _res: Response, next: NextFunction) => {

@@ -4,6 +4,41 @@
 
 The Control Plane is a **completely separate service** from the customer-facing backend API. It runs on its own hostname (`admin.apexmediation.ee`), uses its own authentication system, and has no shared code with the customer API.
 
+## Critical Separation: Operator vs Customer
+
+```
+╔════════════════════════════════════════════════════════════════════════════╗
+║                OPERATOR vs CUSTOMER AUTHENTICATION                          ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║                                                                            ║
+║ OPERATOR (System Admin)              │ CUSTOMER (Console User)             ║
+║ ─────────────────────────────────────┼─────────────────────────────────────║
+║ Auth: OPERATOR_EMAILS whitelist      │ Auth: NextAuth session + JWT        ║
+║ Auth: OPERATOR_SECRET token          │ RBAC: admin/publisher/readonly      ║
+║                                      │                                     ║
+║ Routes: /admin/* (console)           │ Routes: All other console routes    ║
+║ API: /api/v1/admin/* (backend)       │ API: /api/v1/* (excluding admin)    ║
+║                                      │                                     ║
+║ Controls:                            │ Controls:                           ║
+║   - System infrastructure            │   - Organization resources          ║
+║   - Billing reconciliation           │   - Placements & adapters           ║
+║   - Health monitoring                │   - Analytics & reports             ║
+║   - Audit logs (all orgs)            │   - Team & settings                 ║
+║   - Value multipliers                │   - Billing (own org)               ║
+║   - Sales automation                 │                                     ║
+║                                      │                                     ║
+║ ⚠️ Customer 'admin' role ≠ Operator  │ No customer role grants op access   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Key Points:**
+- Customer roles (`admin`, `publisher`, `readonly`) are for organization-level access control
+- Customer `admin` role controls team/billing/settings for ONE organization
+- Operator access is a completely separate authentication system
+- Operators are system administrators with access to ALL organizations' data
+
+## Network Architecture
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         NETWORK ARCHITECTURE                            │
