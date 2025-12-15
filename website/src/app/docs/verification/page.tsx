@@ -4,14 +4,10 @@ import { motion } from 'framer-motion';
 import {
   CheckCircle,
   Code,
-  Download,
   FileCheck,
-  FileSearch,
-  FileText,
   Key,
   Lock,
   Search,
-  Shield,
   Terminal,
 } from 'lucide-react';
 

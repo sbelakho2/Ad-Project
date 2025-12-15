@@ -7,7 +7,6 @@ import {
   CheckCircle,
   Clock,
   FileCheck,
-  Gauge,
   RefreshCw,
   Server,
   Shield,

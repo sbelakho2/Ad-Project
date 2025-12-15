@@ -7,7 +7,6 @@ import {
   Monitor,
   Play,
   Smartphone,
-  Tablet,
   Tv,
   XCircle,
 } from 'lucide-react';

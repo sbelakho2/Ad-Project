@@ -12,8 +12,6 @@ import {
   Server,
   Shield,
   ShieldCheck,
-  UserX,
-  Zap,
 } from 'lucide-react';
 
 import CookieBanner from '@/components/CookieBanner';
