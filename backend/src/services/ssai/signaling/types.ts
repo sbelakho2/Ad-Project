@@ -15,6 +15,11 @@ export type SpliceCommandType =
   | 'private_command';
 
 /**
+ * Cue type for signaling source
+ */
+export type CueType = 'scte35' | 'daterange' | 'dash_event' | 'schedule';
+
+/**
  * SCTE-35 segmentation type
  */
 export type SegmentationType =

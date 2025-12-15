@@ -161,6 +161,19 @@ export class SessionService {
   }
 
   /**
+   * Delete a session (admin operation - no token required)
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    const session = await this.store.get(sessionId);
+
+    if (!session) {
+      return false;
+    }
+
+    return this.store.terminate(sessionId);
+  }
+
+  /**
    * Update manifest version (called when manifest changes)
    */
   async updateManifestVersion(sessionId: string): Promise<number> {

@@ -5,8 +5,23 @@
  * Follows DVB-DASH guidance for SCTE-214 encapsulation.
  */
 
-import { AdBreakCue, CueType, SCTE35Message } from './types';
+import { AdBreakCue, CueType, SegmentationType } from './types';
 import { SCTE35Parser } from './SCTE35Parser';
+
+/**
+ * Simplified SCTE35 message for DASH XML parsing
+ */
+interface ParsedSCTE35 {
+  tableId: number;
+  commandType: 'splice_insert' | 'time_signal' | 'splice_null';
+  ptsTime?: number;
+  duration?: number;
+  segmentationDescriptors?: Array<{
+    segmentationTypeId: number;
+    segmentationType?: SegmentationType;
+    upid?: string;
+  }>;
+}
 
 export interface DASHEvent {
   /** Event ID */
@@ -129,7 +144,7 @@ export class DASHEventHandler {
         : event.duration / eventStream.timescale;
 
     // Parse SCTE-35 message if present
-    let scte35Message: SCTE35Message | undefined;
+    let scte35Message: ParsedSCTE35 | undefined;
     let cueType: CueType = 'scte35';
 
     if (this.isSCTE35Scheme(eventStream.schemeIdUri) && event.messageData) {
@@ -141,7 +156,8 @@ export class DASHEventHandler {
             ? event.messageData
             : Buffer.from(event.messageData, 'utf8').toString('base64');
 
-        scte35Message = this.scte35Parser.parse(base64Data);
+        const parsed = this.scte35Parser.parse(base64Data);
+        scte35Message = this.convertToSimplified(parsed);
       } else if (eventStream.schemeIdUri.includes(':xml')) {
         // XML SCTE-35 - parse as best effort
         scte35Message = this.parseSCTE35XML(event.messageData);
@@ -162,25 +178,46 @@ export class DASHEventHandler {
     const cueId = this.generateCueId(event, eventStream);
 
     return {
-      id: cueId,
-      type: cueType,
-      startTime: presentationTimeSeconds,
+      cueId: cueId,
+      type: isEndCue ? 'end' : 'start',
+      mediaTime: presentationTimeSeconds,
       duration: durationSeconds,
       plannedDuration: durationSeconds,
-      scte35: scte35Message,
+      source: this.isSCTE35Scheme(eventStream.schemeIdUri) ? 'scte35' : 'dash_event',
       breakId: this.extractBreakId(event, scte35Message),
-      podId: undefined, // Assigned later by pod planner
       segmentationType:
         scte35Message?.segmentationDescriptors?.[0]?.segmentationType,
-      raw: event.messageData,
-      isEndCue,
+      rawScte35: event.messageData,
+    };
+  }
+
+  /**
+   * Convert full SCTE35Message to simplified ParsedSCTE35
+   */
+  private convertToSimplified(message: ReturnType<typeof this.scte35Parser.parse>): ParsedSCTE35 {
+    return {
+      tableId: message.tableId,
+      commandType: message.spliceCommandType as 'splice_insert' | 'time_signal' | 'splice_null',
+      ptsTime: message.ptsAdjustment,
+      duration: message.spliceCommand && 'breakDuration' in message.spliceCommand 
+        ? message.spliceCommand.breakDuration?.duration 
+        : undefined,
+      segmentationDescriptors: message.descriptors
+        ?.filter(d => d.segmentation)
+        .map(d => ({
+          segmentationTypeId: d.segmentation!.segmentationTypeId,
+          segmentationType: this.mapSegmentationType(d.segmentation!.segmentationTypeId),
+          upid: d.segmentation?.segmentationUpid 
+            ? Buffer.from(d.segmentation.segmentationUpid).toString('utf8')
+            : undefined,
+        })),
     };
   }
 
   /**
    * Parse SCTE-35 XML format (simplified).
    */
-  private parseSCTE35XML(xmlData: string): SCTE35Message | undefined {
+  private parseSCTE35XML(xmlData: string): ParsedSCTE35 | undefined {
     // Simplified XML parsing - extract key fields
     try {
       // Look for SpliceTime or BreakDuration
@@ -232,18 +269,7 @@ export class DASHEventHandler {
    */
   private mapSegmentationType(
     typeId: number
-  ):
-    | 'provider_placement_opportunity_start'
-    | 'provider_placement_opportunity_end'
-    | 'program_start'
-    | 'program_end'
-    | 'chapter_start'
-    | 'chapter_end'
-    | 'break_start'
-    | 'break_end'
-    | 'provider_advertisement_start'
-    | 'provider_advertisement_end'
-    | 'unknown' {
+  ): SegmentationType | undefined {
     switch (typeId) {
       case 0x30:
       case 0x32:
@@ -270,14 +296,14 @@ export class DASHEventHandler {
       case 0x37:
         return 'provider_advertisement_end';
       default:
-        return 'unknown';
+        return undefined;
     }
   }
 
   /**
    * Check if this is an end cue.
    */
-  private isEndCue(scte35?: SCTE35Message): boolean {
+  private isEndCue(scte35?: ParsedSCTE35): boolean {
     if (!scte35?.segmentationDescriptors) {
       return false;
     }
@@ -307,7 +333,7 @@ export class DASHEventHandler {
   /**
    * Extract break ID from event or SCTE-35 message.
    */
-  private extractBreakId(event: DASHEvent, scte35?: SCTE35Message): string {
+  private extractBreakId(event: DASHEvent, scte35?: ParsedSCTE35): string {
     // Try to get from SCTE-35 segmentation UPID
     if (scte35?.segmentationDescriptors?.[0]?.upid) {
       return scte35.segmentationDescriptors[0].upid;

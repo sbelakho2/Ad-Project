@@ -114,8 +114,13 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <section className="relative py-16 md:py-16 bg-gradient-to-b from-gray-900 to-gray-800">
-      <div className="container mx-auto px-4">
+    <section className="relative bg-gradient-to-b from-gray-900 via-gray-900 to-gray-800">
+      {/* Navigation inside hero for dark background */}
+      <div className="container mx-auto px-4 pt-6">
+        <HomeNav />
+      </div>
+      
+      <div className="container mx-auto px-4 py-16 md:py-20">
         <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
           {/* Left: Copy */}
           <motion.div {...getRevealProps(0)} className="max-w-xl">
@@ -519,10 +524,6 @@ export default function HomePage() {
   return (
     <>
       <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
-
         <HeroSection />
         <PillarsSection />
         <SSAICoverageSection />

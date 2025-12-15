@@ -114,8 +114,11 @@ export class DriftHandler {
       driftType = 'late';
     }
 
+    // Use duration or a default value
+    const breakDuration = cue.duration ?? 0;
+
     // Determine action
-    const action = this.determineAction(driftMs, cue.duration);
+    const action = this.determineAction(driftMs, breakDuration);
 
     // Determine if slate is needed
     const insertSlate =
@@ -125,12 +128,12 @@ export class DriftHandler {
     // Calculate slate duration if needed
     let slateDurationMs: number | undefined;
     if (insertSlate) {
-      slateDurationMs = this.calculateSlateDuration(driftMs, cue.duration);
+      slateDurationMs = this.calculateSlateDuration(driftMs, breakDuration);
     }
 
     // Calculate adjusted duration
     const adjustedDurationMs = this.calculateAdjustedDuration(
-      cue.duration,
+      breakDuration,
       driftMs,
       action
     );

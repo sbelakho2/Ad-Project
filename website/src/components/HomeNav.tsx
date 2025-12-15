@@ -51,34 +51,34 @@ export default function HomeNav() {
   return (
     <nav className="relative" style={{ zIndex: 50 }} aria-label="Main navigation">
       {/* Desktop Navigation */}
-      <div className="hidden md:flex items-center justify-between w-full py-6">
+      <div className="hidden md:flex items-center justify-between w-full">
         <Link href="/" className="flex-shrink-0">
           <img src="/api/brand/logo" alt="ApexMediation" className="h-44 w-auto" />
         </Link>
-        <div className="flex items-center gap-8">
+        <div className="flex items-center gap-6">
           {navItems.map((item) => (
             <Link
               key={item.href}
               href={item.href}
               aria-current={isActive(item.href) ? 'page' : undefined}
-              className={`text-gray-700 font-semibold text-sm tracking-wide hover:text-brand-600 hover:underline decoration-2 underline-offset-4 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600 ${isActive(item.href) ? 'text-brand-600 underline' : ''}`}
+              className={`text-white font-medium text-sm hover:text-brand-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-400 ${isActive(item.href) ? 'text-brand-300' : ''}`}
             >
               {item.label}
             </Link>
           ))}
 
-          <div className="flex items-center gap-4 ml-4">
+          <div className="flex items-center gap-3 ml-4">
             <Link
               href="/signin"
-              className="text-gray-700 font-semibold text-sm hover:text-brand-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
+              className="text-white font-medium text-sm hover:text-brand-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-400"
             >
               Sign In
             </Link>
             <Link
               href="/signup"
-              className="btn-primary px-6 py-2 font-semibold text-sm hover:shadow-lg transition-all"
+              className="bg-brand-500 text-white px-5 py-2 rounded-lg font-semibold text-sm hover:bg-brand-400 transition-colors"
             >
-              Sign Up
+              Get Started
             </Link>
           </div>
         </div>
@@ -92,7 +92,7 @@ export default function HomeNav() {
         <button
           type="button"
           onClick={toggleMenu}
-          className="text-gray-700 p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+          className="text-white p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-400"
           aria-expanded={mobileMenuOpen}
           aria-controls="mobile-navigation"
           aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}

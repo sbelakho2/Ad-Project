@@ -10,10 +10,35 @@
 // Session Management
 export * from './session';
 
-// Manifest Generation
-export * from './manifest';
+// Manifest Generation (excluding types that conflict with signaling)
+export {
+  HLSManifestGenerator,
+  DASHManifestGenerator,
+  ContainerHandler,
+  CachePolicy,
+  ManifestService,
+} from './manifest';
 
-// Break Signaling
+// Re-export manifest types (primary location for manifest types)
+export type {
+  DASHPeriod,
+  DASHAdaptationSet,
+  DASHRepresentation,
+  DASHSegmentTemplate,
+  DASHSegmentList,
+  DASHEventStream as ManifestDASHEventStream,
+  DASHEvent as ManifestDASHEvent,
+  ManifestContext,
+  ManifestProtocol,
+  ContainerFormat,
+  StreamMode,
+  SegmentInfo,
+  HLSManifestOptions,
+  DASHManifestOptions,
+  ManifestCachePolicy,
+} from './manifest/types';
+
+// Break Signaling (primary location for signaling types)
 export * from './signaling';
 
 // Pod Planning & Decisioning

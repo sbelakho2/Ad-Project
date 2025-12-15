@@ -9,43 +9,43 @@ export class SSAIPrometheusExporter {
   private registry: Registry;
   
   // Session metrics
-  private sessionsCreated: Counter;
-  private sessionsActive: Gauge;
-  private sessionDuration: Histogram;
+  private sessionsCreated!: Counter;
+  private sessionsActive!: Gauge;
+  private sessionDuration!: Histogram;
   
   // Manifest metrics
-  private manifestRequestsTotal: Counter;
-  private manifestLatencyMs: Histogram;
-  private manifestErrorsTotal: Counter;
+  private manifestRequestsTotal!: Counter;
+  private manifestLatencyMs!: Histogram;
+  private manifestErrorsTotal!: Counter;
   
   // Pod decisioning metrics
-  private podDecisionsTotal: Counter;
-  private podDecisionLatencyMs: Histogram;
-  private fillRate: Gauge;
-  private noFillTotal: Counter;
+  private podDecisionsTotal!: Counter;
+  private podDecisionLatencyMs!: Histogram;
+  private fillRate!: Gauge;
+  private noFillTotal!: Counter;
   
   // Stitching metrics
-  private stitchingOperationsTotal: Counter;
-  private stitchingLatencyMs: Histogram;
-  private stitchingErrorsTotal: Counter;
-  private discontinuityCount: Histogram;
+  private stitchingOperationsTotal!: Counter;
+  private stitchingLatencyMs!: Histogram;
+  private stitchingErrorsTotal!: Counter;
+  private discontinuityCount!: Histogram;
   
   // Tracking metrics
-  private beaconsFiredTotal: Counter;
-  private beaconLatencyMs: Histogram;
-  private beaconErrorsTotal: Counter;
+  private beaconsFiredTotal!: Counter;
+  private beaconLatencyMs!: Histogram;
+  private beaconErrorsTotal!: Counter;
   
   // Partner metrics
-  private partnerRequestsTotal: Counter;
-  private partnerLatencyMs: Histogram;
-  private partnerErrorsTotal: Counter;
-  private circuitBreakerState: Gauge;
+  private partnerRequestsTotal!: Counter;
+  private partnerLatencyMs!: Histogram;
+  private partnerErrorsTotal!: Counter;
+  private circuitBreakerState!: Gauge;
   
   // SLI metrics
-  private sliAvailability: Gauge;
-  private sliLatencyP99: Gauge;
-  private sliErrorRate: Gauge;
-  private sliFillRate: Gauge;
+  private sliAvailability!: Gauge;
+  private sliLatencyP99!: Gauge;
+  private sliErrorRate!: Gauge;
+  private sliFillRate!: Gauge;
 
   constructor() {
     this.registry = new Registry();

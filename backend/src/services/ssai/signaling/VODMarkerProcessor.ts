@@ -432,6 +432,8 @@ export class VODMarkerProcessor {
         mediaTime: marker.position,
         duration,
         plannedDuration: duration,
+        source: marker.type === 'scte35' ? 'scte35' : 
+                marker.type === 'daterange' ? 'daterange' : 'schedule',
       };
 
       adBreaks.push(cue);
