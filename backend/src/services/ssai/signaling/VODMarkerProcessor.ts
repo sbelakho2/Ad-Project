@@ -427,14 +427,11 @@ export class VODMarkerProcessor {
       }
 
       const cue: AdBreakCue = {
-        id: marker.id,
-        type: marker.type === 'scte35' ? 'scte35' : 'daterange',
-        startTime: marker.position,
+        cueId: marker.id,
+        type: 'start',
+        mediaTime: marker.position,
         duration,
         plannedDuration: duration,
-        scte35: marker.scte35,
-        raw: marker.data,
-        isEndCue: false,
       };
 
       adBreaks.push(cue);
@@ -492,22 +489,22 @@ export class VODMarkerProcessor {
       return adBreaks;
     }
 
-    const sorted = [...adBreaks].sort((a, b) => a.startTime - b.startTime);
+    const sorted = [...adBreaks].sort((a, b) => a.mediaTime - b.mediaTime);
     const merged: AdBreakCue[] = [];
 
     let current = sorted[0];
 
     for (let i = 1; i < sorted.length; i++) {
       const next = sorted[i];
-      const currentEnd = current.startTime + (current.duration || 0);
+      const currentEnd = current.mediaTime + (current.duration || 0);
 
       // Check if breaks should be merged
-      if (next.startTime - currentEnd <= toleranceSeconds) {
+      if (next.mediaTime - currentEnd <= toleranceSeconds) {
         // Merge into current
         const newDuration =
-          next.startTime +
+          next.mediaTime +
           (next.duration || 0) -
-          current.startTime;
+          current.mediaTime;
         current = {
           ...current,
           duration: newDuration,

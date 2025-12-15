@@ -15,6 +15,7 @@ export const TRACKING_MODULE_VERSION = '1.0.0';
 
 // Types
 export * from './types';
+import type { TrackingEvent } from './types';
 
 // Event Tracker
 export { EventTracker, EventTrackerConfig } from './EventTracker';

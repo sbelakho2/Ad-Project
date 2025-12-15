@@ -182,16 +182,7 @@ export interface AudioConfig {
   loudnessTarget: number;
 }
 
-export interface CaptionConfig {
-  /** Caption format */
-  format: 'cea608' | 'cea708' | 'webvtt' | 'ttml';
-
-  /** Content caption continuity */
-  preserveContentCaptions: boolean;
-
-  /** Include ad captions */
-  includeAdCaptions: boolean;
-}
+// CaptionConfig is exported from CaptionHandler.ts to avoid duplicate
 
 export interface SegmentAlignment {
   /** Target segment duration */
