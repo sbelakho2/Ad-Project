@@ -5,7 +5,9 @@ import { usePathname, useSelectedLayoutSegments, useRouter } from 'next/navigati
 import { useAdminGate, clearOperatorCredentials } from '@/lib/useAdminGate'
 
 const ADMIN_NAV = [
+  { name: 'Overview', href: '/admin/overview', segment: 'overview' },
   { name: 'Health', href: '/admin/health', segment: 'health' },
+  { name: 'SSAI', href: '/admin/ssai', segment: 'ssai' },
   { name: 'Infrastructure', href: '/admin/infrastructure', segment: 'infrastructure' },
   { name: 'Billing Ops', href: '/admin/billing', segment: 'billing' },
   { name: 'Audit Log', href: '/admin/audit', segment: 'audit' },
@@ -26,7 +28,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   })
   
   const segments = useSelectedLayoutSegments()
-  const currentSegment = segments[0] ?? (pathname === '/admin' ? 'health' : undefined)
+  const currentSegment = segments[0] ?? (pathname === '/admin' ? 'overview' : undefined)
 
   const handleLogout = () => {
     clearOperatorCredentials()
