@@ -12,8 +12,6 @@
     "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,css,md}\"",
     "type-check": "tsc --noEmit",
     "analyze": "ANALYZE=true next build",
-    "deploy:vercel": "npx vercel --prod",
-    "deploy:preview": "npx vercel",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

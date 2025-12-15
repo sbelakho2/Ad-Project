@@ -10,7 +10,7 @@ function getBaseUrl() {
 export default function robots(): MetadataRoute.Robots {
   const base = getBaseUrl()
   const isProd = process.env.NODE_ENV === 'production'
-  const isStaging = /staging|preview|vercel\.app/i.test(base)
+  const isStaging = /staging|preview/i.test(base)
 
   const commonDisallows = [
     '/dashboard',
