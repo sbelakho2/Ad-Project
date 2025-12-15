@@ -71,6 +71,274 @@ app.use(compression());
 // JSON body parsing
 app.use(express.json({ limit: '1mb' }));
 
+// ============================================
+// MINIMAL OPERATOR UI (same-origin)
+// ============================================
+
+function sendHtml(res: Response, html: string): void {
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.status(200).send(html);
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+app.get('/', (req: Request, res: Response) => {
+  res.redirect('/admin/');
+});
+
+app.get('/admin', (req: Request, res: Response) => {
+  res.redirect('/admin/');
+});
+
+app.get('/admin/login', (req: Request, res: Response) => {
+  const title = 'Operator Login';
+  sendHtml(
+    res,
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: #0b1020; color: #e5e7eb; }
+      .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+      .card { width: 100%; max-width: 440px; background: #0f172a; border: 1px solid #1f2a44; border-radius: 14px; padding: 24px; }
+      h1 { margin: 0 0 6px; font-size: 22px; }
+      p { margin: 0 0 18px; color: #9ca3af; font-size: 14px; }
+      label { display: block; font-size: 12px; color: #cbd5e1; margin: 14px 0 6px; }
+      input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #334155; background: #0b1224; color: #e5e7eb; }
+      button { width: 100%; margin-top: 16px; padding: 10px 12px; border-radius: 10px; border: 0; background: #2563eb; color: white; font-weight: 600; cursor: pointer; }
+      button:disabled { opacity: .6; cursor: not-allowed; }
+      .err { display:none; margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid #7f1d1d; background: rgba(127,29,29,.35); color: #fecaca; font-size: 13px; }
+      .foot { margin-top: 16px; color: #94a3b8; font-size: 12px; }
+      .muted { color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Operator Access</h1>
+        <p>Control Plane login (operator-only). Customer accounts do not apply.</p>
+
+        <form id="login-form">
+          <label for="username">Username / Email</label>
+          <input id="username" name="username" autocomplete="username" placeholder="operator or you@apexmediation.ee" required />
+
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+          <div id="error" class="err"></div>
+
+          <button id="submit" type="submit">Sign in</button>
+        </form>
+
+        <div class="foot">
+          <div>All operator actions are logged.</div>
+          <div class="muted">If you see 404s, your IP may not be allowlisted.</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/admin-login.js" defer></script>
+  </body>
+</html>`
+  );
+});
+
+app.get('/admin/', (req: Request, res: Response) => {
+  const title = 'Control Plane';
+  sendHtml(
+    res,
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: #0b1020; color: #e5e7eb; }
+      .top { display:flex; justify-content: space-between; align-items:center; padding: 16px 20px; border-bottom: 1px solid #1f2a44; background: #0f172a; }
+      .top h1 { margin: 0; font-size: 16px; }
+      .top a { color: #93c5fd; text-decoration: none; font-size: 13px; }
+      .wrap { padding: 20px; }
+      .card { background: #0f172a; border: 1px solid #1f2a44; border-radius: 14px; padding: 16px; }
+      .row { display:flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+      .pill { padding: 6px 10px; border-radius: 999px; border: 1px solid #334155; background: #0b1224; font-size: 12px; }
+      pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: #d1d5db; }
+      .err { display:none; margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid #7f1d1d; background: rgba(127,29,29,.35); color: #fecaca; font-size: 13px; }
+      .muted { color: #94a3b8; }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <h1>Control Plane</h1>
+      <a href="/admin/logout">Sign out</a>
+    </div>
+    <div class="wrap">
+      <div class="row">
+        <div class="pill" id="status">Loading…</div>
+        <div class="pill muted">API: /api/v1/dashboard</div>
+      </div>
+      <div id="error" class="err"></div>
+      <div class="card">
+        <pre id="payload">Loading…</pre>
+      </div>
+    </div>
+    <script src="/static/admin-dashboard.js" defer></script>
+  </body>
+</html>`
+  );
+});
+
+app.get('/admin/logout', (req: Request, res: Response) => {
+  sendHtml(
+    res,
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signed out</title>
+  </head>
+  <body>
+    <script src="/static/admin-logout.js" defer></script>
+  </body>
+</html>`
+  );
+});
+
+app.get('/static/admin-login.js', (req: Request, res: Response) => {
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.status(200).send(`
+(function () {
+  var form = document.getElementById('login-form');
+  var errorEl = document.getElementById('error');
+  var submit = document.getElementById('submit');
+  if (!form || !errorEl || !submit) return;
+
+  function setError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = msg ? 'block' : 'none';
+  }
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    setError('');
+    submit.disabled = true;
+    submit.textContent = 'Signing in…';
+
+    try {
+      var username = document.getElementById('username').value;
+      var password = document.getElementById('password').value;
+
+      var resp = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password }),
+      });
+
+      var data = null;
+      try { data = await resp.json(); } catch (_) {}
+
+      if (!resp.ok || !data || !data.token) {
+        var msg = (data && (data.error || data.message)) ? (data.error || data.message) : 'Authentication failed';
+        setError(msg);
+        return;
+      }
+
+      localStorage.setItem('controlPlaneToken', data.token);
+      window.location.assign('/admin/');
+    } catch (err) {
+      setError('Network error');
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Sign in';
+    }
+  });
+})();
+`);
+});
+
+app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.status(200).send(`
+(function () {
+  var statusEl = document.getElementById('status');
+  var payloadEl = document.getElementById('payload');
+  var errorEl = document.getElementById('error');
+  if (!statusEl || !payloadEl || !errorEl) return;
+
+  function setError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = msg ? 'block' : 'none';
+  }
+
+  function setStatus(msg) {
+    statusEl.textContent = msg;
+  }
+
+  async function run() {
+    var token = localStorage.getItem('controlPlaneToken');
+    if (!token) {
+      window.location.assign('/admin/login');
+      return;
+    }
+
+    try {
+      setError('');
+      setStatus('Loading dashboard…');
+
+      var resp = await fetch('/api/v1/dashboard', {
+        headers: { Authorization: 'Bearer ' + token },
+      });
+
+      if (resp.status === 401) {
+        localStorage.removeItem('controlPlaneToken');
+        window.location.assign('/admin/login');
+        return;
+      }
+
+      var data = await resp.json();
+      if (!resp.ok) {
+        setStatus('Error');
+        setError((data && data.error) ? data.error : 'Failed to load dashboard');
+        payloadEl.textContent = JSON.stringify(data, null, 2);
+        return;
+      }
+
+      setStatus('OK');
+      payloadEl.textContent = JSON.stringify(data, null, 2);
+    } catch (err) {
+      setStatus('Error');
+      setError('Network error');
+    }
+  }
+
+  run();
+})();
+`);
+});
+
+app.get('/static/admin-logout.js', (req: Request, res: Response) => {
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.status(200).send(`
+(function () {
+  try { localStorage.removeItem('controlPlaneToken'); } catch (_) {}
+  window.location.assign('/admin/login');
+})();
+`);
+});
+
 // Request logging
 app.use((req: Request, res: Response, next: NextFunction) => {
   const start = Date.now();

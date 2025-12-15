@@ -16,45 +16,30 @@ services:
       
       # Operator Authentication (separate from customer API)
       - OPERATOR_JWT_SECRET=${OPERATOR_JWT_SECRET:?OPERATOR_JWT_SECRET is required}
-      - OPERATOR_JWT_EXPIRES_IN=${OPERATOR_JWT_EXPIRES_IN:-8h}
+      - OPERATOR_SESSION_TTL_HOURS=${OPERATOR_SESSION_TTL_HOURS:-4}
       
       # Operator credentials (bcrypt hashes)
+      # Format: email:hash,email2:hash2
+      # (JSON map is also accepted for backward compatibility)
       # Generate with: node -e "console.log(require('bcryptjs').hashSync('password', 12))"
       - OPERATOR_CREDENTIALS=${OPERATOR_CREDENTIALS:?OPERATOR_CREDENTIALS is required}
       
       # IP Allowlist (comma-separated CIDR blocks)
-      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:-127.0.0.1/32}
+      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:-127.0.0.1/32,::1/128}
       
-      # Three-tier database access
-      # Read-only pool (monitoring, telemetry)
-      - DB_READONLY_HOST=${DB_HOST:-postgres}
-      - DB_READONLY_PORT=${DB_PORT:-5432}
-      - DB_READONLY_NAME=${DB_NAME:-apexmediation}
-      - DB_READONLY_USER=${DB_READONLY_USER:-apex_readonly}
-      - DB_READONLY_PASSWORD=${DB_READONLY_PASSWORD:?DB_READONLY_PASSWORD required}
-      - DB_READONLY_SSL=${DB_SSL:-false}
-      - DB_READONLY_POOL_MIN=2
-      - DB_READONLY_POOL_MAX=10
+      # Database (READ-ONLY role for monitoring)
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-apexmediation}
+      - DB_USER=${DB_READONLY_USER:-apex_readonly}
+      - DB_PASSWORD=${DB_READONLY_PASSWORD:?DB_READONLY_PASSWORD required}
+      - DB_SSL=${DB_SSL:-false}
       
-      # Operator pool (partition management, safe writes)
-      - DB_OPERATOR_HOST=${DB_HOST:-postgres}
-      - DB_OPERATOR_PORT=${DB_PORT:-5432}
-      - DB_OPERATOR_NAME=${DB_NAME:-apexmediation}
       - DB_OPERATOR_USER=${DB_OPERATOR_USER:-apex_operator}
       - DB_OPERATOR_PASSWORD=${DB_OPERATOR_PASSWORD:?DB_OPERATOR_PASSWORD required}
-      - DB_OPERATOR_SSL=${DB_SSL:-false}
-      - DB_OPERATOR_POOL_MIN=1
-      - DB_OPERATOR_POOL_MAX=5
       
-      # Break-glass pool (emergency session termination)
-      - DB_BREAKGLASS_HOST=${DB_HOST:-postgres}
-      - DB_BREAKGLASS_PORT=${DB_PORT:-5432}
-      - DB_BREAKGLASS_NAME=${DB_NAME:-apexmediation}
       - DB_BREAKGLASS_USER=${DB_BREAKGLASS_USER:-apex_breakglass}
       - DB_BREAKGLASS_PASSWORD=${DB_BREAKGLASS_PASSWORD:?DB_BREAKGLASS_PASSWORD required}
-      - DB_BREAKGLASS_SSL=${DB_SSL:-false}
-      - DB_BREAKGLASS_POOL_MIN=0
-      - DB_BREAKGLASS_POOL_MAX=2
       
       # Backend metrics endpoint (for app telemetry)
       - BACKEND_METRICS_URL=${BACKEND_METRICS_URL:-http://backend:8080/metrics}

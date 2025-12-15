@@ -93,12 +93,37 @@ export function getOperatorCredentials(): Map<string, string> {
   const creds = new Map<string, string>();
   
   if (!cfg.OPERATOR_CREDENTIALS) return creds;
-  
-  const pairs = cfg.OPERATOR_CREDENTIALS.split(',');
+
+  const raw = cfg.OPERATOR_CREDENTIALS.trim();
+
+  // Format A (preferred): email:hash,email2:hash2
+  // Format B (legacy): {"email":"hash","email2":"hash2"}
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      for (const [email, hash] of Object.entries(parsed)) {
+        if (typeof email !== 'string') continue;
+        if (typeof hash !== 'string') continue;
+        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedHash = hash.trim();
+        if (normalizedEmail && normalizedHash) {
+          creds.set(normalizedEmail, normalizedHash);
+        }
+      }
+      return creds;
+    } catch {
+      // Fall through to CSV parsing
+    }
+  }
+
+  const pairs = raw.split(',');
   for (const pair of pairs) {
-    const [email, hash] = pair.split(':');
+    const idx = pair.indexOf(':');
+    if (idx === -1) continue;
+    const email = pair.slice(0, idx).trim();
+    const hash = pair.slice(idx + 1).trim();
     if (email && hash) {
-      creds.set(email.trim().toLowerCase(), hash.trim());
+      creds.set(email.toLowerCase(), hash);
     }
   }
   

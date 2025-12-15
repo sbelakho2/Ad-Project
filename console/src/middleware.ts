@@ -10,25 +10,12 @@ import type { NextRequest } from 'next/server'
 export function middleware(request: NextRequest) {
   const hostname = request.headers.get('host') || ''
   const isAdminSubdomain = hostname.startsWith('admin.')
-  const pathname = request.nextUrl.pathname
 
-  // Admin subdomain handling
+  // Hard separation:
+  // The admin hostname must never be served by the customer console.
+  // If traffic is misrouted here, fail closed (stealthy 404).
   if (isAdminSubdomain) {
-    // Root of admin subdomain -> redirect to /admin/overview (or /admin/login if not authenticated)
-    if (pathname === '/') {
-      return NextResponse.redirect(new URL('/admin/overview', request.url))
-    }
-
-    // /login on admin subdomain -> redirect to operator login
-    if (pathname === '/login') {
-      return NextResponse.redirect(new URL('/admin/login', request.url))
-    }
-
-    // Any customer console routes on admin subdomain -> redirect to admin
-    const customerRoutes = ['/dashboard', '/billing', '/payouts', '/settings', '/transparency', '/signup']
-    if (customerRoutes.some(route => pathname.startsWith(route))) {
-      return NextResponse.redirect(new URL('/admin/overview', request.url))
-    }
+    return new NextResponse('Not found', { status: 404 })
   }
 
   return NextResponse.next()

@@ -1,125 +1,44 @@
 'use client'
 
-import Link from 'next/link'
-import { usePathname, useSelectedLayoutSegments, useRouter } from 'next/navigation'
-import { useAdminGate, clearOperatorCredentials } from '@/lib/useAdminGate'
+import { useEffect, useMemo } from 'react'
 
-const ADMIN_NAV = [
-  { name: 'Overview', href: '/admin/overview', segment: 'overview' },
-  { name: 'Health', href: '/admin/health', segment: 'health' },
-  { name: 'SSAI', href: '/admin/ssai', segment: 'ssai' },
-  { name: 'Infrastructure', href: '/admin/infrastructure', segment: 'infrastructure' },
-  { name: 'Billing Ops', href: '/admin/billing', segment: 'billing' },
-  { name: 'Audit Log', href: '/admin/audit', segment: 'audit' },
-  { name: 'Sales Automation', href: '/admin/sales-automation', segment: 'sales-automation' },
-  { name: 'Value Multipliers', href: '/admin/value-multipliers', segment: 'value-multipliers' },
-]
+const DEFAULT_CONTROL_PLANE_ORIGIN = 'https://admin.apexmediation.ee'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter()
-  const pathname = usePathname()
-  
-  // Skip auth gate for the login page itself
-  const isLoginPage = pathname === '/admin/login'
-  
-  const { isOperator, isLoading, user } = useAdminGate({ 
-    unauthorizedRedirect: '/admin/login',
-    disableRedirects: isLoginPage // Don't redirect when on login page
-  })
-  
-  const segments = useSelectedLayoutSegments()
-  const currentSegment = segments[0] ?? (pathname === '/admin' ? 'overview' : undefined)
+  const origin = (process.env.NEXT_PUBLIC_CONTROL_PLANE_URL || DEFAULT_CONTROL_PLANE_ORIGIN).trim()
 
-  const handleLogout = () => {
-    clearOperatorCredentials()
-    router.push('/admin/login')
-  }
+  const target = useMemo(() => {
+    if (typeof window === 'undefined') return `${origin}/admin/`
+    const path = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    return new URL(path, origin).toString()
+  }, [origin])
 
-  // For the login page, just render the children without the gate
-  if (isLoginPage) {
-    return children
-  }
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    // Hard separation: the operator control plane is not served by the customer console.
+    window.location.replace(target)
+  }, [target])
 
-  // Show loading state while checking operator access
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary-500 mx-auto"></div>
-          <p className="mt-4 text-gray-400">Verifying operator access...</p>
-        </div>
-      </div>
-    )
-  }
-
-  // Don't render anything if not an operator - redirect will happen via useAdminGate
-  if (!isOperator) {
-    return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-red-400 text-lg">Access Denied</p>
-          <p className="mt-2 text-gray-500 text-sm">Operator authentication required.</p>
-          <Link 
-            href="/admin/login"
-            className="mt-4 inline-block text-primary-400 hover:text-primary-300"
-          >
-            Go to Operator Login →
-          </Link>
-        </div>
-      </div>
-    )
-  }
-
+  // Render a small fallback in case redirects are blocked.
   return (
-    <div className="min-h-screen bg-[#f9fafb] px-6 py-10">
-      <div className="mx-auto max-w-6xl space-y-6">
-        <div className="flex items-start justify-between">
-          <div className="space-y-2">
-            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">
-              Operator Control Panel
-            </h1>
-            <p className="text-sm text-gray-600">
-              System administration dashboard. Internal use only.
-            </p>
-          </div>
-          <div className="flex items-center gap-4">
-            {user?.email && (
-              <span className="text-sm text-gray-500">
-                {user.email}
-              </span>
-            )}
-            <button
-              onClick={handleLogout}
-              className="text-sm text-gray-600 hover:text-red-600 transition-colors"
-            >
-              Logout
-            </button>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white p-2">
-          <nav className="flex gap-1" aria-label="Admin navigation">
-            {ADMIN_NAV.map((tab) => {
-              const active = currentSegment === tab.segment
-              return (
-                <Link
-                  key={tab.href}
-                  href={tab.href}
-                  className={`relative flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
-                    active ? 'bg-primary-50 text-primary-700 ring-1 ring-primary-100' : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
-                  }`}
-                  aria-current={active ? 'page' : undefined}
-                >
-                  {active && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-primary-600" aria-hidden />}
-                  {tab.name}
-                </Link>
-              )
-            })}
-          </nav>
-        </div>
-
-        <div>{children}</div>
+    <div className="min-h-screen bg-gray-900 flex items-center justify-center px-6">
+      <div className="max-w-md w-full rounded-xl border border-gray-700 bg-gray-800 p-6">
+        <h1 className="text-xl font-semibold text-white">Operator Control Plane</h1>
+        <p className="mt-2 text-sm text-gray-300">
+          This route is no longer served by the customer console. Continue on the dedicated operator hostname.
+        </p>
+        <a
+          href={target}
+          className="mt-4 inline-flex items-center justify-center w-full rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700"
+        >
+          Go to Control Plane
+        </a>
+        <p className="mt-3 text-xs text-gray-500">
+          If you expected the customer console, use https://console.apexmediation.ee
+        </p>
       </div>
+      {/* Keep children unused to avoid accidental operator UI rendering in console */}
+      <div style={{ display: 'none' }}>{children}</div>
     </div>
   )
 }

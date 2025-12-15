@@ -45,28 +45,20 @@ const DEFAULT_OPTIONS: UseOperatorGateOptions = {
   disableRedirects: false,
 }
 
-// Operator emails are defined server-side via environment variable
-// This list is fetched at build time or via API for security
-const OPERATOR_EMAILS = (process.env.NEXT_PUBLIC_OPERATOR_EMAILS || '')
-  .split(',')
-  .map(email => email.trim().toLowerCase())
-  .filter(Boolean)
-
-// Check if user's email is in the operator whitelist
-function isOperatorEmail(email: string | undefined | null): boolean {
-  if (!email) return false
-  // If no operator emails are configured, deny all access (fail-secure)
-  if (OPERATOR_EMAILS.length === 0) return false
-  return OPERATOR_EMAILS.includes(email.toLowerCase())
+type OperatorSession = {
+  identifier: string
 }
 
-// Check if operator secret is provided and valid
-function hasValidOperatorSecret(): boolean {
-  if (typeof window === 'undefined') return false
-  const secret = sessionStorage.getItem('operator_secret') || localStorage.getItem('operator_secret')
-  const expectedSecret = process.env.NEXT_PUBLIC_OPERATOR_SECRET
-  if (!expectedSecret) return false
-  return secret === expectedSecret
+async function fetchOperatorSession(): Promise<OperatorSession | null> {
+  try {
+    const response = await fetch('/api/operator/session', { credentials: 'include' })
+    if (!response.ok) return null
+    const data = (await response.json()) as { identifier?: string }
+    if (!data?.identifier) return null
+    return { identifier: data.identifier }
+  } catch {
+    return null
+  }
 }
 
 export function useAdminGate(options?: UseOperatorGateOptions) {
@@ -80,7 +72,7 @@ export function useAdminGate(options?: UseOperatorGateOptions) {
   const [isClient, setIsClient] = useState(false)
   const [isCheckingAccess, setIsCheckingAccess] = useState(true)
   const [isOperator, setIsOperator] = useState(false)
-  const [operatorEmail, setOperatorEmail] = useState<string | null>(null)
+  const [operatorIdentifier, setOperatorIdentifier] = useState<string | null>(null)
   const lastRedirectRef = useRef<string | null>(null)
   const guardEnabled = isFeatureEnabled('requireAdminGuard')
 
@@ -95,30 +87,12 @@ export function useAdminGate(options?: UseOperatorGateOptions) {
     const checkOperatorAccess = async () => {
       setIsCheckingAccess(true)
 
-      // Method 1: Check for valid operator secret in session
-      if (hasValidOperatorSecret()) {
-        const email = sessionStorage.getItem('operator_email') || 'operator@system'
+      const session = await fetchOperatorSession()
+      if (session) {
         setIsOperator(true)
-        setOperatorEmail(email)
+        setOperatorIdentifier(session.identifier)
         setIsCheckingAccess(false)
         return
-      }
-
-      // Method 2: Check if authenticated user's email is in operator whitelist
-      // This requires fetching the current session from our auth endpoint
-      try {
-        const response = await fetch('/api/auth/session', { credentials: 'include' })
-        if (response.ok) {
-          const session = await response.json()
-          if (session?.user?.email && isOperatorEmail(session.user.email)) {
-            setIsOperator(true)
-            setOperatorEmail(session.user.email)
-            setIsCheckingAccess(false)
-            return
-          }
-        }
-      } catch (e) {
-        // Silent fail - will redirect to unauthorized
       }
 
       // No valid operator access
@@ -152,7 +126,7 @@ export function useAdminGate(options?: UseOperatorGateOptions) {
   return {
     // For backward compatibility, we expose 'user' as a minimal object
     // but this is NOT a customer user - it's operator identity
-    user: isOperator ? { email: operatorEmail, role: 'operator' as const } : null,
+    user: isOperator ? { email: operatorIdentifier, role: 'operator' as const } : null,
     isAdmin: isOperator, // renamed semantically but kept for compat
     isOperator,
     isLoading: isCheckingAccess || !isClient,
@@ -163,23 +137,27 @@ export function useAdminGate(options?: UseOperatorGateOptions) {
  * Utility to set operator credentials for session
  * Used by the operator login page/mechanism
  */
-export function setOperatorCredentials(secret: string, email?: string) {
-  if (typeof window === 'undefined') return false
-  const expectedSecret = process.env.NEXT_PUBLIC_OPERATOR_SECRET
-  if (secret !== expectedSecret) return false
-  
-  sessionStorage.setItem('operator_secret', secret)
-  if (email) sessionStorage.setItem('operator_email', email)
-  return true
+export async function operatorLogin(secret: string, identifier?: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/operator/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ secret, identifier }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
-/**
- * Clear operator credentials (logout)
- */
-export function clearOperatorCredentials() {
-  if (typeof window === 'undefined') return
-  sessionStorage.removeItem('operator_secret')
-  sessionStorage.removeItem('operator_email')
-  localStorage.removeItem('operator_secret')
-  localStorage.removeItem('operator_email')
+export async function operatorLogout(): Promise<void> {
+  try {
+    await fetch('/api/operator/logout', {
+      method: 'POST',
+      credentials: 'include',
+    })
+  } catch {
+    // ignore
+  }
 }

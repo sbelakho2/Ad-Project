@@ -18,13 +18,18 @@ function isAdminSubdomain(): boolean {
   return window.location.hostname.startsWith('admin.')
 }
 
+function getControlPlaneOrigin(): string {
+  return (process.env.NEXT_PUBLIC_CONTROL_PLANE_URL || 'https://admin.apexmediation.ee').trim()
+}
+
 export default function LoginPage() {
   const router = useRouter()
   
   // Redirect admin subdomain users to operator login
   useEffect(() => {
     if (isAdminSubdomain()) {
-      router.replace('/admin/login')
+      const origin = getControlPlaneOrigin()
+      window.location.replace(new URL('/admin/login', origin).toString())
     }
   }, [router])
   const [email, setEmail] = useState(() => (CAN_SHOW_DEMO_MODE ? 'demo@apexmediation.ee' : ''))

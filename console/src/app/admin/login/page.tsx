@@ -1,8 +1,8 @@
 "use client"
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { setOperatorCredentials } from '@/lib/useAdminGate'
+import { operatorLogin } from '@/lib/useAdminGate'
 
 /**
  * OPERATOR LOGIN PAGE
@@ -11,8 +11,7 @@ import { setOperatorCredentials } from '@/lib/useAdminGate'
  * It is NOT connected to customer authentication in any way.
  * 
  * Operators authenticate via:
- * 1. Operator secret key (NEXT_PUBLIC_OPERATOR_SECRET)
- * 2. Or their whitelisted email (NEXT_PUBLIC_OPERATOR_EMAILS)
+ * 1. Operator secret key (OPERATOR_SECRET)
  * 
  * For production: Consider implementing proper SSO/OAuth with your identity provider.
  */
@@ -20,7 +19,7 @@ import { setOperatorCredentials } from '@/lib/useAdminGate'
 export default function OperatorLoginPage() {
   const router = useRouter()
   const [secret, setSecret] = useState('')
-  const [email, setEmail] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
@@ -29,8 +28,7 @@ export default function OperatorLoginPage() {
     setError(null)
     setIsLoading(true)
 
-    // Try to authenticate with operator secret
-    const success = setOperatorCredentials(secret, email || undefined)
+    const success = await operatorLogin(secret, identifier || undefined)
     
     if (success) {
       router.push('/admin/health')
@@ -59,16 +57,16 @@ export default function OperatorLoginPage() {
         <div className="bg-gray-800 rounded-xl p-8 border border-gray-700">
           <form onSubmit={handleLogin} className="space-y-6">
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-300">
-                Operator Email (optional)
+              <label htmlFor="identifier" className="block text-sm font-medium text-gray-300">
+                Operator Identifier (optional)
               </label>
               <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                id="identifier"
+                type="text"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
                 className="mt-1 block w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-                placeholder="operator@apexmediation.com"
+                placeholder="operator or you@apexmediation.ee"
               />
             </div>
 

@@ -1,6 +1,5 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { useAdminGate } from '../useAdminGate'
-import type { SessionUser } from '../useSession'
 
 const mockIsFeatureEnabled = jest.fn((flag?: string) => true)
 
@@ -18,35 +17,27 @@ jest.mock('next/navigation', () => ({
   usePathname: () => mockPathname,
 }))
 
-const mockUseSession = jest.fn()
+const mockFetch = jest.fn()
 
-jest.mock('../useSession', () => ({
-  useSession: (options?: unknown) => mockUseSession(options),
-}))
-
-const buildSession = (overrides: Partial<{ user: SessionUser | null; isLoading: boolean }> = {}) => ({
-  user: null,
-  isLoading: false,
-  ...overrides,
+beforeAll(() => {
+  ;(global as any).fetch = mockFetch
 })
 
 describe('useAdminGate', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockPathname = '/admin/health'
-    mockUseSession.mockReturnValue(buildSession())
     window.history.replaceState({}, 'Test', mockPathname)
     mockIsFeatureEnabled.mockImplementation(() => true)
+    mockFetch.mockResolvedValue({ ok: false, status: 401 })
   })
 
-  it('redirects unauthenticated users to login once', async () => {
-    mockUseSession.mockReturnValue(buildSession({ user: null, isLoading: false }))
-
+  it('redirects non-operators to 403 once', async () => {
     renderHook(() => useAdminGate())
 
     await waitFor(() => {
       expect(mockRouterReplace).toHaveBeenCalledTimes(1)
-      expect(mockRouterReplace.mock.calls[0][0]).toMatch(/\/login\?next=/)
+      expect(mockRouterReplace).toHaveBeenCalledWith('/403')
     })
 
     mockRouterReplace.mockClear()
@@ -56,47 +47,24 @@ describe('useAdminGate', () => {
     })
   })
 
-  it('redirects non-admin users to 403', async () => {
-    mockUseSession.mockReturnValue(
-      buildSession({
-        user: {
-          userId: '1',
-          publisherId: 'pub',
-          email: 'user@test.dev',
-          role: 'publisher',
-        },
-      })
-    )
-
-    renderHook(() => useAdminGate())
-
-    await waitFor(() => {
-      expect(mockRouterReplace).toHaveBeenCalledWith('/403')
+  it('does not redirect operators and returns gate status', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, identifier: 'operator@apexmediation.ee' }),
     })
-  })
-
-  it('does not redirect admins and returns gate status', async () => {
-    const adminUser: SessionUser = {
-      userId: 'admin',
-      publisherId: 'pub',
-      email: 'admin@test.dev',
-      role: 'admin',
-    }
-    mockUseSession.mockReturnValue(buildSession({ user: adminUser }))
 
     const { result } = renderHook(() => useAdminGate())
 
     await waitFor(() => {
+      expect(result.current.isOperator).toBe(true)
       expect(result.current.isAdmin).toBe(true)
-      expect(result.current.user).toEqual(adminUser)
+      expect(result.current.user?.email).toBe('operator@apexmediation.ee')
     })
 
     expect(mockRouterReplace).not.toHaveBeenCalled()
   })
 
   it('can disable redirects for custom handling', async () => {
-    mockUseSession.mockReturnValue(buildSession({ user: null, isLoading: false }))
-
     renderHook(() => useAdminGate({ disableRedirects: true }))
 
     await waitFor(() => {
@@ -106,7 +74,6 @@ describe('useAdminGate', () => {
 
   it('respects the requireAdminGuard flag when disabled', async () => {
     mockIsFeatureEnabled.mockImplementation(() => false)
-    mockUseSession.mockReturnValue(buildSession({ user: null, isLoading: false }))
 
     renderHook(() => useAdminGate())
 

@@ -3,6 +3,50 @@ networks:
     driver: bridge
 
 services:
+  control-plane:
+    build:
+      context: ../
+      dockerfile: control-plane/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+
+      # Operator Authentication (separate realm)
+      - OPERATOR_JWT_SECRET=${OPERATOR_JWT_SECRET:?OPERATOR_JWT_SECRET is required}
+      - OPERATOR_SESSION_TTL_HOURS=${OPERATOR_SESSION_TTL_HOURS:-4}
+      # email:hash,email2:hash2 (JSON map also accepted)
+      - OPERATOR_CREDENTIALS=${OPERATOR_CREDENTIALS:?OPERATOR_CREDENTIALS is required}
+
+      # IP Allowlist (comma-separated CIDRs)
+      - ALLOWED_IPS=${CONTROL_PLANE_ALLOWED_IPS:?CONTROL_PLANE_ALLOWED_IPS is required}
+
+      # Database (read-only)
+      - DB_HOST=${DB_HOST:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-apexmediation}
+      - DB_USER=${DB_READONLY_USER:-apex_readonly}
+      - DB_PASSWORD=${DB_READONLY_PASSWORD:?DB_READONLY_PASSWORD required}
+      - DB_SSL=${DB_SSL:-false}
+
+      # Database (operator / break-glass) for actions
+      - DB_OPERATOR_USER=${DB_OPERATOR_USER:-apex_operator}
+      - DB_OPERATOR_PASSWORD=${DB_OPERATOR_PASSWORD:-}
+      - DB_BREAKGLASS_USER=${DB_BREAKGLASS_USER:-apex_breakglass}
+      - DB_BREAKGLASS_PASSWORD=${DB_BREAKGLASS_PASSWORD:-}
+
+      # CORS (admin hostname)
+      - CORS_ORIGIN=https://admin.apexmediation.ee
+
+      # Telemetry sources
+      - BACKEND_METRICS_URL=http://backend:8080/metrics
+    expose:
+      - "4000"
+    networks:
+      - apex-net
+
   backend:
     build:
       context: ../backend
@@ -143,6 +187,7 @@ services:
       - backend
       - config
       - auction
+      - control-plane
     ports:
       - "${NGINX_PORT:-8080}:80"
       - "443:443"
