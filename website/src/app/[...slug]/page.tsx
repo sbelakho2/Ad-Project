@@ -231,6 +231,7 @@ function renderContent(slugKey: string, breadcrumbs: Breadcrumb[]): React.ReactN
                 <a href="#ab-testing-platform" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">A/B testing</a>
                 <a href="#integration-checklist" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">Integration checklist</a>
                 <a href="#sdk-reference" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">SDK reference</a>
+                <a href="#ssai-documentation" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">SSAI documentation</a>
               </nav>
             </aside>
             <div className="space-y-8">
@@ -350,11 +351,42 @@ Body: {
               <section id="integration-checklist" className="rounded-3xl bg-white p-8 shadow-xl ring-1 ring-gray-200">
                 <h2 className="text-h3 font-semibold text-gray-900">5. Integration Checklist</h2>
                 <ul className="mt-4 space-y-3 text-body text-gray-700">
-                  <li>✅ Add the SDK to your project and confirm no build errors.</li>
-                  <li>✅ Verify GDPR/CCPA consent flow for European and Californian users.</li>
-                  <li>✅ Test rewarded and interstitial placements using device test mode.</li>
-                  <li>✅ Enable analytics streaming to your data warehouse of choice.</li>
-                  <li>✅ View payout schedule and invoices (NET 30 payment terms) in <Link href="/dashboard/settings?tab=payment" className="font-bold underline">Settings → Payment Methods</Link>.</li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>Add the SDK to your project and confirm no build errors.</span>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>Verify GDPR/CCPA consent flow for European and Californian users.</span>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>Test rewarded and interstitial placements using device test mode.</span>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>Enable analytics streaming to your data warehouse of choice.</span>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>View payout schedule and invoices (NET 30 payment terms) in <Link href="/dashboard/settings?tab=payment" className="font-bold underline">Settings → Payment Methods</Link>.</span>
+                  </li>
+                  <li className="flex items-start gap-3">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </span>
+                    <span>Review <Link href="/docs/ssai/prerequisites" className="font-bold underline">SSAI prerequisites</Link> if using server-side ad insertion.</span>
+                  </li>
                 </ul>
               </section>
 
@@ -386,6 +418,39 @@ Body: {
                     </tr>
                   </tbody>
                 </table>
+              </section>
+
+              <section id="ssai-documentation" className="rounded-3xl bg-white p-8 shadow-xl ring-1 ring-gray-200">
+                <h2 className="text-h3 font-semibold text-gray-900">7. SSAI Documentation</h2>
+                <p className="mt-4 text-body text-gray-700 leading-relaxed">
+                  Complete guides for server-side ad insertion across Live and VOD content. Covers protocols, containers, DRM, and operational best practices.
+                </p>
+                <div className="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  <Link href="/docs/ssai" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">SSAI Overview</h3>
+                    <p className="mt-1 text-sm text-gray-600">Architecture, protocols, and getting started</p>
+                  </Link>
+                  <Link href="/docs/ssai/prerequisites" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">Prerequisites</h3>
+                    <p className="mt-1 text-sm text-gray-600">Origin, cue types, codec ladder requirements</p>
+                  </Link>
+                  <Link href="/docs/ssai/operations" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">Operations</h3>
+                    <p className="mt-1 text-sm text-gray-600">Failure modes, fallback ladder, SLAs</p>
+                  </Link>
+                  <Link href="/docs/ssai/cdn" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">CDN Guidance</h3>
+                    <p className="mt-1 text-sm text-gray-600">Cache policies, headers, common misconfigs</p>
+                  </Link>
+                  <Link href="/docs/ssai/measurement" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">Measurement</h3>
+                    <p className="mt-1 text-sm text-gray-600">Tracking, exactly-once, reconciliation</p>
+                  </Link>
+                  <Link href="/docs/playback-matrix" className="group rounded-2xl border border-gray-200 bg-gray-50 p-4 transition-colors hover:border-brand-500 hover:bg-brand-50">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-brand-700">Playback Matrix</h3>
+                    <p className="mt-1 text-sm text-gray-600">Certified player/platform compatibility</p>
+                  </Link>
+                </div>
               </section>
             </div>
           </div>

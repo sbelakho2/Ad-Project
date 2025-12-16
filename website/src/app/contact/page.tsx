@@ -15,6 +15,7 @@ import Footer from '@/components/Footer';
 import { ContactBenefitsCard } from '@/components/VisualCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { legalEntity } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -127,9 +128,9 @@ export default function ContactPage() {
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-1">Office</h3>
                         <p className="text-gray-600">
-                          Bel Consulting OÜ (Reg. 16192499)<br />
-                          Sakala 7-2<br />
-                          EE-10141 Tallinn, Estonia
+                          {legalEntity.name} ({legalEntity.registryLine})<br />
+                          {legalEntity.address.street}<br />
+                          {legalEntity.address.postalCode} {legalEntity.address.city}, {legalEntity.address.country}
                         </p>
                       </div>
                     </div>

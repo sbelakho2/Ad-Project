@@ -86,6 +86,13 @@ import {
   dropOldPartition,
 } from './adapters/action-gateway';
 
+import {
+  getComplianceStatus,
+  getVatReports,
+  generateAnnualReport,
+  generateTsdReport,
+} from './services/estonian-compliance';
+
 const router = Router();
 
 /**
@@ -816,6 +823,43 @@ router.get('/api/v1/dashboard', asyncHandler(async (req: Request, res: Response)
     autopilot: autopilotHealth,
     partitions: partitionHealth,
   });
+}));
+
+// ============================================
+// ESTONIAN COMPLIANCE ROUTES
+// ============================================
+
+router.get('/api/v1/compliance/status', requireOperator, asyncHandler(async (req, res) => {
+  const status = await getComplianceStatus();
+  res.json(status);
+}));
+
+router.get('/api/v1/compliance/vat-reports', requireOperator, asyncHandler(async (req, res) => {
+  const reports = await getVatReports();
+  res.json(reports);
+}));
+
+router.get('/api/v1/compliance/annual-report/:year', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  if (isNaN(year)) {
+    res.status(400).json({ error: 'Invalid year' });
+    return;
+  }
+  const report = await generateAnnualReport(year);
+  res.json(report);
+}));
+
+router.get('/api/v1/compliance/tsd-report/:year', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
+  
+  if (isNaN(year)) {
+    res.status(400).json({ error: 'Invalid year' });
+    return;
+  }
+  
+  const report = await generateTsdReport(year, month);
+  res.json(report);
 }));
 
 export default router;

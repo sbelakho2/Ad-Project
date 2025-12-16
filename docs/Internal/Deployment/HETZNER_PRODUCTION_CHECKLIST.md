@@ -7,9 +7,22 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > - **DB Server:** 77.42.44.35  
 > - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
-> - **Project Path:** `/opt/adproject` (NOT `/opt/apex`)
-> - **Deployment:** Tarball upload (no git on server)
+> - **Project Path:** `/opt/adproject` (NOT `/opt/apex` or `/var/www`)
+> - **Deployment:** Tarball upload or rsync (no git on server)
 > - **Compose File:** `docker-compose.hetzner.yml` (not `docker-compose.yml`)
+
+> **⚠️ CRITICAL: Production Paths**
+>
+> **All services run from `/opt/adproject`**. Do NOT deploy to `/var/www` or any other path.
+>
+> | Service | Production Path | Process Manager |
+> |---------|-----------------|-----------------|
+> | Backend | `/opt/adproject/backend` | Docker |
+> | Console | `/opt/adproject/console` | Docker |
+> | Website | `/opt/adproject/website` | PM2 |
+> | Control Plane | `/opt/adproject/control-plane` | systemd |
+>
+> **Deployment commands MUST use `/opt/adproject` as the target.**
 
 ## Current Production Status (2025-12-15)
 
@@ -24,6 +37,15 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Caddy | ✅ Running | 80/443 | Auto Let's Encrypt for all domains |
 | Prometheus | ✅ Running | 9090 | Monitoring |
 | Grafana | ✅ Running | 3001 | Dashboards |
+
+### Console Security Status (2025-12-16)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| RBAC Enforcement | ✅ Active | Settings/Billing protected by layouts |
+| 2FA Available | ✅ Active | Settings → Security & 2FA |
+| Session Security | ✅ Active | httpOnly cookies, CSRF protection |
+| Operator Separation | ✅ Active | Admin routes redirect to control plane |
 
 > **⚠️ Important Notes:**
 > - Redis and PostgreSQL run as **system services**, NOT Docker containers
@@ -381,10 +403,41 @@ curl -I http://localhost:3000
 
 ### 8.4 Deploy Website
 
-```bash
-# Website runs on port 3002 (Grafana uses 3001)
-# Deployment is tarball upload + install/build on the server + PM2 restart.
+> **⚠️ CRITICAL:** The PM2 process runs from `/opt/adproject/website`. Do NOT deploy to `/var/www/website` or any other path.
 
+Website runs on **port 3002** (Grafana uses 3001). There are two deployment methods:
+
+#### 8.4.1 Rsync Method (Preferred - Pre-built)
+
+Build locally and rsync pre-built artifacts. Faster and more reliable.
+
+```bash
+# From local machine (website directory)
+cd /path/to/Ad-Project/website
+
+# 1. Build locally
+npm run build
+
+# 2. Rsync build artifacts directly to production
+#    IMPORTANT: Target must be /opt/adproject/website NOT /var/www/website
+rsync -avz --delete \
+  -e "ssh -i ~/.ssh/hetzner-db-mac" \
+  .next package.json node_modules public next.config.js \
+  root@46.62.252.96:/opt/adproject/website/
+
+# 3. Restart PM2 to pick up changes
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env"
+
+# 4. Verify deployment
+curl -I https://apexmediation.ee
+curl -I https://apexmediation.ee/documentation
+```
+
+#### 8.4.2 Tarball Method (Alternative - Server-built)
+
+Upload source and build on server. Use when rsync is not practical.
+
+```bash
 # From local machine (repo root)
 tar -czvf /tmp/website-deploy.tar.gz \
   --exclude='node_modules' --exclude='.next' --exclude='test-results' \
@@ -408,6 +461,21 @@ pm2 start npm --name website -- start -- -p 3002
 pm2 save
 
 curl -I http://localhost:3002
+```
+
+#### 8.4.3 Common Mistakes to Avoid
+
+| ❌ Wrong | ✅ Correct |
+|----------|------------|
+| Deploy to `/var/www/website` | Deploy to `/opt/adproject/website` |
+| Deploy to `/opt/apex` | Deploy to `/opt/adproject` |
+| rsync to wrong path then "restart" | Verify PM2 cwd first: `pm2 show website` |
+| Forget to restart PM2 | Always run `pm2 restart website` |
+
+**Verify PM2 is running from correct directory:**
+```bash
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 show website | grep cwd"
+# Should output: cwd: /opt/adproject/website
 ```
 
 ### 8.5 Deploy Control Plane
@@ -546,6 +614,72 @@ journalctl -u caddy --since "1 hour ago"
 caddy reload
 ```
 
+### 10.5 Website Deployment Issues
+
+**Problem: Pages return 404 after deployment**
+
+```bash
+# 1. First, verify PM2 is running and check its working directory
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 show website"
+
+# Look for the "cwd" line - it MUST be /opt/adproject/website
+# If cwd shows a different path, that's the problem
+```
+
+**Problem: Deployed to wrong directory**
+
+This is a common mistake. If you deployed to `/var/www/website` but PM2 runs from `/opt/adproject/website`:
+
+```bash
+# Fix: Re-deploy to the correct directory
+# From local machine
+cd /path/to/Ad-Project/website
+npm run build
+
+rsync -avz --delete \
+  -e "ssh -i ~/.ssh/hetzner-db-mac" \
+  .next package.json node_modules public next.config.js \
+  root@46.62.252.96:/opt/adproject/website/
+
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env"
+```
+
+**Problem: PM2 process not running**
+
+```bash
+# Check PM2 status
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 list"
+
+# If website is not listed or status is "errored", start fresh
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject/website
+pm2 delete website 2>/dev/null
+pm2 start npm --name website -- start -- -p 3002
+pm2 save
+```
+
+**Problem: Website builds but pages still 404**
+
+```bash
+# Check if .next directory contains the pages
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "ls -la /opt/adproject/website/.next/server/app"
+
+# If empty or missing pages, rebuild on server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject/website
+npm run build
+pm2 restart website
+```
+
+**Quick diagnostic checklist:**
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| PM2 running | `pm2 list` | website: online |
+| Correct cwd | `pm2 show website \| grep cwd` | `/opt/adproject/website` |
+| Port 3002 | `curl -I localhost:3002` | HTTP 200 |
+| .next exists | `ls /opt/adproject/website/.next` | Files present |
+
 ---
 
 ## 11. Evidence & Validation
@@ -605,3 +739,11 @@ The following files have been removed or deprecated:
 - [INFRASTRUCTURE_MIGRATION_PLAN.md](../Infrastructure/INFRASTRUCTURE_MIGRATION_PLAN.md) - Migration history
 - [MONITORING_INFRASTRUCTURE.md](../../Monitoring/MONITORING_INFRASTRUCTURE.md) - Monitoring setup
 - [ROLLBACK.md](../../runbooks/ROLLBACK.md) - Rollback procedures
+
+### Security Documentation
+
+- [Console/RBAC_SYSTEM.md](../Console/RBAC_SYSTEM.md) - Role-based access control
+- [Console/SECURITY_CHECKLIST.md](../Console/SECURITY_CHECKLIST.md) - Security audit checklist
+- [Console/SESSION_AUTH.md](../Console/SESSION_AUTH.md) - Session and CSRF configuration
+- [Security/TWO_FACTOR_AUTH.md](../Security/TWO_FACTOR_AUTH.md) - 2FA implementation
+- [Security/SECRETS_MANAGEMENT_SETUP.md](../Security/SECRETS_MANAGEMENT_SETUP.md) - Key management

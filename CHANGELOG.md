@@ -1,6 +1,132 @@
 # Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
 
-## 🚀 Production Deployment & Test Fixes (2025-12-15)
+## 🔐 Console Security Audit & 2FA Implementation (2025-12-16)
+
+**Status:** Complete security audit with RBAC hardening and 2FA user management
+
+### Two-Factor Authentication (2FA)
+
+Full 2FA management UI now available for all console users:
+
+| Feature | Implementation | Files |
+|---------|---------------|-------|
+| **Status Endpoint** | `GET /auth/twofa/status` | `backend/src/routes/auth/twofa.routes.ts` |
+| **2FA Settings Page** | Enrollment, QR code, backup codes | `console/src/app/settings/security/page.tsx` |
+| **Backup Codes Count** | Track remaining backup codes | `backend/src/services/twofa.service.ts` |
+
+**2FA User Flow:**
+1. User navigates to Settings → Security & 2FA
+2. Clicks "Enable Two-Factor Authentication"
+3. Scans QR code with authenticator app (Google Authenticator, Authy, etc.)
+4. Enters 6-digit verification code
+5. Receives 10 backup codes (save securely)
+6. Can disable 2FA or regenerate backup codes anytime
+
+### RBAC Security Hardening
+
+**Vulnerability Fixed:** Direct URL access to \`/settings/*\` routes bypassed parent page RBAC check.
+
+| Change | Description | File |
+|--------|-------------|------|
+| **Settings Layout** | Server-side RBAC enforcement for ALL settings routes | \`console/src/app/settings/layout.tsx\` |
+| **Role Validation** | Validates \`admin\` or \`publisher\` role before rendering | Same |
+| **Publisher ID Check** | Ensures valid publisher context | Same |
+
+**Role Permission Matrix:**
+
+| Role | Settings | Billing | Admin Panel |
+|------|----------|---------|-------------|
+| \`admin\` | ✅ Full access | ✅ Full access | ❌ Separate operator system |
+| \`publisher\` | ✅ Full access | ✅ Full access | ❌ |
+| \`readonly\` | ❌ 403 redirect | ❌ (unless permission granted) | ❌ |
+
+### RBAC Test Coverage
+
+Created comprehensive edge case tests in \`console/src/lib/__tests__/rbac.test.ts\`:
+
+- **28 new test cases** covering:
+  - Role validation (valid/invalid/null/undefined)
+  - Role hierarchy enforcement
+  - Permission-based access control (billing:view, billing:manage)
+  - Security injection attempts (object, array, prototype pollution)
+  - Case sensitivity (prevents typosquatting like 'Admin' vs 'admin')
+
+### Test Results
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| Console (all) | 263 | ✅ Passed |
+| Console RBAC | 28 | ✅ Passed |
+| Backend 2FA | 1 | ✅ Passed |
+| Backend Billing | 51 | ✅ Passed |
+
+### Files Changed
+
+**New Files:**
+- \`console/src/app/settings/security/page.tsx\` — 2FA management UI
+- \`console/src/app/settings/layout.tsx\` — RBAC-protected settings layout
+- \`console/src/lib/__tests__/rbac.test.ts\` — RBAC edge case tests
+
+**Modified Files:**
+- \`backend/src/services/twofa.service.ts\` — Added \`getBackupCodesCount()\`
+- \`backend/src/controllers/twofa.controller.ts\` — Added \`status()\` handler
+- \`backend/src/routes/auth/twofa.routes.ts\` — Added \`GET /status\` route
+- \`console/src/app/settings/page.tsx\` — Added Security & 2FA link
+
+---
+
+
+## � SSAI Customer-Facing Documentation (2025-12-15)
+
+**Status:** Complete customer and developer-facing SSAI documentation created
+
+### Documentation Pages Created
+
+All documentation verified against actual code implementation in `/backend/src/services/ssai/`.
+
+| Page | Path | Source Files Verified |
+|------|------|----------------------|
+| **SSAI Overview** | `/docs/ssai/page.tsx` | SessionService.ts, HLSManifestGenerator.ts, DASHManifestGenerator.ts |
+| **HLS Protocol** | `/docs/ssai/protocols/hls/page.tsx` | HLSManifestGenerator.ts (RFC 8216, DATERANGE, VERSION:6) |
+| **DASH Protocol** | `/docs/ssai/protocols/dash/page.tsx` | DASHManifestGenerator.ts (MPD, multi-period, EventStream) |
+| **Live Mode** | `/docs/ssai/modes/live/page.tsx` | SafeModeManager.ts (10% error, 500ms latency thresholds), SSAICircuitBreaker.ts |
+| **VOD Mode** | `/docs/ssai/modes/vod/page.tsx` | VODMarkerProcessor.ts, VODReconciler.ts (timingToleranceSeconds: 0.5, fireOnSeek: true) |
+| **Container Formats** | `/docs/ssai/containers/page.tsx` | ContainerHandler.ts (TS: .ts/.m2ts/.mts, CMAF: .m4s/.mp4/.m4a/.m4v) |
+| **DRM Integration** | `/docs/ssai/drm/page.tsx` | DRMPolicyHandler.ts (Widevine, FairPlay, PlayReady, allowClearAdsInEncryptedContent: true) |
+| **Coverage Matrix** | `/docs/ssai/coverage/page.tsx` | SSAI_IMPROVEMENTS.md (Platform/Protocol/Container/Mode matrix) |
+
+### Documentation Coverage
+
+The documentation addresses all 60+ original audit questions across:
+
+- **Integration & Architecture** - Session management, manifest generation, CDN caching
+- **Ad Decisioning** - Pod planning, competitive separation, format compatibility
+- **Content Correctness** - Manifest validation, A/V alignment, codec matching
+- **Observability** - Tracking, reconciliation, audit bundles
+- **Security** - Signed tokens, rate limiting, SSRF protection
+- **HLS Protocol** - RFC 8216 compliance, DATERANGE, discontinuity handling
+- **DASH Protocol** - DASH-IF MPD, multi-period, EventStream
+- **Live Mode** - Sliding window, safe mode, circuit breakers
+- **VOD Mode** - Pre-stitched manifests, seek-aware tracking, quartile reconciliation
+- **TS Container** - MPEG Transport Stream, self-contained segments
+- **CMAF Container** - Fragmented MP4, init segments, low overhead
+- **DRM** - Multi-DRM policy, clear ads in encrypted content, key continuity
+- **Coverage Matrix** - Complete platform/protocol/container/mode compatibility table
+
+### Fact-Based Documentation Approach
+
+All claims in documentation verified against actual implementation code:
+
+- `HLSManifestGenerator.generateMasterPlaylist()` → RFC 8216 compliance
+- `DASHManifestGenerator.generateMPD()` → DASH-IF multi-period support
+- `SafeModeManager.config` → 10% error threshold, 500ms latency threshold
+- `VODReconciler.defaultConfig` → 0.5s timing tolerance, fireOnSeek: true
+- `ContainerHandler.MIME_TYPES` → video/MP2T (TS), video/mp4 (CMAF)
+- `DRMPolicyHandler.config` → allowClearAdsInEncryptedContent: true by default
+
+---
+
+## �🚀 Production Deployment & Test Fixes (2025-12-15)
 
 **Status:** All services deployed and verified on production
 

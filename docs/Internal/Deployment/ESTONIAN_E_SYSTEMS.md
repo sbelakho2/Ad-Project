@@ -3,7 +3,6 @@
 _Last updated: 2025-11-18_  
 _Company: Bel Consulting OÜ_  
 _Registry Code: 16736399_  
-_VAT Number: EE102736890_  
 _Owner: Finance / Legal / Platform Engineering_  
 _Review Cycle: Annually or when Estonian regulations change (next review: 2026-11-18)_  
 _Status: Requires legal review for jurisdiction-specific compliance_

@@ -1,28 +1,30 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import AdminBillingOpsPage from '../page'
-import { reconcileBilling, resendInvoiceEmail } from '@/lib/billing'
-import type { ReconciliationResult } from '@/lib/billing'
+import { operatorReconcileBilling, operatorResendInvoiceEmail } from '@/lib/admin'
+import type { ReconciliationResult } from '@/lib/admin'
 
-jest.mock('@/lib/billing', () => ({
-  reconcileBilling: jest.fn(),
-  resendInvoiceEmail: jest.fn(),
+jest.mock('@/lib/admin', () => ({
+  operatorReconcileBilling: jest.fn(),
+  operatorResendInvoiceEmail: jest.fn(),
 }))
 
-const mockedReconcileBilling = reconcileBilling as jest.MockedFunction<typeof reconcileBilling>
-const mockedResendInvoiceEmail = resendInvoiceEmail as jest.MockedFunction<typeof resendInvoiceEmail>
+const mockedReconcileBilling = operatorReconcileBilling as jest.MockedFunction<typeof operatorReconcileBilling>
+const mockedResendInvoiceEmail = operatorResendInvoiceEmail as jest.MockedFunction<typeof operatorResendInvoiceEmail>
 
 const baseReconcileResult: ReconciliationResult = {
   success: true,
-  discrepancies: [],
-  total_discrepancy_amount: 0,
-  reconciliation_id: 'rec_test',
-  timestamp: new Date().toISOString(),
+  data: {
+    processed: 10,
+    discrepancies: 0,
+    errors: [],
+  },
+  message: 'Reconciliation completed successfully',
 }
 
 describe('AdminBillingOpsPage', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-  mockedReconcileBilling.mockResolvedValue(baseReconcileResult)
+    mockedReconcileBilling.mockResolvedValue(baseReconcileResult)
     mockedResendInvoiceEmail.mockResolvedValue(undefined)
   })
 

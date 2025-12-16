@@ -453,11 +453,18 @@ const pool = new Pool({
 - ✅ Referral code security verified (crypto.randomBytes)
 - ✅ Health checks for Kubernetes
 - ✅ Migration conflicts resolved
+- ✅ RBAC enforcement for console routes (2025-12-16)
+- ✅ Two-Factor Authentication (2FA) for user accounts (2025-12-16)
 
 **Solo operator can now**:
 - Export all financial reports in 1 click
 - Submit Estonian VAT reports directly from API
 - Monitor system health via Kubernetes dashboards
 - Scale to 1000+ customers with zero manual financial work
+
+**Related Documentation (2025-12-16)**:
+- [TWO_FACTOR_AUTH.md](./TWO_FACTOR_AUTH.md) - 2FA implementation details
+- [Console/RBAC_SYSTEM.md](../Console/RBAC_SYSTEM.md) - Role-based access control
+- [Console/SECURITY_CHECKLIST.md](../Console/SECURITY_CHECKLIST.md) - Security audit checklist
 
 **Estimated time to production**: 2-3 weeks (with input validation + secrets management)

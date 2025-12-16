@@ -22,6 +22,7 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { sloConfig, tcfConfig } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -86,16 +87,16 @@ const privacyFeatures = [
 ];
 
 const reliabilityMetrics = [
-  { label: 'Uptime SLA', value: '99.9%', icon: CheckCircle },
-  { label: 'Median latency', value: '<50ms', icon: Zap },
-  { label: 'Regions', value: 'DE + FI', icon: Server },
-  { label: 'Auto-failover', value: '<30s', icon: RefreshCw },
+  { label: 'Uptime SLA', value: sloConfig.availability.target, icon: CheckCircle },
+  { label: 'Latency (p50)', value: sloConfig.latency.p50, icon: Zap },
+  { label: 'Regions', value: sloConfig.regions.map(r => `${r.code} (${r.name})`).join(', '), icon: Server },
+  { label: 'Auto-failover', value: sloConfig.failover.target, icon: RefreshCw },
 ];
 
 const complianceBadges = [
   { name: 'GDPR Compliant', description: 'Full EU data protection compliance', status: 'live' },
   { name: 'CCPA Ready', description: 'California Consumer Privacy Act support', status: 'live' },
-  { name: 'IAB TCF 2.2', description: 'Transparency & Consent Framework', status: 'live' },
+  { name: `IAB TCF ${tcfConfig.version}`, description: 'Transparency & Consent Framework', status: 'live' },
   { name: 'COPPA Compliant', description: 'Children\'s privacy protection', status: 'live' },
 ];
 

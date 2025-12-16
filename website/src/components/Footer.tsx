@@ -1,4 +1,5 @@
 import SocialIconLink from '@/components/SocialIconLink';
+import { legalEntity } from '@/config/legal';
 
 /**
  * Footer with multi-column layout
@@ -12,7 +13,7 @@ export default function Footer() {
           {/* About */}
           <div>
             <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
-              About ApexMediation
+              About {legalEntity.tradingAs}
             </h3>
             <ul className="space-y-2 text-sm">
               <li><a href="/company" className="text-brand-600 hover:text-brand-700 hover:underline">Company</a></li>
@@ -20,10 +21,10 @@ export default function Footer() {
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
             <div className="mt-6 text-xs text-gray-500">
-              <p className="font-medium">Bel Consulting OÜ</p>
-              <p>Sakala 7-2</p>
-              <p>EE-10141 Tallinn, Estonia</p>
-              <p className="mt-1">Reg. 16192499</p>
+              <p className="font-medium">{legalEntity.name}</p>
+              <p>{legalEntity.address.street}</p>
+              <p>{legalEntity.address.postalCode} {legalEntity.address.city}, {legalEntity.address.country}</p>
+              <p className="mt-1">{legalEntity.registryLine}</p>
             </div>
           </div>
 

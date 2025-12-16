@@ -3,6 +3,7 @@
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
 import CookieBanner from '@/components/CookieBanner';
+import { legalEntity } from '@/config/legal';
 
 const LAST_UPDATED = '2025-12-12';
 
@@ -26,7 +27,7 @@ export default function GdprPage() {
                 <section className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">1) Overview</h2>
                   <p className="text-gray-700">
-                    ApexMediation is operated by Bel Consulting OÜ (Estonia). We take GDPR compliance seriously
+                    ApexMediation is operated by {legalEntity.name} ({legalEntity.address.country}). We take GDPR compliance seriously
                     and design the platform to support publishers in meeting their obligations.
                   </p>
                 </section>

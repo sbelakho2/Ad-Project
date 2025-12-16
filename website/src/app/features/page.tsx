@@ -428,7 +428,7 @@ export default function FeaturesPage() {
               </div>
 
               <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-green-50 rounded-2xl p-8 border border-brand-200">
-                <div className="grid md:grid-cols-4 gap-6 text-center">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
                   <div>
                     <div className="text-4xl font-bold text-brand-600 mb-2">3</div>
                     <div className="text-gray-600 font-medium">Lines to integrate</div>

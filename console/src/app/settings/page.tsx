@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import {
   ShieldAlert,
+  ShieldCheck,
   CreditCard,
   Users,
   Globe,
@@ -16,6 +17,12 @@ import { authOptions } from '@/lib/auth/options'
 import { hasRole, type Role } from '@/lib/rbac'
 
 const sections = [
+  {
+    title: 'Security & 2FA',
+    description: 'Manage two-factor authentication and account security.',
+    href: '/settings/security',
+    icon: ShieldCheck,
+  },
   {
     title: 'SDK API Keys',
     description: 'Manage per-app API keys for SDK authentication.',

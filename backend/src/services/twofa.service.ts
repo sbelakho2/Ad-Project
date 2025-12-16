@@ -73,6 +73,14 @@ export const twofaService = {
     return tfaRecord?.enabled === true;
   },
 
+  async getBackupCodesCount(userId: string): Promise<number> {
+    const repositories = getRepositories();
+    if (!repositories) return 0;
+
+    const tfaRecord = await repositories.tfaRepository.findOne({ where: { user: { id: userId } } });
+    return tfaRecord?.backupCodes?.length ?? 0;
+  },
+
   async enroll(userId: string, email: string, issuer = 'ApexMediation', auditCtx?: AuditCtx) {
     const { userRepository, tfaRepository } = requireRepositories();
     const user = await userRepository.findOneBy({ id: userId });

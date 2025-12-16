@@ -18,6 +18,8 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
+import { sloConfig } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -25,17 +27,24 @@ const getRevealProps = (delay = 0) => ({
   transition: { duration: 0.5, delay },
 });
 
+/**
+ * SLO Definitions - CANONICAL SOURCE
+ * 
+ * This page is the authoritative source for all SLO metrics.
+ * Other pages (home, security, company) reference these values
+ * via the sloConfig in /config/legal.ts
+ */
 const sloDefinitions = [
   {
     name: 'Manifest/API Availability',
-    target: '99.9%',
+    target: sloConfig.availability.target,
     measurement: 'Percentage of successful responses (2xx) from manifest and API endpoints over a 30-day rolling window.',
     unit: 'availability',
     icon: Server,
   },
   {
     name: 'Decision Latency (p95)',
-    target: '< 100ms',
+    target: sloConfig.latency.p95,
     measurement: 'Time from cue receipt to pod decision completion, measured at the 95th percentile.',
     unit: 'latency',
     icon: Clock,
@@ -67,7 +76,7 @@ const mitigations = [
   {
     title: 'Safe Mode',
     description: 'When error rates exceed thresholds, the system automatically enters safe mode: reduced fanout, strict deadlines, and slate fallback for ad breaks.',
-    trigger: 'Error rate > 5% or latency p95 > 200ms',
+    trigger: `Error rate > 5% or latency p95 > ${sloConfig.latency.p99}`,
     icon: Shield,
   },
   {
@@ -109,22 +118,22 @@ export default function SLOPage() {
         </header>
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
+        <PageHero variant="light" className="bg-white border-b border-slate-200/60">
+          <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-green-100 text-green-700 text-sm font-medium mb-6">
                 <CheckCircle className="w-4 h-4" />
                 All Systems Operational
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
                 SLOs & System Reliability
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl text-slate-600">
                 We publish our service level objectives so you know exactly what to expect. When we miss, here&apos;s what happens.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* SLO Definitions */}
         <section className="py-16 bg-gray-50">

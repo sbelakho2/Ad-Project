@@ -17,6 +17,7 @@ import Footer from '@/components/Footer';
 import { PrinciplesToProductCard } from '@/components/VisualCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { legalEntity, sloConfig } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -44,7 +45,7 @@ const values = [
   },
   {
     title: 'Reliability',
-    description: '99.9% uptime, 50ms p99 latency. We treat downtime as seriously as you do.',
+    description: `${sloConfig.availability.target} uptime with ${sloConfig.latency.p99} p99 latency. We treat downtime as seriously as you do.`,
     icon: Scale,
   },
 ];
@@ -155,7 +156,7 @@ export default function CompanyPage() {
 
         <section className="py-16 bg-brand-600">
           <div className="container mx-auto px-4">
-            <div className="grid md:grid-cols-4 gap-8 max-w-5xl mx-auto">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-8 max-w-5xl mx-auto">
               {stats.map((stat, index) => (
                 <motion.div
                   key={stat.label}
@@ -182,14 +183,14 @@ export default function CompanyPage() {
                     <h3 className="text-xl font-bold text-slate-900">Legal entity</h3>
                   </div>
                   <div className="bg-slate-50 rounded-xl p-6 border border-slate-200/70">
-                    <p className="font-semibold text-slate-900 mb-2">Bel Consulting OÜ</p>
-                    <p className="text-slate-600 mb-1">Harju maakond, Tallinn</p>
-                    <p className="text-slate-600 mb-1">Kesklinna linnaosa</p>
-                    <p className="text-slate-600 mb-1">Narva mnt 5, 10117</p>
-                    <p className="text-slate-600">Estonia</p>
+                    <p className="font-semibold text-slate-900 mb-2">{legalEntity.name}</p>
+                    <p className="text-slate-600 mb-1">{legalEntity.address.region}, {legalEntity.address.city}</p>
+                    <p className="text-slate-600 mb-1">{legalEntity.address.street}</p>
+                    <p className="text-slate-600 mb-1">{legalEntity.address.postalCode}</p>
+                    <p className="text-slate-600">{legalEntity.address.country}</p>
                     <div className="mt-4 pt-4 border-t border-slate-200">
                       <p className="text-sm text-slate-500">
-                        VAT: EE102589552 • Registry code: 16916571
+                        {legalEntity.fullRegistryLine}
                       </p>
                     </div>
                   </div>

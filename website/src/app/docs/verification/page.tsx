@@ -14,6 +14,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -32,22 +33,22 @@ export default function VerificationPage() {
         </header>
 
         {/* Hero */}
-        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
-          <div className="container mx-auto px-4 text-center">
+        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+          <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <Key className="w-4 h-4" />
                 Signed Log Verification
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
                 Verify Any Auction, Pod, or Session
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl text-slate-600">
                 Every decision ApexMediation makes is cryptographically signed. Here&apos;s how to verify it.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Why Signed Logs */}
         <section className="py-16">

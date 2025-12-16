@@ -69,7 +69,7 @@ const encryptionDetails = [
   {
     layer: 'In Transit',
     implementation: 'Caddy auto-provisions TLS certificates via Let\'s Encrypt. All public endpoints served over HTTPS.',
-    evidence: 'infrastructure/caddy/Caddyfile, HETZNER_PRODUCTION_CHECKLIST.md',
+    evidence: 'infrastructure/caddy/Caddyfile',
   },
   {
     layer: 'At Rest (Credentials)',
@@ -292,7 +292,7 @@ export default function SecurityPackDownloadPage() {
         <section className="mb-8">
           <h2 className="text-xl font-bold mb-4 text-gray-900 border-b border-gray-300 pb-2">2. Infrastructure Architecture</h2>
           <p className="text-gray-700 mb-4 text-sm">
-            Production infrastructure runs on dedicated Hetzner servers with strict network segmentation.
+            Production infrastructure runs on dedicated EU-based servers with strict network segmentation.
           </p>
           <table className="w-full text-sm border-collapse mb-4">
             <thead>

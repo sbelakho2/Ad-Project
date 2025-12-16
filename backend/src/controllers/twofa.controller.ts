@@ -4,6 +4,21 @@ import logger from '../utils/logger';
 import { twofaEventsTotal } from '../utils/prometheus';
 import { safeInc } from '../utils/metrics';
 
+export async function status(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const enabled = await twofaService.isEnabled(userId);
+    const backupCodesRemaining = enabled ? await twofaService.getBackupCodesCount(userId) : undefined;
+    return res.json({ data: { enabled, backupCodesRemaining } });
+  } catch (e: any) {
+    logger.warn('2FA status check failed', { userId, error: e?.message });
+    return res.json({ data: { enabled: false } });
+  }
+}
+
 export async function enroll(req: Request, res: Response) {
   const userId = req.user?.userId;
   if (!userId) {

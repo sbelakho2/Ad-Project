@@ -3,6 +3,7 @@
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
 import CookieBanner from '@/components/CookieBanner';
+import { legalEntity } from '@/config/legal';
 
 const LAST_UPDATED = '2025-12-12';
 
@@ -66,10 +67,10 @@ export default function PrivacyPolicyPage() {
                   </p>
                   <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
                     <p className="font-semibold text-gray-900">Controller contact</p>
-                    <p className="mt-1">Bel Consulting OÜ (Reg. 16192499)</p>
-                    <p>Sakala 7-2, EE-10141 Tallinn, Estonia</p>
+                    <p className="mt-1">{legalEntity.name} ({legalEntity.registryLine})</p>
+                    <p>{legalEntity.fullAddress}</p>
                     <p>
-                      Privacy inquiries: <a className="underline" href="mailto:security@apexmediation.ee">security@apexmediation.ee</a>
+                      Privacy inquiries: <a className="underline" href={`mailto:${legalEntity.contact.privacyEmail}`}>{legalEntity.contact.privacyEmail}</a>
                     </p>
                   </div>
                 </section>

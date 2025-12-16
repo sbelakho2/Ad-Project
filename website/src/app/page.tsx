@@ -21,6 +21,7 @@ import Footer from '@/components/Footer';
 import { MediationFlowCard } from '@/components/VisualCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { sloConfig } from '@/config/legal';
 
 // Animation helpers - use animate for reliable rendering
 const getRevealProps = (delay = 0) => ({
@@ -235,7 +236,7 @@ function ProofStripSection() {
     {
       icon: Target,
       title: 'Public SLO Targets',
-      description: '99.9% availability, <50ms latency, 95% pod fill',
+      description: `${sloConfig.availability.target} availability, ${sloConfig.latency.p50} latency`,
       href: '/slo',
     },
     {

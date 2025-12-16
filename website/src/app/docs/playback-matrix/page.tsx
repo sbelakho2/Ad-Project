@@ -2,24 +2,38 @@
 
 import { motion } from 'framer-motion';
 import {
-  CheckCircle,
-  Info,
   Monitor,
   Play,
   Smartphone,
   Tv,
-  XCircle,
 } from 'lucide-react';
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
   animate: { opacity: 1, y: 0 },
   transition: { duration: 0.5, delay },
 });
+
+// Premium status indicators (inline SVGs for crisp rendering)
+const StatusDot = ({ status }: { status: 'certified' | 'partial' | 'unsupported' }) => {
+  if (status === 'certified') {
+    return (
+      <span className="relative flex h-2.5 w-2.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40"></span>
+        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+      </span>
+    );
+  }
+  if (status === 'partial') {
+    return <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-400"></span>;
+  }
+  return <span className="inline-flex h-2.5 w-2.5 rounded-full bg-gray-300"></span>;
+};
 
 // Certified playback matrix data
 const playbackMatrix = {
@@ -67,21 +81,21 @@ const playbackMatrix = {
 
 const statusConfig = {
   certified: {
-    icon: CheckCircle,
-    color: 'text-green-600',
-    bgColor: 'bg-green-100',
+    color: 'text-emerald-700',
+    bgColor: 'bg-emerald-50',
+    borderColor: 'border-emerald-200',
     label: 'Certified',
   },
   partial: {
-    icon: Info,
-    color: 'text-amber-600',
-    bgColor: 'bg-amber-100',
-    label: 'Partial Support',
+    color: 'text-amber-700',
+    bgColor: 'bg-amber-50',
+    borderColor: 'border-amber-200',
+    label: 'Partial',
   },
   unsupported: {
-    icon: XCircle,
-    color: 'text-red-600',
-    bgColor: 'bg-red-100',
+    color: 'text-gray-500',
+    bgColor: 'bg-gray-50',
+    borderColor: 'border-gray-200',
     label: 'Unsupported',
   },
 };
@@ -97,36 +111,39 @@ export default function PlaybackMatrixPage() {
         </header>
 
         {/* Hero */}
-        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
-          <div className="container mx-auto px-4 text-center">
+        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+          <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <Play className="w-4 h-4" />
                 SSAI Compatibility
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
                 Certified Playback Matrix
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl text-slate-600">
                 Our SSAI solution has been tested and certified across 20+ platforms and players. Here&apos;s the complete compatibility matrix.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Legend */}
         <section className="py-8 border-b border-gray-100">
           <div className="container mx-auto px-4">
-            <div className="flex flex-wrap justify-center gap-6">
-              {Object.entries(statusConfig).map(([key, config]) => {
-                const Icon = config.icon;
-                return (
-                  <div key={key} className="flex items-center gap-2">
-                    <Icon className={`w-5 h-5 ${config.color}`} />
-                    <span className="text-sm text-gray-600">{config.label}</span>
-                  </div>
-                );
-              })}
+            <div className="flex flex-wrap justify-center gap-8">
+              <div className="flex items-center gap-2.5">
+                <StatusDot status="certified" />
+                <span className="text-sm text-gray-600 font-medium">Certified</span>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <StatusDot status="partial" />
+                <span className="text-sm text-gray-600 font-medium">Partial Support</span>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <StatusDot status="unsupported" />
+                <span className="text-sm text-gray-600 font-medium">Unsupported</span>
+              </div>
             </div>
           </div>
         </section>
@@ -158,18 +175,17 @@ export default function PlaybackMatrixPage() {
                   <tbody>
                     {playbackMatrix.ctv.platforms.map((platform, idx) => {
                       const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      const StatusIcon = status.icon;
                       return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                          <td className="px-4 py-3 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3 text-gray-600 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${status.bgColor} ${status.color}`}>
-                              <StatusIcon className="w-3.5 h-3.5" />
+                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
+                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
+                          <td className="px-4 py-3.5">
+                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
+                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
                               {status.label}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-gray-600 text-sm">{platform.notes}</td>
+                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
                         </tr>
                       );
                     })}
@@ -207,18 +223,17 @@ export default function PlaybackMatrixPage() {
                   <tbody>
                     {playbackMatrix.web.platforms.map((platform, idx) => {
                       const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      const StatusIcon = status.icon;
                       return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                          <td className="px-4 py-3 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3 text-gray-600 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${status.bgColor} ${status.color}`}>
-                              <StatusIcon className="w-3.5 h-3.5" />
+                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
+                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
+                          <td className="px-4 py-3.5">
+                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
+                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
                               {status.label}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-gray-600 text-sm">{platform.notes}</td>
+                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
                         </tr>
                       );
                     })}
@@ -256,18 +271,17 @@ export default function PlaybackMatrixPage() {
                   <tbody>
                     {playbackMatrix.mobile.platforms.map((platform, idx) => {
                       const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      const StatusIcon = status.icon;
                       return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                          <td className="px-4 py-3 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3 text-gray-600 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${status.bgColor} ${status.color}`}>
-                              <StatusIcon className="w-3.5 h-3.5" />
+                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
+                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
+                          <td className="px-4 py-3.5">
+                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
+                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
                               {status.label}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-gray-600 text-sm">{platform.notes}</td>
+                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
                         </tr>
                       );
                     })}
@@ -291,7 +305,7 @@ export default function PlaybackMatrixPage() {
                 </p>
               </motion.div>
 
-              <div className="grid md:grid-cols-4 gap-6">
+              <div className="grid md:grid-cols-4 gap-6 mb-12">
                 <motion.div {...getRevealProps(0.1)} className="bg-white rounded-xl p-6 border border-gray-100">
                   <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
                     1
@@ -324,6 +338,51 @@ export default function PlaybackMatrixPage() {
                   <p className="text-sm text-gray-600">End-to-end testing with demand partners</p>
                 </motion.div>
               </div>
+
+              {/* Certification Details */}
+              <motion.div {...getRevealProps(0.3)} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                <div className="bg-gray-50 px-6 py-4 border-b border-gray-200">
+                  <h3 className="font-semibold text-gray-900">Certification Details</h3>
+                </div>
+                <div className="p-6">
+                  <div className="grid md:grid-cols-2 gap-6">
+                    <div>
+                      <h4 className="font-medium text-gray-900 mb-2">Last Full Certification Run</h4>
+                      <p className="text-gray-600 text-sm">December 2025 (Q4 cycle)</p>
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-gray-900 mb-2">Player Versions Tested</h4>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• hls.js: 1.5.x</li>
+                        <li>• Shaka Player: 4.7.x</li>
+                        <li>• ExoPlayer: 2.19.x</li>
+                        <li>• AVPlayer: iOS/tvOS 17+</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-gray-900 mb-2">Test Suite Categories</h4>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <strong>Variants:</strong> ABR switching, multi-audio, subtitles</li>
+                        <li>• <strong>Chaos:</strong> Network flaps, seek storms, rebuffer</li>
+                        <li>• <strong>DRM:</strong> Widevine/FairPlay/PlayReady rotation</li>
+                        <li>• <strong>Soak:</strong> 2+ hour continuous with 100+ breaks</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-gray-900 mb-2">What &quot;Certified&quot; vs &quot;Partial&quot; Means</h4>
+                      <ul className="text-gray-600 text-sm space-y-1">
+                        <li>• <strong>Certified:</strong> All test categories pass, production-verified with live traffic</li>
+                        <li>• <strong>Partial:</strong> Core playback works, edge cases may require workarounds</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="mt-6 pt-6 border-t border-gray-100">
+                    <a href="/docs/ssai/coverage" className="text-brand-600 hover:text-brand-700 font-medium text-sm">
+                      View full SSAI test coverage →
+                    </a>
+                  </div>
+                </div>
+              </motion.div>
             </div>
           </div>
         </section>

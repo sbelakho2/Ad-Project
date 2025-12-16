@@ -16,6 +16,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -143,17 +144,17 @@ export default function SecurityPackPage() {
         </header>
 
         {/* Hero */}
-        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
-          <div className="container mx-auto px-4 text-center">
+        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+          <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <ShieldCheck className="w-4 h-4" />
                 Security Documentation
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
                 Security Pack
               </h1>
-              <p className="text-xl text-gray-600 mb-8">
+              <p className="text-xl text-slate-600 mb-8">
                 Everything your security team needs to evaluate ApexMediation: architecture, threat model, compliance, and data handling.
               </p>
               <a
@@ -165,7 +166,7 @@ export default function SecurityPackPage() {
               </a>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* What's Included */}
         <section className="py-16">

@@ -3,6 +3,7 @@
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
 import CookieBanner from '@/components/CookieBanner';
+import { legalEntity } from '@/config/legal';
 
 const LAST_UPDATED = '2025-12-12';
 
@@ -28,8 +29,8 @@ export default function DpaPage() {
                 <section className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">1) Parties and scope</h2>
                   <p className="text-gray-700">
-                    This Data Processing Addendum (&quot;DPA&quot;) forms part of the agreement between Bel Consulting OÜ
-                    (Estonia) (&quot;Processor&quot;, &quot;ApexMediation&quot;) and the customer organization that uses the Services
+                    This Data Processing Addendum (&quot;DPA&quot;) forms part of the agreement between {legalEntity.name}
+                    ({legalEntity.address.country}) (&quot;Processor&quot;, &quot;ApexMediation&quot;) and the customer organization that uses the Services
                     (&quot;Controller&quot;, &quot;Customer&quot;).
                   </p>
                   <p className="text-gray-700">

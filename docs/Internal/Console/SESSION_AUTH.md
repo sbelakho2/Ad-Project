@@ -24,6 +24,14 @@ Console client behavior
 RBAC
 - Backend exposes authorize([...]) middleware; revenue routes are protected with publisher|admin roles.
 - Console uses a simple useSession() hook to fetch /auth/me and can gate UI via helper functions in console/src/lib/rbac.ts.
+- Server-side RBAC enforcement via layouts (settings/layout.tsx, billing/layout.tsx) prevents direct URL access bypass.
+- See RBAC_SYSTEM.md for detailed role permissions and implementation.
+
+Two-Factor Authentication (2FA)
+- TOTP-based 2FA with backup codes
+- User management via Settings → Security & 2FA
+- Backend service: backend/src/services/twofa.service.ts
+- See TWO_FACTOR_AUTH.md in Security folder for implementation details.
 
 Configuration
 - Backend:

@@ -4,6 +4,9 @@ import { authenticate } from '../../middleware/auth';
 
 const router = Router();
 
+// 2FA status check
+router.get('/status', authenticate, twofaController.status);
+
 // 2FA enrollment and verification
 router.post('/enroll', authenticate, twofaController.enroll);
 router.post('/verify', authenticate, twofaController.verify);

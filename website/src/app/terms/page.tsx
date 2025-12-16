@@ -3,6 +3,7 @@
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
 import CookieBanner from '@/components/CookieBanner';
+import { legalEntity } from '@/config/legal';
 
 const LAST_UPDATED = '2025-12-12';
 
@@ -179,10 +180,10 @@ export default function TermsOfServicePage() {
                 <section id="contact" className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">13) Contact</h2>
                   <p className="text-gray-700">
-                    Questions about these Terms: <a className="underline" href="mailto:legal@apexmediation.ee">legal@apexmediation.ee</a>
+                    Questions about these Terms: <a className="underline" href={`mailto:${legalEntity.contact.email}`}>{legalEntity.contact.email}</a>
                   </p>
                   <p className="text-gray-700">
-                    Bel Consulting OÜ, Narva mnt 5, 10117 Tallinn, Estonia
+                    {legalEntity.name}, {legalEntity.fullAddress}
                   </p>
                 </section>
                 </div>
