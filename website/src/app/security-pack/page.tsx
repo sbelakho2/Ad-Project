@@ -42,7 +42,7 @@ const securityPackContents = [
   },
   {
     title: 'Audit Logging',
-    description: 'Structured logging via Winston, separate audit stream for compliance, configurable retention (30-90 days by plan).',
+    description: 'Structured logging via Winston, separate audit stream for compliance, configurable retention (30 days–1 year by plan).',
     icon: FileText,
   },
   {
@@ -104,19 +104,19 @@ const dataProcessing = [
   {
     category: 'Session Data',
     data: 'Device type, app bundle ID, content ID, consent signals (TC string if provided)',
-    retention: '30-90 days (configurable)',
+    retention: '30 days–1 year (by plan)',
     deletion: 'Automatic TTL expiry + on-demand DSAR',
   },
   {
     category: 'Auction Logs',
     data: 'Bid requests/responses, decision traces, timing metrics, Ed25519 signatures',
-    retention: '30-90 days (configurable)',
+    retention: '30 days–1 year (by plan)',
     deletion: 'Automatic partition pruning + on-demand DSAR',
   },
   {
     category: 'Tracking Events',
     data: 'Impressions, quartiles, completions, click events (no direct PII)',
-    retention: '30-90 days (configurable)',
+    retention: '30 days–1 year (by plan)',
     deletion: 'Automatic expiry + on-demand DSAR',
   },
   {
@@ -144,7 +144,7 @@ export default function SecurityPackPage() {
         </header>
 
         {/* Hero */}
-        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">

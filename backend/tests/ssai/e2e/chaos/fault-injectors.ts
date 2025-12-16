@@ -217,6 +217,7 @@ export class PartnerTimeoutInjector extends FaultInjector {
   async inject(): Promise<void> {
     this.active = true;
     this.startTime = Date.now();
+    this.circuitBreakerTripped = false;
     this.timeoutRate = 0.3; // 30% timeout rate
     console.log(`[FAULT] Injecting partner timeout (rate: ${this.timeoutRate * 100}%)`);
     
@@ -232,7 +233,6 @@ export class PartnerTimeoutInjector extends FaultInjector {
   async restore(): Promise<void> {
     this.active = false;
     this.timeoutRate = 0;
-    this.circuitBreakerTripped = false;
     console.log(`[FAULT] Restored partner connectivity`);
   }
 

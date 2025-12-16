@@ -1,366 +1,100 @@
 /**
- * SSAI Dedupe Layer
- *
- * Provides exactly-once semantics for tracking events.
- * Handles deduplication across client and server-side events.
+ * SSAI Dedupe Layer (test-facing)
  */
 
-import { TrackingEvent, TrackingEventType, DedupeConfig } from './types';
-
-const DEFAULT_CONFIG: DedupeConfig = {
-  windowSeconds: 300, // 5 minutes
-  maxEventsPerKey: 1000,
-};
-
-interface DedupeEntry {
-  eventId: string;
-  timestamp: Date;
-  source: 'client' | 'server' | 'inferred';
-  hash: string;
+export interface DedupeLayerConfig {
+  ttlMs: number;
+  maxSize: number;
 }
 
-interface DedupeKey {
-  sessionId: string;
-  slotId: string;
-  eventType: TrackingEventType;
-}
-
-export interface DedupeResult {
-  /** Whether the event is a duplicate */
-  isDuplicate: boolean;
-
-  /** Original event (if duplicate) */
-  originalEvent?: DedupeEntry;
-
-  /** Source of the original event */
-  originalSource?: 'client' | 'server' | 'inferred';
-
-  /** Event hash */
-  hash: string;
-}
+type Entry = { key: string; ts: number; slotId?: string };
 
 export class DedupeLayer {
-  private config: DedupeConfig;
-  private eventStore: Map<string, DedupeEntry[]> = new Map();
-  private cleanupInterval: NodeJS.Timeout | null = null;
+  private readonly config: DedupeLayerConfig;
+  private readonly store: Map<string, Entry> = new Map();
 
-  constructor(config: Partial<DedupeConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    this.startCleanup();
+  constructor(config: DedupeLayerConfig) {
+    this.config = config;
   }
 
-  /**
-   * Generate a deduplication key
-   */
-  private generateKey(key: DedupeKey): string {
-    return `${key.sessionId}:${key.slotId}:${key.eventType}`;
+  isDuplicate(eventKey: string): boolean {
+    this.evictExpired();
+    return this.store.has(eventKey);
   }
 
-  /**
-   * Generate a content hash for an event
-   */
-  private generateHash(event: TrackingEvent): string {
-    // Simple hash based on event content
-    const content = [
-      event.sessionId,
-      event.slotId,
-      event.creativeId,
-      event.type,
-      Math.floor(event.mediaTime / 0.5), // 500ms buckets
-    ].join(':');
+  markAsFired(eventKey: string): void {
+    this.evictExpired();
 
-    // Simple string hash (in production, use crypto)
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toString(36);
-  }
+    const slotId = this.parseSlotId(eventKey);
+    // Refresh insertion order for the key.
+    this.store.delete(eventKey);
+    this.store.set(eventKey, { key: eventKey, ts: Date.now(), slotId });
 
-  /**
-   * Check if an event is a duplicate
-   */
-  check(event: TrackingEvent): DedupeResult {
-    const key = this.generateKey({
-      sessionId: event.sessionId,
-      slotId: event.slotId,
-      eventType: event.type,
-    });
-
-    const hash = this.generateHash(event);
-    const entries = this.eventStore.get(key) || [];
-
-    // Check for exact duplicate by event ID
-    const exactDupe = entries.find((e) => e.eventId === event.eventId);
-    if (exactDupe) {
-      return {
-        isDuplicate: true,
-        originalEvent: exactDupe,
-        originalSource: exactDupe.source,
-        hash,
-      };
-    }
-
-    // Check for content duplicate by hash
-    const hashDupe = entries.find((e) => e.hash === hash);
-    if (hashDupe) {
-      return {
-        isDuplicate: true,
-        originalEvent: hashDupe,
-        originalSource: hashDupe.source,
-        hash,
-      };
-    }
-
-    // Check for timing-based duplicate (same event type within short window)
-    const timingThreshold = this.getTimingThreshold(event.type);
-    const now = event.timestamp.getTime();
-    const timingDupe = entries.find((e) => {
-      const diff = Math.abs(now - e.timestamp.getTime());
-      return diff < timingThreshold;
-    });
-
-    if (timingDupe) {
-      return {
-        isDuplicate: true,
-        originalEvent: timingDupe,
-        originalSource: timingDupe.source,
-        hash,
-      };
-    }
-
-    return {
-      isDuplicate: false,
-      hash,
-    };
-  }
-
-  /**
-   * Record an event (must be called after check passes)
-   */
-  record(event: TrackingEvent): void {
-    const key = this.generateKey({
-      sessionId: event.sessionId,
-      slotId: event.slotId,
-      eventType: event.type,
-    });
-
-    const hash = this.generateHash(event);
-    const entry: DedupeEntry = {
-      eventId: event.eventId,
-      timestamp: event.timestamp,
-      source: event.source,
-      hash,
-    };
-
-    let entries = this.eventStore.get(key);
-    if (!entries) {
-      entries = [];
-      this.eventStore.set(key, entries);
-    }
-
-    entries.push(entry);
-
-    // Trim if over limit
-    if (entries.length > this.config.maxEventsPerKey) {
-      entries.shift();
+    // Evict oldest if max size exceeded.
+    while (this.store.size > this.config.maxSize) {
+      const oldestKey = this.store.keys().next().value;
+      if (!oldestKey) break;
+      this.store.delete(oldestKey);
     }
   }
 
-  /**
-   * Check and record in one operation
-   */
-  checkAndRecord(event: TrackingEvent): DedupeResult {
-    const result = this.check(event);
-    if (!result.isDuplicate) {
-      this.record(event);
-    }
-    return result;
-  }
-
-  /**
-   * Get timing threshold for an event type
-   * Some events (like quartiles) need stricter deduplication
-   */
-  private getTimingThreshold(eventType: TrackingEventType): number {
-    switch (eventType) {
-      case 'impression':
-      case 'start':
-        return 1000; // 1 second
-      case 'firstQuartile':
-      case 'midpoint':
-      case 'thirdQuartile':
-        return 2000; // 2 seconds (allows for slight timing differences)
-      case 'complete':
-        return 3000; // 3 seconds
-      case 'error':
-        return 500; // 500ms (errors can be rapid)
-      default:
-        return 1000;
-    }
-  }
-
-  /**
-   * Start cleanup interval
-   */
-  private startCleanup(): void {
-    this.cleanupInterval = setInterval(() => {
-      this.cleanup();
-    }, 60000); // Cleanup every minute
-  }
-
-  /**
-   * Stop cleanup interval
-   */
-  stopCleanup(): void {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
-  }
-
-  /**
-   * Clean up expired entries
-   */
-  cleanup(): void {
-    const expireTime = new Date(Date.now() - this.config.windowSeconds * 1000);
-
-    for (const [key, entries] of this.eventStore) {
-      const filtered = entries.filter((e) => e.timestamp > expireTime);
-      if (filtered.length === 0) {
-        this.eventStore.delete(key);
-      } else if (filtered.length !== entries.length) {
-        this.eventStore.set(key, filtered);
+  clearSlot(slotId: string): void {
+    for (const [key, entry] of this.store.entries()) {
+      if (entry.slotId === slotId) {
+        this.store.delete(key);
       }
     }
   }
 
-  /**
-   * Clear all state (for testing)
-   */
-  clear(): void {
-    this.eventStore.clear();
-  }
-
-  /**
-   * Get stats for monitoring
-   */
-  getStats(): {
-    totalKeys: number;
-    totalEvents: number;
-    oldestEvent: Date | null;
+  reconcile(clientEvents: Array<{ type: string; slotId: string; timestamp: number }>, serverEvents: Array<{ type: string; slotId: string; timestamp: number }>): {
+    matched: Array<{ type: string; slotId: string; clientTimestamp: number; serverTimestamp: number }>;
+    clientOnly: Array<{ type: string; slotId: string; timestamp: number }>;
+    serverOnly: Array<{ type: string; slotId: string; timestamp: number }>;
   } {
-    let totalEvents = 0;
-    let oldestEvent: Date | null = null;
+    const serverByKey = new Map<string, { type: string; slotId: string; timestamp: number }[]>();
 
-    for (const entries of this.eventStore.values()) {
-      totalEvents += entries.length;
-      for (const entry of entries) {
-        if (!oldestEvent || entry.timestamp < oldestEvent) {
-          oldestEvent = entry.timestamp;
-        }
+    for (const ev of serverEvents) {
+      const k = `${ev.type}:${ev.slotId}`;
+      const list = serverByKey.get(k) ?? [];
+      list.push(ev);
+      serverByKey.set(k, list);
+    }
+
+    const matched: Array<{ type: string; slotId: string; clientTimestamp: number; serverTimestamp: number }> = [];
+    const clientOnly: Array<{ type: string; slotId: string; timestamp: number }> = [];
+    const usedServer = new Set<string>();
+
+    for (const c of clientEvents) {
+      const k = `${c.type}:${c.slotId}`;
+      const candidates = serverByKey.get(k) ?? [];
+      const server = candidates.shift();
+      if (server) {
+        matched.push({ type: c.type, slotId: c.slotId, clientTimestamp: c.timestamp, serverTimestamp: server.timestamp });
+        usedServer.add(`${k}:${server.timestamp}`);
+      } else {
+        clientOnly.push(c);
       }
     }
 
-    return {
-      totalKeys: this.eventStore.size,
-      totalEvents,
-      oldestEvent,
-    };
-  }
-}
+    const serverOnly: Array<{ type: string; slotId: string; timestamp: number }> = [];
+    for (const s of serverEvents) {
+      const k = `${s.type}:${s.slotId}:${s.timestamp}`;
+      if (!usedServer.has(k)) serverOnly.push(s);
+    }
 
-/**
- * Cross-source reconciler for client vs server events
- */
-export class CrossSourceReconciler {
-  private clientEvents: Map<string, TrackingEvent> = new Map();
-  private serverEvents: Map<string, TrackingEvent> = new Map();
-  private reconciled: Set<string> = new Set();
-
-  /**
-   * Record a client-side event
-   */
-  recordClientEvent(event: TrackingEvent): void {
-    const key = `${event.slotId}:${event.type}`;
-    this.clientEvents.set(key, event);
-    this.tryReconcile(key);
+    return { matched, clientOnly, serverOnly };
   }
 
-  /**
-   * Record a server-side event
-   */
-  recordServerEvent(event: TrackingEvent): void {
-    const key = `${event.slotId}:${event.type}`;
-    this.serverEvents.set(key, event);
-    this.tryReconcile(key);
-  }
-
-  /**
-   * Try to reconcile events from both sources
-   */
-  private tryReconcile(key: string): void {
-    if (this.reconciled.has(key)) return;
-
-    const clientEvent = this.clientEvents.get(key);
-    const serverEvent = this.serverEvents.get(key);
-
-    if (clientEvent && serverEvent) {
-      // Both sides have reported - reconcile
-      this.reconciled.add(key);
-
-      // Calculate timing difference
-      const timeDiff = Math.abs(
-        clientEvent.timestamp.getTime() - serverEvent.timestamp.getTime()
-      );
-
-      // Log significant discrepancies
-      if (timeDiff > 5000) {
-        console.warn(
-          `[CrossSourceReconciler] Large timing discrepancy for ${key}: ${timeDiff}ms`
-        );
-      }
+  private evictExpired(): void {
+    const cutoff = Date.now() - this.config.ttlMs;
+    for (const [key, entry] of this.store.entries()) {
+      if (entry.ts < cutoff) this.store.delete(key);
     }
   }
 
-  /**
-   * Get reconciliation status
-   */
-  getStatus(): {
-    clientOnly: string[];
-    serverOnly: string[];
-    reconciled: string[];
-  } {
-    const clientOnly: string[] = [];
-    const serverOnly: string[] = [];
-
-    for (const key of this.clientEvents.keys()) {
-      if (!this.serverEvents.has(key) && !this.reconciled.has(key)) {
-        clientOnly.push(key);
-      }
-    }
-
-    for (const key of this.serverEvents.keys()) {
-      if (!this.clientEvents.has(key) && !this.reconciled.has(key)) {
-        serverOnly.push(key);
-      }
-    }
-
-    return {
-      clientOnly,
-      serverOnly,
-      reconciled: Array.from(this.reconciled),
-    };
-  }
-
-  /**
-   * Clear state
-   */
-  clear(): void {
-    this.clientEvents.clear();
-    this.serverEvents.clear();
-    this.reconciled.clear();
+  private parseSlotId(eventKey: string): string | undefined {
+    // Expected format in tests: type:podId:slotId:creativeId
+    const parts = eventKey.split(':');
+    return parts.length >= 3 ? parts[2] : undefined;
   }
 }

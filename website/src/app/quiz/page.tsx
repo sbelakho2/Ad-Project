@@ -74,7 +74,7 @@ const RESULTS = [
     maxScore: 1.9,
     label: 'Starter Fast Track',
     summary: 'Perfect for teams spinning up monetisation. Use our step-by-step integration guides and pay nothing until revenue flows—then just a simple marginal fee.',
-    cta: { label: 'Read the integration checklist', href: '/documentation#integration-checklist' },
+    cta: { label: 'Read the integration checklist', href: '/docs' },
   },
   {
     minScore: 2,
@@ -197,7 +197,7 @@ export default function QuizPage() {
 
         <footer className="space-y-4 text-center text-sm text-white/80">
           <p>
-            Ready to put these insights into action? Explore our <Link href="/documentation" className="font-bold underline">documentation</Link> or review the <Link href="/pricing" className="font-bold underline">pricing guide</Link>.
+            Ready to put these insights into action? Explore our <Link href="/docs" className="font-bold underline">documentation</Link> or review the <Link href="/pricing" className="font-bold underline">pricing guide</Link>.
           </p>
         </footer>
       </div>

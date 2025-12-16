@@ -76,7 +76,7 @@ const mitigations = [
   {
     title: 'Safe Mode',
     description: 'When error rates exceed thresholds, the system automatically enters safe mode: reduced fanout, strict deadlines, and slate fallback for ad breaks.',
-    trigger: `Error rate > 5% or latency p95 > ${sloConfig.latency.p99}`,
+    trigger: `Error rate > 5% or latency p95 > ${sloConfig.latency.p95.replace(/^[<≤]\s*/, '')}`,
     icon: Shield,
   },
   {
@@ -118,7 +118,7 @@ export default function SLOPage() {
         </header>
 
         {/* Hero */}
-        <PageHero variant="light" className="bg-white border-b border-slate-200/60">
+        <PageHero className="bg-white border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-green-100 text-green-700 text-sm font-medium mb-6">

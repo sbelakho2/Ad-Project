@@ -140,6 +140,35 @@
     margin-inline: auto;
   }
 
+  /* HeroShell central policy overrides */
+  [data-hero-variant='marketingDark'] h1,
+  [data-hero-variant='marketingDark'] h2,
+  [data-hero-variant='marketingDark'] h3,
+  [data-hero-variant='marketingDark'] h4,
+  [data-hero-variant='marketingDark'] h5,
+  [data-hero-variant='marketingDark'] h6 {
+    @apply text-white;
+  }
+
+  [data-hero-variant='marketingDark'] p {
+    @apply text-slate-200/90;
+  }
+
+  [data-hero-variant='marketingDark'] .btn-primary {
+    background: var(--brand-600);
+    @apply text-white;
+  }
+  [data-hero-variant='marketingDark'] .btn-primary:hover {
+    background: var(--brand-700);
+  }
+
+  [data-hero-variant='marketingDark'] .btn-secondary {
+    @apply border-white/20 bg-white/10 text-white no-underline;
+  }
+  [data-hero-variant='marketingDark'] .btn-secondary:hover {
+    @apply bg-white/15 no-underline;
+  }
+
   .hero p {
     color: var(--muted);
     font-size: 1.125rem;

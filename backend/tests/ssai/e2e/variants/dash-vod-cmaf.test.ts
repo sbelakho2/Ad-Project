@@ -289,10 +289,11 @@ export class DASHVODCMAFRunner {
       firstSegment: 'content-15.m4s'
     };
 
-    const correctResolution = 
-      mockSeekResult.resolvedPeriod && 
-      mockSeekResult.requiredInit && 
-      mockSeekResult.firstSegment;
+    const correctResolution = Boolean(
+      mockSeekResult.resolvedPeriod &&
+        mockSeekResult.requiredInit &&
+        mockSeekResult.firstSegment
+    );
 
     this.results.push({
       name: 'seek_resolution',

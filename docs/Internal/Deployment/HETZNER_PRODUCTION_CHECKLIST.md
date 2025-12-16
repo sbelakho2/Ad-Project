@@ -430,7 +430,7 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env
 
 # 4. Verify deployment
 curl -I https://apexmediation.ee
-curl -I https://apexmediation.ee/documentation
+curl -I https://apexmediation.ee/docs
 ```
 
 #### 8.4.2 Tarball Method (Alternative - Server-built)

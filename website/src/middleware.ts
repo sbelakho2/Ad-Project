@@ -63,7 +63,8 @@ export async function middleware(request: NextRequest) {
 
   // Redirect to signin if accessing protected path without authentication
   if (isProtectedPath && !isAuthenticated && !isPublicAuthPath) {
-    const url = new URL('/signin', request.url);
+    const url = request.nextUrl.clone();
+    url.pathname = '/signin';
     url.searchParams.set('redirect', pathname);
     url.searchParams.set('reason', token ? 'invalid_session' : 'unauthenticated');
     const resp = NextResponse.redirect(url);
@@ -74,7 +75,9 @@ export async function middleware(request: NextRequest) {
 
   // Redirect to dashboard if accessing auth pages while authenticated
   if (isAuthPath && isAuthenticated) {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+    const url = request.nextUrl.clone();
+    url.pathname = '/dashboard';
+    return NextResponse.redirect(url);
   }
 
   return NextResponse.next();

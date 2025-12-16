@@ -36,7 +36,7 @@ const securityPillars = [
     description: 'Every auction produces a signed, tamper-evident log. You can verify any decision we make.',
     icon: Key,
     details: [
-      'SHA-256 signed auction logs',
+      'Ed25519-signed auction logs',
       'Exportable for independent verification',
       'Immutable audit trail',
     ],
@@ -90,7 +90,7 @@ const reliabilityMetrics = [
   { label: 'Uptime SLA', value: sloConfig.availability.target, icon: CheckCircle },
   { label: 'Latency (p50)', value: sloConfig.latency.p50, icon: Zap },
   { label: 'Regions', value: sloConfig.regions.map(r => `${r.code} (${r.name})`).join(', '), icon: Server },
-  { label: 'Auto-failover', value: sloConfig.failover.target, icon: RefreshCw },
+  { label: 'Failover target', value: sloConfig.failover.target, icon: RefreshCw },
 ];
 
 const complianceBadges = [
@@ -107,7 +107,7 @@ export default function SecurityPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="light" className="bg-slate-50 border-b border-slate-200/60">
+        <PageHero className="bg-slate-50 border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <div className="w-16 h-16 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
@@ -202,14 +202,14 @@ export default function SecurityPage() {
                   </h2>
                   <p className="text-lg text-gray-600 mb-6">
                     We treat downtime as seriously as you do. Our infrastructure is designed 
-                    for high availability with automatic failover and multi-region redundancy.
+                    for high availability with regional redundancy and published failover targets.
                   </p>
                   <div className="bg-brand-50 border border-brand-200 rounded-xl p-4 flex items-start gap-3">
                     <ShieldCheck className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
                     <div>
                       <p className="font-semibold text-brand-800">SLO Dashboard</p>
                       <p className="text-sm text-brand-700">
-                        View our public SLO commitments at{' '}
+                        View current regions and public SLO commitments at{' '}
                         <a href="/slo" className="underline">
                           apexmediation.ee/slo
                         </a>

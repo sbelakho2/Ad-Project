@@ -162,8 +162,20 @@ export default function PrivacyPolicyPage() {
                     We require subprocessors to protect data and only process it for agreed purposes.
                   </p>
                   <p className="text-gray-700">
-                    Where required, we will publish and maintain a subprocessor list and update customers in
-                    accordance with our Data Processing Addendum.
+                    For ApexMediation-hosted deployments, our current subprocessors include:
+                  </p>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                    <ul className="list-disc pl-6 space-y-1">
+                      <li><span className="font-semibold">Fly.io</span> — application hosting and networking</li>
+                      <li><span className="font-semibold">Stripe</span> — billing and payment processing</li>
+                      <li><span className="font-semibold">Resend</span> — transactional email delivery</li>
+                    </ul>
+                  </div>
+
+                  <p className="text-gray-700">
+                    Updates and objection process are described in our <a className="underline" href="/dpa">Data Processing Addendum</a>.
+                    If you are an end user of a publisher app, your data sharing is primarily governed by that publisher.
                   </p>
                 </section>
 

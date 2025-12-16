@@ -45,7 +45,7 @@ const transparencySubsections = [
   },
   {
     title: 'Data-warehouse friendly',
-    description: 'Streaming schema is documented and stable, so you can wire ApexMediation directly into ClickHouse, BigQuery, Snowflake or your existing tools.',
+    description: 'Streaming schema is documented and stable, so you can wire ApexMediation into BigQuery or export to object storage (S3/GCS) for your existing tools.',
   },
 ];
 
@@ -111,7 +111,7 @@ export default function ProductPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="dark">
+        <PageHero>
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
@@ -271,7 +271,7 @@ export default function ProductPage() {
                       <td className="py-3 px-4 text-center text-gray-400">Limited</td>
                     </tr>
                     <tr className="border-b border-gray-100">
-                      <td className="py-3 px-4 text-gray-700">No revenue share / take rate</td>
+                      <td className="py-3 px-4 text-gray-700">No hidden take rate (transparent platform fee)</td>
                       <td className="py-3 px-4 text-center bg-brand-50"><CheckCircle className="w-5 h-5 text-brand-600 mx-auto" /></td>
                       <td className="py-3 px-4 text-center text-gray-400">Hidden fees common</td>
                     </tr>

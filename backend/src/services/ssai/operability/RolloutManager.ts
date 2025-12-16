@@ -30,6 +30,7 @@ export class RolloutManager {
   private features: Map<string, RolloutConfig> = new Map();
   private allowlists: Map<string, Set<string>> = new Map();
   private denylists: Map<string, Set<string>> = new Map();
+  private canaryGroups: Map<string, string> = new Map();
   private refreshTimer: NodeJS.Timeout | null = null;
 
   constructor(config: Partial<RolloutManagerConfig> = {}) {
@@ -123,9 +124,63 @@ export class RolloutManager {
   }
 
   /**
-   * Check if a feature is enabled for given context
+   * Create a rollout config (test-facing API)
+   */
+  createRollout(config: {
+    featureId: string;
+    strategy: RolloutStrategy;
+    percentage?: number;
+    allowlist?: string[];
+    denylist?: string[];
+    canaryPercentage?: number;
+    canaryGroup?: string;
+    regions?: string[];
+  }): void {
+    const percentage = config.percentage ?? this.config.defaultPercentage;
+
+    this.registerFeature(config.featureId, {
+      percentage,
+      strategy: config.strategy,
+      // For tests, userId is the sticky id; map to session.
+      stickyKey: 'session',
+      enabledRegions: config.regions,
+    });
+
+    if (config.allowlist?.length) {
+      this.allowlists.set(config.featureId, new Set(config.allowlist));
+    }
+    if (config.denylist?.length) {
+      this.denylists.set(config.featureId, new Set(config.denylist));
+    }
+    if (config.canaryGroup) {
+      this.canaryGroups.set(config.featureId, config.canaryGroup);
+    }
+  }
+
+  /**
+   * Check if a feature is enabled (test-facing API)
    */
   isEnabled(
+    featureId: string,
+    context: {
+      userId?: string;
+      group?: string;
+      region?: string;
+      version?: string;
+    }
+  ): boolean {
+    return this.getDecision(featureId, {
+      sessionId: context.userId,
+      regionCode: context.region,
+      version: context.version,
+      group: context.group,
+    }).enabled;
+  }
+
+  /**
+   * Detailed decision (backward-compatible API)
+   */
+  getDecision(
     featureName: string,
     context: {
       sessionId?: string;
@@ -133,6 +188,7 @@ export class RolloutManager {
       tenantId?: string;
       regionCode?: string;
       version?: string;
+      group?: string;
     }
   ): RolloutDecision {
     const feature = this.features.get(featureName);
@@ -305,10 +361,23 @@ export class RolloutManager {
    */
   private canaryDecision(
     feature: RolloutConfig,
-    context: { sessionId?: string; deviceId?: string; tenantId?: string }
+    context: { sessionId?: string; deviceId?: string; tenantId?: string; group?: string }
   ): RolloutDecision {
-    // Canary uses same logic as percentage but with canary-specific key
-    return this.percentageDecision(feature, context);
+    const canaryGroup = this.canaryGroups.get(feature.featureName);
+    if (canaryGroup && context.group === canaryGroup) {
+      return {
+        enabled: true,
+        config: feature,
+        reason: `Canary group ${canaryGroup}`,
+      };
+    }
+
+    // Default: not enabled unless the canary group matches
+    return {
+      enabled: false,
+      config: feature,
+      reason: 'Not in canary group',
+    };
   }
 
   /**
@@ -400,5 +469,6 @@ export class RolloutManager {
     this.features.clear();
     this.allowlists.clear();
     this.denylists.clear();
+    this.canaryGroups.clear();
   }
 }

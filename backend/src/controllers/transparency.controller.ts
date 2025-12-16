@@ -388,7 +388,7 @@ export const getAuctionById = async (req: Request, res: Response, next: NextFunc
         auction: {
           auction_id: r.auction_id,
           publisher_id: r.publisher_id,
-          timestamp: r.timestamp,
+          timestamp: toIsoString(r.observed_at),
           winner_source: r.winner_source,
           winner_bid_ecpm: Number(r.winner_bid_ecpm || 0),
           winner_currency: r.winner_currency,
@@ -540,6 +540,23 @@ const parsePublicKey = (source: string) => {
   }
 };
 
+const toPublicKeyPem = (source: unknown): string | null => {
+  if (typeof source !== 'string' || source.trim().length === 0) {
+    return null;
+  }
+
+  const key = parsePublicKey(source);
+  if (!key) {
+    return null;
+  }
+
+  try {
+    return key.export({ format: 'pem', type: 'spki' }).toString();
+  } catch (_err) {
+    return null;
+  }
+};
+
 /** GET /keys — return active transparency signer public keys */
 export const getTransparencyKeys = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -568,6 +585,11 @@ export const getTransparencyKeys = async (req: Request, res: Response, next: Nex
           ? [{ key_id: keyId, algo: 'ed25519', public_key_base64: fallbackKey, active: 1 }]
           : []);
 
+    const enriched = data.map((k: any) => ({
+      ...k,
+      public_key_pem: toPublicKeyPem(k.public_key_base64) || undefined,
+    }));
+
     // Generate a stable ETag based on the concatenation of key_id+public_key_base64
     const etagSource = data.map((k: any) => `${k.key_id}:${k.public_key_base64}`).join('|');
     const etag = 'W/"' + crypto.createHash('sha256').update(etagSource).digest('hex').slice(0, 32) + '"';
@@ -583,7 +605,52 @@ export const getTransparencyKeys = async (req: Request, res: Response, next: Nex
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
 
-    res.json({ count: data.length, data });
+    res.json({ count: enriched.length, data: enriched });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** GET /keys (public) — return active transparency signer public keys (no auth) */
+export const getTransparencyKeysPublic = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { rows } = await replicaQuery(
+      `SELECT key_id, algo, public_key_base64, active
+       FROM transparency_signer_keys
+       WHERE active = true
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      undefined,
+      'TRANSPARENCY_KEYS_PUBLIC'
+    );
+
+    const fallbackKey = process.env.TRANSPARENCY_PUBLIC_KEY_BASE64;
+    const keyId = process.env.TRANSPARENCY_KEY_ID || 'env-default';
+
+    const data = rows.length > 0
+      ? rows
+      : (fallbackKey
+          ? [{ key_id: keyId, algo: 'ed25519', public_key_base64: fallbackKey, active: 1 }]
+          : []);
+
+    const enriched = data.map((k: any) => ({
+      ...k,
+      public_key_pem: toPublicKeyPem(k.public_key_base64) || undefined,
+    }));
+
+    const etagSource = data.map((k: any) => `${k.key_id}:${k.public_key_base64}`).join('|');
+    const etag = 'W/"' + crypto.createHash('sha256').update(etagSource).digest('hex').slice(0, 32) + '"';
+
+    const inm = _req.headers['if-none-match'];
+    if (inm && inm === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+
+    res.json({ count: enriched.length, data: enriched });
   } catch (err) {
     next(err);
   }

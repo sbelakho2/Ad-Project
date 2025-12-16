@@ -1,26 +1,37 @@
 import Footer from '@/components/Footer'
 import CookieBanner from '@/components/CookieBanner'
 
-const SERVICES = [
+type StatusService = {
+  name: string
+  description: string
+  expected: string
+  check: string
+  openUrl?: string
+}
+
+const SERVICES: StatusService[] = [
   {
     name: 'Website',
     description: 'Marketing site and docs pages.',
     expected: 'https://apexmediation.ee',
+    openUrl: 'https://apexmediation.ee',
     check: '/healthz (edge)',
   },
   {
     name: 'API',
     description: 'Core platform APIs and auction endpoints.',
     expected: 'https://api.apexmediation.ee',
+    openUrl: 'https://api.apexmediation.ee/health',
     check: '/health',
   },
   {
     name: 'Console',
     description: 'Customer console and operator control plane.',
     expected: 'https://console.apexmediation.ee',
+    openUrl: 'https://console.apexmediation.ee',
     check: '/ (web)',
   },
-] as const
+] 
 
 export const metadata = {
   title: 'Status — ApexMediation',
@@ -68,7 +79,7 @@ export default function StatusPage() {
 
                       <div className="shrink-0">
                         <a
-                          href={svc.expected}
+                          href={svc.openUrl ?? svc.expected}
                           className="btn-secondary text-sm"
                         >
                           Open

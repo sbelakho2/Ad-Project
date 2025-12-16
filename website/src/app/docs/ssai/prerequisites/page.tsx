@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { CheckCircle, XCircle, AlertTriangle, FileCheck, Settings, Zap, Shield, Clock } from 'lucide-react';
+import { CheckCircle, XCircle, AlertTriangle, FileCheck, Settings, Zap } from 'lucide-react';
 import SiteHeader from '@/components/SiteHeader';
 import Footer from '@/components/Footer';
 

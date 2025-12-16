@@ -75,8 +75,8 @@ export default function DpaPage() {
                     protective than those in this DPA.
                   </p>
                   <p className="text-gray-700">
-                    Where required, ApexMediation will maintain a subprocessor list and provide a mechanism
-                    for customers to receive updates and raise reasonable objections.
+                    A list of subprocessors (for hosted deployments) and the update mechanism are provided in
+                    Annex 3. Customers may subscribe to subprocessor updates by contacting us (see Contact section below).
                   </p>
                 </section>
 
@@ -100,7 +100,7 @@ export default function DpaPage() {
                 <section className="space-y-3">
                   <h2 className="text-2xl font-bold text-gray-900">8) Contact</h2>
                   <p className="text-gray-700">
-                    DPA questions and requests: <a className="underline" href="mailto:legal@apexmediation.ee">legal@apexmediation.ee</a>
+                    DPA questions and requests: <a className="underline" href={`mailto:${legalEntity.contact.legalEmail}`}>{legalEntity.contact.legalEmail}</a>
                   </p>
                 </section>
 
@@ -127,6 +127,56 @@ export default function DpaPage() {
                       <li>Vulnerability and dependency hygiene (updates and scanning as part of engineering workflow).</li>
                       <li>Incident response process with customer notification for qualifying breaches.</li>
                     </ul>
+                  </div>
+                </section>
+
+                <section className="space-y-4">
+                  <h2 className="text-2xl font-bold text-gray-900">Annex 3 — Subprocessors and transfers</h2>
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 space-y-3">
+                    <p>
+                      This Annex lists subprocessors used in ApexMediation-hosted deployments.
+                      If Customer self-hosts the Services, Customer selects and controls its own infrastructure vendors.
+                    </p>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="border-b border-gray-200">
+                            <th className="py-2 pr-3 font-semibold text-gray-900">Subprocessor</th>
+                            <th className="py-2 pr-3 font-semibold text-gray-900">Purpose</th>
+                            <th className="py-2 pr-3 font-semibold text-gray-900">Data categories (typical)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="border-b border-gray-200">
+                            <td className="py-2 pr-3">Fly.io</td>
+                            <td className="py-2 pr-3">Application hosting and networking (when hosted by ApexMediation)</td>
+                            <td className="py-2 pr-3">Service logs, operational metadata, customer account data as needed to provide the service</td>
+                          </tr>
+                          <tr className="border-b border-gray-200">
+                            <td className="py-2 pr-3">Stripe</td>
+                            <td className="py-2 pr-3">Billing and payment processing</td>
+                            <td className="py-2 pr-3">Billing contact details and payment/transaction metadata</td>
+                          </tr>
+                          <tr>
+                            <td className="py-2 pr-3">Resend</td>
+                            <td className="py-2 pr-3">Transactional email delivery (invoices, notices, operational emails)</td>
+                            <td className="py-2 pr-3">Email address, email content, delivery metadata</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <p>
+                      <span className="font-semibold text-gray-900">Updates and objections:</span> We will update this Annex when subprocessors change.
+                      Customers may request to be notified by email and may raise reasonable objections by contacting
+                      <a className="underline" href={`mailto:${legalEntity.contact.legalEmail}`}> {legalEntity.contact.legalEmail}</a>.
+                    </p>
+
+                    <p>
+                      <span className="font-semibold text-gray-900">International transfers:</span> If processing involves transfers outside the EEA/UK/Switzerland,
+                      we will apply appropriate safeguards (such as Standard Contractual Clauses) where required.
+                    </p>
                   </div>
                 </section>
               </div>

@@ -739,7 +739,7 @@ Body: {
               {
                 title: 'Launch Checklist for New Studios',
                 summary: 'Everything you need to configure mediation, verify payouts, and test placements before launch day.',
-                href: '/documentation#integration-checklist',
+                href: '/docs',
               },
               {
                 title: 'How to Read Bid Landscape Reports',
@@ -1138,7 +1138,7 @@ Body: {
             <section className="rounded-3xl bg-white p-6 text-gray-900 shadow-xl ring-1 ring-gray-200">
               <h2 className="text-h3 font-bold uppercase">Controls</h2>
               <ul className="mt-4 list-disc space-y-2 pl-6 text-sm text-gray-700">
-                <li>Encryption at rest (AES-256) and in transit (TLS 1.3) across EU-West regions.</li>
+                <li>Encryption at rest (AES-256) and in transit (TLS 1.3) across EU regions.</li>
                 <li>Quarterly penetration tests by Cure53 plus continuous dependency scanning.</li>
                 <li>Role-based access, hardware security keys, and background checks for production access.</li>
                 <li>Telemetry automatically redacts consent strings, credentials, and user identifiers before export.</li>

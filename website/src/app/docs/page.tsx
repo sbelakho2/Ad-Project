@@ -55,9 +55,9 @@ export default function DocsLandingPage() {
               </div>
 
               <div className="mt-12 rounded-2xl border border-gray-200 bg-gray-50 p-6">
-                <h3 className="text-base font-semibold text-gray-900">Docs subdomain</h3>
+                <h3 className="text-base font-semibold text-gray-900">Docs URL</h3>
                 <p className="mt-2 text-sm text-gray-600 max-w-prose">
-                  Prefer the docs subdomain? Use <span className="font-mono">docs.apexmediation.ee</span> — it routes to the same content.
+                  Documentation is served from <span className="font-mono">apexmediation.ee/docs</span>.
                 </p>
               </div>
             </div>

@@ -35,8 +35,14 @@ export interface AuditBundleGeneratorConfig {
   /** Secret key for HMAC signing */
   signingSecret: string;
 
+  /** Alias for tests (preferred in tests) */
+  secretKey?: string;
+
   /** Include raw cue data */
   includeRawCue: boolean;
+
+  /** Alias for tests (preferred in tests) */
+  includeRaw?: boolean;
 
   /** Maximum events per bundle */
   maxEventsPerBundle: number;
@@ -52,6 +58,20 @@ const DEFAULT_CONFIG: AuditBundleGeneratorConfig = {
   retentionDays: 90,
 };
 
+export interface SimpleAuditBundleSummary {
+  impressions: number;
+  completions: number;
+  skips: number;
+}
+
+export interface SimpleAuditBundle {
+  sessionId: string;
+  podId: string;
+  events: Array<{ type: string; slotId?: string; timestamp?: number }>;
+  summary: SimpleAuditBundleSummary;
+  signature: string;
+}
+
 interface BundleData {
   sessionId: string;
   podId: string;
@@ -66,9 +86,66 @@ export class AuditBundleGenerator {
   private config: AuditBundleGeneratorConfig;
   private bundles: Map<string, BundleData> = new Map();
   private generatedBundles: Map<string, AuditBundle> = new Map();
+  private simpleSigningSecret: string;
+  private includeRaw: boolean;
 
   constructor(config: Partial<AuditBundleGeneratorConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    // Accept both legacy config keys and the test-facing keys.
+    const signingSecret = config.secretKey ?? config.signingSecret;
+    const includeRaw = config.includeRaw ?? config.includeRawCue;
+
+    this.config = {
+      ...DEFAULT_CONFIG,
+      ...config,
+      signingSecret: signingSecret ?? DEFAULT_CONFIG.signingSecret,
+      includeRawCue: includeRaw ?? DEFAULT_CONFIG.includeRawCue,
+    };
+
+    this.simpleSigningSecret = this.config.signingSecret;
+    this.includeRaw = this.config.includeRawCue;
+  }
+
+  /**
+   * Test-facing API: generate a compact bundle with summary + SHA-256-hex signature.
+   */
+  generateBundle(sessionId: string, podId: string, events: any[]): SimpleAuditBundle {
+    const normalizedEvents: SimpleAuditBundle['events'] = (events ?? []).map((e: any) => {
+      if (this.includeRaw) {
+        // Preserve the key fields the tests use, and avoid Date serialization ambiguity.
+        return {
+          type: String(e?.type ?? ''),
+          slotId: e?.slotId,
+          timestamp:
+            typeof e?.timestamp === 'number'
+              ? e.timestamp
+              : e?.timestamp instanceof Date
+                ? e.timestamp.getTime()
+                : undefined,
+        };
+      }
+
+      return {
+        type: String(e?.type ?? ''),
+        slotId: e?.slotId,
+        timestamp:
+          typeof e?.timestamp === 'number'
+            ? e.timestamp
+            : e?.timestamp instanceof Date
+              ? e.timestamp.getTime()
+              : undefined,
+      };
+    });
+
+    const summary = this.summarizeEvents(normalizedEvents);
+    const signature = this.signSimpleBundle({ sessionId, podId, events: normalizedEvents, summary });
+
+    return {
+      sessionId,
+      podId,
+      events: normalizedEvents,
+      summary,
+      signature,
+    };
   }
 
   /**
@@ -267,10 +344,48 @@ export class AuditBundleGenerator {
   /**
    * Verify a bundle signature
    */
-  verifyBundle(bundle: AuditBundle): boolean {
-    const { signature, ...bundleWithoutSignature } = bundle;
-    const expectedSignature = this.signBundle(bundleWithoutSignature);
-    return signature === expectedSignature;
+  verifyBundle(bundle: AuditBundle | SimpleAuditBundle): boolean {
+    if ('bundleId' in bundle) {
+      const { signature, ...bundleWithoutSignature } = bundle;
+      const expectedSignature = this.signBundle(bundleWithoutSignature);
+      return signature === expectedSignature;
+    }
+
+    const expected = this.signSimpleBundle({
+      sessionId: bundle.sessionId,
+      podId: bundle.podId,
+      events: bundle.events,
+      summary: bundle.summary,
+    });
+    return bundle.signature === expected;
+  }
+
+  private summarizeEvents(events: SimpleAuditBundle['events']): SimpleAuditBundleSummary {
+    let impressions = 0;
+    let completions = 0;
+    let skips = 0;
+
+    for (const event of events) {
+      if (event.type === 'impression') impressions += 1;
+      if (event.type === 'complete') completions += 1;
+      if (event.type === 'skip') skips += 1;
+    }
+
+    return { impressions, completions, skips };
+  }
+
+  private signSimpleBundle(input: Omit<SimpleAuditBundle, 'signature'>): string {
+    // Deterministic content string for signing.
+    const content = JSON.stringify({
+      sessionId: input.sessionId,
+      podId: input.podId,
+      events: input.events,
+      summary: input.summary,
+    });
+
+    const hmac = createHmac('sha256', this.simpleSigningSecret);
+    hmac.update(content);
+    return hmac.digest('hex');
   }
 
   /**

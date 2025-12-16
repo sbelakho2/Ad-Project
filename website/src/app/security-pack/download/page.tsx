@@ -31,7 +31,7 @@ const securityPackContents = [
   },
   {
     title: 'Audit Logging',
-    description: 'Structured logging via Winston, separate audit stream for compliance, configurable retention (30-90 days by plan).',
+    description: 'Structured logging via Winston, separate audit stream for compliance, configurable retention (30 days–1 year by plan).',
     icon: FileText,
   },
   {
@@ -162,21 +162,21 @@ const dataProcessing = [
   {
     category: 'Session Data',
     data: 'Device type, app bundle ID, content ID, consent signals (TC string if provided)',
-    retention: '30-90 days (configurable by plan)',
+    retention: '30 days–1 year (by plan)',
     legal_basis: 'Legitimate interest / Consent',
     deletion: 'Automatic TTL expiry + on-demand DSAR',
   },
   {
     category: 'Auction Logs',
     data: 'Bid requests/responses, decision traces, timing metrics, Ed25519 signatures',
-    retention: '30-90 days (configurable by plan)',
+    retention: '30 days–1 year (by plan)',
     legal_basis: 'Legitimate interest (fraud prevention, transparency)',
     deletion: 'Automatic partition pruning + on-demand DSAR',
   },
   {
     category: 'Tracking Events',
     data: 'Impressions, quartiles, completions, click events (no direct PII)',
-    retention: '30-90 days (configurable by plan)',
+    retention: '30 days–1 year (by plan)',
     legal_basis: 'Legitimate interest / Contract',
     deletion: 'Automatic expiry + on-demand DSAR',
   },
@@ -455,7 +455,7 @@ export default function SecurityPackDownloadPage() {
             </tbody>
           </table>
           <div className="bg-yellow-50 border border-yellow-200 rounded p-3 mt-4 text-sm">
-            <strong>Data Minimization:</strong> We do not collect or store IP addresses in their raw form. 
+            <strong>Data Minimization:</strong> We aim to minimize collection. IP addresses may be processed (and in some cases retained) for security, fraud prevention, and rate limiting.
             Device identifiers (IDFA, GAID) are only collected when consent is provided. No direct PII is stored 
             in tracking events.
           </div>
@@ -472,7 +472,7 @@ export default function SecurityPackDownloadPage() {
                 <li>API key creation, rotation, and revocation</li>
                 <li>Configuration changes (placements, settings, team membership)</li>
                 <li>Credential access (BYO token generation, network credential rotation)</li>
-                <li>Operator actions via Control Plane (with 7-year retention target)</li>
+                <li>Operator actions via Control Plane (retained per compliance and operational requirements)</li>
               </ul>
             </div>
             <div className="border border-gray-200 rounded p-4">
@@ -481,7 +481,7 @@ export default function SecurityPackDownloadPage() {
                 <li>Structured JSON logs via Winston with consistent schema</li>
                 <li>Separate audit stream for compliance-critical events</li>
                 <li>Ed25519 signatures on auction decision logs for cryptographic verification</li>
-                <li>Minimum 90-day retention enforced; partition drops blocked for newer data</li>
+                <li>Log retention is configured by plan (30 days / 90 days / 1 year) with automated pruning</li>
               </ul>
             </div>
           </div>

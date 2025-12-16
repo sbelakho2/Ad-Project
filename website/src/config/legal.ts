@@ -32,6 +32,7 @@ export const legalEntity = {
   // Contact
   contact: {
     email: 'hello@apexmediation.ee',
+    legalEmail: 'legal@apexmediation.ee',
     privacyEmail: 'privacy@apexmediation.ee',
     securityEmail: 'security@apexmediation.ee',
   },

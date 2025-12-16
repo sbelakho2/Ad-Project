@@ -33,7 +33,7 @@ export default function VerificationPage() {
         </header>
 
         {/* Hero */}
-        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
@@ -101,19 +101,20 @@ export default function VerificationPage() {
                     1
                   </div>
                   <div>
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Export the Evidence Bundle</h3>
+                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Export the Auction Receipt</h3>
                     <p className="text-gray-600 mb-4">
-                      From the Console, navigate to the session or pod you want to verify and export the signed bundle.
+                      Export the signed auction receipt from the Console, or fetch it via the Transparency API.
                     </p>
                   </div>
                 </div>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
-{`# Console → Sessions → [Session ID] → Export Evidence Bundle
-# Or use the CLI:
+{`# Fetch a specific auction (requires auth)
+# Tip: includeCanonical=1 returns the canonical string to verify.
 
-apex-cli evidence export --session-id sess_abc123xyz \\
-  --output ./evidence-bundle.json`}
+curl -s \
+  -H "Authorization: Bearer $APEX_TOKEN" \
+  "https://api.apexmediation.ee/api/v1/transparency/auctions/auc_abc123?includeCanonical=1" | jq . > auction.json`}
                   </pre>
                 </div>
               </motion.div>
@@ -127,31 +128,26 @@ apex-cli evidence export --session-id sess_abc123xyz \\
                   <div>
                     <h3 className="text-xl font-semibold text-gray-900 mb-2">Inspect the Bundle Structure</h3>
                     <p className="text-gray-600 mb-4">
-                      The evidence bundle contains all components needed for verification.
+                      The receipt includes the signature, key id, algorithm, and (optionally) the canonical string.
                     </p>
                   </div>
                 </div>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`{
-  "bundleId": "bundle_abc123xyz",
-  "sessionId": "sess_abc123xyz",
+  "auction_id": "auc_abc123",
   "timestamp": "2025-12-15T10:30:00Z",
-  "components": {
-    "cueTimeline": [...],      // All cues received
-    "decisions": [...],        // Pod decisions made
-    "stitchVersions": [...],   // Manifest versions served
-    "trackingEvents": [...]    // Beacons fired
+  "winner": { "source": "network_a", "bid_ecpm": 2.5, "currency": "USD" },
+  "integrity": {
+    "algo": "ed25519",
+    "key_id": "key_2025Q4",
+    "signature": "<base64 Ed25519 signature>"
   },
-  "signatures": {
-    "cueTimeline": "sha256:a1b2c3...",
-    "decisions": "sha256:d4e5f6...",
-    "stitchVersions": "sha256:g7h8i9...",
-    "trackingEvents": "sha256:j0k1l2...",
-    "bundle": "sha256:m3n4o5..."  // Root signature
-  },
-  "publicKeyId": "key_2025Q4",
-  "version": "1.0"
+  "canonical": {
+    "string": "{...canonical JSON string...}",
+    "truncated": false,
+    "size_bytes": 1234
+  }
 }`}
                   </pre>
                 </div>
@@ -166,25 +162,19 @@ apex-cli evidence export --session-id sess_abc123xyz \\
                   <div>
                     <h3 className="text-xl font-semibold text-gray-900 mb-2">Verify the Signatures</h3>
                     <p className="text-gray-600 mb-4">
-                      Use our CLI tool or verify manually with OpenSSL.
+                      Verify locally (offline) once you have the receipt JSON.
                     </p>
                   </div>
                 </div>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
-{`# Using the Apex CLI (recommended)
-apex-cli evidence verify --bundle ./evidence-bundle.json
+{`# Extract canonical string + signature from the receipt
+jq -r '.canonical.string' auction.json > canonical.txt
+jq -r '.integrity.signature' auction.json | base64 -d > signature.bin
 
-# Output:
-✓ Fetching public key: key_2025Q4
-✓ Verifying cueTimeline signature... VALID
-✓ Verifying decisions signature... VALID
-✓ Verifying stitchVersions signature... VALID
-✓ Verifying trackingEvents signature... VALID
-✓ Verifying bundle root signature... VALID
-
-All signatures verified successfully.
-Bundle is authentic and unmodified.`}
+# Confirm metadata
+jq -r '.integrity.algo' auction.json    # ed25519
+jq -r '.integrity.key_id' auction.json  # key_2025Q4`}
                   </pre>
                 </div>
               </motion.div>
@@ -205,18 +195,20 @@ Bundle is authentic and unmodified.`}
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`# 1. Download our public key (rotated quarterly)
-curl https://keys.apexmediation.ee/v1/key_2025Q4.pem -o apex-key.pem
+curl -s https://api.apexmediation.ee/api/v1/transparency/keys | jq .
 
-# 2. Extract the component to verify
-jq '.components.decisions' evidence-bundle.json > decisions.json
+# If you want a PEM file for a specific key_id:
+curl -s https://api.apexmediation.ee/api/v1/transparency/keys | \\
+  jq -r '.data[] | select(.key_id=="key_2025Q4") | (.public_key_pem // empty)' > apex-key.pem
 
-# 3. Extract the signature
-jq -r '.signatures.decisions' evidence-bundle.json | \\
-  base64 -d > decisions.sig
+# If your response doesn't include public_key_pem, fall back to public_key_base64:
+curl -s https://api.apexmediation.ee/api/v1/transparency/keys | \\
+  jq -r '.data[] | select(.key_id=="key_2025Q4") | .public_key_base64' | \\
+  awk 'BEGIN{print "-----BEGIN PUBLIC KEY-----"} {print} END{print "-----END PUBLIC KEY-----"}' > apex-key.pem
 
-# 4. Verify with OpenSSL
-openssl dgst -sha256 -verify apex-key.pem \\
-  -signature decisions.sig decisions.json
+# 2. Verify with OpenSSL (Ed25519 verifies the message directly; no hashing step)
+openssl pkeyutl -verify -pubin -inkey apex-key.pem \\
+  -sigfile signature.bin -in canonical.txt
 
 # Output: "Verified OK" if valid`}
                   </pre>

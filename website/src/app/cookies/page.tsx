@@ -43,6 +43,23 @@ export default function CookiePolicyPage() {
                     <li>Remember cookie preferences where a consent banner is shown.</li>
                     <li>Optionally measure performance and reliability of the website.</li>
                   </ul>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                    <p className="font-semibold text-gray-900">Identifiers currently used</p>
+                    <ul className="mt-2 list-disc pl-6 space-y-1">
+                      <li>
+                        <span className="font-semibold">Cookie:</span> <span className="font-mono">session</span> (httpOnly)
+                        — used to maintain an authenticated session when you sign in.
+                      </li>
+                      <li>
+                        <span className="font-semibold">Local storage:</span> <span className="font-mono">cookieConsent</span>
+                        — stores your cookie banner preference (this is not a cookie).
+                      </li>
+                    </ul>
+                    <p className="mt-2">
+                      We do not currently set third-party analytics cookies by default on this site.
+                    </p>
+                  </div>
                 </section>
 
                 <section className="space-y-3">

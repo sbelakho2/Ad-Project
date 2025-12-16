@@ -71,7 +71,7 @@ const observabilityStack = [
   },
   {
     title: 'Smart Alerts',
-    description: 'Coverage drops and latency spikes trigger instantly.',
+    description: 'Coverage drops and latency spikes surface quickly via metrics and alerting policies.',
     icon: Activity,
   },
   {
@@ -144,7 +144,21 @@ function ConsentCodeCard({ className }: { className?: string }) {
   return (
     <VisualCard title="Android SDK - Consent" className={className}>
 {`// Option 1: One-liner with Google UMP
-BelAds.collectConsentWithUmp(activity)
+BelAds.requestGoogleConsentForm(activity, callback = object : UmpConsentClient.Callback {
+  override fun onConsentUpdated() {
+    // (Optional) read IAB strings and pass to the SDK
+    val state = ConsentManager.fromIabStorage(activity)
+    BelAds.setConsent(
+      tcString = state.tcfString,
+      usPrivacy = state.usPrivacy,
+      gdprApplies = state.gdprApplies
+    )
+  }
+
+  override fun onConsentUpdateFailed(error: Throwable) {
+    // Handle consent error
+  }
+})
 
 // Option 2: Pass your own consent strings
 BelAds.setConsent(
@@ -161,8 +175,8 @@ BelAds.setConsent(
     gdprApplies = state.gdprApplies
 )
 
-// Consent flows to all networks automatically.
-// GDPR, CCPA, COPPA—handled.`}
+// Consent signals are included in auction metadata and passed to adapters.
+// Your app remains the consent source of truth.`}
     </VisualCard>
   );
 }
@@ -212,9 +226,9 @@ function TransparencyEngineCard({ className }: { className?: string }) {
 ├─ Winner:      Network A @ $2.50
 ├─ Floor:       $2.00
 ├─ Waterfall:   [A, B, C] (ML-optimized)
-└─ Signature:   SHA-256:4f3a...d82c ✓
+└─ Signature:   Ed25519:AbCd...1234 ✓
 
-Verify:   hash → compare → trust
+Verify:   canonical → verify → trust
 Dispute:  cryptographic evidence`}
     </VisualCard>
   );
@@ -378,7 +392,7 @@ export default function FeaturesPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="dark">
+        <PageHero>
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <div className="w-20 h-20 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
@@ -542,10 +556,10 @@ export default function FeaturesPage() {
                         <span className="text-2xl font-bold text-green-600">3</span>
                       </div>
                       <div>
-                        <h3 className="font-bold text-gray-900 text-lg mb-2">Auto-read from CMP storage</h3>
+                        <h3 className="font-bold text-gray-900 text-lg mb-2">Read IAB-standard consent storage (opt-in)</h3>
                         <p className="text-gray-600">
-                          Using OneTrust, Didomi, or another CMP? We read IAB-standard storage keys
-                          automatically. No code changes needed.
+                          Use the SDK helper to read IAB-standard consent keys (TCF + US Privacy) from
+                          app storage, then pass them into the SDK. There is no background scraping.
                         </p>
                       </div>
                     </div>
@@ -555,10 +569,10 @@ export default function FeaturesPage() {
                     <div className="flex items-start gap-3">
                       <CheckCircle className="w-6 h-6 text-green-600 flex-shrink-0 mt-0.5" />
                       <div>
-                        <h4 className="font-bold text-gray-900 mb-1">Automatic propagation</h4>
+                        <h4 className="font-bold text-gray-900 mb-1">Consistent signal plumbing</h4>
                         <p className="text-gray-600 text-sm">
-                          Set consent once. It flows to AdMob, AppLovin, ironSource, Unity, Meta, and every
-                          other network in your stack. No per-network configuration.
+                          Set consent once. The SDK includes consent signals in auction metadata and makes
+                          them available to adapters. Partner behavior depends on each integration.
                         </p>
                       </div>
                     </div>
@@ -595,7 +609,7 @@ export default function FeaturesPage() {
                       'Auto-normalize and match against SDK events',
                       'Classify deltas: underpay, IVT, timing, FX',
                       'Monthly Proof-of-Revenue certificates',
-                      'Export to BigQuery, ClickHouse, or S3',
+                      'Export to BigQuery, S3, or GCS',
                     ].map((item) => (
                       <li key={item} className="flex items-start gap-2 text-gray-700">
                         <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
@@ -672,7 +686,7 @@ export default function FeaturesPage() {
                   </h2>
                   <p className="text-lg text-gray-600 mb-6 max-w-[55ch]">
                     Every auction produces a tamper-evident record. Bids received, waterfall order,
-                    floor prices, winner selection—all SHA-256 signed and exportable.
+                    floor prices, winner selection—all Ed25519-signed and exportable.
                   </p>
                   <ul className="space-y-3 mb-6">
                     {[
@@ -779,7 +793,7 @@ export default function FeaturesPage() {
                   </h2>
                   <p className="text-lg text-gray-600 mb-8 max-w-[55ch]">
                     Monitor every layer. From SDK to network response,
-                    see exactly what&apos;s happening—and get alerted instantly.
+                    see exactly what&apos;s happening—and set clear alert thresholds.
                   </p>
                   <div className="grid grid-cols-2 gap-4">
                     {observabilityStack.map((item, index) => (

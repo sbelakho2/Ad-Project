@@ -86,16 +86,19 @@ const tools = [
     name: 'CLI',
     description: 'Validate configs, dry-run migrations, and inspect auction traces from your terminal.',
     icon: Terminal,
+    href: '/docs/developer-tools#cli',
   },
   {
     name: 'Test Console',
     description: 'Simulate auctions, test adapter integrations, and inspect bid responses in sandbox mode.',
     icon: Play,
+    href: '/docs/developer-tools#test-console',
   },
   {
     name: 'Figma Kit',
     description: 'UI components for building custom dashboards and internal tools with our design system.',
     icon: Palette,
+    href: '/docs/developer-tools#figma-kit',
   },
 ];
 
@@ -165,13 +168,13 @@ export default function DevelopersPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="light">
+        <PageHero>
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight mb-6">
                 SDKs built for ad teams who ship.
               </h1>
-              <p className="text-xl leading-relaxed text-slate-600 mb-8">
+              <p className="text-xl leading-relaxed mb-8">
                 Integrate once. Bring your own networks. Keep full control.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
@@ -189,6 +192,12 @@ export default function DevelopersPage() {
                   <BookOpen className="w-5 h-5" />
                   View Documentation
                 </a>
+              </div>
+
+              <div className="mt-8 mx-auto max-w-2xl rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-left">
+                <p className="text-sm text-slate-700 max-w-none">
+                  <span className="font-semibold">Naming:</span> Bel Consulting OÜ is the company. ApexMediation is the platform. BelAds is the SDK namespace.
+                </p>
               </div>
             </motion.div>
           </div>
@@ -208,7 +217,7 @@ export default function DevelopersPage() {
 
             <div className="grid md:grid-cols-2 gap-6 max-w-4xl mx-auto mb-12">
               <motion.a
-                href="/docs/playback-matrix#web-video"
+                href="/docs/ssai/quickstart-web"
                 {...getRevealProps(0.1)}
                 className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
               >
@@ -224,7 +233,7 @@ export default function DevelopersPage() {
               </motion.a>
 
               <motion.a
-                href="/docs/playback-matrix#ctv"
+                href="/docs/ssai/quickstart-ctv"
                 {...getRevealProps(0.15)}
                 className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
               >
@@ -338,17 +347,18 @@ export default function DevelopersPage() {
 
             <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
               {tools.map((tool, index) => (
-                <motion.div
+                <motion.a
                   key={tool.name}
                   {...getRevealProps(index * 0.1)}
-                  className="text-center"
+                  href={tool.href}
+                  className="text-center group"
                 >
                   <div className="w-16 h-16 bg-brand-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
                     <tool.icon className="w-8 h-8 text-brand-600" />
                   </div>
-                  <h3 className="text-xl font-bold text-gray-900 mb-2">{tool.name}</h3>
+                  <h3 className="text-xl font-bold text-gray-900 mb-2 group-hover:text-brand-600">{tool.name}</h3>
                   <p className="text-gray-600">{tool.description}</p>
-                </motion.div>
+                </motion.a>
               ))}
             </div>
           </div>

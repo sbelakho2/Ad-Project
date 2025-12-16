@@ -116,7 +116,7 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <PageHero variant="dark">
+    <PageHero>
       <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
         {/* Left: Copy */}
         <motion.div {...getRevealProps(0)} className="max-w-3xl">
@@ -236,7 +236,7 @@ function ProofStripSection() {
     {
       icon: Target,
       title: 'Public SLO Targets',
-      description: `${sloConfig.availability.target} availability, ${sloConfig.latency.p50} latency`,
+      description: `${sloConfig.availability.target} availability, decision latency p95 ${sloConfig.latency.p95}`,
       href: '/slo',
     },
     {

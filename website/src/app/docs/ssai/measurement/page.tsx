@@ -160,7 +160,7 @@ export default function MeasurementSemanticsPage() {
                 <ul className="text-sm text-gray-600 space-y-1">
                   <li>• First event with key → delivered</li>
                   <li>• Duplicate within TTL → silently dropped</li>
-                  <li>• Duplicate after TTL → logged as "late"</li>
+                  <li>• Duplicate after TTL → logged as &quot;late&quot;</li>
                   <li>• TTL: 24 hours for VOD, 4 hours for Live</li>
                 </ul>
               </div>

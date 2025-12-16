@@ -45,7 +45,7 @@ const values = [
   },
   {
     title: 'Reliability',
-    description: `${sloConfig.availability.target} uptime with ${sloConfig.latency.p99} p99 latency. We treat downtime as seriously as you do.`,
+    description: `${sloConfig.availability.target} uptime with decision latency p99 ${sloConfig.latency.p99}. We treat downtime as seriously as you do.`,
     icon: Scale,
   },
 ];
@@ -63,7 +63,7 @@ export default function CompanyPage() {
       <main className="relative bg-white text-slate-900">
         <SiteHeader />
 
-        <PageHero variant="dark">
+        <PageHero>
           <motion.div
             {...getRevealProps(0)}
             className="max-w-3xl mx-auto text-center md:text-left"
@@ -204,8 +204,11 @@ export default function CompanyPage() {
                   <div className="bg-slate-50 rounded-xl p-6 border border-slate-200/70">
                     <p className="text-slate-600 mb-4">
                       Headquartered in Estonia, serving publishers worldwide with
-                      infrastructure deployed across multiple regions for low-latency ad
-                      serving.
+                      infrastructure designed for regional redundancy. Current regions and
+                      reliability targets are published on our SLO page.
+                    </p>
+                    <p className="text-sm text-slate-600">
+                      <a href="/slo" className="underline">apexmediation.ee/slo</a>
                     </p>
                     <ul className="space-y-2 text-slate-600">
                       <li className="flex items-center gap-2">

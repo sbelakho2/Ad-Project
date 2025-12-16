@@ -60,7 +60,7 @@ const pricingTiers = [
   {
     name: 'Scale',
     price: '2.0%',
-    badge: '1.25% with annual',
+    annualPrice: '1.25% with annual',
     icon: Layers,
     description: 'For publishers with advanced analytics needs.',
     features: [
@@ -127,7 +127,7 @@ export default function PricingPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="dark">
+        <PageHero>
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
@@ -170,6 +170,11 @@ export default function PricingPage() {
                   <p className={`text-lg font-semibold mb-4 ${tier.accent ? 'text-brand-100' : 'text-brand-600'}`}>
                     {tier.price}
                   </p>
+                  {('annualPrice' in tier) && tier.annualPrice && (
+                    <p className={`text-sm -mt-3 mb-4 ${tier.accent ? 'text-brand-200' : 'text-gray-600'}`}>
+                      {tier.annualPrice}
+                    </p>
+                  )}
                   <p className={`text-sm mb-6 ${tier.accent ? 'text-brand-100' : 'text-gray-600'}`}>
                     {tier.description}
                   </p>

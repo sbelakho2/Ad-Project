@@ -21,7 +21,7 @@ import type { TrackingEvent } from './types';
 export { EventTracker, EventTrackerConfig } from './EventTracker';
 
 // Deduplication
-export { DedupeLayer, DedupeResult, CrossSourceReconciler } from './DedupeLayer';
+export { DedupeLayer } from './DedupeLayer';
 
 // VOD Reconciliation
 export { VODReconciler, VODReconcilerConfig } from './VODReconciler';

@@ -84,9 +84,9 @@ export function SignatureChainCard({ className }: { className?: string }) {
 ├─ Bids:       [A: $2.50, B: $2.45, C: $2.10]
 ├─ Winner:     Network A
 ├─ Floor:      $2.00
-└─ Signature:  SHA-256:4f3a...d82c
+└─ Signature:  Ed25519:AbCd...1234
 
-Verify:     export → hash → compare
+Verify:     export → canonicalize → verify
 Dispute:    cryptographic evidence`}
     </VisualCard>
   );
@@ -115,7 +115,7 @@ export function RetentionMatrixCard({ className }: { className?: string }) {
 {`┌───────────┬─────────────────┐
 │ Starter   │ 30 days         │
 │ Growth    │ 90 days         │
-│ Scale     │ Exports avail.  │
+│ Scale     │ 1 year          │
 │ Enterprise│ Custom + archive│
 └───────────┴─────────────────┘
 

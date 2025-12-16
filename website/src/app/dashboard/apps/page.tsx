@@ -242,7 +242,7 @@ export default function AppsPage() {
               <li>4. Handle ad events</li>
               <li>5. Test with test mode enabled</li>
             </ol>
-            <a href="/documentation#sdk-reference" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
+            <a href="/docs" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
               View Mobile Docs →
             </a>
           </div>
@@ -258,7 +258,7 @@ export default function AppsPage() {
               <li>4. Script ad loading logic</li>
               <li>5. Build and test on device</li>
             </ol>
-            <a href="/documentation#sdk-reference" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
+            <a href="/docs" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
               View Unity Docs →
             </a>
           </div>
@@ -274,7 +274,7 @@ export default function AppsPage() {
               <li>4. Call displayAd() method</li>
               <li>5. Handle ad callbacks</li>
             </ol>
-            <a href="/documentation#sdk-reference" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
+            <a href="/docs" className="text-brand-700 font-bold text-sm underline mt-3 inline-block">
               View Web Docs →
             </a>
           </div>
@@ -571,7 +571,7 @@ function AppModal({ state, onClose }: { state: ModalState; onClose: () => void }
             Close
           </button>
           {state.type === 'add' ? (
-            <a href="/documentation#integration-checklist" className="btn-primary px-6 py-3 text-sm">
+            <a href="/docs" className="btn-primary px-6 py-3 text-sm">
               Start Integration
             </a>
           ) : (

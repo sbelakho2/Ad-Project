@@ -1,6 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
+import HeroShell, { type HeroShellVariant } from '@/components/HeroShell';
 
 /**
  * PageHero - Shared Hero Section Component
@@ -36,18 +37,16 @@ export default function PageHero({
   children,
   className,
 }: {
-  variant: PageHeroVariant;
+  variant?: PageHeroVariant;
   children: ReactNode;
   className?: string;
 }) {
-  const variantClasses =
-    variant === 'dark'
-      ? 'bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white'
-      : 'bg-white text-slate-900';
+  const heroVariant: HeroShellVariant | undefined =
+    variant === 'dark' ? 'marketingDark' : variant === 'light' ? 'trustLight' : undefined;
 
   return (
-    <section className={[variantClasses, className].filter(Boolean).join(' ')}>
-      <div className="container mx-auto px-4 py-16 md:py-20">{children}</div>
-    </section>
+    <HeroShell variant={heroVariant} className={className}>
+      {children}
+    </HeroShell>
   );
 }

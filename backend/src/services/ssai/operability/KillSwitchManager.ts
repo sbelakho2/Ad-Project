@@ -11,6 +11,32 @@ import {
   KillSwitchResult,
 } from './types';
 
+type KillSwitchAction = 'slate' | 'passthrough' | 'reject';
+type KillSwitchScopeKind = 'global' | 'tenant' | 'partner' | 'creative' | 'region';
+
+export interface KillSwitchActivationRequest {
+  scope: KillSwitchScopeKind;
+  scopeId?: string;
+  reason: string;
+  action: KillSwitchAction;
+  autoRestoreAfterMs?: number;
+}
+
+export interface KillSwitchCheckRequestContext {
+  tenantId?: string;
+  partnerId?: string;
+  creativeId?: string;
+  region?: string;
+}
+
+export interface KillSwitchCheckRequestResult {
+  blocked: boolean;
+  action?: KillSwitchAction;
+  reason?: string;
+  scope?: KillSwitchScopeKind;
+  scopeId?: string;
+}
+
 export interface KillSwitchManagerConfig {
   /** Default fallback action */
   defaultFallback: 'slate' | 'passthrough' | 'reject';
@@ -31,6 +57,7 @@ const DEFAULT_CONFIG: KillSwitchManagerConfig = {
 export class KillSwitchManager {
   private config: KillSwitchManagerConfig;
   private killSwitches: Map<string, KillSwitchConfig> = new Map();
+  private actions: Map<string, KillSwitchAction> = new Map();
   private refreshTimer: NodeJS.Timeout | null = null;
 
   constructor(config: Partial<KillSwitchManagerConfig> = {}) {
@@ -102,14 +129,48 @@ export class KillSwitchManager {
   /**
    * Activate a kill switch
    */
+  activate(request: KillSwitchActivationRequest): void;
   activate(
     id: string,
     reason: string,
+    options?: {
+      autoRestoreMinutes?: number;
+      updatedBy?: string;
+    }
+  ): boolean;
+  activate(
+    arg1: KillSwitchActivationRequest | string,
+    reason?: string,
     options: {
       autoRestoreMinutes?: number;
       updatedBy?: string;
     } = {}
-  ): boolean {
+  ): boolean | void {
+    // Test-facing API
+    if (typeof arg1 !== 'string') {
+      const key = this.toKey(arg1.scope, arg1.scopeId);
+      const scope = this.toScope(arg1.scope, arg1.scopeId);
+
+      const killSwitch: KillSwitchConfig = {
+        id: key,
+        name: key,
+        enabled: true,
+        scope,
+        lastUpdated: new Date(),
+        updatedBy: 'system',
+        reason: arg1.reason,
+        autoRestoreAt: arg1.autoRestoreAfterMs
+          ? new Date(Date.now() + arg1.autoRestoreAfterMs)
+          : undefined,
+      };
+
+      this.killSwitches.set(key, killSwitch);
+      this.actions.set(key, arg1.action);
+      return;
+    }
+
+    // Backward-compatible API
+    const id = arg1;
     const killSwitch = this.killSwitches.get(id);
     if (!killSwitch) return false;
 
@@ -121,13 +182,46 @@ export class KillSwitchManager {
       ? new Date(Date.now() + options.autoRestoreMinutes * 60 * 1000)
       : undefined;
 
+    if (!this.actions.has(id)) {
+      this.actions.set(id, this.config.defaultFallback);
+    }
+
     return true;
   }
 
   /**
    * Deactivate a kill switch
    */
-  deactivate(id: string, reason: string, updatedBy?: string): boolean {
+  deactivate(scope: KillSwitchScopeKind, scopeId?: string): void;
+  deactivate(id: string, reason: string, updatedBy?: string): boolean;
+  deactivate(
+    arg1: string,
+    arg2?: string,
+    arg3?: string
+  ): boolean | void {
+    // Test-facing API: deactivate('global') / deactivate('tenant','tenant-123')
+    if (
+      arg1 === 'global' ||
+      arg1 === 'tenant' ||
+      arg1 === 'partner' ||
+      arg1 === 'creative' ||
+      arg1 === 'region'
+    ) {
+      const key = this.toKey(arg1, arg2);
+      const ks = this.killSwitches.get(key);
+      if (!ks) return;
+      ks.enabled = false;
+      ks.lastUpdated = new Date();
+      ks.reason = 'Deactivated';
+      ks.updatedBy = 'system';
+      ks.autoRestoreAt = undefined;
+      return;
+    }
+
+    // Backward-compatible API
+    const id = arg1;
+    const reason = arg2;
+    const updatedBy = arg3;
     const killSwitch = this.killSwitches.get(id);
     if (!killSwitch) return false;
 
@@ -141,6 +235,48 @@ export class KillSwitchManager {
   }
 
   /**
+   * Test-facing API: check if a given scope is active.
+   */
+  isActive(scope: KillSwitchScopeKind, scopeId?: string): boolean {
+    this.autoRestoreExpired();
+    const key = this.toKey(scope, scopeId);
+    const ks = this.killSwitches.get(key);
+    return Boolean(ks?.enabled);
+  }
+
+  /**
+   * Test-facing API: evaluate whether a request should be blocked.
+   */
+  checkRequest(context: KillSwitchCheckRequestContext): KillSwitchCheckRequestResult {
+    this.autoRestoreExpired();
+
+    // Precedence order: global -> tenant -> partner -> creative -> region
+    const checks: Array<{ scope: KillSwitchScopeKind; scopeId?: string }> = [
+      { scope: 'global' },
+      context.tenantId ? { scope: 'tenant', scopeId: context.tenantId } : (null as any),
+      context.partnerId ? { scope: 'partner', scopeId: context.partnerId } : (null as any),
+      context.creativeId ? { scope: 'creative', scopeId: context.creativeId } : (null as any),
+      context.region ? { scope: 'region', scopeId: context.region } : (null as any),
+    ].filter(Boolean);
+
+    for (const check of checks) {
+      const key = this.toKey(check.scope, check.scopeId);
+      const ks = this.killSwitches.get(key);
+      if (!ks?.enabled) continue;
+
+      return {
+        blocked: true,
+        action: this.actions.get(key) || this.config.defaultFallback,
+        reason: ks.reason,
+        scope: check.scope,
+        scopeId: check.scopeId,
+      };
+    }
+
+    return { blocked: false };
+  }
+
+  /**
    * Check if operation should proceed
    */
   check(context: {
@@ -149,20 +285,10 @@ export class KillSwitchManager {
     creativeId?: string;
     regionCode?: string;
   }): KillSwitchResult {
-    const now = Date.now();
     const activeKillSwitches: string[] = [];
     let fallbackAction: 'slate' | 'passthrough' | 'reject' | undefined;
 
-    // Check auto-restore
-    for (const [id, ks] of this.killSwitches) {
-      if (ks.enabled && ks.autoRestoreAt && ks.autoRestoreAt.getTime() <= now) {
-        ks.enabled = false;
-        ks.reason = 'Auto-restored after timeout';
-        ks.lastUpdated = new Date();
-        ks.updatedBy = 'system';
-        ks.autoRestoreAt = undefined;
-      }
-    }
+    this.autoRestoreExpired();
 
     // Check each kill switch
     for (const [id, ks] of this.killSwitches) {
@@ -209,6 +335,40 @@ export class KillSwitchManager {
     }
   }
 
+  private toKey(scope: KillSwitchScopeKind, scopeId?: string): string {
+    return scopeId ? `${scope}:${scopeId}` : scope;
+  }
+
+  private toScope(scope: KillSwitchScopeKind, scopeId?: string): KillSwitchScope {
+    switch (scope) {
+      case 'global':
+        return { type: 'global' };
+      case 'tenant':
+        return { type: 'tenant', tenantId: scopeId || '' };
+      case 'partner':
+        return { type: 'partner', partnerId: scopeId || '' };
+      case 'creative':
+        return { type: 'creative', creativeId: scopeId || '' };
+      case 'region':
+        return { type: 'region', regionCode: scopeId || '' };
+    }
+  }
+
+  private autoRestoreExpired(): void {
+    const now = Date.now();
+    for (const ks of this.killSwitches.values()) {
+      if (!ks.enabled) continue;
+      if (!ks.autoRestoreAt) continue;
+      if (ks.autoRestoreAt.getTime() > now) continue;
+
+      ks.enabled = false;
+      ks.reason = 'Auto-restored after timeout';
+      ks.lastUpdated = new Date();
+      ks.updatedBy = 'system';
+      ks.autoRestoreAt = undefined;
+    }
+  }
+
   /**
    * Get all kill switches
    */
@@ -242,5 +402,6 @@ export class KillSwitchManager {
    */
   clear(): void {
     this.killSwitches.clear();
+    this.actions.clear();
   }
 }

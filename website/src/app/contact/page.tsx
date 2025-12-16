@@ -7,6 +7,7 @@ import {
   Mail,
   MessageSquare,
   Send,
+  ShieldCheck,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -61,19 +62,36 @@ export default function ContactPage() {
     }));
   };
 
+  const routeHint = (() => {
+    switch (formData.reason) {
+      case 'Security / Compliance':
+        return {
+          title: 'Security / Compliance routing',
+          body: `For security and compliance inquiries, you can also email ${legalEntity.contact.securityEmail}.`,
+        };
+      case 'Technical support':
+        return {
+          title: 'Technical support routing',
+          body: `If you are an existing customer, your support channel may include Slack; otherwise submit this form and we will route your request.`,
+        };
+      default:
+        return null;
+    }
+  })();
+
   return (
     <>
       <main className="relative bg-white text-slate-900">
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero variant="light">
+        <PageHero>
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-4">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight mb-4">
                 Let&apos;s talk.
               </h1>
-              <p className="text-xl leading-relaxed text-slate-600">
+              <p className="text-xl leading-relaxed">
                 Whether you&apos;re evaluating, integrating, or scaling—we&apos;re here to help.
               </p>
             </motion.div>
@@ -103,11 +121,32 @@ export default function ContactPage() {
                       <div>
                         <h3 className="font-semibold text-gray-900 mb-1">Email</h3>
                         <a 
-                          href="mailto:contact@apexmediation.ee" 
+                          href={`mailto:${legalEntity.contact.email}`}
                           className="text-brand-600 hover:underline"
                         >
-                          contact@apexmediation.ee
+                          {legalEntity.contact.email}
                         </a>
+                        <p className="text-xs text-gray-600 mt-1">
+                          General inquiries and sales.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 bg-brand-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <ShieldCheck className="w-6 h-6 text-brand-600" />
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-gray-900 mb-1">Security / compliance</h3>
+                        <a
+                          href={`mailto:${legalEntity.contact.securityEmail}`}
+                          className="text-brand-600 hover:underline"
+                        >
+                          {legalEntity.contact.securityEmail}
+                        </a>
+                        <p className="text-xs text-gray-600 mt-1">
+                          Security questionnaires, DPAs, and incident reporting.
+                        </p>
                       </div>
                     </div>
 
@@ -234,13 +273,15 @@ export default function ContactPage() {
                           </div>
                           <div>
                             <label htmlFor="reason" className="block text-sm font-medium text-gray-700 mb-2">
-                              What can we help with?
+                              What can we help with? *
                             </label>
                             <select
                               id="reason"
                               name="reason"
+                              required
                               value={formData.reason}
                               onChange={handleChange}
+                              aria-describedby={routeHint ? 'reason-help' : undefined}
                               className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition-colors bg-white"
                             >
                               <option value="">Select a topic</option>
@@ -248,6 +289,11 @@ export default function ContactPage() {
                                 <option key={reason} value={reason}>{reason}</option>
                               ))}
                             </select>
+                            {routeHint && (
+                              <p id="reason-help" className="mt-2 text-sm text-gray-600" role="status" aria-live="polite">
+                                <span className="font-medium text-gray-900">{routeHint.title}:</span> {routeHint.body}
+                              </p>
+                            )}
                           </div>
                         </div>
 

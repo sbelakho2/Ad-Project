@@ -217,7 +217,7 @@ segment051.m4s`;
       firstSegment: 'segment020.m4s'
     };
 
-    const seekValid = mockSeekResult.requiredInit && mockSeekResult.firstSegment;
+    const seekValid = Boolean(mockSeekResult.requiredInit && mockSeekResult.firstSegment);
 
     this.results.push({
       name: 'seek_init_aware',

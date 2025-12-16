@@ -111,7 +111,7 @@ export default function PlaybackMatrixPage() {
         </header>
 
         {/* Hero */}
-        <PageHero variant="light" className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
