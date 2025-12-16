@@ -200,14 +200,14 @@ export class SSAIManifestParser {
     // Look for EventStream elements
     const eventStreams = doc.querySelectorAll('EventStream');
 
-    for (const eventStream of eventStreams) {
+    for (const eventStream of Array.from(eventStreams)) {
       const schemeIdUri = eventStream.getAttribute('schemeIdUri') || '';
 
       // SCTE-35 event stream
       if (schemeIdUri.includes('scte35') || schemeIdUri.includes('urn:scte:scte35')) {
         const events = eventStream.querySelectorAll('Event');
 
-        for (const event of events) {
+        for (const event of Array.from(events)) {
           const eventData = this.parseDASHEvent(event, schemeIdUri);
           if (eventData) {
             const adBreak = this.eventToAdBreak(eventData);
@@ -223,7 +223,7 @@ export class SSAIManifestParser {
     const periods = doc.querySelectorAll('Period');
     let periodStart = 0;
 
-    for (const period of periods) {
+    for (const period of Array.from(periods)) {
       const id = period.getAttribute('id') || '';
       const durationStr = period.getAttribute('duration');
 

@@ -20,7 +20,8 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -101,28 +102,26 @@ const complianceBadges = [
 export default function SecurityPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
+        <PageHero variant="light" className="bg-slate-50 border-b border-slate-200/60">
+          <div className="text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <div className="w-16 h-16 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-6">
                 <ShieldCheck className="w-8 h-8 text-white" />
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-6">
                 Security that scales with your trust.
               </h1>
-              <p className="text-xl text-gray-600">
-                We believe mediation should be verifiable, not just trustworthy. 
+              <p className="text-xl leading-relaxed text-slate-600">
+                We believe mediation should be verifiable, not just trustworthy.
                 Every auction is cryptographically signed. Every decision is auditable.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Security Pillars */}
         <section className="py-16">

@@ -8,6 +8,7 @@ import { test, expect } from '@playwright/test';
  * - Security Pack Page (/security-pack)
  * - Verification Docs Page (/docs/verification)
  * - Playback Matrix Page (/docs/playback-matrix)
+ * - SSAI Evaluation Sandbox (/docs/getting-started/sandbox)
  */
 
 test.describe('SLO/SLA Page', () => {
@@ -390,5 +391,91 @@ test.describe('Trust Package Accessibility', () => {
       const viewport = await page.locator('meta[name="viewport"]').first().getAttribute('content');
       expect(viewport).toContain('width=');
     }
+  });
+});
+
+test.describe('SSAI Evaluation Sandbox Page', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/docs/getting-started/sandbox');
+  });
+
+  test('page loads with correct hero content', async ({ page }) => {
+    await expect(page.locator('h1')).toContainText(/sandbox|evaluation/i);
+    await expect(page.locator('main').first()).toBeVisible();
+    await expect(page.locator('nav').first()).toBeVisible();
+    await expect(page.locator('footer').first()).toBeVisible();
+  });
+
+  test('displays start demo button', async ({ page }) => {
+    const startButton = page.getByRole('button', { name: /start demo/i });
+    await expect(startButton).toBeVisible();
+  });
+
+  test('shows sample manifest URLs', async ({ page }) => {
+    const pageContent = await page.content();
+    
+    // Check for HLS and DASH URLs
+    expect(pageContent).toMatch(/hls|\.m3u8/i);
+    expect(pageContent).toMatch(/dash|\.mpd/i);
+  });
+
+  test('displays live event console', async ({ page }) => {
+    const pageContent = await page.content();
+    
+    expect(pageContent).toMatch(/live.*console|event console/i);
+  });
+
+  test('shows platform integration examples', async ({ page }) => {
+    const pageContent = await page.content();
+    
+    // Check for player integration snippets
+    expect(pageContent).toMatch(/web|ios|android/i);
+    expect(pageContent).toMatch(/avplayer|exoplayer|hls\.js|shaka/i);
+  });
+
+  test('demo simulation works when started', async ({ page }) => {
+    // Click start button
+    const startButton = page.getByRole('button', { name: /start demo/i });
+    await startButton.click();
+    
+    // Wait for events to start appearing
+    await page.waitForTimeout(2000);
+    
+    // Check that events are showing
+    const pageContent = await page.content();
+    expect(pageContent).toMatch(/session_init|cue_received|auction/i);
+  });
+
+  test('shows auction results after demo runs', async ({ page }) => {
+    // Click start button
+    const startButton = page.getByRole('button', { name: /start demo/i });
+    await startButton.click();
+    
+    // Wait for auction results section
+    await page.waitForTimeout(4000);
+    
+    // Check for auction results
+    const pageContent = await page.content();
+    expect(pageContent).toMatch(/pod summary|partner responses|auction results/i);
+  });
+
+  test('screenshot for visual verification', async ({ page }) => {
+    await page.screenshot({ 
+      path: 'test-results/screenshots/trust-package/sandbox-page.png', 
+      fullPage: true 
+    });
+  });
+
+  test('sandbox page mobile responsive', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('/docs/getting-started/sandbox');
+    
+    await expect(page.locator('h1')).toBeVisible();
+    await expect(page.locator('main').first()).toBeVisible();
+    
+    await page.screenshot({ 
+      path: 'test-results/screenshots/trust-package/sandbox-mobile.png', 
+      fullPage: true 
+    });
   });
 });

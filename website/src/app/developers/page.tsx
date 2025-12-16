@@ -15,7 +15,8 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -160,19 +161,17 @@ banner.show(document.getElementById('ad-container'));`,
 export default function DevelopersPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
-          <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+        <PageHero variant="light">
+          <div className="text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-6">
                 SDKs built for ad teams who ship.
               </h1>
-              <p className="text-xl text-gray-600 mb-8">
+              <p className="text-xl leading-relaxed text-slate-600 mb-8">
                 Integrate once. Bring your own networks. Keep full control.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
@@ -193,7 +192,7 @@ export default function DevelopersPage() {
               </div>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Quickstarts */}
         <section className="py-16 bg-gray-50">

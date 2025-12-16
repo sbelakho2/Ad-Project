@@ -25,8 +25,9 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import { VisualCard } from '@/components/VisualCard';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -373,29 +374,27 @@ function PlatformTabsSection() {
 export default function FeaturesPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-4xl mx-auto">
+        <PageHero variant="dark">
+          <div className="text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <div className="w-20 h-20 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
                 <Sparkles className="w-10 h-10 text-white" />
               </div>
-              <h1 className="text-4xl md:text-6xl font-bold text-gray-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
                 Features that just work.
               </h1>
-              <p className="text-xl md:text-2xl text-gray-600 max-w-3xl mx-auto">
+              <p className="text-xl leading-relaxed text-slate-200/90 max-w-3xl mx-auto">
                 Unified API. Privacy handled. All networks, one integration.
                 <br className="hidden md:block" />
                 Copy, paste, ship.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Platform Tabs */}
         <PlatformTabsSection />

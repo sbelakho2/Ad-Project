@@ -9,10 +9,12 @@ const LAST_UPDATED = '2025-12-12';
 export default function DpaPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <header className="bg-white border-b border-slate-200/60">
+          <div className="container mx-auto px-4 py-6">
+            <HomeNav />
+          </div>
+        </header>
 
         <section className="py-14 md:py-16">
           <div className="container mx-auto px-4">

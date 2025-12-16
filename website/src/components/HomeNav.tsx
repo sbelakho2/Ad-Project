@@ -6,6 +6,9 @@ import { useState, useEffect } from 'react';
 
 /**
  * Homepage navigation - cleaned up and simplified
+ * 
+ * ⚠️ Navigation order is LOCKED (see DESIGN_SYSTEM.md)
+ * Changes require UX review + A/B test validation
  */
 export default function HomeNav() {
   const pathname = usePathname();
@@ -29,13 +32,15 @@ export default function HomeNav() {
     };
   }, [mobileMenuOpen]);
 
+  // ⚠️ LOCKED NAVIGATION ORDER - Do not reorder without design review
+  // Current: Product → Features → Pricing → Company → Developers → Security
   const navItems = [
     { label: 'Product', href: '/product' },
     { label: 'Features', href: '/features' },
     { label: 'Pricing', href: '/pricing' },
+    { label: 'Company', href: '/company' },
     { label: 'Developers', href: '/developers' },
     { label: 'Security', href: '/security' },
-    { label: 'Company', href: '/company' },
   ];
 
   const isActive = (href: string) => pathname === href;
@@ -61,7 +66,7 @@ export default function HomeNav() {
               key={item.href}
               href={item.href}
               aria-current={isActive(item.href) ? 'page' : undefined}
-              className={`text-white font-medium text-sm hover:text-brand-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-400 ${isActive(item.href) ? 'text-brand-300' : ''}`}
+              className={`text-gray-700 font-medium text-sm hover:text-brand-600 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600 ${isActive(item.href) ? 'text-brand-600' : ''}`}
             >
               {item.label}
             </Link>
@@ -70,7 +75,7 @@ export default function HomeNav() {
           <div className="flex items-center gap-3 ml-4">
             <Link
               href="/signin"
-              className="text-white font-medium text-sm hover:text-brand-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-400"
+              className="text-gray-700 font-medium text-sm hover:text-brand-600 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
             >
               Sign In
             </Link>
@@ -92,7 +97,7 @@ export default function HomeNav() {
         <button
           type="button"
           onClick={toggleMenu}
-          className="text-white p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-400"
+          className="text-gray-700 p-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
           aria-expanded={mobileMenuOpen}
           aria-controls="mobile-navigation"
           aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}

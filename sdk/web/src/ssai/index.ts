@@ -9,13 +9,15 @@
 export * from './types';
 
 // Session Client
-export { SSAISessionClient, SSAISessionClientConfig } from './SSAISessionClient';
+export { SSAISessionClient } from './SSAISessionClient';
+export type { SSAISessionClientConfig } from './SSAISessionClient';
 
 // Manifest Parser
 export { SSAIManifestParser } from './SSAIManifestParser';
 
 // Player Monitor
-export { SSAIPlayerMonitor, SSAIPlayerMonitorConfig } from './SSAIPlayerMonitor';
+export { SSAIPlayerMonitor } from './SSAIPlayerMonitor';
+export type { SSAIPlayerMonitorConfig } from './SSAIPlayerMonitor';
 
 // Convenience function to create SSAI integration
 import { SSAIConfig, SSAISession, SSAIPlayerEvents } from './types';

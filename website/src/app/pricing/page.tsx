@@ -12,8 +12,9 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import { RetentionMatrixCard } from '@/components/VisualCard';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -122,24 +123,22 @@ const faqs = [
 export default function PricingPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+        <PageHero variant="dark">
+          <div className="text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
                 Transparent pricing for a transparent mediation layer.
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl leading-relaxed text-slate-200/90">
                 Networks pay you directly—100% of your ad revenue is yours. We charge a predictable platform fee based on your usage.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Pricing Tiers */}
         <section className="py-16 bg-gray-50">

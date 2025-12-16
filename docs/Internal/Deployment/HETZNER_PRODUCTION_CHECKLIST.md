@@ -205,9 +205,12 @@ redis-cli -a <password> INFO memory
 Caddy handles automatic TLS certificate provisioning and renewal via Let's Encrypt.
 
 Domains served:
-- `apexmediation.ee` → Console (port 3000)
+- `apexmediation.ee` / `www.apexmediation.ee` → Website (port 3002)
 - `console.apexmediation.ee` → Console (port 3000)
 - `api.apexmediation.ee` → Backend API (port 8080)
+
+Operator access:
+- `admin.apexmediation.ee` → Control Plane (port 4000)
 
 ### 5.2 Certificate Status
 
@@ -262,7 +265,7 @@ All targets should show UP status at `/targets`:
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 # Run migrations
-cd /opt/apex && docker compose exec backend npm run migrate
+cd /opt/adproject && docker compose -f docker-compose.hetzner.yml exec backend npm run migrate
 ```
 
 ### 7.2 Backups
@@ -305,7 +308,10 @@ ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adprojec
 tar -czvf /tmp/deploy.tar.gz --exclude='node_modules' --exclude='.next' --exclude='dist' \
   backend/src backend/package.json \
   console/src console/package.json \
-  website/src website/package.json \
+  website/src website/public \
+  website/package.json website/package-lock.json \
+  website/next.config.js website/tsconfig.json \
+  website/tailwind.config.ts website/postcss.config.js \
   control-plane/src control-plane/package.json
 
 # 2. Upload to production
@@ -319,9 +325,16 @@ tar -xzvf deploy.tar.gz
 docker compose -f docker-compose.hetzner.yml build backend console
 docker compose -f docker-compose.hetzner.yml up -d backend console
 
+cd /opt/adproject/website
+npm ci
+npm run build
+pm2 start npm --name website -- start -- -p 3002
+pm2 save
+
 # 4. Verify
 curl http://localhost:8080/health
 curl -I http://localhost:3000
+curl -I http://localhost:3002
 ```
 
 ### 8.2 Deploy Backend
@@ -370,9 +383,15 @@ curl -I http://localhost:3000
 
 ```bash
 # Website runs on port 3002 (Grafana uses 3001)
-# From local machine
-tar -czvf /tmp/website-deploy.tar.gz --exclude='node_modules' --exclude='.next' \
-  website/src website/package.json website/next.config.js
+# Deployment is tarball upload + install/build on the server + PM2 restart.
+
+# From local machine (repo root)
+tar -czvf /tmp/website-deploy.tar.gz \
+  --exclude='node_modules' --exclude='.next' --exclude='test-results' \
+  website/src website/public \
+  website/package.json website/package-lock.json \
+  website/next.config.js website/tsconfig.json \
+  website/tailwind.config.ts website/postcss.config.js
 
 scp -i ~/.ssh/hetzner-db-mac /tmp/website-deploy.tar.gz root@46.62.252.96:/opt/adproject/
 
@@ -380,11 +399,13 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd /opt/adproject
 tar -xzvf website-deploy.tar.gz
 
-# Build and run (website is not in hetzner compose, run manually)
-docker build -t adproject-website:latest ./website
-docker rm -f adproject-website-1 2>/dev/null
-docker run -d --name adproject-website-1 --network adproject_apex-net \
-  -p 3002:3001 -e NODE_ENV=production adproject-website:latest
+cd /opt/adproject/website
+npm ci
+npm run build
+
+# Start/restart via PM2 (keeps it pinned on port 3002)
+pm2 start npm --name website -- start -- -p 3002
+pm2 save
 
 curl -I http://localhost:3002
 ```
@@ -418,7 +439,7 @@ systemctl status control-plane
 |---------|---------------|-----------|-------|
 | Backend | 8080 | 8080 | API server |
 | Console | 3000 | 3000 | Next.js standalone |
-| Website | 3001 | 3002 | Grafana uses 3001 |
+| Website | N/A | 3002 | PM2 process (Grafana uses 3001) |
 | Control Plane | 4000 | 4000 | Systemd service (not Docker) |
 | Redis | 6379 | 6379 | System service (not Docker) |
 | PostgreSQL | 5432 | 5432 | DB server (not Docker) |
@@ -444,14 +465,13 @@ systemctl status control-plane
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 # Navigate to project
-cd /opt/apex
+cd /opt/adproject
 
-# Rollback to previous commit
-git checkout HEAD~1
-
-# Rebuild and restart
-docker compose build
-docker compose up -d
+# Rollback uses a previously known-good tarball (production server has no git).
+# Re-upload the older tarball and repeat the relevant deploy steps in Section 8.
+# Then restart only the affected service:
+# - backend/console: docker compose -f docker-compose.hetzner.yml up -d --build <svc>
+# - website: pm2 restart website
 
 # Verify
 curl https://api.apexmediation.ee/health

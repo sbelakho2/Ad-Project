@@ -17,8 +17,9 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import { SignatureChainCard, MigrationPipelineCard, CircuitBreakerCard } from '@/components/VisualCard';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -106,24 +107,22 @@ const observabilityFeatures = [
 export default function ProductPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
-            <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-6">
+        <PageHero variant="dark">
+          <div className="text-center">
+            <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
                 One mediation layer. Your networks. Your rules.
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl leading-relaxed text-slate-200/90">
                 ApexMediation is the neutral orchestration layer between your apps and your ad networks, with SDKs tuned for reliability and a console built for serious teams.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* BYO Model - two column with card */}
         <section className="py-16 bg-gray-50">

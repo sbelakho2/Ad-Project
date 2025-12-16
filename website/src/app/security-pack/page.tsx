@@ -8,7 +8,6 @@ import {
   FileText,
   Key,
   Lock,
-  RefreshCw,
   Server,
   Shield,
   ShieldCheck,
@@ -26,33 +25,33 @@ const getRevealProps = (delay = 0) => ({
 
 const securityPackContents = [
   {
-    title: 'Architecture Overview',
-    description: 'System architecture diagram, data flow, component separation, and network topology.',
+    title: 'Infrastructure Architecture',
+    description: 'Two-server topology (App + DB), Caddy TLS termination, Redis caching, PostgreSQL 16 persistence, network isolation.',
     icon: Server,
   },
   {
-    title: 'Encryption & Key Management',
-    description: 'TLS 1.3 in transit, AES-256 at rest, key rotation procedures, and HSM usage.',
+    title: 'Encryption Standards',
+    description: 'TLS via Caddy (Let\'s Encrypt auto-provisioning), AES-256-GCM for secrets at rest with 12-byte IV and auth tags.',
     icon: Key,
   },
   {
     title: 'Access Control (RBAC)',
-    description: 'Role definitions, permission matrices, and authentication flows for Console and APIs.',
+    description: 'Three-tier customer roles (admin, publisher, readonly) with separate operator authentication for system access.',
     icon: Lock,
   },
   {
     title: 'Audit Logging',
-    description: 'What gets logged, retention periods, tamper-evidence, and export formats.',
+    description: 'Structured logging via Winston, separate audit stream for compliance, configurable retention (30-90 days by plan).',
     icon: FileText,
   },
   {
     title: 'Threat Model',
-    description: 'Cache poisoning, token leakage, SSRF, replay attacks, and mitigation controls.',
+    description: 'Defense-in-depth: cache controls, circuit breakers, dedupe layers, Ed25519-signed auction logs, replay protection.',
     icon: Shield,
   },
   {
-    title: 'Compliance Summary',
-    description: 'GDPR, CCPA, IAB TCF 2.2 compliance status and data handling procedures.',
+    title: 'Privacy & Compliance',
+    description: 'GDPR/CCPA-aligned data handling, consent signal propagation, DSAR workflow, data minimization principles.',
     icon: FileCheck,
   },
 ];
@@ -60,32 +59,42 @@ const securityPackContents = [
 const threatModels = [
   {
     threat: 'Cache Poisoning',
-    control: 'Session manifests are never cached (no-store). CDN keys include session token hash.',
+    control: 'Session manifests use Cache-Control: private, no-store. CDN keys include session token hash.',
     status: 'mitigated',
   },
   {
     threat: 'Token Leakage',
-    control: 'Short-lived tokens (15min), signed with HMAC-SHA256, bound to session + IP prefix.',
+    control: 'JWT tokens with configurable expiry. Short-lived BYO tokens (5-15 min). httpOnly cookies.',
     status: 'mitigated',
   },
   {
     threat: 'SSRF Attacks',
-    control: 'Outbound requests allowlisted to partner domains only. Internal IPs blocked.',
+    control: 'Outbound requests constrained to configured partner domains. CORS allowlist enforced.',
     status: 'mitigated',
   },
   {
     threat: 'Replay Attacks',
-    control: 'Tracking beacons include nonce + timestamp. Dedupe layer rejects replays.',
+    control: 'Composite dedupe keys (session, pod, slot, event, creative). DedupeLayer rejects duplicates.',
     status: 'mitigated',
   },
   {
     threat: 'Config Rollback Abuse',
-    control: 'All config changes are versioned. Rollback creates new version, not deletion.',
+    control: 'All config changes versioned with timestamps. Rollback creates new version, preserving history.',
     status: 'mitigated',
   },
   {
     threat: 'Partner Timeout Abuse',
-    control: 'Per-partner circuit breakers + quarantine. Can\'t weaponize slow responses.',
+    control: 'Per-partner circuit breakers with configurable thresholds. Automatic quarantine on trip.',
+    status: 'mitigated',
+  },
+  {
+    threat: 'Auction Tampering',
+    control: 'Ed25519 signatures on auction logs. Public key available for independent verification.',
+    status: 'mitigated',
+  },
+  {
+    threat: 'Credential Exposure',
+    control: 'Network credentials never exposed to SDKs. Short-lived JWT tokens generated on demand.',
     status: 'mitigated',
   },
 ];
@@ -93,37 +102,45 @@ const threatModels = [
 const dataProcessing = [
   {
     category: 'Session Data',
-    data: 'Device type, app ID, content ID, consent signals',
-    retention: '30-90 days (by plan)',
-    deletion: 'Automatic expiry + on-demand DSAR',
+    data: 'Device type, app bundle ID, content ID, consent signals (TC string if provided)',
+    retention: '30-90 days (configurable)',
+    deletion: 'Automatic TTL expiry + on-demand DSAR',
   },
   {
     category: 'Auction Logs',
-    data: 'Bid requests/responses, decision traces, timing',
-    retention: '30-90 days (by plan)',
-    deletion: 'Automatic expiry + on-demand DSAR',
+    data: 'Bid requests/responses, decision traces, timing metrics, Ed25519 signatures',
+    retention: '30-90 days (configurable)',
+    deletion: 'Automatic partition pruning + on-demand DSAR',
   },
   {
     category: 'Tracking Events',
-    data: 'Impressions, quartiles, completions (no PII)',
-    retention: '30-90 days (by plan)',
+    data: 'Impressions, quartiles, completions, click events (no direct PII)',
+    retention: '30-90 days (configurable)',
     deletion: 'Automatic expiry + on-demand DSAR',
   },
   {
     category: 'Console Users',
-    data: 'Email, name, role, audit trail',
-    retention: 'Account lifetime',
-    deletion: 'On account deletion',
+    data: 'Email, display name, role, 2FA status, audit trail',
+    retention: 'Account lifetime + 30 days',
+    deletion: 'On account deletion request',
+  },
+  {
+    category: 'API Keys',
+    data: 'Key prefix, last4 digits, bcrypt hash (never full secret)',
+    retention: 'Until revocation',
+    deletion: 'Soft delete with audit retention',
   },
 ];
 
 export default function SecurityPackPage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative z-10 py-6 md:py-10">
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <header className="bg-white border-b border-slate-200/60">
+          <div className="container mx-auto px-4 py-6">
+            <HomeNav />
+          </div>
+        </header>
 
         {/* Hero */}
         <section className="py-16 md:py-16 bg-gradient-to-b from-gray-50 to-white">
@@ -140,7 +157,7 @@ export default function SecurityPackPage() {
                 Everything your security team needs to evaluate ApexMediation: architecture, threat model, compliance, and data handling.
               </p>
               <a
-                href="/downloads/apex-security-pack.pdf"
+                href="/security-pack/download"
                 className="btn-primary inline-flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
@@ -303,26 +320,21 @@ export default function SecurityPackPage() {
                 </h2>
               </motion.div>
 
-              <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="grid md:grid-cols-3 gap-6">
                 <motion.div {...getRevealProps(0.1)} className="bg-green-50 rounded-xl p-6 text-center">
                   <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">GDPR</h3>
-                  <p className="text-sm text-gray-600">Compliant</p>
+                  <p className="text-sm text-gray-600">Aligned</p>
                 </motion.div>
                 <motion.div {...getRevealProps(0.15)} className="bg-green-50 rounded-xl p-6 text-center">
                   <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">CCPA</h3>
-                  <p className="text-sm text-gray-600">Compliant</p>
+                  <p className="text-sm text-gray-600">Aligned</p>
                 </motion.div>
-                <motion.div {...getRevealProps(0.2)} className="bg-green-50 rounded-xl p-6 text-center">
-                  <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-3" />
+                <motion.div {...getRevealProps(0.2)} className="bg-blue-50 rounded-xl p-6 text-center">
+                  <Shield className="w-10 h-10 text-blue-600 mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">IAB TCF 2.2</h3>
-                  <p className="text-sm text-gray-600">Registered CMP</p>
-                </motion.div>
-                <motion.div {...getRevealProps(0.25)} className="bg-amber-50 rounded-xl p-6 text-center">
-                  <RefreshCw className="w-10 h-10 text-amber-600 mx-auto mb-3" />
-                  <h3 className="font-semibold text-gray-900 mb-1">SOC 2 Type II</h3>
-                  <p className="text-sm text-gray-600">In Progress</p>
+                  <p className="text-sm text-gray-600">Consent Propagation</p>
                 </motion.div>
               </div>
             </div>
@@ -347,7 +359,7 @@ export default function SecurityPackPage() {
                   Schedule Security Review
                 </a>
                 <a
-                  href="/downloads/apex-security-pack.pdf"
+                  href="/security-pack/download"
                   className="inline-flex items-center gap-2 px-6 py-3 bg-white/10 text-white border border-white/20 rounded-lg font-semibold hover:bg-white/20 transition-colors"
                 >
                   <Download className="w-5 h-5" />

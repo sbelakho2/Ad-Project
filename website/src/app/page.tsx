@@ -18,8 +18,9 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import { MediationFlowCard } from '@/components/VisualCard';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 // Animation helpers - use animate for reliable rendering
 const getRevealProps = (delay = 0) => ({
@@ -114,55 +115,48 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <section className="relative bg-gradient-to-b from-gray-900 via-gray-900 to-gray-800">
-      {/* Navigation inside hero for dark background */}
-      <div className="container mx-auto px-4 pt-6">
-        <HomeNav />
+    <PageHero variant="dark">
+      <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
+        {/* Left: Copy */}
+        <motion.div {...getRevealProps(0)} className="max-w-3xl">
+          <p className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-600/20 text-brand-300 text-sm font-medium mb-6">
+            ✓ Free to start · No credit card required
+          </p>
+          <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
+            Ad mediation that maximizes your revenue—transparently.
+          </h1>
+          <p className="text-xl leading-relaxed text-slate-200/90 mb-6 max-w-3xl">
+            ApexMediation optimizes every ad request across your networks with ML-powered waterfalls, real-time analytics, and verifiable auction logs.
+          </p>
+          <div className="flex flex-col sm:flex-row items-start gap-4 mb-4">
+            <a
+              href="/signup"
+              className="bg-brand-600 hover:bg-brand-700 text-white px-8 py-4 text-lg font-semibold rounded-lg transition-colors"
+            >
+              Get started free
+            </a>
+            <a
+              href="/contact"
+              className="bg-white/10 hover:bg-white/15 text-white border border-white/20 px-8 py-4 text-lg font-semibold rounded-lg transition-colors"
+            >
+              Talk with our team
+            </a>
+          </div>
+          <p className="text-sm text-slate-300/80">
+            Built for mobile and CTV publishers who demand auditability and control.
+          </p>
+          <p className="text-sm text-slate-300/80 mt-2">
+            <a href="/security-pack" className="text-brand-300 hover:text-brand-200 underline">
+              Download the Security Pack →
+            </a>
+          </p>
+        </motion.div>
+        {/* Right: Visual Card */}
+        <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
+          <MediationFlowCard className="ml-auto max-w-md" />
+        </motion.div>
       </div>
-      
-      <div className="container mx-auto px-4 py-16 md:py-20">
-        <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
-          {/* Left: Copy */}
-          <motion.div {...getRevealProps(0)} className="max-w-xl">
-            <p className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-600/20 text-brand-300 text-sm font-medium mb-6">
-              ✓ Free to start · No credit card required
-            </p>
-            <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold text-white leading-tight mb-6">
-              Ad mediation that maximizes your revenue—transparently.
-            </h1>
-            <p className="text-xl text-gray-300 mb-6 max-w-[55ch]">
-              ApexMediation optimizes every ad request across your networks with ML-powered waterfalls, real-time analytics, and verifiable auction logs.
-            </p>
-            <div className="flex flex-col sm:flex-row items-start gap-4 mb-4">
-              <a
-                href="/signup"
-                className="btn-primary px-8 py-4 text-lg font-semibold"
-              >
-                Get started free
-              </a>
-              <a
-                href="/contact"
-                className="bg-white/10 text-white border border-white/20 px-8 py-4 text-lg font-semibold rounded-lg hover:bg-white/20 transition-colors"
-              >
-                Talk with our team
-              </a>
-            </div>
-            <p className="text-sm text-gray-400">
-              Built for mobile and CTV publishers who demand auditability and control.
-            </p>
-            <p className="text-sm text-gray-400 mt-2">
-              <a href="/security-pack" className="text-brand-300 hover:text-brand-200 underline">
-                Download the Security Pack →
-              </a>
-            </p>
-          </motion.div>
-          {/* Right: Visual Card */}
-          <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
-            <MediationFlowCard className="ml-auto max-w-md" />
-          </motion.div>
-        </div>
-      </div>
-    </section>
+    </PageHero>
   );
 }
 
@@ -523,7 +517,9 @@ function FinalCTASection() {
 export default function HomePage() {
   return (
     <>
-      <main className="relative bg-white text-gray-900">
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
+        
         <HeroSection />
         <PillarsSection />
         <SSAICoverageSection />

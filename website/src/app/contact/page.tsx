@@ -12,8 +12,9 @@ import { useState } from 'react';
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import { ContactBenefitsCard } from '@/components/VisualCard';
+import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -61,24 +62,22 @@ export default function ContactPage() {
 
   return (
     <>
-      <main className="relative bg-white text-gray-900">
-        <div className="container relative py-6 md:py-10" style={{ zIndex: 100 }}>
-          <HomeNav />
-        </div>
+      <main className="relative bg-white text-slate-900">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16">
-          <div className="container mx-auto px-4 text-center">
+        <PageHero variant="light">
+          <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
-              <h1 className="text-4xl md:text-5xl font-bold text-gray-900 leading-tight mb-4">
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-4">
                 Let&apos;s talk.
               </h1>
-              <p className="text-xl text-gray-600">
+              <p className="text-xl leading-relaxed text-slate-600">
                 Whether you&apos;re evaluating, integrating, or scaling—we&apos;re here to help.
               </p>
             </motion.div>
           </div>
-        </section>
+        </PageHero>
 
         {/* Contact Grid */}
         <section className="py-12 pb-20">
