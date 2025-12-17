@@ -18,6 +18,8 @@ import {
   ManifestValidationWarning,
 } from './types';
 
+import { recordPerformanceMetric } from '../../performanceMetricsRecorder';
+
 /**
  * Default DASH options
  */
@@ -544,8 +546,29 @@ export class DASHManifestGenerator {
       });
     }
 
+    const valid = errors.length === 0;
+
+    recordPerformanceMetric({
+      observedAt: new Date(),
+      metricType: 'manifest_invalid',
+      metricValue: valid ? 0 : 1,
+      requestId: context.sessionId,
+      errorCode: valid ? null : 'MANIFEST_INVALID',
+      errorMessage: valid ? null : (errors[0]?.message ?? 'Manifest validation failed'),
+      metadata: {
+        source: 'server_validator',
+        protocol: context.protocol,
+        mode: context.mode,
+        container: context.container,
+        manifestVersion: context.manifestVersion,
+        errorCount: errors.length,
+        warningCount: warnings.length,
+        errorCodes: errors.slice(0, 20).map((e) => e.code),
+      },
+    });
+
     return {
-      valid: errors.length === 0,
+      valid,
       errors,
       warnings,
     };

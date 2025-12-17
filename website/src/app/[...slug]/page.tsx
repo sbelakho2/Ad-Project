@@ -556,7 +556,7 @@ Body: {
             <section className="rounded-3xl bg-white p-8 text-gray-900 shadow-xl ring-1 ring-gray-200" id="account-access">
               <h2 className="text-h3 font-bold uppercase">Account & Access</h2>
               <ul className="mt-4 space-y-3 text-sm text-gray-700">
-                <li>Reset your password via <Link href="/signin?redirect=%2Fdashboard" className="font-bold underline">Sign In</Link> → “Forgot password”.</li>
+                <li>Reset your password via <a href="https://console.apexmediation.ee/login" className="font-bold underline">Sign In</a> → “Forgot password”.</li>
                 <li>Invite teammates from <Link href="/dashboard/settings?tab=security" className="font-bold underline">Settings → Security</Link>.</li>
                 <li>Contact us at <a href="mailto:support@apexmediation.ee" className="underline">support@apexmediation.ee</a> for account merges.</li>
               </ul>

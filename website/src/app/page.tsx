@@ -116,7 +116,7 @@ const audienceCards = [
 
 function HeroSection() {
   return (
-    <PageHero>
+    <PageHero variant="dark">
       <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
         {/* Left: Copy */}
         <motion.div {...getRevealProps(0)} className="max-w-3xl">

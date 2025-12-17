@@ -392,7 +392,7 @@ export default function FeaturesPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero>
+        <PageHero variant="dark">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <div className="w-20 h-20 bg-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
@@ -472,7 +472,7 @@ export default function FeaturesPage() {
                   {
                     icon: Zap,
                     title: 'No boilerplate',
-                    description: 'No lifecycle callbacks to wire. No activities to register. No XML to parse.',
+                    description: 'No lifecycle callbacks to wire. Minimal manifest wiring. No fragile XML plumbing.',
                   },
                   {
                     icon: GitBranch,
@@ -816,7 +816,7 @@ export default function FeaturesPage() {
                       <div className="w-3 h-3 rounded-full bg-red-500" />
                       <div className="w-3 h-3 rounded-full bg-yellow-500" />
                       <div className="w-3 h-3 rounded-full bg-green-500" />
-                      <span className="text-gray-400 ml-2">live metrics</span>
+                      <span className="text-gray-400 ml-2">example metrics</span>
                     </div>
                     <pre className="text-green-400 overflow-x-auto text-xs">
 {`# VRA reconciliation
@@ -836,6 +836,20 @@ rtb_errors{code="timeout"}           2`}
                     </pre>
                   </div>
                 </motion.div>
+              </div>
+
+              <div className="mt-10 rounded-xl border border-gray-200 bg-gray-50 p-6">
+                <h3 className="text-lg font-semibold text-gray-900">Debug Panel</h3>
+                <p className="mt-2 text-sm text-gray-600 max-w-prose">
+                  A lightweight, on-device view of what the SDK did during an auction—useful for reproducing issues and sharing a sanitized trace with your team.
+                </p>
+                <ul className="mt-4 space-y-2 text-sm text-gray-700">
+                  <li>• Waterfall order and per-adapter outcomes (shown/filled/timeout)</li>
+                  <li>• Latency breakdowns and time budget visibility</li>
+                  <li>• Consent and policy signals surfaced for debugging (no raw PII)</li>
+                  <li>• Export/share a sanitized trace bundle for support</li>
+                  <li>• Correlate traces with Prometheus/Grafana metrics</li>
+                </ul>
               </div>
             </div>
           </div>

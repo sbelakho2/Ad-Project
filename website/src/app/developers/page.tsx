@@ -168,7 +168,7 @@ export default function DevelopersPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero>
+        <PageHero variant="light">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold leading-tight mb-6">
@@ -197,6 +197,9 @@ export default function DevelopersPage() {
               <div className="mt-8 mx-auto max-w-2xl rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-left">
                 <p className="text-sm text-slate-700 max-w-none">
                   <span className="font-semibold">Naming:</span> Bel Consulting OÜ is the company. ApexMediation is the platform. BelAds is the SDK namespace.
+                </p>
+                <p className="mt-2 text-sm text-slate-700 max-w-none">
+                  <span className="font-semibold">Where to go:</span> apexmediation.ee is marketing + docs. The Console lives at console.apexmediation.ee (login, apps, analytics). SDK/API behavior is documented in these docs.
                 </p>
               </div>
             </motion.div>

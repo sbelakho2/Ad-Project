@@ -4,19 +4,54 @@ type MockPoolOptions = {
   cacheHits?: number;
   cacheReads?: number;
   failReplica?: boolean;
+  failSelect1?: boolean;
+  failSloQuery?: boolean;
 };
 
 const mockRedis = { isReady: jest.fn(() => true) };
 
+const mockQueueManager = { isReady: jest.fn(() => true) };
+
 jest.mock('../../utils/redis', () => ({
   redis: mockRedis,
+}));
+
+jest.mock('../../queues/queueManager', () => ({
+  queueManager: mockQueueManager,
 }));
 
 function makeMockPool(options: MockPoolOptions = {}) {
   return {
     query: jest.fn(async (sql: string) => {
       if (/SELECT 1/.test(sql)) {
+        if (options.failSelect1) {
+          throw new Error('db down');
+        }
         return { rows: [{ '?column?': 1 }] };
+      }
+      if (sql.includes('WITH impression_metrics')) {
+        if (options.failSloQuery) {
+          throw new Error('slo query failed');
+        }
+        return {
+          rows: [
+            {
+              total_requests: '1000',
+              successful_requests: '999',
+              error_requests: '1',
+              latency_p95_ms: '87',
+              sessions: '500',
+              anrs: '0',
+              deadline_samples: '100',
+              deadline_hit_rate: '0.99',
+              validator_samples: '10000',
+              validator_invalid: '0',
+              parse_errors: '0',
+              tracking_total_events: '1000',
+              tracking_unique_events: '1000',
+            },
+          ],
+        };
       }
       if (sql.includes('pg_stat_replication')) {
         if (options.failReplica) {
@@ -48,8 +83,13 @@ function createMockRes() {
   const res: any = {};
   res.statusCode = 200;
   res.body = null as any;
+  res.headers = {} as Record<string, string>;
   res.status = (code: number) => {
     res.statusCode = code;
+    return res;
+  };
+  res.set = (key: string, value: string) => {
+    res.headers[key.toLowerCase()] = value;
     return res;
   };
   res.json = (payload: any) => {
@@ -132,5 +172,82 @@ describe('HealthCheckController.readiness', () => {
     expect(res.body?.replica?.hasReplicas).toBe(true);
     expect(res.body?.staging?.totalRows).toBe(5);
     expect(res.body?.cache?.hit_ratio).toBeGreaterThan(0.8);
+  });
+});
+
+describe('HealthCheckController.publicStatus', () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+  });
+
+  it('always returns 200 and reports down when DB is unavailable', async () => {
+    jest.doMock('../../config/index', () => ({ __esModule: true, default: baseConfig }));
+
+    const { HealthCheckController: Controller } = await import('../../controllers/HealthCheckController');
+    const controller = new Controller(makeMockPool({ failSelect1: true }));
+    const res = createMockRes();
+
+    await controller.publicStatus({} as any, res as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.status).toBe('down');
+    expect(res.body?.checks?.postgres?.connected).toBe(false);
+    expect(res.headers['cache-control']).toMatch(/public/i);
+  });
+
+  it('reports operational when core checks are healthy', async () => {
+    jest.doMock('../../config/index', () => ({ __esModule: true, default: baseConfig }));
+
+    const { HealthCheckController: Controller } = await import('../../controllers/HealthCheckController');
+    const controller = new Controller(makeMockPool());
+    const res = createMockRes();
+
+    await controller.publicStatus({} as any, res as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.status).toBe('operational');
+    expect(res.body?.checks?.postgres?.connected).toBe(true);
+  });
+});
+
+describe('HealthCheckController.publicSLOs', () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+  });
+
+  it('returns 200 with ok payload when query succeeds', async () => {
+    jest.doMock('../../config/index', () => ({ __esModule: true, default: baseConfig }));
+
+    const { HealthCheckController: Controller } = await import('../../controllers/HealthCheckController');
+    const controller = new Controller(makeMockPool());
+    const res = createMockRes();
+
+    await controller.publicSLOs({ query: { days: '30' } } as any, res as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.status).toBe('ok');
+    expect(res.body?.window?.days).toBe(30);
+    expect(res.body?.slis?.availability?.availabilityPct).toBeGreaterThan(99);
+    expect(res.body?.slis?.latency?.p95Ms).toBe(87);
+    expect(res.body?.slis?.deadlineHitRate?.deadlineHitRatePct).toBeGreaterThan(98);
+    expect(res.body?.slis?.invalidManifestRate?.invalidManifestRatePct).toBeLessThan(0.01);
+    expect(res.body?.slis?.trackingIntegrity?.integrityPct).toBe(100);
+    expect(res.headers['cache-control']).toMatch(/public/i);
+  });
+
+  it('always returns 200 even if DB query fails', async () => {
+    jest.doMock('../../config/index', () => ({ __esModule: true, default: baseConfig }));
+
+    const { HealthCheckController: Controller } = await import('../../controllers/HealthCheckController');
+    const controller = new Controller(makeMockPool({ failSloQuery: true }));
+    const res = createMockRes();
+
+    await controller.publicSLOs({ query: { days: '30' } } as any, res as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body?.status).toMatch(/unknown|ok/);
+    expect(res.body?.window?.days).toBe(30);
   });
 });

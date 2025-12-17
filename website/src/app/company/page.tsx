@@ -63,7 +63,7 @@ export default function CompanyPage() {
       <main className="relative bg-white text-slate-900">
         <SiteHeader />
 
-        <PageHero>
+        <PageHero variant="dark">
           <motion.div
             {...getRevealProps(0)}
             className="max-w-3xl mx-auto text-center md:text-left"

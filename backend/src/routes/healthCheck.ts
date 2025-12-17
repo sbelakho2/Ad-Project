@@ -41,6 +41,8 @@ export function createHealthCheckRoutes(pool: Pool): Router {
    * Detailed status (authenticated)
    * GET /api/v1/status
    */
+  router.get('/api/v1/status.json', (req, res) => controller.publicStatus(req, res));
+  router.get('/api/v1/slo.json', (req, res) => controller.publicSLOs(req, res));
   router.get('/api/v1/status', authenticate, (req, res) => controller.detailedStatus(req, res));
 
   return router;

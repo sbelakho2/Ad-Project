@@ -12,6 +12,7 @@ import logger from '../utils/logger';
 import config from '../config/index';
 import { queueManager, QueueName } from '../queues/queueManager';
 import { analyticsEventsEnqueuedTotal } from '../utils/prometheus';
+import { recordPerformanceMetric } from '../services/performanceMetricsRecorder';
 
 const parseQueryParam = (value: unknown): string | undefined => {
   if (typeof value === 'string') {
@@ -216,6 +217,19 @@ const revenueEventSchema = z.object({
   reconciliation_status: z.enum(['pending', 'matched', 'discrepancy']),
 });
 
+const manifestParseErrorSchema = z.object({
+  timestamp: z.string().datetime().optional(),
+  publisher_id: z.string().uuid().optional(),
+  app_id: z.string().uuid().optional(),
+  session_id: z.string().optional(),
+  protocol: z.enum(['hls', 'dash']).optional(),
+  sdk_platform: z.string().max(32).optional(),
+  sdk_version: z.string().max(32).optional(),
+  error_code: z.string().max(64).optional(),
+  error_message: z.string().max(500).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
 /**
  * POST /api/v1/analytics/events/impressions
  * Record impression events
@@ -361,6 +375,70 @@ export const recordRevenue = async (
     res.status(500).json({
       success: false,
       error: 'Failed to record revenue events',
+    });
+  }
+};
+
+/**
+ * POST /api/v1/analytics/events/manifest-parse
+ * Record SSAI manifest parse failures from SDKs/players.
+ *
+ * Best-effort only:
+ * - Always returns quickly
+ * - Does not block production paths
+ */
+export const recordManifestParseErrors = async (
+  req: Request,
+  res: Response,
+  _next?: NextFunction
+): Promise<void> => {
+  try {
+    const body = (req.body ?? {}) as any;
+    const events = Array.isArray(body.events) ? body.events : [body];
+
+    const parsedEvents = events.map((ev: unknown) => manifestParseErrorSchema.parse(ev));
+
+    for (const ev of parsedEvents) {
+      const observedAt = ev.timestamp ? new Date(ev.timestamp) : new Date();
+
+      recordPerformanceMetric({
+        observedAt,
+        metricType: 'manifest_parse_error',
+        metricValue: 1,
+        publisherId: ev.publisher_id ?? null,
+        requestId: ev.session_id ?? null,
+        errorCode: ev.error_code ?? 'MANIFEST_PARSE_ERROR',
+        errorMessage: ev.error_message ?? null,
+        metadata: {
+          source: 'sdk_parse_failure',
+          protocol: ev.protocol,
+          sdk_platform: ev.sdk_platform,
+          sdk_version: ev.sdk_version,
+          app_id: ev.app_id,
+          ...(ev.metadata ?? {}),
+        },
+      });
+    }
+
+    res.status(202).json({
+      success: true,
+      message: `Accepted ${parsedEvents.length} manifest parse error event(s)`,
+      count: parsedEvents.length,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid manifest parse event data',
+        details: error.errors,
+      });
+      return;
+    }
+
+    logger.warn('[Analytics] Failed to accept manifest parse error event(s)', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to record manifest parse error events',
     });
   }
 };

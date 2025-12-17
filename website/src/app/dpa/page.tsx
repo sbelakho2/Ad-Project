@@ -149,7 +149,7 @@ export default function DpaPage() {
                         </thead>
                         <tbody>
                           <tr className="border-b border-gray-200">
-                            <td className="py-2 pr-3">Fly.io</td>
+                            <td className="py-2 pr-3">Hetzner (Hetzner Online GmbH)</td>
                             <td className="py-2 pr-3">Application hosting and networking (when hosted by ApexMediation)</td>
                             <td className="py-2 pr-3">Service logs, operational metadata, customer account data as needed to provide the service</td>
                           </tr>

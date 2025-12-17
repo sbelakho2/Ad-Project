@@ -167,7 +167,7 @@ export default function PrivacyPolicyPage() {
 
                   <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
                     <ul className="list-disc pl-6 space-y-1">
-                      <li><span className="font-semibold">Fly.io</span> — application hosting and networking</li>
+                      <li><span className="font-semibold">Hetzner (Hetzner Online GmbH)</span> — application hosting and networking</li>
                       <li><span className="font-semibold">Stripe</span> — billing and payment processing</li>
                       <li><span className="font-semibold">Resend</span> — transactional email delivery</li>
                     </ul>

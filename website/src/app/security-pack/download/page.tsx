@@ -569,13 +569,13 @@ export default function SecurityPackDownloadPage() {
             <p><strong>Privacy / DPO:</strong> privacy@apexmediation.ee</p>
             <p><strong>General Contact:</strong> hello@apexmediation.ee</p>
             <p><strong>Website:</strong> https://apexmediation.ee</p>
-            <p><strong>Registered Entity:</strong> ApexMediation OÜ, Estonia</p>
+            <p><strong>Registered Entity:</strong> Bel Consulting OÜ, Estonia</p>
           </div>
         </section>
 
         {/* Footer */}
         <div className="border-t border-gray-300 pt-4 mt-8 text-center text-xs text-gray-500">
-          <p>© {new Date().getFullYear()} ApexMediation OÜ. All rights reserved.</p>
+          <p>© {new Date().getFullYear()} Bel Consulting OÜ. All rights reserved.</p>
           <p>This document is confidential and intended for security evaluation purposes.</p>
           <p className="mt-2">Document generated from verified codebase implementation.</p>
         </div>

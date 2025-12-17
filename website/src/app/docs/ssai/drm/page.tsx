@@ -27,9 +27,9 @@ export default function DRMPage() {
               DRM Integration
             </h1>
             <p className="text-xl text-gray-600">
-              ApexMediation SSAI supports Widevine, FairPlay, and PlayReady DRM systems 
-              with configurable policies for clear vs encrypted ads, key continuity, 
-              and mixed-scheme handling.
+              ApexMediation SSAI supports SSAI workflows with Widevine, FairPlay, and PlayReady 
+              when your streams are packaged in compatible formats (e.g., CMAF) and DRM licenses/policies 
+              are provided. Policies cover clear vs encrypted ads, key continuity, and mixed-scheme handling.
             </p>
           </div>
 

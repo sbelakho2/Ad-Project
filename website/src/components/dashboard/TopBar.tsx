@@ -14,7 +14,7 @@ export default function DashboardTopBar({ onToggleSidebar }: DashboardTopBarProp
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
-    router.push('/signin');
+    window.location.href = 'https://console.apexmediation.ee/login';
   };
 
   return (

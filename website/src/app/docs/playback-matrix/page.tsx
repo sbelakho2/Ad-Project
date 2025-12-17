@@ -371,7 +371,7 @@ export default function PlaybackMatrixPage() {
                     <div>
                       <h4 className="font-medium text-gray-900 mb-2">What &quot;Certified&quot; vs &quot;Partial&quot; Means</h4>
                       <ul className="text-gray-600 text-sm space-y-1">
-                        <li>• <strong>Certified:</strong> All test categories pass, production-verified with live traffic</li>
+                        <li>• <strong>Certified:</strong> All test categories pass in our certification suite (variants/chaos/DRM/soak). Validate with your own player stack before rolling out traffic.</li>
                         <li>• <strong>Partial:</strong> Core playback works, edge cases may require workarounds</li>
                       </ul>
                     </div>

@@ -39,8 +39,8 @@ export default function OperationalGuaranteesPage() {
               Core Principle: Never Black Screen
             </h2>
             <p className="text-gray-600 text-sm">
-              The system is designed to always deliver watchable content. When ad delivery fails, 
-              we fall back to slate (neutral filler) or pass through content—never a black screen or player stall.
+              The system is designed to fail open and keep playback moving. When ad delivery fails, 
+              we fall back to slate (neutral filler) or pass through content where possible—avoiding black screens and player stalls.
             </p>
           </div>
 

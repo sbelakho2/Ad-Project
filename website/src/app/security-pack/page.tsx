@@ -162,7 +162,7 @@ export default function SecurityPackPage() {
                 className="btn-primary inline-flex items-center gap-2"
               >
                 <Download className="w-5 h-5" />
-                Download Security Pack (PDF)
+                Printable Security Pack (HTML)
               </a>
             </motion.div>
           </div>

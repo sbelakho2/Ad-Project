@@ -1,6 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -99,15 +100,278 @@ const mitigations = [
   },
 ];
 
-const statusHistory = [
-  { date: '2025-12-14', status: 'operational', note: 'All systems operational' },
-  { date: '2025-12-13', status: 'operational', note: 'All systems operational' },
-  { date: '2025-12-12', status: 'operational', note: 'All systems operational' },
-  { date: '2025-12-11', status: 'operational', note: 'All systems operational' },
-  { date: '2025-12-10', status: 'operational', note: 'All systems operational' },
-];
-
 export default function SLOPage() {
+  const [liveStatus, setLiveStatus] = useState<any | null>(null);
+  const [sloRollup, setSloRollup] = useState<any | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetch('/api/public/status', {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && typeof data === 'object') {
+          setLiveStatus(data);
+        }
+      })
+      .catch(() => {
+        // Always fail open; the page should render even without live status.
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetch('/api/public/slo?days=30', {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && typeof data === 'object') {
+          setSloRollup(data);
+        }
+      })
+      .catch(() => {
+        // Fail open.
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  const targets = useMemo(() => {
+    const availabilityTargetPct = Number((sloConfig.availability.target || '').replace('%', ''));
+    const latencyTargetMs = Number((sloConfig.latency.p95 || '').replace(/[^0-9.]/g, ''));
+    return {
+      availabilityTargetPct: Number.isFinite(availabilityTargetPct) ? availabilityTargetPct : 99.9,
+      latencyTargetMs: Number.isFinite(latencyTargetMs) ? latencyTargetMs : 100,
+      deadlineTargetPct: 98,
+      invalidManifestTargetPct: 0.01,
+      trackingIntegrityTargetPct: 100,
+    };
+  }, []);
+
+  const computedSlo = useMemo(() => {
+    const availabilityPct = Number(sloRollup?.slis?.availability?.availabilityPct);
+    const latencyP95Ms = sloRollup?.slis?.latency?.p95Ms === null || sloRollup?.slis?.latency?.p95Ms === undefined
+      ? null
+      : Number(sloRollup?.slis?.latency?.p95Ms);
+
+    const deadlineHitRatePct = Number(sloRollup?.slis?.deadlineHitRate?.deadlineHitRatePct);
+    const invalidManifestRatePct = Number(sloRollup?.slis?.invalidManifestRate?.invalidManifestRatePct);
+    const trackingIntegrityPct = Number(sloRollup?.slis?.trackingIntegrity?.integrityPct);
+
+    const availabilityOk = Number.isFinite(availabilityPct)
+      ? availabilityPct >= targets.availabilityTargetPct
+      : null;
+
+    const latencyOk = typeof latencyP95Ms === 'number' && Number.isFinite(latencyP95Ms)
+      ? latencyP95Ms <= targets.latencyTargetMs
+      : null;
+
+    const deadlineOk = Number.isFinite(deadlineHitRatePct)
+      ? deadlineHitRatePct >= targets.deadlineTargetPct
+      : null;
+
+    const invalidManifestOk = Number.isFinite(invalidManifestRatePct)
+      ? invalidManifestRatePct <= targets.invalidManifestTargetPct
+      : null;
+
+    const trackingIntegrityOk = Number.isFinite(trackingIntegrityPct)
+      ? trackingIntegrityPct >= targets.trackingIntegrityTargetPct
+      : null;
+
+    return {
+      availabilityPct: Number.isFinite(availabilityPct) ? availabilityPct : null,
+      latencyP95Ms,
+      deadlineHitRatePct: Number.isFinite(deadlineHitRatePct) ? deadlineHitRatePct : null,
+      invalidManifestRatePct: Number.isFinite(invalidManifestRatePct) ? invalidManifestRatePct : null,
+      trackingIntegrityPct: Number.isFinite(trackingIntegrityPct) ? trackingIntegrityPct : null,
+      availabilityOk,
+      latencyOk,
+      deadlineOk,
+      invalidManifestOk,
+      trackingIntegrityOk,
+      windowDays: sloRollup?.window?.days ?? 30,
+      windowStart: typeof sloRollup?.window?.start === 'string' ? sloRollup.window.start : null,
+      windowEnd: typeof sloRollup?.window?.end === 'string' ? sloRollup.window.end : null,
+    };
+  }, [
+    sloRollup,
+    targets.availabilityTargetPct,
+    targets.latencyTargetMs,
+    targets.deadlineTargetPct,
+    targets.invalidManifestTargetPct,
+    targets.trackingIntegrityTargetPct,
+  ]);
+
+  const badge = useMemo(() => {
+    const status = (liveStatus?.status || 'unknown') as string;
+    const lastChecked = typeof liveStatus?.timestamp === 'string' ? liveStatus.timestamp : null;
+
+    if (status === 'operational') {
+      return {
+        className: 'bg-green-100 text-green-700',
+        label: 'Operational',
+        icon: CheckCircle,
+        lastChecked,
+      };
+    }
+
+    if (status === 'degraded') {
+      return {
+        className: 'bg-amber-100 text-amber-700',
+        label: 'Degraded',
+        icon: AlertTriangle,
+        lastChecked,
+      };
+    }
+
+    if (status === 'down') {
+      return {
+        className: 'bg-red-100 text-red-700',
+        label: 'Down',
+        icon: AlertTriangle,
+        lastChecked,
+      };
+    }
+
+    return {
+      className: 'bg-slate-100 text-slate-700',
+      label: liveStatus ? 'Unknown' : 'Loading…',
+      icon: Activity,
+      lastChecked,
+    };
+  }, [liveStatus]);
+
+  const renderSloHealth = (unit: string) => {
+    if (unit === 'availability') {
+      const current = computedSlo.availabilityPct;
+      const ok = computedSlo.availabilityOk;
+
+      if (ok === null) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+        </div>
+      );
+    }
+
+    if (unit === 'latency') {
+      const current = computedSlo.latencyP95Ms;
+      const ok = computedSlo.latencyOk;
+
+      if (ok === null) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{typeof current === 'number' ? `${Math.round(current)}ms` : '—'}</span>
+        </div>
+      );
+    }
+
+    if (unit === 'deadline') {
+      const current = computedSlo.deadlineHitRatePct;
+      const ok = computedSlo.deadlineOk;
+
+      if (ok === null) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+        </div>
+      );
+    }
+
+    if (unit === 'error') {
+      const current = computedSlo.invalidManifestRatePct;
+      const ok = computedSlo.invalidManifestOk;
+
+      if (ok === null) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(4)}%`}</span>
+        </div>
+      );
+    }
+
+    if (unit === 'integrity') {
+      const current = computedSlo.trackingIntegrityPct;
+      const ok = computedSlo.trackingIntegrityOk;
+
+      if (ok === null) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+          <div className="flex items-center gap-2">
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
+          </div>
+          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+        </div>
+      );
+    }
+
+    return (
+      <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+        <span className="text-sm font-medium">Not published</span>
+      </div>
+    );
+  };
+
   return (
     <>
       <main className="relative bg-white text-slate-900">
@@ -121,9 +385,9 @@ export default function SLOPage() {
         <PageHero className="bg-white border-b border-slate-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
-              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-green-100 text-green-700 text-sm font-medium mb-6">
-                <CheckCircle className="w-4 h-4" />
-                All Systems Operational
+              <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full ${badge.className} text-sm font-medium mb-6`}>
+                <badge.icon className="w-4 h-4" />
+                Live Status: {badge.label}
               </div>
               <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
                 SLOs & System Reliability
@@ -131,6 +395,9 @@ export default function SLOPage() {
               <p className="text-xl text-slate-600">
                 We publish our service level objectives so you know exactly what to expect. When we miss, here&apos;s what happens.
               </p>
+              {badge.lastChecked ? (
+                <p className="mt-4 text-sm text-slate-500 font-mono">Last checked: {badge.lastChecked}</p>
+              ) : null}
             </motion.div>
           </div>
         </PageHero>
@@ -143,8 +410,13 @@ export default function SLOPage() {
                 Our Service Level Objectives
               </h2>
               <p className="text-lg text-gray-600 max-w-prose mx-auto">
-                These are the targets we hold ourselves to. All measurements are real-time and auditable.
+                These are the targets we hold ourselves to. Live component health is shown above and on the status page.
               </p>
+              {computedSlo.windowStart && computedSlo.windowEnd ? (
+                <p className="mt-3 text-sm text-gray-500 font-mono">
+                  Rolling window: {computedSlo.windowDays}d ({computedSlo.windowStart} → {computedSlo.windowEnd})
+                </p>
+              ) : null}
             </motion.div>
 
             <div className="max-w-5xl mx-auto space-y-6">
@@ -167,10 +439,7 @@ export default function SLOPage() {
                       </div>
                       <p className="text-gray-600 text-sm">{slo.measurement}</p>
                     </div>
-                    <div className="hidden md:flex items-center gap-2 text-green-600">
-                      <CheckCircle className="w-5 h-5" />
-                      <span className="text-sm font-medium">Meeting</span>
-                    </div>
+                    {renderSloHealth(slo.unit)}
                   </div>
                 </motion.div>
               ))}
@@ -259,27 +528,49 @@ export default function SLOPage() {
           </div>
         </section>
 
-        {/* Status History */}
+        {/* Live Snapshot */}
         <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-4xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-12">
                 <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
-                  Recent Status History
+                  Live Status Snapshot
                 </h2>
               </motion.div>
 
               <motion.div {...getRevealProps(0.1)} className="space-y-3">
-                {statusHistory.map((entry) => (
-                  <div
-                    key={entry.date}
-                    className="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-100"
-                  >
-                    <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0" />
-                    <span className="text-sm font-mono text-gray-500 w-24">{entry.date}</span>
-                    <span className="text-sm text-gray-700">{entry.note}</span>
+                <div className="p-4 bg-white rounded-lg border border-gray-100">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-sm font-semibold text-gray-900">Backend</span>
+                    <span className="text-sm text-gray-600">{badge.label}</span>
                   </div>
-                ))}
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-gray-700">
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-gray-500">Postgres</span>
+                      <span className="font-mono">
+                        {liveStatus?.checks?.postgres?.connected
+                          ? `${liveStatus?.checks?.postgres?.status ?? 'unknown'} (${liveStatus?.checks?.postgres?.latency_ms ?? '?'}ms)`
+                          : 'down'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-gray-500">Redis</span>
+                      <span className="font-mono">{liveStatus?.checks?.redis?.ready ? 'ready' : 'not ready'}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-gray-500">Queues</span>
+                      <span className="font-mono">{liveStatus?.checks?.queues?.ready ? 'ready' : 'not ready'}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-gray-500">Replica lag</span>
+                      <span className="font-mono">
+                        {typeof liveStatus?.checks?.replica?.maxReplayLagMs === 'number'
+                          ? `${liveStatus.checks.replica.maxReplayLagMs}ms`
+                          : 'n/a'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </motion.div>
 
               <motion.div {...getRevealProps(0.2)} className="mt-8 text-center">

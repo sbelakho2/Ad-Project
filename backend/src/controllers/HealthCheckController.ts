@@ -31,6 +31,270 @@ const STAGING_TABLES = [
 export class HealthCheckController {
   constructor(private pool: Pool) {}
 
+  private static publicSLOCache:
+    | {
+        expiresAtMs: number;
+        payload: unknown;
+      }
+    | null = null;
+
+  /**
+   * Public status snapshot (unauthenticated)
+   * GET /api/v1/status.json
+   *
+   * Intended for customer-facing status/SLO pages.
+   * - Always returns 200
+   * - Cache-friendly
+   * - Does not expose detailed configuration or internal metrics
+   */
+  async publicStatus(req: Request, res: Response): Promise<void> {
+    const timestamp = new Date().toISOString();
+
+    try {
+      const snapshot = await this.computePublicStatusSnapshot();
+
+      res.set('Cache-Control', 'public, max-age=15, s-maxage=30, stale-while-revalidate=300');
+      res.status(200).json({
+        ...snapshot,
+        timestamp,
+      });
+    } catch (error) {
+      logger.error('[HealthCheck] Public status failed', { error });
+      res.set('Cache-Control', 'public, max-age=5, s-maxage=10, stale-while-revalidate=60');
+      res.status(200).json({
+        status: 'unknown',
+        service: 'apexmediation-backend',
+        timestamp,
+        checks: {
+          postgres: { connected: false, latency_ms: null, status: 'unknown' },
+          redis: { ready: false },
+          queues: { ready: false },
+        },
+      });
+    }
+  }
+
+  /**
+   * Public 30-day SLO rollup (unauthenticated)
+   * GET /api/v1/slo.json
+   *
+   * Always returns 200 and is safe for customer-facing pages.
+   */
+  async publicSLOs(req: Request, res: Response): Promise<void> {
+    const now = Date.now();
+    const timestamp = new Date().toISOString();
+
+    const cached = HealthCheckController.publicSLOCache;
+    if (cached && cached.expiresAtMs > now) {
+      res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=900');
+      res.status(200).json(cached.payload);
+      return;
+    }
+
+    // Default: 30d window, capped to 31.
+    const daysRaw = Number(req.query?.days ?? 30);
+    const days = Number.isFinite(daysRaw) ? Math.min(31, Math.max(1, Math.floor(daysRaw))) : 30;
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - days * 24 * 60 * 60 * 1000);
+
+    try {
+      const sql = `
+        WITH impression_metrics AS (
+          SELECT
+            COUNT(*)::bigint AS total_requests,
+            COUNT(*) FILTER (WHERE status = 'success' OR filled IS TRUE)::bigint AS successful_requests,
+            COUNT(*) FILTER (WHERE status = 'error')::bigint AS error_requests,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)
+              FILTER (WHERE latency_ms IS NOT NULL) AS latency_p95_ms
+          FROM analytics_impressions
+          WHERE observed_at >= $1
+            AND observed_at < $2
+            AND is_test_mode = false
+        ),
+        sdk_metrics AS (
+          SELECT
+            COUNT(DISTINCT payload->>'session_id')::bigint AS sessions,
+            COUNT(*) FILTER (WHERE event_type = 'anr')::bigint AS anrs
+          FROM analytics_sdk_telemetry
+          WHERE observed_at >= $1
+            AND observed_at < $2
+            AND is_test_mode = false
+        ),
+        deadline_metrics AS (
+          SELECT
+            COUNT(*)::bigint AS deadline_samples,
+            AVG(metric_value)::double precision AS deadline_hit_rate
+          FROM analytics_performance_metrics
+          WHERE observed_at >= $1
+            AND observed_at < $2
+            AND metric_type = 'pod_deadline_hit'
+        ),
+        manifest_validator_metrics AS (
+          SELECT
+            COUNT(*)::bigint AS validator_samples,
+            COALESCE(SUM(metric_value), 0)::double precision AS validator_invalid
+          FROM analytics_performance_metrics
+          WHERE observed_at >= $1
+            AND observed_at < $2
+            AND metric_type = 'manifest_invalid'
+        ),
+        manifest_parse_error_metrics AS (
+          SELECT
+            COUNT(*)::bigint AS parse_errors
+          FROM analytics_performance_metrics
+          WHERE observed_at >= $1
+            AND observed_at < $2
+            AND metric_type = 'manifest_parse_error'
+        ),
+        tracking_metrics AS (
+          SELECT
+            COUNT(*)::bigint AS tracking_total_events,
+            COUNT(DISTINCT (event_type, bid_id))::bigint AS tracking_unique_events
+          FROM rtb_tracking_events
+          WHERE observed_at >= $1
+            AND observed_at < $2
+        )
+        SELECT
+          total_requests,
+          successful_requests,
+          error_requests,
+          latency_p95_ms,
+          sessions,
+          anrs,
+          deadline_samples,
+          deadline_hit_rate,
+          validator_samples,
+          validator_invalid,
+          parse_errors,
+          tracking_total_events,
+          tracking_unique_events
+        FROM impression_metrics, sdk_metrics, deadline_metrics, manifest_validator_metrics, manifest_parse_error_metrics, tracking_metrics
+      `;
+
+      const result = await this.pool.query(sql, [startTime, endTime]);
+      const row = result.rows?.[0] ?? {};
+
+      const totalRequests = Number(row.total_requests ?? 0);
+      const successfulRequests = Number(row.successful_requests ?? 0);
+      const errorRequests = Number(row.error_requests ?? 0);
+
+      const availabilityPct = totalRequests > 0 ? (successfulRequests / totalRequests) * 100 : 100;
+      const errorRatePct = totalRequests > 0 ? (errorRequests / totalRequests) * 100 : 0;
+
+      const sessions = Number(row.sessions ?? 0);
+      const anrs = Number(row.anrs ?? 0);
+      const anrRatePct = sessions > 0 ? (anrs / sessions) * 100 : 0;
+
+      const latencyP95Ms = row.latency_p95_ms === null || row.latency_p95_ms === undefined ? null : Number(row.latency_p95_ms);
+
+      const deadlineSamples = Number(row.deadline_samples ?? 0);
+      const deadlineHitRate = row.deadline_hit_rate === null || row.deadline_hit_rate === undefined
+        ? null
+        : Number(row.deadline_hit_rate);
+      const deadlineHitRatePct = deadlineSamples > 0 && typeof deadlineHitRate === 'number' && Number.isFinite(deadlineHitRate)
+        ? deadlineHitRate * 100
+        : null;
+
+      const validatorSamples = Number(row.validator_samples ?? 0);
+      const validatorInvalid = row.validator_invalid === null || row.validator_invalid === undefined
+        ? 0
+        : Number(row.validator_invalid);
+      const parseErrors = Number(row.parse_errors ?? 0);
+      const manifestSamples = Math.max(0, validatorSamples + parseErrors);
+      const manifestInvalidCount = Math.max(0, validatorInvalid + parseErrors);
+      const invalidManifestRatePct = manifestSamples > 0
+        ? (manifestInvalidCount / manifestSamples) * 100
+        : null;
+
+      const trackingTotalEvents = Number(row.tracking_total_events ?? 0);
+      const trackingUniqueEvents = Number(row.tracking_unique_events ?? 0);
+      const trackingDuplicateEvents = Math.max(0, trackingTotalEvents - trackingUniqueEvents);
+      const trackingIntegrityPct = trackingTotalEvents > 0
+        ? (trackingUniqueEvents / trackingTotalEvents) * 100
+        : 100;
+
+      const payload = {
+        status: 'ok',
+        service: 'apexmediation-backend',
+        timestamp,
+        window: {
+          days,
+          start: startTime.toISOString(),
+          end: endTime.toISOString(),
+        },
+        slis: {
+          availability: {
+            totalRequests,
+            successfulRequests,
+            availabilityPct,
+          },
+          latency: {
+            p95Ms: latencyP95Ms,
+            samples: totalRequests,
+          },
+          errorRate: {
+            errorRequests,
+            totalRequests,
+            errorRatePct,
+          },
+          anrRate: {
+            sessions,
+            anrs,
+            anrRatePct,
+          },
+          deadlineHitRate: {
+            samples: deadlineSamples,
+            deadlineHitRatePct,
+          },
+          invalidManifestRate: {
+            samples: manifestSamples,
+            invalidManifestRatePct,
+          },
+          trackingIntegrity: {
+            totalEvents: trackingTotalEvents,
+            uniqueEvents: trackingUniqueEvents,
+            duplicateEvents: trackingDuplicateEvents,
+            integrityPct: trackingIntegrityPct,
+          },
+        },
+      };
+
+      HealthCheckController.publicSLOCache = {
+        expiresAtMs: now + 5 * 60 * 1000,
+        payload,
+      };
+
+      res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=900');
+      res.status(200).json(payload);
+    } catch (error) {
+      logger.error('[HealthCheck] Public SLO rollup failed', { error });
+
+      // Serve last known good if available.
+      const fallback = HealthCheckController.publicSLOCache?.payload ?? {
+        status: 'unknown',
+        service: 'apexmediation-backend',
+        timestamp,
+        window: {
+          days,
+          start: startTime.toISOString(),
+          end: endTime.toISOString(),
+        },
+        slis: {
+          availability: { totalRequests: 0, successfulRequests: 0, availabilityPct: 0 },
+          latency: { p95Ms: null, samples: 0 },
+          errorRate: { errorRequests: 0, totalRequests: 0, errorRatePct: 0 },
+          anrRate: { sessions: 0, anrs: 0, anrRatePct: 0 },
+          deadlineHitRate: { samples: 0, deadlineHitRatePct: null },
+          invalidManifestRate: { samples: 0, invalidManifestRatePct: null },
+          trackingIntegrity: { totalEvents: 0, uniqueEvents: 0, duplicateEvents: 0, integrityPct: 100 },
+        },
+      };
+
+      res.set('Cache-Control', 'public, max-age=15, s-maxage=30, stale-while-revalidate=300');
+      res.status(200).json(fallback);
+    }
+  }
+
   /**
    * Liveness probe - simple check that service is running
    * GET /health
@@ -57,6 +321,105 @@ export class HealthCheckController {
         queues: queuesHealthy ? 'up' : 'down',
       },
     });
+  }
+
+  private async computePublicStatusSnapshot(): Promise<{
+    status: 'operational' | 'degraded' | 'down' | 'unknown';
+    service: 'apexmediation-backend';
+    checks: {
+      postgres: {
+        connected: boolean;
+        latency_ms: number | null;
+        status: 'healthy' | 'slow' | 'down' | 'unknown';
+      };
+      redis: { ready: boolean };
+      queues: { ready: boolean };
+      replica?: { hasReplicas: boolean; maxReplayLagMs: number | null } | null;
+      cache?: { hit_ratio: number | null };
+      staging?: { totalRows: number } | null;
+    };
+  }> {
+    const redisReady = redis.isReady();
+    const queuesReady = queueManager.isReady();
+
+    let postgresConnected = false;
+    let dbLatency: number | null = null;
+    let dbStatus: 'healthy' | 'slow' | 'down' | 'unknown' = 'unknown';
+
+    try {
+      const startTime = Date.now();
+      await this.pool.query('SELECT 1');
+      dbLatency = Date.now() - startTime;
+      postgresConnected = true;
+
+      if (dbLatency > READINESS_LIMITS.dbSlowMs) {
+        dbStatus = 'slow';
+      } else {
+        dbStatus = 'healthy';
+      }
+    } catch (error) {
+      logger.warn('[HealthCheck] Public status DB check failed', { error });
+      postgresConnected = false;
+      dbLatency = null;
+      dbStatus = 'down';
+    }
+
+    // Optional deeper signals (best-effort)
+    const [replicaLag, cacheHitRatio, stagingPressure] = postgresConnected
+      ? await Promise.all([
+          this.measureReplicaLag().catch(() => null),
+          this.measureCacheHitRatio().catch(() => null),
+          this.measureStagingPressure().catch(() => null),
+        ])
+      : [null, null, null];
+
+    const replicaSummary = replicaLag
+      ? { hasReplicas: replicaLag.hasReplicas, maxReplayLagMs: replicaLag.maxReplayLagMs }
+      : null;
+
+    // Derive a conservative top-level status.
+    // "operational" requires: DB up & within guardrails + core dependencies ready.
+    // "degraded" covers: slow DB, readiness guardrails exceeded, or dependency not ready.
+    // "down" covers: DB down.
+    let status: 'operational' | 'degraded' | 'down' | 'unknown' = 'unknown';
+
+    if (!postgresConnected) {
+      status = 'down';
+    } else {
+      const dbSlow = (dbLatency ?? Number.POSITIVE_INFINITY) > READINESS_LIMITS.dbSlowMs;
+
+      const replicaCritical =
+        !!config.replicaRequired &&
+        (!replicaSummary?.hasReplicas || (replicaSummary.maxReplayLagMs ?? 0) > READINESS_LIMITS.replicaLagCriticalMs);
+
+      const stagingBacklog = (stagingPressure?.totalRows ?? 0) > READINESS_LIMITS.stagingWarnRows;
+
+      const cacheHitLow =
+        !!config.replicaRequired &&
+        cacheHitRatio !== null &&
+        cacheHitRatio < READINESS_LIMITS.cacheHitWarnRatio;
+
+      const depsDegraded = !redisReady || !queuesReady;
+
+      status = dbSlow || replicaCritical || stagingBacklog || cacheHitLow || depsDegraded ? 'degraded' : 'operational';
+    }
+
+    return {
+      status,
+      service: 'apexmediation-backend',
+      checks: {
+        postgres: {
+          connected: postgresConnected,
+          latency_ms: dbLatency,
+          status: dbStatus,
+        },
+        redis: { ready: redisReady },
+        queues: { ready: queuesReady },
+        replica: replicaSummary,
+        cache: { hit_ratio: cacheHitRatio },
+        staging: stagingPressure ? { totalRows: stagingPressure.totalRows } : null,
+      },
+    };
   }
 
   /**

@@ -41,7 +41,7 @@ export default function CDNGuidancePage() {
             <p className="text-red-700 text-sm">
               SSAI session manifests (<code>/v1/session/&#123;id&#125;/manifest.m3u8</code>) are 
               per-viewer personalized. Caching them will serve wrong ads to viewers and break tracking.
-              Always configure CDN to bypass cache for session manifest paths.
+              Configure your CDN to bypass cache (or use very low TTL) for session manifest paths.
             </p>
           </div>
 

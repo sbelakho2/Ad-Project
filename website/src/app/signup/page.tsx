@@ -107,7 +107,7 @@ export default function SignUpPage() {
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
             Already have an account?{' '}
-            <Link href="/signin" className="font-semibold text-brand-600 hover:text-brand-700 underline">
+            <Link href="https://console.apexmediation.ee/login" className="font-semibold text-brand-600 hover:text-brand-700 underline">
               Sign in
             </Link>
           </p>

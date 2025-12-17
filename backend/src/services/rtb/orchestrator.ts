@@ -10,6 +10,7 @@ import config from '../../config/index';
 import * as breaker from '../../utils/redisCircuitBreaker';
 import { generateLandscapeId } from './auctionIdempotency';
 import { scoreShadow, ShadowScoreInput } from '../inference/shadowFraudScoring';
+import { recordPerformanceMetric } from '../performanceMetricsRecorder';
 
 const envInt = (key: string, dflt: number) => {
   const v = parseInt(process.env[key] || '', 10);
@@ -77,6 +78,27 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
   const metricLabels = { arm: armLabel, exp_id: migration?.experimentId ?? 'none' } as const;
   const decisionStartedAt = Date.now();
 
+  const recordDeadlineHit = (latencyMs: number, meta?: Record<string, unknown>) => {
+    try {
+      // Exclude pure shadow traffic from customer-facing SLOs.
+      if (migration && mode === 'shadow') return;
+
+      recordPerformanceMetric({
+        observedAt: new Date(decisionStartedAt),
+        metricType: 'pod_deadline_hit',
+        metricValue: latencyMs <= AUCTION_TTL_MS ? 1 : 0,
+        requestId,
+        metadata: {
+          ttl_ms: AUCTION_TTL_MS,
+          latency_ms: latencyMs,
+          ...(meta || {}),
+        },
+      });
+    } catch {
+      // best-effort only
+    }
+  };
+
   const baseMetadata = migration
     ? {
         assignment_ts: migration.assignmentTs,
@@ -123,6 +145,7 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
   const adapters = getAdaptersForFormat(input.adFormat);
     if (adapters.length === 0) {
       const landscapeId = generateLandscapeId(requestId);
+      recordDeadlineHit(Date.now() - decisionStartedAt, { outcome: 'error', reason: 'NO_ADAPTER' });
       rtbErrorsTotal.inc({ code: 'NO_ADAPTER', adapter: 'none', ...metricLabels });
       if (migration) {
         await recordOutcome('error', {
@@ -137,7 +160,7 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
     }
 
     const abort = new AbortController();
-    const deadline = Date.now() + AUCTION_TTL_MS;
+    const deadline = decisionStartedAt + AUCTION_TTL_MS;
 
     const tasks = adapters.map(async (adapter) => ({
       adapter,
@@ -173,6 +196,7 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
 
     if (bids.length === 0) {
       const landscapeId = generateLandscapeId(requestId);
+      recordDeadlineHit(Date.now() - decisionStartedAt, { outcome: 'no_bid' });
       if (migration) {
         await recordOutcome('no_fill', {
           bids: candidateSnapshots,
@@ -199,6 +223,7 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
     abort.abort();
 
     const latencyMs = Date.now() - decisionStartedAt;
+    recordDeadlineHit(latencyMs, { outcome: 'decision_made', winner_adapter: winner.adapter });
     const bidId = crypto.randomUUID();
     const landscapeId = generateLandscapeId(requestId, bidId);
 

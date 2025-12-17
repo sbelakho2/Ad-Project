@@ -111,7 +111,7 @@ export default function ProductPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero>
+        <PageHero variant="dark">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
@@ -119,6 +119,13 @@ export default function ProductPage() {
               </h1>
               <p className="text-xl leading-relaxed text-slate-200/90">
                 ApexMediation is the neutral orchestration layer between your apps and your ad networks, with SDKs tuned for reliability and a console built for serious teams.
+              </p>
+              <p className="mt-6 text-sm text-slate-300/80">
+                Shipping SSAI for CTV or web video?{' '}
+                <a href="/docs/ssai" className="text-white underline underline-offset-4 hover:text-slate-100">
+                  Read the SSAI docs
+                </a>
+                .
               </p>
             </motion.div>
           </div>

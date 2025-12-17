@@ -18,6 +18,17 @@ export async function middleware(request: NextRequest) {
   const hostname = request.headers.get('host') || '';
   const { pathname } = request.nextUrl;
 
+  // Marketing-site sign-in is handled by the Console.
+  // Hard-redirect early so we never render the broken /signin page.
+  if (pathname === '/signin' || pathname.startsWith('/signin/')) {
+    const url = new URL('https://console.apexmediation.ee/login');
+    const redirectTo = request.nextUrl.searchParams.get('redirect');
+    if (redirectTo) {
+      url.searchParams.set('redirect', redirectTo);
+    }
+    return NextResponse.redirect(url, 302);
+  }
+
   // Host-based routing for marketing subdomains.
   // These subdomains are served by the same Next.js app; we rewrite paths so they resolve.
   // - docs.apexmediation.ee/foo -> /docs/foo

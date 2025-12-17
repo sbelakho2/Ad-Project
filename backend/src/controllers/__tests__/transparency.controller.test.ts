@@ -42,6 +42,7 @@ describe('Transparency Controller — verification API', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    queryMock.mockReset();
     resetEnv();
   });
 
@@ -54,6 +55,20 @@ describe('Transparency Controller — verification API', () => {
     const res = await request(app)
       .get('/api/v1/transparency/keys')
       .set('Authorization', 'Bearer test')
+      .expect(200);
+
+    expect(res.body.count).toBe(1);
+    expect(res.body.data[0]).toMatchObject({ key_id: 'env-key-1', algo: 'ed25519' });
+  });
+
+  it('GET /transparency/keys returns 200 even when DB query fails (public/no auth)', async () => {
+    process.env.TRANSPARENCY_PUBLIC_KEY_BASE64 = '-----BEGIN PUBLIC KEY-----\nMFYwEAYHKoZIzj0CAQYFK4EEAAoDQgAEXAMPLEKEYLINE\n-----END PUBLIC KEY-----\n';
+    process.env.TRANSPARENCY_KEY_ID = 'env-key-1';
+
+    queryMock.mockRejectedValueOnce(new Error('relation "transparency_signer_keys" does not exist'));
+
+    const res = await request(app)
+      .get('/api/v1/transparency/keys')
       .expect(200);
 
     expect(res.body.count).toBe(1);

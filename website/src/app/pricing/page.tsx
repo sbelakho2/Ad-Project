@@ -51,7 +51,7 @@ const pricingTiers = [
       'Unlimited mediated revenue',
       'A/B testing & experiments',
       '90-day log retention',
-      'Priority Slack support',
+      'Priority support (email)',
     ],
     cta: 'Talk to sales',
     ctaHref: '/contact',
@@ -68,6 +68,7 @@ const pricingTiers = [
       'Data warehouse exports',
       'Dedicated integration help',
       'Custom SLOs',
+      '1-year log retention',
       'Compliance review support',
     ],
     cta: 'Book a consult',
@@ -83,6 +84,7 @@ const pricingTiers = [
     features: [
       'Everything in Scale',
       'Custom SLAs & data residency',
+      'Custom retention',
       'Dedicated support engineer',
       'Roadmap input',
       'Quarterly business reviews',
@@ -127,7 +129,7 @@ export default function PricingPage() {
         <SiteHeader />
 
         {/* Hero */}
-        <PageHero>
+        <PageHero variant="dark">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto">
               <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
@@ -222,6 +224,7 @@ export default function PricingPage() {
                 <div className="bg-gray-50 rounded-xl p-6 text-center">
                   <p className="text-sm text-gray-500 mb-2">$5k/mo mediated</p>
                   <p className="text-3xl font-bold text-gray-900 mb-1">$0</p>
+                    'Custom retention',
                   <p className="text-sm text-brand-600">Free tier</p>
                 </div>
                 <div className="bg-gray-50 rounded-xl p-6 text-center">

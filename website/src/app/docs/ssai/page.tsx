@@ -101,7 +101,7 @@ export default function SSAIOverviewPage() {
                 </li>
                 <li className="flex items-start gap-2">
                   <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-                  <span className="text-gray-600"><strong>Universal compatibility:</strong> Works on any device that plays HLS or DASH. Compatibility depends on protocol/container/DRM policy and player capabilities—see the <Link href="/docs/ssai/coverage" className="text-emerald-600 hover:underline">Certified Playback Matrix</Link> and protocol pages.</span>
+                  <span className="text-gray-600"><strong>Broad compatibility:</strong> Designed to work across modern HLS and DASH players. Exact compatibility depends on protocol, container, DRM policy, and player capabilities—see the <Link href="/docs/ssai/coverage" className="text-emerald-600 hover:underline">Certified Playback Matrix</Link> and protocol pages.</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
