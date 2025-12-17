@@ -15,9 +15,10 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import { PrinciplesToProductCard } from '@/components/VisualCard';
+import { CompanyIdentity } from '@/components/CompanyIdentity';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
-import { legalEntity, sloConfig } from '@/config/legal';
+import { sloConfig } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -182,18 +183,7 @@ export default function CompanyPage() {
                     <Building2 className="w-6 h-6 text-brand-600" />
                     <h3 className="text-xl font-bold text-slate-900">Legal entity</h3>
                   </div>
-                  <div className="bg-slate-50 rounded-xl p-6 border border-slate-200/70">
-                    <p className="font-semibold text-slate-900 mb-2">{legalEntity.name}</p>
-                    <p className="text-slate-600 mb-1">{legalEntity.address.region}, {legalEntity.address.city}</p>
-                    <p className="text-slate-600 mb-1">{legalEntity.address.street}</p>
-                    <p className="text-slate-600 mb-1">{legalEntity.address.postalCode}</p>
-                    <p className="text-slate-600">{legalEntity.address.country}</p>
-                    <div className="mt-4 pt-4 border-t border-slate-200">
-                      <p className="text-sm text-slate-500">
-                        {legalEntity.fullRegistryLine}
-                      </p>
-                    </div>
-                  </div>
+                  <CompanyIdentity variant="full" />
                 </motion.div>
 
                 <motion.div {...getRevealProps(0.1)}>

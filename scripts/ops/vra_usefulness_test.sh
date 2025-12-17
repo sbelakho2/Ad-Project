@@ -16,10 +16,17 @@
 
 set -euo pipefail
 
+# Load optional env file for SLO runs if present
+if [[ -f "/opt/adproject/.env.slo" ]]; then
+  set -a; source "/opt/adproject/.env.slo"; set +a
+elif [[ -f ".env.slo" ]]; then
+  set -a; source ".env.slo"; set +a
+fi
+
 # Hetzner infrastructure (App: 46.62.252.96, DB: 77.42.44.35)
 API_URL="${API_URL:-https://api.apexmediation.ee}"
-TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
-PUBLISHER_ID="efbb0394-23eb-4b80-a4d6-9a0e60ef1b56"
+TOKEN="${TOKEN:-}"
+PUBLISHER_ID="${PUBLISHER_ID:-}"
 EVIDENCE_DIR="evidence-$(date +%F)/vra"
 TEST_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TEST_DATE_SHORT=$(date -u +%Y-%m-%d)
@@ -51,6 +58,14 @@ random_uuid() {
     $RANDOM $RANDOM $RANDOM
 }
 
+require_env() {
+  local name="$1"; local value="${2:-}"
+  if [[ -z "$value" ]]; then
+    log "[err] Missing required env: $name"
+    exit 2
+  fi
+}
+
 # ============================================================
 # PHASE 1: Clear existing test data
 # ============================================================
@@ -60,6 +75,10 @@ log "Testing VRA variance detection accuracy"
 log "API: $API_URL"
 log "Date: $TEST_DATE"
 log "=========================================="
+
+# Validate env
+require_env TOKEN "$TOKEN"
+require_env PUBLISHER_ID "$PUBLISHER_ID"
 
 # ============================================================
 # PHASE 2: Seed SDK Revenue Events (Expected Revenue)

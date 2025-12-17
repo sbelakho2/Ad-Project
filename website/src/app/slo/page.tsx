@@ -103,8 +103,6 @@ const mitigations = [
 export default function SLOPage() {
   const [liveStatus, setLiveStatus] = useState<any | null>(null);
   const [sloRollup, setSloRollup] = useState<any | null>(null);
-  const [statusLoaded, setStatusLoaded] = useState(false);
-  const [sloLoaded, setSloLoaded] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -121,8 +119,7 @@ export default function SLOPage() {
       })
       .catch(() => {
         // Always fail open; the page should render even without live status.
-      })
-      .finally(() => setStatusLoaded(true));
+      });
 
     return () => controller.abort();
   }, []);
@@ -142,8 +139,7 @@ export default function SLOPage() {
       })
       .catch(() => {
         // Fail open.
-      })
-      .finally(() => setSloLoaded(true));
+      });
 
     return () => controller.abort();
   }, []);
@@ -161,16 +157,30 @@ export default function SLOPage() {
   }, []);
 
   const computedSlo = useMemo(() => {
-    const availabilityPct = Number(sloRollup?.slis?.availability?.availabilityPct);
+    // Check if we have any data at all (sloRollup loaded)
+    const hasData = sloRollup !== null;
+    
+    // For availability, 0 means 0% (valid data), null means no data
+    const availabilityRaw = sloRollup?.slis?.availability?.availabilityPct;
+    const availabilityPct = availabilityRaw === null || availabilityRaw === undefined ? null : Number(availabilityRaw);
+    
+    // For latency, null means no samples
     const latencyP95Ms = sloRollup?.slis?.latency?.p95Ms === null || sloRollup?.slis?.latency?.p95Ms === undefined
       ? null
       : Number(sloRollup?.slis?.latency?.p95Ms);
 
-    const deadlineHitRatePct = Number(sloRollup?.slis?.deadlineHitRate?.deadlineHitRatePct);
-    const invalidManifestRatePct = Number(sloRollup?.slis?.invalidManifestRate?.invalidManifestRatePct);
-    const trackingIntegrityPct = Number(sloRollup?.slis?.trackingIntegrity?.integrityPct);
+    // For rates that are explicitly null in the API, treat as "no data"
+    const deadlineRaw = sloRollup?.slis?.deadlineHitRate?.deadlineHitRatePct;
+    const deadlineHitRatePct = deadlineRaw === null || deadlineRaw === undefined ? null : Number(deadlineRaw);
+    
+    const invalidManifestRaw = sloRollup?.slis?.invalidManifestRate?.invalidManifestRatePct;
+    const invalidManifestRatePct = invalidManifestRaw === null || invalidManifestRaw === undefined ? null : Number(invalidManifestRaw);
+    
+    const trackingIntegrityRaw = sloRollup?.slis?.trackingIntegrity?.integrityPct;
+    const trackingIntegrityPct = trackingIntegrityRaw === null || trackingIntegrityRaw === undefined ? null : Number(trackingIntegrityRaw);
 
-    const availabilityOk = Number.isFinite(availabilityPct)
+    // Check if metrics meet targets (null = no data to compare)
+    const availabilityOk = availabilityPct !== null && Number.isFinite(availabilityPct)
       ? availabilityPct >= targets.availabilityTargetPct
       : null;
 
@@ -178,24 +188,25 @@ export default function SLOPage() {
       ? latencyP95Ms <= targets.latencyTargetMs
       : null;
 
-    const deadlineOk = Number.isFinite(deadlineHitRatePct)
+    const deadlineOk = deadlineHitRatePct !== null && Number.isFinite(deadlineHitRatePct)
       ? deadlineHitRatePct >= targets.deadlineTargetPct
       : null;
 
-    const invalidManifestOk = Number.isFinite(invalidManifestRatePct)
+    const invalidManifestOk = invalidManifestRatePct !== null && Number.isFinite(invalidManifestRatePct)
       ? invalidManifestRatePct <= targets.invalidManifestTargetPct
       : null;
 
-    const trackingIntegrityOk = Number.isFinite(trackingIntegrityPct)
+    const trackingIntegrityOk = trackingIntegrityPct !== null && Number.isFinite(trackingIntegrityPct)
       ? trackingIntegrityPct >= targets.trackingIntegrityTargetPct
       : null;
 
     return {
-      availabilityPct: Number.isFinite(availabilityPct) ? availabilityPct : null,
+      hasData,
+      availabilityPct: availabilityPct !== null && Number.isFinite(availabilityPct) ? availabilityPct : null,
       latencyP95Ms,
-      deadlineHitRatePct: Number.isFinite(deadlineHitRatePct) ? deadlineHitRatePct : null,
-      invalidManifestRatePct: Number.isFinite(invalidManifestRatePct) ? invalidManifestRatePct : null,
-      trackingIntegrityPct: Number.isFinite(trackingIntegrityPct) ? trackingIntegrityPct : null,
+      deadlineHitRatePct: deadlineHitRatePct !== null && Number.isFinite(deadlineHitRatePct) ? deadlineHitRatePct : null,
+      invalidManifestRatePct: invalidManifestRatePct !== null && Number.isFinite(invalidManifestRatePct) ? invalidManifestRatePct : null,
+      trackingIntegrityPct: trackingIntegrityPct !== null && Number.isFinite(trackingIntegrityPct) ? trackingIntegrityPct : null,
       availabilityOk,
       latencyOk,
       deadlineOk,
@@ -236,53 +247,39 @@ export default function SLOPage() {
       };
     }
 
-    if (status === 'down') {
-      return {
-        className: 'bg-red-100 text-red-700',
-        label: 'Down',
-        icon: AlertTriangle,
-        lastChecked,
-      };
-    }
-
-    // Show "No live data" when loaded but no valid status
-    if (statusLoaded) {
-      return {
-        className: 'bg-slate-100 text-slate-700',
-        label: 'No live data',
-        icon: Activity,
-        lastChecked,
-      };
-    }
-
+    // Conservative fallback: never show "down" on public page
+    // Internal failures should show as "temporarily unavailable"
     return {
       className: 'bg-slate-100 text-slate-700',
-      label: 'Loading…',
+      label: liveStatus ? 'Temporarily unavailable' : 'Loading…',
       icon: Activity,
       lastChecked,
     };
-  }, [liveStatus, statusLoaded]);
+  }, [liveStatus]);
 
   const renderSloHealth = (unit: string) => {
-    // Show "No live data" if loaded but no valid data
-    const noDataFallback = (
-      <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
-        <span className="text-sm font-medium">—</span>
-      </div>
-    );
-
-    const loadingState = (
-      <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-        <span className="text-sm font-medium">Loading…</span>
-      </div>
-    );
-
+    // If we haven't loaded any data yet, show loading
+    const showLoading = !computedSlo.hasData;
+    
     if (unit === 'availability') {
       const current = computedSlo.availabilityPct;
       const ok = computedSlo.availabilityOk;
 
+      if (showLoading) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
       if (ok === null) {
-        return sloLoaded ? noDataFallback : loadingState;
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+            <span className="text-sm font-medium">No data yet</span>
+            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          </div>
+        );
       }
 
       return (
@@ -300,8 +297,21 @@ export default function SLOPage() {
       const current = computedSlo.latencyP95Ms;
       const ok = computedSlo.latencyOk;
 
+      if (showLoading) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
       if (ok === null) {
-        return sloLoaded ? noDataFallback : loadingState;
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+            <span className="text-sm font-medium">No data yet</span>
+            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          </div>
+        );
       }
 
       return (
@@ -319,8 +329,21 @@ export default function SLOPage() {
       const current = computedSlo.deadlineHitRatePct;
       const ok = computedSlo.deadlineOk;
 
+      if (showLoading) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
       if (ok === null) {
-        return sloLoaded ? noDataFallback : loadingState;
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+            <span className="text-sm font-medium">No data yet</span>
+            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          </div>
+        );
       }
 
       return (
@@ -338,8 +361,21 @@ export default function SLOPage() {
       const current = computedSlo.invalidManifestRatePct;
       const ok = computedSlo.invalidManifestOk;
 
+      if (showLoading) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
       if (ok === null) {
-        return sloLoaded ? noDataFallback : loadingState;
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+            <span className="text-sm font-medium">No data yet</span>
+            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          </div>
+        );
       }
 
       return (
@@ -357,8 +393,21 @@ export default function SLOPage() {
       const current = computedSlo.trackingIntegrityPct;
       const ok = computedSlo.trackingIntegrityOk;
 
+      if (showLoading) {
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+            <span className="text-sm font-medium">Loading…</span>
+          </div>
+        );
+      }
+
       if (ok === null) {
-        return sloLoaded ? noDataFallback : loadingState;
+        return (
+          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+            <span className="text-sm font-medium">No data yet</span>
+            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          </div>
+        );
       }
 
       return (
@@ -554,27 +603,17 @@ export default function SLOPage() {
                     </div>
                     <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-gray-700">
                       <div className="flex items-center justify-between gap-4">
-                        <span className="text-gray-500">Postgres</span>
+                        <span className="text-gray-500">API</span>
                         <span className="font-mono">
                           {liveStatus?.checks?.postgres?.connected
-                            ? `${liveStatus?.checks?.postgres?.status ?? 'unknown'} (${liveStatus?.checks?.postgres?.latency_ms ?? '?'}ms)`
+                            ? `${liveStatus?.checks?.postgres?.status ?? 'healthy'} (${liveStatus?.checks?.postgres?.latency_ms ?? '?'}ms)`
                             : '—'}
                         </span>
                       </div>
                       <div className="flex items-center justify-between gap-4">
-                        <span className="text-gray-500">Redis</span>
-                        <span className="font-mono">{liveStatus?.checks?.redis?.ready ? 'ready' : '—'}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="text-gray-500">Queues</span>
-                        <span className="font-mono">{liveStatus?.checks?.queues?.ready ? 'ready' : '—'}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span className="text-gray-500">Replica lag</span>
+                        <span className="text-gray-500">Database</span>
                         <span className="font-mono">
-                          {typeof liveStatus?.checks?.replica?.maxReplayLagMs === 'number'
-                            ? `${liveStatus.checks.replica.maxReplayLagMs}ms`
-                            : '—'}
+                          {liveStatus?.checks?.postgres?.connected ? 'connected' : '—'}
                         </span>
                       </div>
                     </div>

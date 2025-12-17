@@ -6,16 +6,19 @@ set -euo pipefail
 #   ./scripts/ops/hetzner_ssh.sh                           # SSH to app server (default)
 #   ./scripts/ops/hetzner_ssh.sh app                       # SSH to app server
 #   ./scripts/ops/hetzner_ssh.sh db                        # SSH to database server
+#   ./scripts/ops/hetzner_ssh.sh test                      # SSH to test server (157.90.126.205)
 #   ./scripts/ops/hetzner_ssh.sh app -- "<remote cmd>"     # Run command on app server
 #   ./scripts/ops/hetzner_ssh.sh db -- "<remote cmd>"      # Run command on db server
 #
 # Hetzner Infrastructure:
 #   App Server: 46.62.252.96 (apexmediation.ee)
 #   DB Server:  77.42.44.35
+#   Test Server: 157.90.126.205
 #   Domains: apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee
 
 APP_SERVER="46.62.252.96"
 DB_SERVER="77.42.44.35"
+TEST_SERVER="157.90.126.205"
 KEY="${APEX_HETZNER_SSH_KEY:-$HOME/.ssh/hetzner-db-mac}"
 
 if [[ ! -f "$KEY" ]]; then
@@ -38,6 +41,11 @@ if [[ $# -gt 0 ]]; then
     db)
       TARGET_HOST="$DB_SERVER"
       TARGET_NAME="db"
+      shift
+      ;;
+    test)
+      TARGET_HOST="$TEST_SERVER"
+      TARGET_NAME="test"
       shift
       ;;
     --)

@@ -26,6 +26,7 @@ import {
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import { VisualCard } from '@/components/VisualCard';
+import { MetricCard } from '@/components/MetricCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
 
@@ -442,23 +443,11 @@ export default function FeaturesPage() {
               </div>
 
               <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-green-50 rounded-2xl p-8 border border-brand-200">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
-                  <div>
-                    <div className="text-4xl font-bold text-brand-600 mb-2">3</div>
-                    <div className="text-gray-600 font-medium">Lines to integrate</div>
-                  </div>
-                  <div>
-                    <div className="text-4xl font-bold text-brand-600 mb-2">0</div>
-                    <div className="text-gray-600 font-medium">XML config files</div>
-                  </div>
-                  <div>
-                    <div className="text-4xl font-bold text-brand-600 mb-2">1</div>
-                    <div className="text-gray-600 font-medium">Integration point</div>
-                  </div>
-                  <div>
-                    <div className="text-4xl font-bold text-brand-600 mb-2">8+</div>
-                    <div className="text-gray-600 font-medium">Ad networks</div>
-                  </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                  <MetricCard value="3" label="Lines to integrate" />
+                  <MetricCard value="0" label="XML config files" />
+                  <MetricCard value="1" label="Integration point" />
+                  <MetricCard value="8+" label="Ad networks" />
                 </div>
               </motion.div>
 

@@ -5,13 +5,21 @@
 
 set -euo pipefail
 
+# Load optional env file for SLO runs if present
+if [[ -f "/opt/adproject/.env.slo" ]]; then
+  set -a; source "/opt/adproject/.env.slo"; set +a
+elif [[ -f ".env.slo" ]]; then
+  set -a; source ".env.slo"; set +a
+fi
+
 # Hetzner infrastructure
 APP_SERVER="46.62.252.96"
 DB_SERVER="77.42.44.35"
 SSH_KEY="$HOME/.ssh/hetzner-db-mac"
 SSH_CMD="ssh -i $SSH_KEY root@$DB_SERVER"
-API_URL="https://api.apexmediation.ee"
-TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
+API_URL="${API_URL:-https://api.apexmediation.ee}"
+TOKEN="${TOKEN:-}"
+SDK_KEY="${SDK_KEY:-}"
 EVIDENCE_DIR="evidence-$(date +%F)/vra"
 LOG_FILE="$EVIDENCE_DIR/multiday_test.log"
 INTERVAL_SECONDS=300  # 5 minutes between checks
@@ -20,6 +28,14 @@ mkdir -p "$EVIDENCE_DIR"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+require_env() {
+  local name="$1"; local value="${2:-}"
+  if [[ -z "$value" ]]; then
+    log "[err] Missing required env: $name"
+    exit 2
+  fi
 }
 
 check_vra_endpoints() {
@@ -65,7 +81,7 @@ generate_synthetic_activity() {
   for i in $(seq 1 5); do
     RESP=$(curl -s -X POST "$API_URL/api/v1/rtb/bid" \
       -H "Content-Type: application/json" \
-      -H "X-SDK-Key: ak_test_38dc38e6-7b2e-4f8a-9c5d-1e2f3a4b5c6d" \
+      -H "X-SDK-Key: $SDK_KEY" \
       -d '{
         "placementId": "test-placement-1",
         "adType": "banner",
@@ -106,6 +122,10 @@ log "Starting VRA Multi-Day Soak Test"
 log "Interval: ${INTERVAL_SECONDS}s"
 log "Evidence dir: $EVIDENCE_DIR"
 log "=========================================="
+
+# Validate env
+require_env TOKEN "$TOKEN"
+require_env SDK_KEY "$SDK_KEY"
 
 ITERATION=0
 while true; do

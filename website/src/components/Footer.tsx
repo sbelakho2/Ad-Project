@@ -1,4 +1,5 @@
 import SocialIconLink from '@/components/SocialIconLink';
+import { CompanyIdentity } from '@/components/CompanyIdentity';
 import { legalEntity } from '@/config/legal';
 
 /**
@@ -20,12 +21,7 @@ export default function Footer() {
               <li><a href="/contact" className="text-brand-600 hover:text-brand-700 hover:underline">Contact</a></li>
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
-            <div className="mt-6 text-xs text-gray-500">
-              <p className="font-medium">{legalEntity.name}</p>
-              <p>{legalEntity.address.street}</p>
-              <p>{legalEntity.address.postalCode} {legalEntity.address.city}, {legalEntity.address.country}</p>
-              <p className="mt-1">{legalEntity.registryLine}</p>
-            </div>
+            <CompanyIdentity variant="compact" className="mt-6" />
           </div>
 
           {/* Product */}

@@ -1,7 +1,10 @@
 'use client';
 
+import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
+  ChevronDown,
+  ChevronUp,
   Monitor,
   Play,
   Smartphone,
@@ -85,20 +88,136 @@ const statusConfig = {
     bgColor: 'bg-emerald-50',
     borderColor: 'border-emerald-200',
     label: 'Certified',
+    order: 1,
   },
   partial: {
     color: 'text-amber-700',
     bgColor: 'bg-amber-50',
     borderColor: 'border-amber-200',
     label: 'Partial',
+    order: 2,
   },
   unsupported: {
     color: 'text-gray-500',
     bgColor: 'bg-gray-50',
     borderColor: 'border-gray-200',
     label: 'Unsupported',
+    order: 3,
   },
 };
+
+type SortDirection = 'asc' | 'desc' | null;
+type SortKey = 'name' | 'version' | 'status' | 'notes';
+
+interface SortableHeaderProps {
+  label: string;
+  sortKey: SortKey;
+  currentSort: SortKey | null;
+  direction: SortDirection;
+  onSort: (key: SortKey) => void;
+}
+
+function SortableHeader({ label, sortKey, currentSort, direction, onSort }: SortableHeaderProps) {
+  const isActive = currentSort === sortKey;
+  return (
+    <th
+      className="px-4 py-3 font-semibold text-gray-900 cursor-pointer hover:bg-gray-100 select-none transition-colors"
+      onClick={() => onSort(sortKey)}
+      aria-sort={isActive ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <div className="flex items-center gap-1.5">
+        {label}
+        <span className="text-gray-400 flex flex-col">
+          {isActive && direction === 'asc' && <ChevronUp className="w-4 h-4 text-brand-600" />}
+          {isActive && direction === 'desc' && <ChevronDown className="w-4 h-4 text-brand-600" />}
+          {!isActive && <ChevronUp className="w-3 h-3 opacity-30" />}
+        </span>
+      </div>
+    </th>
+  );
+}
+
+interface Platform {
+  name: string;
+  version: string;
+  status: 'certified' | 'partial' | 'unsupported';
+  notes: string;
+}
+
+interface SortableTableProps {
+  platforms: Platform[];
+  columns: { key: SortKey; label: string }[];
+}
+
+function SortableTable({ platforms, columns }: SortableTableProps) {
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDirection>(null);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      if (sortDir === 'asc') setSortDir('desc');
+      else if (sortDir === 'desc') { setSortKey(null); setSortDir(null); }
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  };
+
+  const sortedPlatforms = useMemo(() => {
+    if (!sortKey || !sortDir) return platforms;
+    
+    return [...platforms].sort((a, b) => {
+      let comparison = 0;
+      
+      if (sortKey === 'status') {
+        comparison = statusConfig[a.status].order - statusConfig[b.status].order;
+      } else {
+        const aVal = a[sortKey].toLowerCase();
+        const bVal = b[sortKey].toLowerCase();
+        comparison = aVal.localeCompare(bVal);
+      }
+      
+      return sortDir === 'desc' ? -comparison : comparison;
+    });
+  }, [platforms, sortKey, sortDir]);
+
+  return (
+    <table className="w-full text-left">
+      <thead>
+        <tr className="bg-gray-50 border-b border-gray-200">
+          {columns.map(col => (
+            <SortableHeader
+              key={col.key}
+              label={col.label}
+              sortKey={col.key}
+              currentSort={sortKey}
+              direction={sortDir}
+              onSort={handleSort}
+            />
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {sortedPlatforms.map((platform, idx) => {
+          const status = statusConfig[platform.status];
+          return (
+            <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+              <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
+              <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
+              <td className="px-4 py-3.5">
+                <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
+                  <StatusDot status={platform.status} />
+                  {status.label}
+                </span>
+              </td>
+              <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
 
 export default function PlaybackMatrixPage() {
   return (
@@ -158,39 +277,20 @@ export default function PlaybackMatrixPage() {
                 </div>
                 <div>
                   <h2 className="text-2xl font-bold text-gray-900">CTV / OTT Platforms</h2>
-                  <p className="text-gray-600">Living room devices and streaming platforms</p>
+                  <p className="text-gray-600">Living room devices and streaming platforms. Click column headers to sort.</p>
                 </div>
               </motion.div>
 
               <motion.div {...getRevealProps(0.1)} className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-4 py-3 font-semibold text-gray-900">Platform</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Min Version</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Status</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {playbackMatrix.ctv.platforms.map((platform, idx) => {
-                      const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3.5">
-                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
-                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
-                              {status.label}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <SortableTable
+                  platforms={playbackMatrix.ctv.platforms as Platform[]}
+                  columns={[
+                    { key: 'name', label: 'Platform' },
+                    { key: 'version', label: 'Min Version' },
+                    { key: 'status', label: 'Status' },
+                    { key: 'notes', label: 'Notes' },
+                  ]}
+                />
               </motion.div>
             </div>
           </div>
@@ -206,39 +306,20 @@ export default function PlaybackMatrixPage() {
                 </div>
                 <div>
                   <h2 className="text-2xl font-bold text-gray-900">Web Video</h2>
-                  <p className="text-gray-600">Browser-based playback</p>
+                  <p className="text-gray-600">Browser-based playback. Click column headers to sort.</p>
                 </div>
               </motion.div>
 
-              <motion.div {...getRevealProps(0.1)} className="overflow-x-auto">
-                <table className="w-full text-left bg-white rounded-xl overflow-hidden">
-                  <thead>
-                    <tr className="bg-gray-100 border-b border-gray-200">
-                      <th className="px-4 py-3 font-semibold text-gray-900">Browser</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Min Version</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Status</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Player Support</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {playbackMatrix.web.platforms.map((platform, idx) => {
-                      const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3.5">
-                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
-                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
-                              {status.label}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <motion.div {...getRevealProps(0.1)} className="overflow-x-auto bg-white rounded-xl overflow-hidden">
+                <SortableTable
+                  platforms={playbackMatrix.web.platforms as Platform[]}
+                  columns={[
+                    { key: 'name', label: 'Browser' },
+                    { key: 'version', label: 'Min Version' },
+                    { key: 'status', label: 'Status' },
+                    { key: 'notes', label: 'Player Support' },
+                  ]}
+                />
               </motion.div>
             </div>
           </div>
@@ -254,39 +335,20 @@ export default function PlaybackMatrixPage() {
                 </div>
                 <div>
                   <h2 className="text-2xl font-bold text-gray-900">Mobile Apps</h2>
-                  <p className="text-gray-600">Native and hybrid mobile applications</p>
+                  <p className="text-gray-600">Native and hybrid mobile applications. Click column headers to sort.</p>
                 </div>
               </motion.div>
 
               <motion.div {...getRevealProps(0.1)} className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-4 py-3 font-semibold text-gray-900">Platform</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Min Version</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Status</th>
-                      <th className="px-4 py-3 font-semibold text-gray-900">Integration</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {playbackMatrix.mobile.platforms.map((platform, idx) => {
-                      const status = statusConfig[platform.status as keyof typeof statusConfig];
-                      return (
-                        <tr key={platform.name} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
-                          <td className="px-4 py-3.5 font-medium text-gray-900">{platform.name}</td>
-                          <td className="px-4 py-3.5 text-gray-500 font-mono text-sm">{platform.version}</td>
-                          <td className="px-4 py-3.5">
-                            <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${status.bgColor} ${status.color} ${status.borderColor}`}>
-                              <StatusDot status={platform.status as 'certified' | 'partial' | 'unsupported'} />
-                              {status.label}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3.5 text-gray-500 text-sm">{platform.notes}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                <SortableTable
+                  platforms={playbackMatrix.mobile.platforms as Platform[]}
+                  columns={[
+                    { key: 'name', label: 'Platform' },
+                    { key: 'version', label: 'Min Version' },
+                    { key: 'status', label: 'Status' },
+                    { key: 'notes', label: 'Integration' },
+                  ]}
+                />
               </motion.div>
             </div>
           </div>

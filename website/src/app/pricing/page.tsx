@@ -245,10 +245,10 @@ export default function PricingPage() {
                 <p className="text-sm text-gray-600 mb-3">
                   SSAI pricing follows the same model as mobile mediation—based on mediated ad revenue, not impressions or stream hours.
                 </p>
-                <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• <strong>Mediated revenue</strong> = ad revenue from SSAI-inserted pods</li>
-                  <li>• <strong>Not included</strong>: origin hosting, CDN egress, packager costs (these are your infrastructure)</li>
-                  <li>• <strong>Included</strong>: manifest manipulation, ad decisioning, tracking, and analytics</li>
+                <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                  <li><strong>Mediated revenue</strong> = ad revenue from SSAI-inserted pods</li>
+                  <li><strong>Not included</strong>: origin hosting, CDN egress, packager costs (these are your infrastructure)</li>
+                  <li><strong>Included</strong>: manifest manipulation, ad decisioning, tracking, and analytics</li>
                 </ul>
               </motion.div>
             </div>
@@ -285,6 +285,42 @@ export default function PricingPage() {
                       <span><strong>Enterprise:</strong> Custom retention + data residency</span>
                     </li>
                   </ul>
+
+                  {/* Accessible retention table */}
+                  <div className="mt-6 overflow-x-auto">
+                    <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+                      <caption className="sr-only">Log retention periods by plan</caption>
+                      <thead className="bg-gray-100">
+                        <tr>
+                          <th className="text-left px-4 py-2 font-semibold text-gray-900">Plan</th>
+                          <th className="text-left px-4 py-2 font-semibold text-gray-900">Retention</th>
+                          <th className="text-left px-4 py-2 font-semibold text-gray-900">Export Formats</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        <tr>
+                          <td className="px-4 py-2 text-gray-900">Starter</td>
+                          <td className="px-4 py-2 text-gray-600">30 days</td>
+                          <td className="px-4 py-2 text-gray-600">JSON, CSV</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-gray-900">Growth</td>
+                          <td className="px-4 py-2 text-gray-600">90 days</td>
+                          <td className="px-4 py-2 text-gray-600">JSON, CSV</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-gray-900">Scale</td>
+                          <td className="px-4 py-2 text-gray-600">1 year</td>
+                          <td className="px-4 py-2 text-gray-600">JSON, CSV, BigQuery, S3</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-gray-900">Enterprise</td>
+                          <td className="px-4 py-2 text-gray-600">Custom + archive</td>
+                          <td className="px-4 py-2 text-gray-600">All formats + data residency</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </motion.div>
                 <motion.div {...getRevealProps(0.1)} className="hidden lg:block">
                   <RetentionMatrixCard className="ml-auto max-w-sm" />

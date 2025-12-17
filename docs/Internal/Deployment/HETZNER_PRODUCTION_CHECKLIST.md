@@ -5,6 +5,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > **Infrastructure Overview:**  
 > - **App Server:** 46.62.252.96 (apexmediation.ee)  
 > - **DB Server:** 77.42.44.35  
+> - **Test Server:** 157.90.126.205 (continuous synthetic testing; managed and accessed same as app server)  
 > - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
 > - **Project Path:** `/opt/adproject` (NOT `/opt/apex` or `/var/www`)
@@ -152,11 +153,17 @@ Database:
 # SSH to database server
 ./scripts/ops/hetzner_ssh.sh db
 
+# SSH to test server
+./scripts/ops/hetzner_ssh.sh test
+
 # Run command on app server
 ./scripts/ops/hetzner_ssh.sh app -- "docker ps"
 
 # Run command on database server
 ./scripts/ops/hetzner_ssh.sh db -- "sudo -u postgres psql -d adproject -c 'SELECT COUNT(*) FROM users;'"
+
+# Run command on test server
+./scripts/ops/hetzner_ssh.sh test -- "hostname && uptime"
 ```
 
 ### 3.2 Direct SSH
@@ -775,3 +782,144 @@ The following files have been removed or deprecated:
 - [Console/SESSION_AUTH.md](../Console/SESSION_AUTH.md) - Session and CSRF configuration
 - [Security/TWO_FACTOR_AUTH.md](../Security/TWO_FACTOR_AUTH.md) - 2FA implementation
 - [Security/SECRETS_MANAGEMENT_SETUP.md](../Security/SECRETS_MANAGEMENT_SETUP.md) - Key management
+
+---
+
+## 13. Continuous SLO Data Population (Test Server 157.90.126.205)
+
+### 13.1 Purpose
+
+To keep the public SLO page at `https://apexmediation.ee/slo` populated with live, representative metrics, we run continuous synthetic activity from a dedicated test server. This protects production from artificial load while ensuring SLO/SLA transparency remains meaningful before and during early customer ramp-up.
+
+Key points:
+- Runs from a separate test server: 157.90.126.205
+- Managed operationally the same way as the App Server (same SSH key/process conventions)
+- Exercises: analytics ingestion, status/slo endpoints, and a minimal SSAI session path
+- Data is ingested and treated as REAL production data (tied to a designated dummy publisher and its apps)
+- MUST be disabled once sufficient customer data is present (see 13.5)
+
+### 13.2 Test Server Access
+
+SSH (same key as App/DB servers):
+```bash
+ssh -i ~/.ssh/hetzner-db-mac root@157.90.126.205
+```
+
+Project layout on the test server should mirror `/opt/adproject` (rsync/tarball deploy acceptable).
+
+### 13.3 Continuous Runner Script
+
+An orchestrator script is provided:
+```bash
+./scripts/ops/slo_continuous_test.sh
+```
+
+Environment variables (store in `/opt/adproject/.env.slo` on the test server):
+- `API_URL` (default: https://api.apexmediation.ee)
+- `TOKEN` (required) Bearer token that belongs to the dummy publisher user (NOT an admin)
+- `SDK_KEY` (required) SDK key owned by the dummy publisher (maps activity to the correct tenant)
+- `PUBLISHER_ID` (required) Dummy publisher UUID
+- App IDs for each SDK owned by the dummy publisher (required to exercise Console, billing, multi-app flows):
+  - `APP_ID_ANDROID`, `APP_ID_IOS`, `APP_ID_WEB`, `APP_ID_UNITY`, `APP_ID_CTV`
+- Optional tuning: `CYCLE_MINUTES` (default 30), `RATE_EPM` (events/min, default 20), `SLEEP_BETWEEN` (sec, default 60)
+
+Template file is provided: `infrastructure/production/.env.slo.example`.
+
+Example manual run on the test server:
+```bash
+cd /opt/adproject
+# 1) Prepare env file with the dummy publisher and per-SDK apps
+cp /opt/adproject/infrastructure/production/.env.slo.example /opt/adproject/.env.slo
+vi /opt/adproject/.env.slo   # fill TOKEN, SDK_KEY, PUBLISHER_ID, APP_ID_*
+
+# 2) Start the runner (uses /opt/adproject/.env.slo)
+nohup ./scripts/ops/slo_continuous_test.sh > /var/log/slo_continuous_test.out 2>&1 &
+disown
+```
+
+The runner performs cycles of:
+- Warming public endpoints: `/api/v1/status.json`, `/api/v1/slo.json`
+- Synthetic analytics load via `scripts/ops/vra_synthetic_load.sh`
+- Minimal SSAI smoke: creates an SSAI session and attempts to fetch a manifest (non-fatal)
+
+### 13.4 Systemd (Recommended) or Cron Setup
+
+Systemd service (continuous) — do NOT place secrets directly in the unit; use EnvironmentFile:
+```ini
+# /etc/systemd/system/slo-continuous.service
+[Unit]
+Description=Apex Continuous SLO Data Generator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/adproject
+EnvironmentFile=/opt/adproject/.env.slo
+ExecStart=/opt/adproject/scripts/ops/slo_continuous_test.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/slo_continuous_test.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+systemctl daemon-reload
+systemctl enable --now slo-continuous.service
+systemctl status slo-continuous.service
+```
+
+Cron alternative (hourly cycle as a stateless job):
+```bash
+crontab -e
+# Run a 20-minute cycle every hour (the script will read /opt/adproject/.env.slo)
+0 * * * * cd /opt/adproject && CYCLE_MINUTES=20 RATE_EPM=20 SLEEP_BETWEEN=0 ./scripts/ops/slo_continuous_test.sh >> /var/log/slo_continuous_test.log 2>&1
+```
+
+### 13.5 Turn Off Policy (Once Customer Data Is Available)
+
+Constant live testing must be turned OFF once real customer traffic sufficiently populates SLO metrics.
+
+Disable systemd service:
+```bash
+systemctl disable --now slo-continuous.service
+```
+
+Disable cron (if used):
+```bash
+crontab -e
+# remove the slo_continuous_test entry
+```
+
+Retain the ability to run the script on-demand for diagnostics, but do not leave continuous generators running once production volumes are healthy.
+
+### 13.6 SDK Test Apps & SSAI Coverage
+
+To maximize data diversity, keep SDK test apps running where feasible and ensure SSAI flows are exercised:
+- Android / Web / Unity / CTV (tvOS/Android TV) test apps: keep at least one instance per platform active (emulator or device). Where available, use any provided soak/run scripts under `Test Apps/` folders.
+- SSAI: The orchestrator performs a minimal smoke by creating a session. For deeper SSAI coverage, schedule periodic session creation and manifest fetches using representative assets.
+
+Prerequisites for the dummy publisher account (must be completed once):
+- Dummy user exists and owns a dummy publisher/tenant (record the `PUBLISHER_ID`).
+- Create five apps under this tenant and record their IDs: Android, iOS, Web, Unity, CTV.
+- Ensure an `SDK_KEY` issued for this tenant is available and configured in `.env.slo`.
+
+Monitoring and checks:
+- Grafana SLO dashboards should show steady, non-zero activity during synthetic runs.
+- Website SLO page (`/slo`) must render populated metrics; `/status` should show an UP state.
+
+### 13.7 Operational Notes – Recording Test App Downtime
+
+If any SDK test app instance is intentionally stopped or experiencing issues:
+- Record the downtime here with time and platform.
+- Update expected coverage so on-call engineers know which signals are synthetic vs. organic.
+
+Template:
+```
+[YYYY-MM-DD HH:MMZ] Android TV test app offline for maintenance (expected 2h)
+[YYYY-MM-DD HH:MMZ] iOS test app crash loop detected; investigating
+```

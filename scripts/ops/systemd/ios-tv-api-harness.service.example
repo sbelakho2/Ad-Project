@@ -1,0 +1,17 @@
+[Unit]
+Description=Apex iOS/tvOS API Harness (Test Server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/adproject
+EnvironmentFile=/opt/adproject/.env.slo
+ExecStart=/opt/adproject/scripts/ops/ios_tv_api_harness.sh 0 8
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/ios_tv_api_harness.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

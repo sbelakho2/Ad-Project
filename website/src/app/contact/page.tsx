@@ -272,6 +272,7 @@ export default function ContactPage() {
                           <div>
                             <label htmlFor="company" className="block text-sm font-medium text-gray-700 mb-2">
                               Company
+                              <span className="ml-1 text-gray-400 font-normal">(optional)</span>
                             </label>
                             <input
                               type="text"
@@ -282,6 +283,9 @@ export default function ContactPage() {
                               className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-brand-500 focus:border-brand-500 transition-colors"
                               placeholder="Your company"
                             />
+                            <p className="mt-1.5 text-xs text-gray-500">
+                              Helps us understand your use case.
+                            </p>
                           </div>
                           <div>
                             <label htmlFor="reason" className="block text-sm font-medium text-gray-700 mb-2">

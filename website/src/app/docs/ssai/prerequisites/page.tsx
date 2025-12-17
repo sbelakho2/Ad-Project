@@ -86,18 +86,18 @@ export default function PrerequisitesPage() {
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="bg-gray-50 rounded p-4">
                     <h4 className="font-medium text-gray-900 text-sm mb-2">HLS Options</h4>
-                    <ul className="text-sm text-gray-600 space-y-1">
-                      <li>• <code>#EXT-X-DATERANGE</code> with SCTE-35 data</li>
-                      <li>• <code>#EXT-X-CUE-OUT</code> / <code>#EXT-X-CUE-IN</code></li>
-                      <li>• SCTE-35 in-band (ID3 timed metadata)</li>
+                    <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                      <li><code>#EXT-X-DATERANGE</code> with SCTE-35 data</li>
+                      <li><code>#EXT-X-CUE-OUT</code> / <code>#EXT-X-CUE-IN</code></li>
+                      <li>SCTE-35 in-band (ID3 timed metadata)</li>
                     </ul>
                   </div>
                   <div className="bg-gray-50 rounded p-4">
                     <h4 className="font-medium text-gray-900 text-sm mb-2">DASH Options</h4>
-                    <ul className="text-sm text-gray-600 space-y-1">
-                      <li>• <code>EventStream</code> with SCTE-35 scheme</li>
-                      <li>• <code>urn:scte:scte35:2013:xml</code></li>
-                      <li>• <code>urn:scte:scte35:2014:xml+bin</code></li>
+                    <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                      <li><code>EventStream</code> with SCTE-35 scheme</li>
+                      <li><code>urn:scte:scte35:2013:xml</code></li>
+                      <li><code>urn:scte:scte35:2014:xml+bin</code></li>
                     </ul>
                   </div>
                 </div>
@@ -244,39 +244,39 @@ export default function PrerequisitesPage() {
             <div className="grid md:grid-cols-2 gap-4">
               <div className="bg-gray-50 rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 mb-2">Manifest Validation</h3>
-                <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• HLS RFC 8216 compliance</li>
-                  <li>• DASH-IF MPD structure</li>
-                  <li>• <code>EXTINF</code> &gt; 0 for all segments</li>
-                  <li>• <code>EXT-X-TARGETDURATION</code> accuracy</li>
-                  <li>• Discontinuity sequence consistency</li>
+                <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                  <li>HLS RFC 8216 compliance</li>
+                  <li>DASH-IF MPD structure</li>
+                  <li><code>EXTINF</code> &gt; 0 for all segments</li>
+                  <li><code>EXT-X-TARGETDURATION</code> accuracy</li>
+                  <li>Discontinuity sequence consistency</li>
                 </ul>
               </div>
               <div className="bg-gray-50 rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 mb-2">Cue Validation</h3>
-                <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• SCTE-35 parse correctness</li>
-                  <li>• Cue deduplication</li>
-                  <li>• Keyframe alignment check</li>
-                  <li>• Duration reasonability (0.5s–300s)</li>
+                <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                  <li>SCTE-35 parse correctness</li>
+                  <li>Cue deduplication</li>
+                  <li>Keyframe alignment check</li>
+                  <li>Duration reasonability (0.5s–300s)</li>
                 </ul>
               </div>
               <div className="bg-gray-50 rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 mb-2">Format Compatibility</h3>
-                <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• Codec string matching (avc1.*, mp4a.40.*)</li>
-                  <li>• Container format (TS vs CMAF)</li>
-                  <li>• Audio layout compatibility</li>
-                  <li>• Resolution tier matching</li>
+                <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                  <li>Codec string matching (avc1.*, mp4a.40.*)</li>
+                  <li>Container format (TS vs CMAF)</li>
+                  <li>Audio layout compatibility</li>
+                  <li>Resolution tier matching</li>
                 </ul>
               </div>
               <div className="bg-gray-50 rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 mb-2">Origin Health</h3>
-                <ul className="text-sm text-gray-600 space-y-1">
-                  <li>• Manifest fetch latency</li>
-                  <li>• Segment availability (404 detection)</li>
-                  <li>• SSL certificate validity</li>
-                  <li>• Rate limit headroom</li>
+                <ul className="text-sm text-gray-600 space-y-1 list-disc list-inside">
+                  <li>Manifest fetch latency</li>
+                  <li>Segment availability (404 detection)</li>
+                  <li>SSL certificate validity</li>
+                  <li>Rate limit headroom</li>
                 </ul>
               </div>
             </div>

@@ -7,10 +7,26 @@ set -euo pipefail
 
 DURATION_MINUTES=${1:-60}
 EVENTS_PER_MINUTE=${2:-20}
+# Load optional env file for SLO runs if present
+if [[ -f "/opt/adproject/.env.slo" ]]; then
+  set -a; source "/opt/adproject/.env.slo"; set +a
+elif [[ -f ".env.slo" ]]; then
+  set -a; source ".env.slo"; set +a
+fi
+
 # Hetzner infrastructure (App: 46.62.252.96, DB: 77.42.44.35)
-API_URL="https://api.apexmediation.ee"
-TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJlYjhiNjZkNC1mYTIxLTQ2NDQtOTVmMC1jNjU3YjNjZGY4OGYiLCJwdWJsaXNoZXJJZCI6ImVmYmIwMzk0LTIzZWItNGI4MC1hNGQ2LTlhMGU2MGVmMWI1NiIsImVtYWlsIjoidGVzdEBhcGV4bWVkaWF0aW9uLmVlIiwicm9sZSI6ImFkbWluIiwidG9rZW5UeXBlIjoiYWNjZXNzIiwiaWF0IjoxNzY1NTQzNzk4LCJleHAiOjE3NjYxNDg1OTh9.2Mk2Ja8o9ofzUI6hMbKwx0HQ85eXymqv4SJjv7xblg4"
-SDK_KEY="ak_test_38dc38e6-7b2e-4f8a-9c5d-1e2f3a4b5c6d"
+API_URL="${API_URL:-https://api.apexmediation.ee}"
+TOKEN="${TOKEN:-}"
+SDK_KEY="${SDK_KEY:-}"
+PUBLISHER_ID="${PUBLISHER_ID:-}"
+
+# Per-SDK app IDs (must belong to the dummy publisher account)
+APP_ID_ANDROID="${APP_ID_ANDROID:-}"
+APP_ID_IOS="${APP_ID_IOS:-}"
+APP_ID_WEB="${APP_ID_WEB:-}"
+APP_ID_UNITY="${APP_ID_UNITY:-}"
+APP_ID_CTV="${APP_ID_CTV:-}"
+
 EVIDENCE_DIR="evidence-$(date +%F)/vra"
 LOG_FILE="$EVIDENCE_DIR/synthetic_load.log"
 
@@ -20,11 +36,34 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
+require_env() {
+  local name="$1"; local value="${2:-}"
+  if [[ -z "$value" ]]; then
+    log "[err] Missing required env: $name"
+    exit 2
+  fi
+}
+
 # Networks to simulate
 NETWORKS=("admob" "unity" "applovin" "ironsource" "vungle")
 PLACEMENTS=("banner_home" "interstitial_levelup" "rewarded_bonus" "native_feed" "mrec_sidebar")
 DEVICES=("phone" "tablet")
 OS_LIST=("ios" "android")
+
+available_platforms() {
+  local plats=()
+  [[ -n "$APP_ID_ANDROID" ]] && plats+=("android")
+  [[ -n "$APP_ID_IOS" ]] && plats+=("ios")
+  [[ -n "$APP_ID_WEB" ]] && plats+=("web")
+  [[ -n "$APP_ID_UNITY" ]] && plats+=("unity")
+  [[ -n "$APP_ID_CTV" ]] && plats+=("ctv")
+  echo "${plats[@]}"
+}
+
+pick_platform() {
+  local plats=("$@")
+  echo "${plats[$RANDOM % ${#plats[@]}]}"
+}
 
 random_element() {
   local arr=("$@")
@@ -58,9 +97,26 @@ generate_impression_batch() {
     local network=$(random_element "${NETWORKS[@]}")
     local placement=$(random_element "${PLACEMENTS[@]}")
     local device=$(random_element "${DEVICES[@]}")
-    local os=$(random_element "${OS_LIST[@]}")
+    local plats=( $(available_platforms) )
+    local platformType=$(pick_platform "${plats[@]}")
+    local os="android"
+    case "$platformType" in
+      ios) os="ios" ;;
+      android) os="android" ;;
+      web) os="web" ;;
+      unity) os=$([[ $((RANDOM%2)) -eq 0 ]] && echo "ios" || echo "android") ;;
+      ctv) os=$([[ $((RANDOM%2)) -eq 0 ]] && echo "tvos" || echo "android_tv") ;;
+    esac
     local event_id=$(random_uuid)
-    local app_id=$(random_uuid)
+    # Determine app_id based on selected platform
+    local app_id=""
+    case "$platformType" in
+      ios) app_id="$APP_ID_IOS" ;;
+      android) app_id="$APP_ID_ANDROID" ;;
+      web) app_id="$APP_ID_WEB" ;;
+      unity) app_id="$APP_ID_UNITY" ;;
+      ctv) app_id="$APP_ID_CTV" ;;
+    esac
     local placement_uuid=$(random_uuid)
     local adapter_uuid=$(random_uuid)
     local session_id=$(random_uuid)
@@ -74,7 +130,7 @@ generate_impression_batch() {
     if [[ $i -gt 0 ]]; then events+=","; fi
     events+="{
       \"event_id\": \"$event_id\",
-      \"publisher_id\": \"efbb0394-23eb-4b80-a4d6-9a0e60ef1b56\",
+      \"publisher_id\": \"$PUBLISHER_ID\",
       \"app_id\": \"$app_id\",
       \"placement_id\": \"$placement_uuid\",
       \"adapter_id\": \"$adapter_uuid\",
@@ -93,7 +149,6 @@ generate_impression_batch() {
       \"bid_price_usd\": $bid,
       \"ecpm_usd\": $ecpm,
       \"latency_ms\": $latency,
-      \"is_test_mode\": true,
       \"timestamp\": \"$timestamp\"
     }"
   done
@@ -110,10 +165,27 @@ generate_revenue_batch() {
     local network=$(random_element "${NETWORKS[@]}")
     local placement=$(random_element "${PLACEMENTS[@]}")
     local device=$(random_element "${DEVICES[@]}")
-    local os=$(random_element "${OS_LIST[@]}")
+    local plats=( $(available_platforms) )
+    local platformType=$(pick_platform "${plats[@]}")
+    local os="android"
+    case "$platformType" in
+      ios) os="ios" ;;
+      android) os="android" ;;
+      web) os="web" ;;
+      unity) os=$([[ $((RANDOM%2)) -eq 0 ]] && echo "ios" || echo "android") ;;
+      ctv) os=$([[ $((RANDOM%2)) -eq 0 ]] && echo "tvos" || echo "android_tv") ;;
+    esac
     local revenue=$(random_revenue)
     local event_id=$(random_uuid)
-    local app_id=$(random_uuid)
+    # Determine app_id based on selected platform
+    local app_id=""
+    case "$platformType" in
+      ios) app_id="$APP_ID_IOS" ;;
+      android) app_id="$APP_ID_ANDROID" ;;
+      web) app_id="$APP_ID_WEB" ;;
+      unity) app_id="$APP_ID_UNITY" ;;
+      ctv) app_id="$APP_ID_CTV" ;;
+    esac
     local placement_uuid=$(random_uuid)
     local adapter_uuid=$(random_uuid)
     local session_id=$(random_uuid)
@@ -124,7 +196,7 @@ generate_revenue_batch() {
     if [[ $i -gt 0 ]]; then events+=","; fi
     events+="{
       \"event_id\": \"$event_id\",
-      \"publisher_id\": \"efbb0394-23eb-4b80-a4d6-9a0e60ef1b56\",
+      \"publisher_id\": \"$PUBLISHER_ID\",
       \"app_id\": \"$app_id\",
       \"placement_id\": \"$placement_uuid\",
       \"adapter_id\": \"$adapter_uuid\",
@@ -142,7 +214,6 @@ generate_revenue_batch() {
       \"request_id\": \"$request_id\",
       \"revenue_usd\": $revenue,
       \"revenue_type\": \"impression\",
-      \"is_test_mode\": true,
       \"timestamp\": \"$timestamp\"
     }"
   done
@@ -202,6 +273,14 @@ log "Duration: ${DURATION_MINUTES} minutes"
 log "Target: ~${EVENTS_PER_MINUTE} events/minute"
 log "API: $API_URL"
 log "=========================================="
+
+# Validate required environment
+require_env TOKEN "$TOKEN"
+require_env SDK_KEY "$SDK_KEY"
+require_env PUBLISHER_ID "$PUBLISHER_ID"
+require_env APP_ID_ANDROID "$APP_ID_ANDROID"
+require_env APP_ID_IOS "$APP_ID_IOS"
+require_env APP_ID_WEB "$APP_ID_WEB"
 
 # Initial health check
 log "Checking API health..."

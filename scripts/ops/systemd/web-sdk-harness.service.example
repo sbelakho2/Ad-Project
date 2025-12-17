@@ -1,0 +1,17 @@
+[Unit]
+Description=Apex Web SDK Harness (Test Server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/adproject
+EnvironmentFile=/opt/adproject/.env.slo
+ExecStart=/opt/adproject/scripts/ops/web_sdk_harness.sh 0 12
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/web_sdk_harness.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target
