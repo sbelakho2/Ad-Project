@@ -19,7 +19,7 @@ Complete GDPR-compliant monitoring stack deployed on Hetzner infrastructure with
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | **Prometheus** | http://46.62.252.96:9090 | No auth required (internal) |
-| **Grafana** | http://46.62.252.96:3001 | `admin` / `ApexGrafana2025!` |
+| **Grafana** | http://46.62.252.96:3001 | Stored in the team password manager / secret store (do not hard-code in docs) |
 | **Alertmanager** | http://46.62.252.96:9093 | No auth required (internal) |
 | **Node Exporter** | http://46.62.252.96:9100 | N/A (metrics only) |
 | **Postgres Exporter** | http://46.62.252.96:9187 | N/A (metrics only) |
@@ -235,7 +235,7 @@ docker logs postgres-exporter --tail 50
 
 ## Security Notes
 
-- Grafana admin password: `ApexGrafana2025!` (change in production)
+- Grafana credentials: store in a password manager / secret store and rotate on compromise.
 - Prometheus and Alertmanager have no auth (internal network only)
 - Consider adding nginx reverse proxy with SSL for external access
 - Alert notifications should be configured with actual SMTP/Slack credentials

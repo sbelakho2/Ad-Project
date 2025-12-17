@@ -494,7 +494,7 @@ describe('UsageMeter', () => {
     it('should chain builder methods', () => {
       const meter = new UsageMeterBuilder()
         .withFlushInterval(30000)
-        .withSamplingRate(0.8)
+        .withSamplingRate(1.0)
         .enableLocalStorage(true)
         .enableRemoteReporting(false)
         .withReportEndpoint('/custom/metrics')

@@ -8,6 +8,12 @@ export const metadata = {
 
 const DOCS = [
   {
+    title: 'SSAI',
+    description: 'Server-side ad insertion for HLS/DASH, live and VOD.',
+    href: '/docs/ssai',
+    card: `SSAI\n----\nHLS:  ✓ Live / VOD\nDASH: ✓ Live / VOD\nDRM:  policy-based\nCDN:  vendor-agnostic`,
+  },
+  {
     title: 'Verification',
     description: 'Verify signed logs, reproduce decisions, and export incident bundles.',
     href: '/docs/verification',
@@ -18,6 +24,12 @@ const DOCS = [
     description: 'Supported players and devices for Web Video and CTV delivery.',
     href: '/docs/playback-matrix',
     card: `PLAYBACK\n--------\nWeb:  HLS/DASH\nCTV:  tvOS/Android TV\nDRM:  policy-based\nSSAI: supported`,
+  },
+  {
+    title: 'Developer Tools',
+    description: 'CLI, Test Console, and Figma Kit for integration and debugging.',
+    href: '/docs/developer-tools',
+    card: `TOOLS\n-----\nCLI:     validate / dry-run\nConsole: sandbox auctions\nFigma:   UI components`,
   },
 ] as const
 

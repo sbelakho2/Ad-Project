@@ -64,6 +64,16 @@ class SSAIManifestParser(
     fun parseHLS(manifest: String): ParseResult {
         val adCues = mutableListOf<AdCue>()
         val errors = mutableListOf<ParseError>()
+
+        val firstNonEmptyLine = manifest
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.isNotEmpty() }
+
+        if (firstNonEmptyLine != "#EXTM3U") {
+            errors.add(ParseError(0, "Missing or invalid #EXTM3U header"))
+        }
+
         var totalDuration = 0.0
         var targetDuration: Double? = null
         var isLive = true
@@ -113,9 +123,13 @@ class SSAIManifestParser(
             // Parse EXT-X-CUE-OUT (legacy SCTE-35 signaling)
             cueOutPattern.matcher(trimmed).let { m ->
                 if (m.find()) {
-                    parseCueOut(trimmed, currentTime, slotIndex)?.let { cue ->
-                        adCues.add(cue)
-                        slotIndex++
+                    try {
+                        parseCueOut(trimmed, currentTime, slotIndex)?.let { cue ->
+                            adCues.add(cue)
+                            slotIndex++
+                        }
+                    } catch (e: Exception) {
+                        errors.add(ParseError(lineIndex + 1, e.message ?: "Parse error"))
                     }
                 }
             }
@@ -147,6 +161,10 @@ class SSAIManifestParser(
         var totalDuration: Double? = null
         var isLive = true
         var slotIndex = 0
+
+        if (!manifest.contains("<MPD") && !manifest.contains("<mpd")) {
+            errors.add(ParseError(0, "Missing <MPD> root element"))
+        }
 
         // Check for live vs VOD
         if (manifest.contains("type=\"static\"")) {

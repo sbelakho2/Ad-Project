@@ -87,8 +87,8 @@ const privacyFeatures = [
 ];
 
 const reliabilityMetrics = [
-  { label: 'Uptime SLA', value: sloConfig.availability.target, icon: CheckCircle },
-  { label: 'Latency (p50)', value: sloConfig.latency.p50, icon: Zap },
+  { label: 'Uptime SLO', value: sloConfig.availability.target, icon: CheckCircle },
+  { label: 'Latency (p95)', value: sloConfig.latency.p95, icon: Zap },
   { label: 'Regions', value: sloConfig.regions.map(r => `${r.code} (${r.name})`).join(', '), icon: Server },
   { label: 'Failover target', value: sloConfig.failover.target, icon: RefreshCw },
 ];

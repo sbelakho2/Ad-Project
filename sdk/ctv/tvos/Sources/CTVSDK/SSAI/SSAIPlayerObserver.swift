@@ -141,6 +141,63 @@ public final class SSAIPlayerObserver: NSObject {
         let result = try await manifestParser.parseHLS(url: manifestUrl)
         adCues = result.adCues
         setupBoundaryObservers()
+
+        if !result.errors.isEmpty {
+            reportManifestParseErrors(protocol: "hls", errors: result.errors)
+        }
+    }
+
+    private func reportManifestParseErrors(protocol: String, errors: [SSAIManifestParser.ParseError]) {
+        guard let base = sessionClient.ssaiEndpoint else { return }
+
+        // Sample to avoid excessive volume
+        if Double.random(in: 0..<1) >= 0.05 { return }
+
+        let url = base
+            .appendingPathComponent("api")
+            .appendingPathComponent("v1")
+            .appendingPathComponent("analytics")
+            .appendingPathComponent("events")
+            .appendingPathComponent("manifest-parse")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 2.0
+
+        let first = errors.first
+        var metadata: [String: Any] = [
+            "error_count": errors.count,
+            "sdk": "tvos"
+        ]
+        if let first {
+            metadata["first_error_line"] = first.line
+            metadata["first_error_message"] = String(first.message.prefix(200))
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let event: [String: Any] = [
+            "timestamp": formatter.string(from: Date()),
+            "protocol": protocol,
+            "sdk_platform": "tvos",
+            "error_code": "MANIFEST_PARSE_ERROR",
+            "error_message": String((first?.message ?? "Parse error").prefix(500)),
+            "metadata": metadata
+        ]
+
+        let payload: [String: Any] = ["events": [event]]
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            return
+        }
+
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            // best-effort only
+        }.resume()
     }
     
     /// Set ad cues directly

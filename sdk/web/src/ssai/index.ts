@@ -50,7 +50,10 @@ export async function createSSAIIntegration(
   const session = await sessionClient.createSession(ssaiConfig);
 
   // Create manifest parser
-  const parser = new SSAIManifestParser();
+  const parser = new SSAIManifestParser({
+    telemetryEndpoint: ssaiConfig.endpoint,
+    sdkPlatform: 'web',
+  });
 
   // Create player monitor
   const monitor = new SSAIPlayerMonitor(

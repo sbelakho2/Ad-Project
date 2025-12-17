@@ -72,8 +72,8 @@ export default function CompanyPage() {
               Mediation shouldn&apos;t mean compromise.
             </h1>
             <p className="text-xl leading-relaxed text-slate-200/90">
-              ApexMediation was founded by ads engineers who were tired of mediators
-              that weren&apos;t built for publishers.
+              ApexMediation was founded by ad engineers who were tired of mediation
+              platforms that weren&apos;t built for publishers.
             </p>
           </motion.div>
         </PageHero>
@@ -91,10 +91,10 @@ export default function CompanyPage() {
                       Our story
                     </h2>
                     <p className="text-slate-600 leading-relaxed mb-4">
-                      We built Apex after years of watching legacy mediators erode trust
-                      with publishers. Hidden algorithms. Opaque fee structures. Networks
-                      that couldn&apos;t be removed. Integration tax that made switching feel
-                      like rebuilding from scratch.
+                      We built ApexMediation after years of watching legacy mediators erode
+                      publisher trust: hidden algorithms, opaque fee structures, networks
+                      that couldn&apos;t be removed. That is an integration tax that made switching
+                      feel like rebuilding from scratch.
                     </p>
                     <p className="text-slate-600 leading-relaxed mb-4">
                       We believed there had to be a better way—one where the publisher
@@ -102,9 +102,9 @@ export default function CompanyPage() {
                       auditable, and where the mediation layer is a tool, not a gatekeeper.
                     </p>
                     <p className="text-slate-600 leading-relaxed">
-                      Today, ApexMediation is being built alongside design-partner studios
-                      who demand transparency, reliability, and the flexibility to run their
-                      ad stack their way.
+                      Today, ApexMediation is built alongside design-partner studios who
+                      demand transparency, reliability, and the flexibility to run their ad
+                      stack their way.
                     </p>
                   </div>
                 </div>

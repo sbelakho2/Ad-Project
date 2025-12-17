@@ -184,6 +184,18 @@ export default function ContactPage() {
                       </li>
                       <li className="flex items-center gap-2">
                         <MessageSquare className="w-4 h-4 text-brand-600" />
+                        CTV / SSAI setup (HLS/DASH, Live/VOD)
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <MessageSquare className="w-4 h-4 text-brand-600" />
+                        Player stack (Shaka/hls.js/AVPlayer/ExoPlayer)
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <MessageSquare className="w-4 h-4 text-brand-600" />
+                        DRM (Widevine/FairPlay/PlayReady) + origin/CDN setup
+                      </li>
+                      <li className="flex items-center gap-2">
+                        <MessageSquare className="w-4 h-4 text-brand-600" />
                         Transparency verification & audit
                       </li>
                       <li className="flex items-center gap-2">

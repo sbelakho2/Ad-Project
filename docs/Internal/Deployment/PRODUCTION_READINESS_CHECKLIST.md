@@ -6,10 +6,7 @@
 > **For current production operations, see:**  
 > [HETZNER_PRODUCTION_CHECKLIST.md](./HETZNER_PRODUCTION_CHECKLIST.md)
 >
-> **Current Infrastructure:**
-> - App Server: 46.62.252.96 (apexmediation.ee)
-> - DB Server: 77.42.44.35
-> - SSH: `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
+> **Current Infrastructure:** See the Hetzner checklist. Do not duplicate hostnames/IPs/SSH commands in this archived document.
 
 ---
 
@@ -648,7 +645,7 @@ References
 
 ### Public Policies
 - [ ] Publish Privacy Policy, Terms of Service, and Cookie Policy on the website.
-- [ ] Maintain Subprocessor list and data retention schedule aligned with Section 8.3.
+- [ ] If you publish a subprocessors list, keep it current and aligned with Section 8.3 and your DPA.
 
 ### Evidence
 - [ ] Snapshot published pages (PDF) and store under `docs/Internal/QA/legal-YYYY-MM-DD/`.
@@ -674,7 +671,7 @@ References
 - [ ] SDKs: latest release tags + smoke tests green; Compatibility Matrix published
 - [ ] Customer Support: channels live, SLA published, incident comms templates ready
 - [ ] Security: scans clean or exceptions documented; secrets rotated pre‑GA
-- [ ] Legal: Privacy, Terms, Cookie Policy, Subprocessors published; DPA template ready
+- [ ] Legal: Privacy, Terms, Cookie Policy, subprocessors disclosures (if applicable); DPA template ready
 - [ ] Sales: pricing live, demo org ready, CRM funnel connected; basic collateral published
 
 ## 3. Payment & Billing Consumers

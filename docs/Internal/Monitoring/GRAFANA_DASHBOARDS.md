@@ -27,7 +27,7 @@ Complete guide to all Grafana dashboards for the ApexMediation platform.
 | Billing & Finance | `apex-billing-finance` | MRR/ARR, churn, payment processing |
 | Database Performance | `apex-database` | PostgreSQL monitoring |
 
-**Access:** http://46.62.252.96:3001 (Credentials: `admin` / `ApexGrafana2025!`)
+**Access:** http://46.62.252.96:3001 (Credentials stored in secret store)
 
 ### Legacy Kubernetes Dashboards
 

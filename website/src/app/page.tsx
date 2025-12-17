@@ -144,7 +144,7 @@ function HeroSection() {
             </a>
           </div>
           <p className="text-sm text-slate-300/80">
-            Built for mobile and CTV publishers who demand auditability and control.
+            Built for mobile, web and CTV publishers who demand auditability and control.
           </p>
           <p className="text-sm text-slate-300/80 mt-2">
             <a href="/security-pack" className="text-brand-300 hover:text-brand-200 underline">
@@ -221,9 +221,13 @@ function SSAICoverageSection() {
 {`       Live  VOD   TS    CMAF
 HLS    ✅    ✅    ✅    ✅
 DASH   ✅    ✅    ✅    ✅
-DRM    ✅ Clear  (Policy-based for DRM streams)`}
+DRM    ✅ Clear key supported`}
               </pre>
             </div>
+            <p className="mt-4 text-xs text-gray-500 text-center">
+              DRM streams (Widevine/FairPlay/PlayReady) work with clear-key or policy-based insertion.
+              <a href="/docs/ssai/drm" className="text-brand-400 hover:underline ml-1">Learn more →</a>
+            </p>
           </div>
         </motion.div>
       </div>

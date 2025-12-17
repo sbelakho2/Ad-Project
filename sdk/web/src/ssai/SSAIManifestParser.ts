@@ -6,6 +6,15 @@
 
 import { SSAIAdBreak, SSAIAd } from './types';
 
+type ManifestParseProtocol = 'hls' | 'dash';
+
+interface ManifestParseTelemetryOptions {
+  telemetryEndpoint?: string;
+  telemetrySampleRate?: number;
+  sdkPlatform?: string;
+  sdkVersion?: string;
+}
+
 /**
  * HLS EXT-X-DATERANGE parsed data
  */
@@ -36,11 +45,42 @@ interface DASHEvent {
 export class SSAIManifestParser {
   private adBreaks: Map<string, SSAIAdBreak> = new Map();
   private lastManifestVersion: string | null = null;
+  private telemetry: Required<Pick<ManifestParseTelemetryOptions, 'telemetrySampleRate' | 'sdkPlatform'>> &
+    Omit<ManifestParseTelemetryOptions, 'telemetrySampleRate' | 'sdkPlatform'>;
+
+  constructor(options: ManifestParseTelemetryOptions = {}) {
+    this.telemetry = {
+      telemetryEndpoint: options.telemetryEndpoint,
+      telemetrySampleRate:
+        typeof options.telemetrySampleRate === 'number'
+          ? Math.min(1, Math.max(0, options.telemetrySampleRate))
+          : 0.05,
+      sdkPlatform: options.sdkPlatform ?? 'web',
+      sdkVersion: options.sdkVersion,
+    };
+  }
 
   /**
    * Parse HLS manifest for ad cues
    */
   parseHLSManifest(manifestContent: string): SSAIAdBreak[] {
+    const firstNonEmptyLine = manifestContent
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    const hasExtM3U = firstNonEmptyLine === '#EXTM3U';
+    if (!hasExtM3U) {
+      this.reportManifestParseError({
+        protocol: 'hls',
+        errorCode: 'HLS_INVALID_HEADER',
+        errorMessage: 'Missing or invalid #EXTM3U header',
+        metadata: {
+          firstLine: firstNonEmptyLine?.slice(0, 80),
+          manifest_len: manifestContent.length,
+        },
+      });
+    }
+
     const lines = manifestContent.split('\n');
     const dateRanges: DateRangeCue[] = [];
 
@@ -49,12 +89,23 @@ export class SSAIManifestParser {
         const cue = this.parseDateRange(line);
         if (cue) {
           dateRanges.push(cue);
+        } else {
+          this.reportManifestParseError({
+            protocol: 'hls',
+            errorCode: 'HLS_DATERANGE_PARSE_ERROR',
+            errorMessage: 'Failed to parse EXT-X-DATERANGE tag',
+            metadata: {
+              line: line.slice(0, 200),
+              manifest_len: manifestContent.length,
+            },
+          });
         }
       }
     }
 
     // Convert date ranges to ad breaks
-    return this.dateRangesToAdBreaks(dateRanges);
+    const breaks = this.dateRangesToAdBreaks(dateRanges);
+    return breaks;
   }
 
   /**
@@ -191,9 +242,38 @@ export class SSAIManifestParser {
    * Parse DASH manifest (MPD) for ad events
    */
   parseDASHManifest(mpdContent: string): SSAIAdBreak[] {
+    if (typeof DOMParser !== 'function') {
+      this.reportManifestParseError({
+        protocol: 'dash',
+        errorCode: 'DASH_DOMPARSER_UNAVAILABLE',
+        errorMessage: 'DOMParser is unavailable in this environment',
+        metadata: {
+          manifest_len: mpdContent.length,
+        },
+      });
+      return [];
+    }
+
     // Parse XML
     const parser = new DOMParser();
     const doc = parser.parseFromString(mpdContent, 'text/xml');
+
+    const hasParserError =
+      doc.getElementsByTagName('parsererror').length > 0 ||
+      (doc.documentElement?.nodeName?.toLowerCase?.() === 'parsererror');
+    const seemsLikeMpd = mpdContent.includes('<MPD') || mpdContent.includes('<mpd');
+    if (hasParserError || !seemsLikeMpd) {
+      this.reportManifestParseError({
+        protocol: 'dash',
+        errorCode: hasParserError ? 'DASH_XML_PARSE_ERROR' : 'DASH_INVALID_HEADER',
+        errorMessage: hasParserError
+          ? 'Failed to parse DASH MPD XML'
+          : 'Missing <MPD> root element',
+        metadata: {
+          manifest_len: mpdContent.length,
+        },
+      });
+    }
 
     const breaks: SSAIAdBreak[] = [];
 
@@ -257,6 +337,70 @@ export class SSAIManifestParser {
     return breaks;
   }
 
+  private reportManifestParseError(input: {
+    protocol: ManifestParseProtocol;
+    errorCode: string;
+    errorMessage?: string;
+    metadata?: Record<string, unknown>;
+  }): void {
+    try {
+      const endpoint = this.telemetry.telemetryEndpoint;
+      if (!endpoint) return;
+      if (typeof fetch !== 'function') return;
+
+      if (Math.random() >= this.telemetry.telemetrySampleRate) return;
+
+      const url = `${endpoint.replace(/\/+$/, '')}/api/v1/analytics/events/manifest-parse`;
+
+      const event = {
+        timestamp: new Date().toISOString(),
+        protocol: input.protocol,
+        sdk_platform: this.telemetry.sdkPlatform,
+        sdk_version: this.telemetry.sdkVersion,
+        error_code: String(input.errorCode).slice(0, 64),
+        error_message: input.errorMessage
+          ? String(input.errorMessage).slice(0, 500)
+          : undefined,
+        metadata: this.sanitizeMetadata(input.metadata),
+      };
+
+      void fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ events: [event] }),
+        keepalive: true,
+      }).catch(() => {
+        // best-effort only
+      });
+    } catch {
+      // best-effort only
+    }
+  }
+
+  private sanitizeMetadata(
+    metadata: Record<string, unknown> | undefined
+  ): Record<string, unknown> | undefined {
+    if (!metadata) return undefined;
+
+    const out: Record<string, unknown> = {};
+    const entries = Object.entries(metadata).slice(0, 25);
+    for (const [rawKey, rawValue] of entries) {
+      const key = String(rawKey).slice(0, 64);
+      if (rawValue === null || rawValue === undefined) continue;
+      if (typeof rawValue === 'string') {
+        out[key] = rawValue.slice(0, 200);
+        continue;
+      }
+      if (typeof rawValue === 'number' || typeof rawValue === 'boolean') {
+        out[key] = rawValue;
+        continue;
+      }
+      // Avoid nested objects/arrays (risk of PII / huge payload)
+      out[key] = String(rawValue).slice(0, 200);
+    }
+
+    return Object.keys(out).length ? out : undefined;
+  }
   /**
    * Parse a DASH Event element
    */

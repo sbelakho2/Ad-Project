@@ -1,6 +1,49 @@
 # Changelog — Infrastructure Validation & Production Readiness (2025-12-13)
 
-## 🔐 Console Security Audit & 2FA Implementation (2025-12-16)
+## � Marketing & Docs Polish Pass (2025-12-17)
+
+**Status:** Complete website copy fixes and docs security/hygiene pass
+
+### Website Copy Fixes
+
+| Page | Change | File |
+|------|--------|------|
+| **Homepage** | Tagline updated: "Built for mobile, web and CTV publishers…" | `website/src/app/page.tsx` |
+| **Company** | Grammar polish: "ads engineers" → "ad engineers", tightened sentences | `website/src/app/company/page.tsx` |
+| **Pricing** | Tier card CTAs now bottom-aligned (flex layout fix) | `website/src/app/pricing/page.tsx` |
+| **Pricing** | Removed stray `'Custom retention',` text artifact | `website/src/app/pricing/page.tsx` |
+
+### CDN Documentation (Vendor-Agnostic)
+
+Removed vendor-specific CloudFront / Cloudflare / Fastly configuration snippets and replaced with a universal "CDN Configuration (Vendor-Agnostic)" checklist.
+
+| Change | File |
+|--------|------|
+| Path examples standardized to `/v1/session/*` | `website/src/app/docs/ssai/cdn/page.tsx` |
+| Vendor blocks removed; replaced with principles-based rules | Same |
+| HLS cache-poisoning language softened ("helps reduce risk" vs "ensures safety") | `website/src/app/docs/ssai/protocols/hls/page.tsx` |
+
+### Docs Security Hardening
+
+Redacted hard-coded production credentials from internal runbooks (Grafana password, DB password). Replaced with placeholders referencing secret store.
+
+| Document | Change |
+|----------|--------|
+| `docs/Monitoring/MONITORING_INFRASTRUCTURE.md` | Grafana creds → "stored in secret store" |
+| `docs/Architecture/HETZNER_POSTGRES_DESIGN.md` | DB password → `<DB_PASSWORD>` placeholder |
+| `docs/Internal/Infrastructure/production-deployment.md` | Same |
+| `docs/runbooks/ROLLBACK.md` | Grafana creds → "credentials in secret store" |
+| `docs/Internal/Monitoring/GRAFANA_DASHBOARDS.md` | Same |
+
+### Deprecated Docs Cleanup
+
+| Document | Change |
+|----------|--------|
+| `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md` | Removed duplicate Hetzner IPs; clarified subprocessors wording |
+
+---
+
+## �🔐 Console Security Audit & 2FA Implementation (2025-12-16)
 
 **Status:** Complete security audit with RBAC hardening and 2FA user management
 

@@ -32,7 +32,7 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
 # Database Connection
-PGPASSWORD='ApexProd2025!' psql -h 77.42.44.35 -U postgres -d adproject
+PGPASSWORD='<DB_PASSWORD>' psql -h 77.42.44.35 -U postgres -d adproject
 ```
 
 ---

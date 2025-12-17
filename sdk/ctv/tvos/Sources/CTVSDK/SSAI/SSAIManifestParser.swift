@@ -55,6 +55,15 @@ public final class SSAIManifestParser {
     public func parseHLS(manifest: String) -> ParseResult {
         var adCues: [AdCue] = []
         var errors: [ParseError] = []
+
+        let firstNonEmptyLine = manifest
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        if firstNonEmptyLine != "#EXTM3U" {
+            errors.append(ParseError(line: 0, message: "Missing or invalid #EXTM3U header"))
+        }
+
         var totalDuration: TimeInterval = 0
         var targetDuration: TimeInterval?
         var isLive = true
@@ -155,6 +164,10 @@ public final class SSAIManifestParser {
         var totalDuration: TimeInterval?
         var isLive = true
         var slotIndex = 0
+
+        if !manifest.contains("<MPD") && !manifest.contains("<mpd") {
+            errors.append(ParseError(line: 0, message: "Missing <MPD> root element"))
+        }
         
         // Parse XML
         guard let data = manifest.data(using: .utf8) else {

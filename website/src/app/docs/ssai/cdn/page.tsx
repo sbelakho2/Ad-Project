@@ -39,7 +39,7 @@ export default function CDNGuidancePage() {
               Critical: Session Manifests Must Not Be Cached
             </h2>
             <p className="text-red-700 text-sm">
-              SSAI session manifests (<code>/v1/session/&#123;id&#125;/manifest.m3u8</code>) are 
+              SSAI session manifests (for example <code>/v1/session/&#123;id&#125;/master.m3u8</code>) are 
               per-viewer personalized. Caching them will serve wrong ads to viewers and break tracking.
               Configure your CDN to bypass cache (or use very low TTL) for session manifest paths.
             </p>
@@ -161,7 +161,7 @@ export default function CDNGuidancePage() {
             </h2>
 
             <p className="text-gray-600 mb-4">
-              ApexMediation returns these headers. Your CDN must respect them:
+              The SSAI origin returns these headers. Your CDN must respect them:
             </p>
 
             <div className="bg-gray-50 rounded-lg p-6 overflow-x-auto">
@@ -215,83 +215,38 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
             </div>
           </section>
 
-          {/* CDN-Specific Config */}
+          {/* CDN Config */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
               <Globe className="w-6 h-6 text-emerald-600" />
-              CDN-Specific Configuration
+              CDN Configuration (Vendor-Agnostic)
             </h2>
 
-            <div className="space-y-6">
-              {/* CloudFront */}
-              <div className="border rounded-lg overflow-hidden">
-                <div className="bg-gray-50 px-4 py-3 border-b">
-                  <h3 className="font-semibold text-gray-900">AWS CloudFront</h3>
-                </div>
-                <div className="p-4">
-                  <pre className="text-xs bg-gray-800 text-gray-100 p-4 rounded overflow-x-auto">
-{`# Cache behavior for session manifests
-CacheBehavior:
-  PathPattern: "/v1/session/*"
-  CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"  # CachingDisabled
-  OriginRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3"  # AllViewer
+            <p className="text-gray-600 mb-6">
+              Use the equivalent features in your CDN and keep the principles the same: never cache
+              personalized session manifests, respect origin cache headers, and avoid normalization
+              that drops required query parameters.
+            </p>
 
-# Cache behavior for segments  
-CacheBehavior:
-  PathPattern: "/segments/*"
-  CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6"  # CachingOptimized
-  Compress: true`}
-                  </pre>
-                </div>
-              </div>
-
-              {/* Cloudflare */}
-              <div className="border rounded-lg overflow-hidden">
-                <div className="bg-gray-50 px-4 py-3 border-b">
-                  <h3 className="font-semibold text-gray-900">Cloudflare</h3>
-                </div>
-                <div className="p-4">
-                  <pre className="text-xs bg-gray-800 text-gray-100 p-4 rounded overflow-x-auto">
-{`# Page Rules for session endpoints
-Match: *example.com/v1/session/*
-Settings:
-  Cache Level: Bypass
-  Browser Cache TTL: Respect Existing Headers
-
-# Cache Rules for segments
-Match: *example.com/segments/*
-Settings:
-  Cache Level: Cache Everything
-  Edge Cache TTL: 1 day
-  Browser Cache TTL: 1 day`}
-                  </pre>
-                </div>
-              </div>
-
-              {/* Fastly */}
-              <div className="border rounded-lg overflow-hidden">
-                <div className="bg-gray-50 px-4 py-3 border-b">
-                  <h3 className="font-semibold text-gray-900">Fastly</h3>
-                </div>
-                <div className="p-4">
-                  <pre className="text-xs bg-gray-800 text-gray-100 p-4 rounded overflow-x-auto">
-{`# VCL for session bypass
-sub vcl_recv {
-  if (req.url ~ "^/v1/session/") {
-    return(pass);
-  }
-}
-
-# Segment caching
-sub vcl_fetch {
-  if (req.url ~ "\\.(ts|m4s|mp4)$") {
-    set beresp.ttl = 24h;
-    set beresp.stale_if_error = 1d;
-  }
-}`}
-                  </pre>
-                </div>
-              </div>
+            <div className="bg-gray-50 rounded-lg p-6">
+              <h3 className="font-semibold text-gray-900 mb-3">Recommended rules</h3>
+              <ul className="space-y-2 text-sm text-gray-600">
+                <li>
+                  <strong>Bypass caching:</strong> <code>/v1/session/*</code> (session manifests + per-viewer endpoints)
+                </li>
+                <li>
+                  <strong>Cache aggressively:</strong> <code>/segments/*</code>, <code>/init/*</code>, <code>/slate/*</code>
+                </li>
+                <li>
+                  <strong>Always origin:</strong> <code>/tracking/*</code>
+                </li>
+                <li>
+                  <strong>Preserve query strings:</strong> do not drop or normalize query params on <code>/v1/session/*</code>
+                </li>
+                <li>
+                  <strong>Respect origin headers:</strong> honor <code>Cache-Control</code>, <code>Vary</code>, and <code>Content-Encoding</code>
+                </li>
+              </ul>
             </div>
           </section>
 
@@ -312,7 +267,7 @@ sub vcl_fetch {
                   <strong>Problem:</strong> Caching all <code>.m3u8</code> files ignores that session manifests are personalized.
                 </p>
                 <p className="text-sm text-gray-600">
-                  <strong>Fix:</strong> Cache by path pattern, not extension. <code>/ssai/session/*.m3u8</code> → bypass, 
+                  <strong>Fix:</strong> Cache by path pattern, not extension. <code>/v1/session/*</code> → bypass,
                   <code>/vod/*.m3u8</code> → cache.
                 </p>
               </div>
@@ -326,7 +281,7 @@ sub vcl_fetch {
                   <strong>Problem:</strong> CDN removes <code>?_sid=...</code> for cache normalization. Session ID lost.
                 </p>
                 <p className="text-sm text-gray-600">
-                  <strong>Fix:</strong> Preserve query parameters for <code>/ssai/*</code> paths. Only normalize segments.
+                  <strong>Fix:</strong> Preserve query parameters for <code>/v1/session/*</code> paths. Only normalize segments.
                 </p>
               </div>
 
@@ -352,7 +307,7 @@ sub vcl_fetch {
                   <strong>Problem:</strong> HTTP/2 connection reuse serves wrong session&apos;s segments.
                 </p>
                 <p className="text-sm text-gray-600">
-                  <strong>Fix:</strong> Disable connection coalescing for <code>/ssai/</code> paths or use separate hostnames.
+                  <strong>Fix:</strong> Disable connection coalescing for <code>/v1/session/</code> paths or use separate hostnames.
                 </p>
               </div>
 
@@ -389,7 +344,7 @@ sub vcl_fetch {
                   <div>
                     <h3 className="font-semibold text-gray-900">Session manifest bypass</h3>
                     <code className="text-xs bg-gray-200 px-2 py-1 rounded block mt-1">
-                      curl -I https://cdn.example.com/ssai/session/test/manifest.m3u8
+                      curl -I 'https://cdn.example.com/v1/session/&lt;session_id&gt;/master.m3u8?token=&lt;token&gt;'
                     </code>
                     <p className="text-sm text-gray-600 mt-1">Should show <code>X-Cache: MISS</code> or no cache headers.</p>
                   </div>

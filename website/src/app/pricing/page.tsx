@@ -150,7 +150,7 @@ export default function PricingPage() {
                 <motion.div
                   key={tier.name}
                   {...getRevealProps(index * 0.1)}
-                  className={`rounded-xl p-6 ${
+                  className={`rounded-xl p-6 flex flex-col h-full ${
                     tier.accent
                       ? 'bg-brand-600 text-white'
                       : 'bg-white border border-gray-200'
@@ -180,7 +180,7 @@ export default function PricingPage() {
                   <p className={`text-sm mb-6 ${tier.accent ? 'text-brand-100' : 'text-gray-600'}`}>
                     {tier.description}
                   </p>
-                  <ul className="space-y-3 mb-8">
+                  <ul className="space-y-3 mb-8 flex-1">
                     {tier.features.map((feature, i) => (
                       <li key={i} className="flex items-start gap-2 text-sm">
                         <CheckCircle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${
@@ -224,7 +224,6 @@ export default function PricingPage() {
                 <div className="bg-gray-50 rounded-xl p-6 text-center">
                   <p className="text-sm text-gray-500 mb-2">$5k/mo mediated</p>
                   <p className="text-3xl font-bold text-gray-900 mb-1">$0</p>
-                    'Custom retention',
                   <p className="text-sm text-brand-600">Free tier</p>
                 </div>
                 <div className="bg-gray-50 rounded-xl p-6 text-center">
@@ -241,6 +240,17 @@ export default function PricingPage() {
               <motion.p {...getRevealProps(0.2)} className="text-center text-sm text-gray-500 mt-6">
                 Your ad networks pay you directly. We never touch your revenue—only charge a platform fee.
               </motion.p>
+              <motion.div {...getRevealProps(0.25)} className="mt-8 bg-gray-50 rounded-xl p-6 border border-gray-200">
+                <h3 className="font-semibold text-gray-900 mb-3">SSAI (Web & CTV) Pricing Note</h3>
+                <p className="text-sm text-gray-600 mb-3">
+                  SSAI pricing follows the same model as mobile mediation—based on mediated ad revenue, not impressions or stream hours.
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1">
+                  <li>• <strong>Mediated revenue</strong> = ad revenue from SSAI-inserted pods</li>
+                  <li>• <strong>Not included</strong>: origin hosting, CDN egress, packager costs (these are your infrastructure)</li>
+                  <li>• <strong>Included</strong>: manifest manipulation, ad decisioning, tracking, and analytics</li>
+                </ul>
+              </motion.div>
             </div>
           </div>
         </section>

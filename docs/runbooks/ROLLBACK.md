@@ -51,7 +51,7 @@ curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets | leng
 ```
 
 ### Monitoring Links
-- **Grafana:** http://46.62.252.96:3001 (admin / ApexGrafana2025!)
+- **Grafana:** http://46.62.252.96:3001 (credentials in secret store)
 - **Prometheus:** http://46.62.252.96:9090
 - **Alertmanager:** http://46.62.252.96:9093
 

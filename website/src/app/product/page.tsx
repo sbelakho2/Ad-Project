@@ -400,8 +400,8 @@ export default function ProductPage() {
                   <a href="/developers" className="btn-primary px-6 py-3">
                     Explore SDKs
                   </a>
-                  <a href="https://console.apexmediation.ee" className="btn-secondary px-6 py-3" target="_blank" rel="noopener noreferrer">
-                    Open Console
+                  <a href="/docs/ssai/prerequisites" className="btn-secondary px-6 py-3">
+                    SSAI Buyer Checklist
                   </a>
                   <a href="/docs/playback-matrix" className="btn-secondary px-6 py-3">
                     Playback Matrix

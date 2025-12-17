@@ -90,12 +90,12 @@ const sdkFeatures = [
   {
     platform: 'Android',
     language: 'Kotlin',
-    features: ['Jetpack Compose', 'Privacy Sandbox', 'Play Billing'],
+    features: ['Jetpack Compose', 'Privacy Sandbox', 'Topics API'],
   },
   {
     platform: 'Web',
     language: 'TypeScript',
-    features: ['Tree-shakeable', 'SSR compatible', 'TCF 2.0'],
+    features: ['Tree-shakeable', 'SSR compatible', 'TCF 2.2'],
   },
   {
     platform: 'Unity',
@@ -109,7 +109,7 @@ function SDKInitCodeCard({ className }: { className?: string }) {
   return (
     <VisualCard title="Android SDK - Initialize" className={className}>
 {`// Application.onCreate()
-BelAds.initialize(
+ApexMediation.initialize(
     context = this,
     appId = "your-app-id"
 )
@@ -124,7 +124,7 @@ function SDKInterstitialCodeCard({ className }: { className?: string }) {
   return (
     <VisualCard title="Android SDK - Show Interstitial" className={className}>
 {`// Load an interstitial
-val interstitial = BelInterstitial(placementId)
+val interstitial = ApexInterstitial(placementId)
 
 interstitial.load()
 
@@ -144,11 +144,11 @@ function ConsentCodeCard({ className }: { className?: string }) {
   return (
     <VisualCard title="Android SDK - Consent" className={className}>
 {`// Option 1: One-liner with Google UMP
-BelAds.requestGoogleConsentForm(activity, callback = object : UmpConsentClient.Callback {
+ApexMediation.requestGoogleConsentForm(activity, callback = object : UmpConsentClient.Callback {
   override fun onConsentUpdated() {
     // (Optional) read IAB strings and pass to the SDK
     val state = ConsentManager.fromIabStorage(activity)
-    BelAds.setConsent(
+    ApexMediation.setConsent(
       tcString = state.tcfString,
       usPrivacy = state.usPrivacy,
       gdprApplies = state.gdprApplies
@@ -161,7 +161,7 @@ BelAds.requestGoogleConsentForm(activity, callback = object : UmpConsentClient.C
 })
 
 // Option 2: Pass your own consent strings
-BelAds.setConsent(
+ApexMediation.setConsent(
     tcString = "CPXxRfAPXxR...",  // IAB TCF v2.2
     usPrivacy = "1YNN",           // CCPA/CPRA
     gdprApplies = true
@@ -169,7 +169,7 @@ BelAds.setConsent(
 
 // Option 3: Read from CMP storage
 val state = ConsentManager.fromIabStorage(context)
-BelAds.setConsent(
+ApexMediation.setConsent(
     tcString = state.tcfString,
     usPrivacy = state.usPrivacy,
     gdprApplies = state.gdprApplies

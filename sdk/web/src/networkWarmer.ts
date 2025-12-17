@@ -147,9 +147,11 @@ export class NetworkWarmer {
   private async warmupConnection(endpoint: string): Promise<ConnectionResult> {
     const startTime = performance.now();
 
+    const controller = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.warmupTimeout);
+      timeoutId = setTimeout(() => controller.abort(), this.config.warmupTimeout);
 
       // Use HEAD request to minimize data transfer while still establishing connection
       const response = await fetch(endpoint, {
@@ -160,7 +162,10 @@ export class NetworkWarmer {
         credentials: 'omit',
       });
 
-      clearTimeout(timeoutId);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
 
       const latencyMs = performance.now() - startTime;
 
@@ -199,6 +204,10 @@ export class NetworkWarmer {
         latencyMs,
         error: errorMessage,
       };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 

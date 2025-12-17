@@ -60,6 +60,9 @@ class SSAISessionClient(
     val currentMetrics: SSAIMetrics get() = metrics
     val isSessionValid: Boolean get() = session?.isValid ?: false
 
+    internal fun getEndpoint(): String? = ssaiConfig?.endpoint
+    internal fun isDebugEnabled(): Boolean = ssaiConfig?.debug == true
+
     /**
      * Create a new SSAI session
      */

@@ -8,6 +8,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.random.Random
 
 /**
  * SSAI Player Observer for Android TV SDK
@@ -50,6 +54,7 @@ class SSAIPlayerObserver(
     private val manifestParser = SSAIManifestParser()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var timeUpdateJob: Job? = null
 
     private var adCues = listOf<SSAIManifestParser.AdCue>()
@@ -98,14 +103,88 @@ class SSAIPlayerObserver(
         currentAdProgress = 0.0
         trackedQuartiles.clear()
         impressionsFired.clear()
+        try {
+            ioScope.coroutineContext.cancelChildren()
+        } catch (_: Exception) {
+            // best-effort only
+        }
     }
 
     /**
      * Load ad cues from manifest URL
      */
     suspend fun loadAdCues(manifestUrl: String) {
-        val result = manifestParser.parseHLS(java.net.URL(manifestUrl))
+        val result = manifestParser.parseHLS(URL(manifestUrl))
         adCues = result.adCues
+
+        if (result.errors.isNotEmpty()) {
+            reportManifestParseErrors(protocol = "hls", errors = result.errors)
+        }
+    }
+
+    private fun reportManifestParseErrors(
+        protocol: String,
+        errors: List<SSAIManifestParser.ParseError>
+    ) {
+        val endpoint = sessionClient.getEndpoint() ?: return
+
+        // Sample to avoid excessive volume
+        if (Random.nextDouble() >= 0.05) return
+
+        val first = errors.firstOrNull()
+        val errorMessage = first?.message?.take(500)
+
+        val metadata = JSONObject().apply {
+            put("error_count", errors.size)
+            if (first != null) {
+                put("first_error_line", first.line)
+                put("first_error_message", first.message.take(200))
+            }
+            // Include only high-level info; no URLs / manifest contents
+            put("sdk", "android_tv")
+        }
+
+        val event = JSONObject().apply {
+            put("protocol", protocol)
+            put("sdk_platform", "android_tv")
+            put("error_code", "MANIFEST_PARSE_ERROR")
+            if (errorMessage != null) put("error_message", errorMessage)
+            put("metadata", metadata)
+        }
+
+        val payload = JSONObject().apply {
+            put("events", org.json.JSONArray().put(event))
+        }
+
+        ioScope.launch {
+            try {
+                val url = URL(endpoint.trimEnd('/') + "/api/v1/analytics/events/manifest-parse")
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 2000
+                    readTimeout = 2000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+
+                conn.outputStream.use { os ->
+                    val bytes = payload.toString().toByteArray(Charsets.UTF_8)
+                    os.write(bytes, 0, bytes.size)
+                }
+
+                try {
+                    // Consume response to avoid resource leaks
+                    conn.inputStream.use { it.readBytes() }
+                } catch (_: Exception) {
+                    // Ignore non-2xx responses
+                    try { conn.errorStream?.use { it.readBytes() } } catch (_: Exception) { }
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (_: Exception) {
+                // best-effort only
+            }
+        }
     }
 
     /**

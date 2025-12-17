@@ -24,7 +24,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 >
 > **Deployment commands MUST use `/opt/adproject` as the target.**
 
-## Current Production Status (2025-12-15)
+## Current Production Status (2025-12-17)
 
 | Component | Status | Port | Details |
 |-----------|--------|------|---------|
@@ -38,7 +38,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Prometheus | ✅ Running | 9090 | Monitoring |
 | Grafana | ✅ Running | 3001 | Dashboards |
 
-### Console Security Status (2025-12-16)
+### Console Security Status (2025-12-17)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -262,8 +262,27 @@ curl https://api.apexmediation.ee/health
 # Backend readiness
 curl https://api.apexmediation.ee/ready
 
+# Public / fail-open endpoints (used by marketing website)
+curl -i https://api.apexmediation.ee/api/v1/status.json
+curl -i https://api.apexmediation.ee/api/v1/slo.json
+curl -i https://api.apexmediation.ee/api/v1/transparency/keys
+
+# SDK parse-failure ingestion (Invalid Manifest Rate signal)
+# Expect: HTTP 202 and a JSON body with success=true
+curl -i -X POST https://api.apexmediation.ee/api/v1/analytics/events/manifest-parse \
+  -H 'Content-Type: application/json' \
+  -d '{"events":[{"protocol":"hls","sdk_platform":"runbook","error_code":"MANIFEST_PARSE_ERROR","error_message":"smoke test"}]}'
+
 # Console
 curl -I https://console.apexmediation.ee
+
+# Marketing website key routes
+curl -I https://apexmediation.ee
+curl -I https://apexmediation.ee/status
+curl -I https://apexmediation.ee/slo
+
+# /signin is a client-side redirect to the Console login page
+curl -s https://apexmediation.ee/signin | grep -E 'console\.apexmediation\.ee/login' || true
 ```
 
 ### 6.3 Prometheus Targets
@@ -411,6 +430,10 @@ Website runs on **port 3002** (Grafana uses 3001). There are two deployment meth
 
 Build locally and rsync pre-built artifacts. Faster and more reliable.
 
+> **⚠️ CRITICAL: Standalone Static Assets**  
+> Next.js standalone builds do NOT include static assets automatically.  
+> You MUST copy `.next/static` and `public` into `.next/standalone/` after rsync.
+
 ```bash
 # From local machine (website directory)
 cd /path/to/Ad-Project/website
@@ -425,12 +448,17 @@ rsync -avz --delete \
   .next package.json node_modules public next.config.js \
   root@46.62.252.96:/opt/adproject/website/
 
-# 3. Restart PM2 to pick up changes
+# 3. Copy static assets into standalone folder (REQUIRED for CSS/JS to work)
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "\
+  cp -r /opt/adproject/website/.next/static /opt/adproject/website/.next/standalone/.next/ && \
+  cp -r /opt/adproject/website/public /opt/adproject/website/.next/standalone/"
+
+# 4. Restart PM2 to pick up changes
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env"
 
-# 4. Verify deployment
+# 5. Verify deployment
 curl -I https://apexmediation.ee
-curl -I https://apexmediation.ee/docs
+curl -I https://apexmediation.ee/_next/static/css/  # Should return 200, not 404
 ```
 
 #### 8.4.2 Tarball Method (Alternative - Server-built)

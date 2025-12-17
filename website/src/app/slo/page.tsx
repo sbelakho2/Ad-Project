@@ -103,6 +103,8 @@ const mitigations = [
 export default function SLOPage() {
   const [liveStatus, setLiveStatus] = useState<any | null>(null);
   const [sloRollup, setSloRollup] = useState<any | null>(null);
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [sloLoaded, setSloLoaded] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -119,7 +121,8 @@ export default function SLOPage() {
       })
       .catch(() => {
         // Always fail open; the page should render even without live status.
-      });
+      })
+      .finally(() => setStatusLoaded(true));
 
     return () => controller.abort();
   }, []);
@@ -139,7 +142,8 @@ export default function SLOPage() {
       })
       .catch(() => {
         // Fail open.
-      });
+      })
+      .finally(() => setSloLoaded(true));
 
     return () => controller.abort();
   }, []);
@@ -241,25 +245,44 @@ export default function SLOPage() {
       };
     }
 
+    // Show "No live data" when loaded but no valid status
+    if (statusLoaded) {
+      return {
+        className: 'bg-slate-100 text-slate-700',
+        label: 'No live data',
+        icon: Activity,
+        lastChecked,
+      };
+    }
+
     return {
       className: 'bg-slate-100 text-slate-700',
-      label: liveStatus ? 'Unknown' : 'Loading…',
+      label: 'Loading…',
       icon: Activity,
       lastChecked,
     };
-  }, [liveStatus]);
+  }, [liveStatus, statusLoaded]);
 
   const renderSloHealth = (unit: string) => {
+    // Show "No live data" if loaded but no valid data
+    const noDataFallback = (
+      <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+        <span className="text-sm font-medium">—</span>
+      </div>
+    );
+
+    const loadingState = (
+      <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+        <span className="text-sm font-medium">Loading…</span>
+      </div>
+    );
+
     if (unit === 'availability') {
       const current = computedSlo.availabilityPct;
       const ok = computedSlo.availabilityOk;
 
       if (ok === null) {
-        return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
-          </div>
-        );
+        return sloLoaded ? noDataFallback : loadingState;
       }
 
       return (
@@ -278,11 +301,7 @@ export default function SLOPage() {
       const ok = computedSlo.latencyOk;
 
       if (ok === null) {
-        return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
-          </div>
-        );
+        return sloLoaded ? noDataFallback : loadingState;
       }
 
       return (
@@ -301,11 +320,7 @@ export default function SLOPage() {
       const ok = computedSlo.deadlineOk;
 
       if (ok === null) {
-        return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
-          </div>
-        );
+        return sloLoaded ? noDataFallback : loadingState;
       }
 
       return (
@@ -324,11 +339,7 @@ export default function SLOPage() {
       const ok = computedSlo.invalidManifestOk;
 
       if (ok === null) {
-        return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
-          </div>
-        );
+        return sloLoaded ? noDataFallback : loadingState;
       }
 
       return (
@@ -347,11 +358,7 @@ export default function SLOPage() {
       const ok = computedSlo.trackingIntegrityOk;
 
       if (ok === null) {
-        return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
-          </div>
-        );
+        return sloLoaded ? noDataFallback : loadingState;
       }
 
       return (
@@ -539,38 +546,48 @@ export default function SLOPage() {
               </motion.div>
 
               <motion.div {...getRevealProps(0.1)} className="space-y-3">
-                <div className="p-4 bg-white rounded-lg border border-gray-100">
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-sm font-semibold text-gray-900">Backend</span>
-                    <span className="text-sm text-gray-600">{badge.label}</span>
+                {liveStatus ? (
+                  <div className="p-4 bg-white rounded-lg border border-gray-100">
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-sm font-semibold text-gray-900">Backend</span>
+                      <span className="text-sm text-gray-600">{badge.label}</span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-gray-700">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-gray-500">Postgres</span>
+                        <span className="font-mono">
+                          {liveStatus?.checks?.postgres?.connected
+                            ? `${liveStatus?.checks?.postgres?.status ?? 'unknown'} (${liveStatus?.checks?.postgres?.latency_ms ?? '?'}ms)`
+                            : '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-gray-500">Redis</span>
+                        <span className="font-mono">{liveStatus?.checks?.redis?.ready ? 'ready' : '—'}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-gray-500">Queues</span>
+                        <span className="font-mono">{liveStatus?.checks?.queues?.ready ? 'ready' : '—'}</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-gray-500">Replica lag</span>
+                        <span className="font-mono">
+                          {typeof liveStatus?.checks?.replica?.maxReplayLagMs === 'number'
+                            ? `${liveStatus.checks.replica.maxReplayLagMs}ms`
+                            : '—'}
+                        </span>
+                      </div>
+                    </div>
+                    {badge.lastChecked && (
+                      <p className="mt-3 text-xs text-gray-400">Last updated: {badge.lastChecked}</p>
+                    )}
                   </div>
-                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-gray-700">
-                    <div className="flex items-center justify-between gap-4">
-                      <span className="text-gray-500">Postgres</span>
-                      <span className="font-mono">
-                        {liveStatus?.checks?.postgres?.connected
-                          ? `${liveStatus?.checks?.postgres?.status ?? 'unknown'} (${liveStatus?.checks?.postgres?.latency_ms ?? '?'}ms)`
-                          : 'down'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <span className="text-gray-500">Redis</span>
-                      <span className="font-mono">{liveStatus?.checks?.redis?.ready ? 'ready' : 'not ready'}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <span className="text-gray-500">Queues</span>
-                      <span className="font-mono">{liveStatus?.checks?.queues?.ready ? 'ready' : 'not ready'}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <span className="text-gray-500">Replica lag</span>
-                      <span className="font-mono">
-                        {typeof liveStatus?.checks?.replica?.maxReplayLagMs === 'number'
-                          ? `${liveStatus.checks.replica.maxReplayLagMs}ms`
-                          : 'n/a'}
-                      </span>
-                    </div>
+                ) : (
+                  <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
+                    <p className="text-sm text-gray-600">Status temporarily unavailable</p>
+                    <p className="text-xs text-gray-400 mt-1">Refreshing...</p>
                   </div>
-                </div>
+                )}
               </motion.div>
 
               <motion.div {...getRevealProps(0.2)} className="mt-8 text-center">

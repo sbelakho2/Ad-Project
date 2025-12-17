@@ -366,8 +366,8 @@ Vary: Accept-Encoding, Cookie`}
               </h3>
               <p className="text-sm text-gray-600">
                 Session manifests are protected from cache poisoning attacks. Even if a CDN were 
-                misconfigured, the signed session token in the URL ensures that cached responses 
-                cannot be served to different users.
+                misconfigured, the signed session token in the URL helps reduce the risk of cross-user 
+                cache poisoning. You should still configure your CDN to bypass caching for session manifests.
               </p>
             </div>
           </section>

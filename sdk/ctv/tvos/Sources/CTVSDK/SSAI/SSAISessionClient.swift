@@ -82,6 +82,9 @@ public final class SSAISessionClient {
     
     /// Get metrics
     public var currentMetrics: SSAIMetrics { metrics }
+
+    internal var ssaiEndpoint: URL? { ssaiConfig?.endpoint }
+    internal var isDebugEnabled: Bool { ssaiConfig?.debug == true }
     
     /// Create a new SSAI session
     public func createSession(

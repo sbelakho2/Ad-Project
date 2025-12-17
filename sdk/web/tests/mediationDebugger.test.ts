@@ -502,6 +502,7 @@ describe('MediationDebugger', () => {
 
   describe('Configuration', () => {
     it('should respect max events limit', () => {
+      debugger_.stop();
       debugger_ = new MediationDebugger({ maxEventsPerSession: 5 });
       const session = debugger_.startSession('placement-1');
 
@@ -520,6 +521,7 @@ describe('MediationDebugger', () => {
     });
 
     it('should respect session timeout', async () => {
+      debugger_.stop();
       debugger_ = new MediationDebugger({ sessionTimeoutMs: 50 });
       const session = debugger_.startSession('placement-1');
 
@@ -531,6 +533,7 @@ describe('MediationDebugger', () => {
     });
 
     it('should enable/disable sanitization globally', () => {
+      debugger_.stop();
       debugger_ = new MediationDebugger({ sanitizeByDefault: false });
       const session = debugger_.startSession('placement-1');
       debugger_.recordEvent(session.id, {

@@ -334,8 +334,8 @@ export default function PlaybackMatrixPage() {
                   <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
                     4
                   </div>
-                  <h3 className="font-semibold text-gray-900 mb-2">Partner Validation</h3>
-                  <p className="text-sm text-gray-600">End-to-end testing with demand partners</p>
+                  <h3 className="font-semibold text-gray-900 mb-2">E2E Validation</h3>
+                  <p className="text-sm text-gray-600">End-to-end testing with sample VAST and simulated partners</p>
                 </motion.div>
               </div>
 
