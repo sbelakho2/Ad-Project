@@ -358,7 +358,7 @@ openssl pkeyutl -verify -pubin -inkey apex-key.pem \\
                   Run Sandbox
                 </a>
                 <a
-                  href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/tools/cli"
+                  href={require('@/config/links').repoPath('tools/cli')}
                   className="inline-flex items-center gap-2 px-6 py-3 bg-white/10 text-white border border-white/20 rounded-lg font-semibold hover:bg-white/20 transition-colors"
                 >
                   <Code className="w-5 h-5" />

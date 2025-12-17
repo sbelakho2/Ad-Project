@@ -17,6 +17,7 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { REPO_URL, repoPath } from '@/config/links';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -179,7 +180,7 @@ export default function DevelopersPage() {
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a
-                  href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/sdk"
+                  href={repoPath('sdk')}
                   className="btn-primary inline-flex items-center gap-2"
                 >
                   <GitBranch className="w-5 h-5" />
@@ -277,7 +278,7 @@ export default function DevelopersPage() {
                     <div>
                       <h3 className="text-xl font-bold text-gray-900">{sdk.platform}</h3>
                       <a
-                        href={`https://github.com/sbelakho2/${sdk.repo}/tree/main/${sdk.repoPath}`}
+                        href={repoPath(sdk.repoPath)}
                         className="text-sm text-brand-600 hover:underline"
                       >
                         {sdk.repoPath}
@@ -421,7 +422,7 @@ export default function DevelopersPage() {
               </p>
               <div className="flex flex-wrap justify-center gap-4">
                 <a
-                  href="https://github.com/sbelakho2/apex-mediation-platform"
+                  href={REPO_URL}
                   className="inline-flex items-center gap-2 bg-white text-brand-600 px-6 py-3 rounded-lg font-semibold hover:bg-brand-50 transition-colors"
                 >
                   View on GitHub

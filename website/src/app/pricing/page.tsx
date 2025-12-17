@@ -71,7 +71,7 @@ const pricingTiers = [
       '1-year log retention',
       'Compliance review support',
     ],
-    cta: 'Book a consult',
+    cta: 'Talk to sales',
     ctaHref: '/contact',
     accent: false,
   },

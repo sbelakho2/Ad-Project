@@ -7,6 +7,7 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import HomeNav from '@/components/HomeNav';
 import PageHero from '@/components/PageHero';
+import { repoPath } from '@/config/links';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -57,10 +58,10 @@ export default function DeveloperToolsDocPage() {
                 </p>
                 <ul className="list-disc pl-6 text-gray-700 space-y-2 mt-3">
                   <li>
-                    Repo: <a className="underline" href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/sdk/adapter-dev-kit">sdk/adapter-dev-kit</a>
+                    Repo: <a className="underline" href={repoPath('sdk/adapter-dev-kit')}>sdk/adapter-dev-kit</a>
                   </li>
                   <li>
-                    iOS runner entrypoint: <a className="underline" href="https://github.com/sbelakho2/apex-mediation-platform/tree/main/sdk/adapter-dev-kit/ios">sdk/adapter-dev-kit/ios</a>
+                    iOS runner entrypoint: <a className="underline" href={repoPath('sdk/adapter-dev-kit/ios')}>sdk/adapter-dev-kit/ios</a>
                   </li>
                 </ul>
               </motion.section>

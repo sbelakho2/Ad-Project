@@ -1,6 +1,7 @@
 import SocialIconLink from '@/components/SocialIconLink';
 import { CompanyIdentity } from '@/components/CompanyIdentity';
 import { legalEntity } from '@/config/legal';
+import { REPO_URL } from '@/config/links';
 
 /**
  * Footer with multi-column layout
@@ -43,7 +44,7 @@ export default function Footer() {
             </h3>
             <ul className="space-y-2 text-sm">
               <li><a href="/docs" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
-              <li><a href="https://github.com/sbelakho2/apex-mediation-platform" className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
+              <li><a href={REPO_URL} className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
           </div>
@@ -73,7 +74,7 @@ export default function Footer() {
                   <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
                 </svg>
               </SocialIconLink>
-              <SocialIconLink href="https://github.com/sbelakho2/apex-mediation-platform" label="GitHub">
+              <SocialIconLink href={REPO_URL} label="GitHub">
                 <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
                   <path
                     fillRule="evenodd"

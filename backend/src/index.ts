@@ -105,7 +105,28 @@ app.use(cors({
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
+  standardHeaders: true,
+  legacyHeaders: false,
   message: 'Too many requests from this IP, please try again later.',
+  skip: (req: Request) => {
+    const originalUrl = req.originalUrl || '';
+
+    // Auth routes have their own limiter.
+    if (originalUrl.startsWith(`/api/${API_VERSION}/auth`)) return true;
+
+    // Public status/SLO endpoints must be resilient for customer-facing pages.
+    // These endpoints are cache-protected on the backend and the website; rate-limiting them
+    // at low thresholds causes false-positive 429s (especially via server-side fetches).
+    if (req.method === 'GET') {
+      if (originalUrl.startsWith(`/api/${API_VERSION}/status.json`)) return true;
+      if (originalUrl.startsWith(`/api/${API_VERSION}/slo.json`)) return true;
+    }
+
+    // High-volume ingest endpoints: do not apply the generic IP limiter.
+    if (originalUrl.startsWith(`/api/${API_VERSION}/analytics/events/`)) return true;
+
+    return false;
+  },
 });
 app.use(`/api/${API_VERSION}/`, limiter);
 

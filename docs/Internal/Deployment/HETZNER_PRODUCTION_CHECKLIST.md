@@ -48,6 +48,17 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Session Security | ✅ Active | httpOnly cookies, CSRF protection |
 | Operator Separation | ✅ Active | Admin routes redirect to control plane |
 
+### Admin Access
+
+The following user is configured with `admin` role for production verification:
+
+| Role | Email | Password |
+|------|-------|----------|
+| Admin | `sales@apexmediation.ee` | `&&Pw20354491` |
+
+> **Note:** This user is linked to "Apex Dummy Publisher" and has full access to the console.
+
+
 > **⚠️ Important Notes:**
 > - Redis and PostgreSQL run as **system services**, NOT Docker containers
 > - Use `docker-compose.hetzner.yml` to avoid port conflicts

@@ -6,14 +6,16 @@ import { usePathname } from 'next/navigation';
 export type HeroShellVariant = 'marketingDark' | 'trustLight';
 
 function getDefaultHeroVariant(pathname: string): HeroShellVariant {
-  // Central policy:
+  // Central policy (Rule C):
   // - Marketing pages: dark hero
   // - Trust/docs pages: light hero
-  // Keep this allowlist small to avoid accidentally making unknown pages "marketing".
-  const marketingPrefixes = ['/', '/product', '/features', '/pricing', '/company'];
+  // Explicit route mapping – single source of truth
+  const marketingRoutes = ['/', '/product', '/features', '/pricing'];
+  const trustRoutes = ['/developers', '/security', '/docs', '/slo', '/status', '/company', '/contact'];
 
   if (pathname === '/') return 'marketingDark';
-  if (marketingPrefixes.some(prefix => prefix !== '/' && pathname.startsWith(prefix))) return 'marketingDark';
+  if (marketingRoutes.some(prefix => prefix !== '/' && pathname.startsWith(prefix))) return 'marketingDark';
+  if (trustRoutes.some(prefix => pathname.startsWith(prefix))) return 'trustLight';
 
   return 'trustLight';
 }

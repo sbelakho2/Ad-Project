@@ -251,14 +251,14 @@ export default function SLOPage() {
     // Internal failures should show as "temporarily unavailable"
     return {
       className: 'bg-slate-100 text-slate-700',
-      label: liveStatus ? 'Temporarily unavailable' : 'Loading…',
+      label: 'Temporarily unavailable',
       icon: Activity,
       lastChecked,
     };
   }, [liveStatus]);
 
   const renderSloHealth = (unit: string) => {
-    // If we haven't loaded any data yet, show loading
+    // If we haven't loaded any data yet, show a stable placeholder (no loading states)
     const showLoading = !computedSlo.hasData;
     
     if (unit === 'availability') {
@@ -268,7 +268,7 @@ export default function SLOPage() {
       if (showLoading) {
         return (
           <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
+            <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
       }
@@ -300,7 +300,7 @@ export default function SLOPage() {
       if (showLoading) {
         return (
           <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
+            <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
       }
@@ -332,7 +332,7 @@ export default function SLOPage() {
       if (showLoading) {
         return (
           <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
+            <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
       }
@@ -364,7 +364,7 @@ export default function SLOPage() {
       if (showLoading) {
         return (
           <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
+            <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
       }
@@ -396,7 +396,7 @@ export default function SLOPage() {
       if (showLoading) {
         return (
           <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
-            <span className="text-sm font-medium">Loading…</span>
+            <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
       }
@@ -624,7 +624,6 @@ export default function SLOPage() {
                 ) : (
                   <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 text-center">
                     <p className="text-sm text-gray-600">Status temporarily unavailable</p>
-                    <p className="text-xs text-gray-400 mt-1">Refreshing...</p>
                   </div>
                 )}
               </motion.div>

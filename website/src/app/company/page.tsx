@@ -64,17 +64,17 @@ export default function CompanyPage() {
       <main className="relative bg-white text-slate-900">
         <SiteHeader />
 
-        <PageHero variant="dark">
+        <PageHero variant="light">
           <motion.div
             {...getRevealProps(0)}
             className="max-w-3xl mx-auto text-center md:text-left"
           >
-            <h1 className="text-4xl md:text-5xl font-bold leading-tight text-white mb-6">
+            <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-6">
               Mediation shouldn&apos;t mean compromise.
             </h1>
-            <p className="text-xl leading-relaxed text-slate-200/90">
-              ApexMediation was founded by ad engineers who were tired of mediation
-              platforms that weren&apos;t built for publishers.
+            <p className="text-xl leading-relaxed text-slate-600">
+              We started ApexMediation as ad engineers who were tired of mediation
+              platforms that weren’t built for publishers.
             </p>
           </motion.div>
         </PageHero>
@@ -93,9 +93,9 @@ export default function CompanyPage() {
                     </h2>
                     <p className="text-slate-600 leading-relaxed mb-4">
                       We built ApexMediation after years of watching legacy mediators erode
-                      publisher trust: hidden algorithms, opaque fee structures, networks
-                      that couldn&apos;t be removed. That is an integration tax that made switching
-                      feel like rebuilding from scratch.
+                      publisher trust: hidden algorithms, opaque fees, and networks that
+                      couldn’t be removed. That integration tax made switching feel like
+                      rebuilding from scratch.
                     </p>
                     <p className="text-slate-600 leading-relaxed mb-4">
                       We believed there had to be a better way—one where the publisher
