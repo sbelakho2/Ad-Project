@@ -242,7 +242,7 @@ function PaymentTab() {
 
       {/* Payment Methods */}
       <div className="card-v2 p-6">
-        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b pb-2" style={{borderColor:'var(--gray-200)'}}>
+        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b border-gray-200 pb-2">
           Payment Methods
         </h2>
         <div className="space-y-4">
@@ -265,7 +265,7 @@ function PaymentTab() {
 
       {/* Payout Settings */}
       <div className="card-v2 p-6">
-        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b pb-2" style={{borderColor:'var(--gray-200)'}}>
+        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b border-gray-200 pb-2">
           Payout Settings
         </h2>
         <div className="space-y-4 max-w-2xl">
@@ -307,7 +307,7 @@ function PaymentTab() {
 
       {/* Tax Information */}
       <div className="card-v2 p-6">
-        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b pb-2" style={{borderColor:'var(--gray-200)'}}>
+        <h2 className="text-gray-900 font-semibold text-lg mb-6 border-b border-gray-200 pb-2">
           Tax Information
         </h2>
         <div className="space-y-4">

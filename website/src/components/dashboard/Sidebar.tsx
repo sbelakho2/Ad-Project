@@ -148,7 +148,7 @@ export default function DashboardSidebar({ mobileOpen = false, onClose }: Dashbo
     <>
       {/* Desktop sidebar */}
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-[280px] lg:flex-col">
-        <div className="flex flex-grow flex-col overflow-y-auto bg-white pt-5 pb-4 border-r" style={{borderColor: 'var(--gray-200)'}}>
+        <div className="flex flex-grow flex-col overflow-y-auto bg-white pt-5 pb-4 border-r border-gray-200">
           <div className="flex flex-shrink-0 items-center px-4">
             <h1 className="text-xl font-semibold tracking-tight text-gray-900">ApexMediation</h1>
           </div>

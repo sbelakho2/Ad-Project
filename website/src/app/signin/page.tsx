@@ -167,20 +167,21 @@ function SignInInner() {
         </form>
 
         {process.env.NODE_ENV !== 'production' && (
-        <div className="mt-6">
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300" />
+          <div className="mt-6">
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-gray-300" />
+              </div>
+              <div className="relative flex justify-center text-sm">
+                <span className="px-2 bg-white text-gray-500">Demo Credentials</span>
+              </div>
             </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-white text-gray-500">Demo Credentials</span>
+
+            <div className="mt-4 text-xs text-center text-gray-700 bg-gray-50 p-3 rounded border border-gray-200">
+              <p className="mb-1">Email: demo@apexmediation.ee</p>
+              <p>Password: demo1234</p>
             </div>
           </div>
-          <div className="mt-4 text-xs text-center text-gray-700 bg-gray-50 p-3 rounded border" style={{borderColor:'var(--gray-200)'}}>
-            <p className="mb-1">Email: demo@apexmediation.ee</p>
-            <p>Password: demo1234</p>
-          </div>
-        </div>
         )}
       </div>
     </div>

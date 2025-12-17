@@ -48,7 +48,7 @@ export default function CookieBanner() {
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 animate-slide-up" role="dialog" aria-live="polite">
-      <div className="bg-white border-t px-4 py-4 shadow-lg" style={{borderColor:'var(--gray-200)'}}>
+      <div className="bg-white border-t border-gray-200 px-4 py-4 shadow-lg">
         <div className="container flex flex-col items-center justify-between gap-4 sm:flex-row">
           <p className="text-sm text-gray-700">
             We use cookies to improve your experience. By continuing, you accept our cookie policy.
@@ -81,8 +81,8 @@ export default function CookieBanner() {
             if (e.key === 'Escape') setShowSettings(false)
           }}
         >
-          <div className="w-full max-w-lg rounded-xl border bg-white shadow-xl" style={{borderColor:'var(--gray-200)'}}>
-            <div className="border-b p-6" style={{borderColor:'var(--gray-200)'}}>
+          <div className="w-full max-w-lg rounded-xl border border-gray-200 bg-white shadow-xl">
+            <div className="border-b border-gray-200 p-6">
               <h2 id="cookie-settings-title" className="text-lg font-semibold text-gray-900">
                 Cookie Preferences
               </h2>
@@ -128,7 +128,7 @@ export default function CookieBanner() {
               </fieldset>
             </div>
 
-            <div className="flex flex-col justify-end gap-3 border-t p-6 sm:flex-row" style={{borderColor:'var(--gray-200)'}}>
+            <div className="flex flex-col justify-end gap-3 border-t border-gray-200 p-6 sm:flex-row">
               <button onClick={() => setShowSettings(false)} className="btn-ghost text-sm">
                 Cancel
               </button>
@@ -154,7 +154,7 @@ interface CookieSwitchProps {
 
 function CookieSwitch({ id, label, description, checked, disabled, onChange }: CookieSwitchProps) {
   return (
-    <div className={`rounded p-4 border ${disabled ? 'bg-gray-100' : 'bg-white'}`} style={{borderColor:'var(--gray-200)'}}>
+    <div className={`rounded p-4 border border-gray-200 ${disabled ? 'bg-gray-100' : 'bg-white'}`}>
       <div className="flex items-start justify-between gap-4">
         <div>
           <label htmlFor={id} className="block font-semibold text-gray-900">

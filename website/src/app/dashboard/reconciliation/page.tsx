@@ -22,18 +22,18 @@ export default function ReconciliationPage() {
         </header>
 
         {/* Static step indicator */}
-        <nav aria-label="Wizard steps" className="rounded-[12px] border bg-gray-50 p-3" style={{borderColor:'var(--gray-200)'}}>
+        <nav aria-label="Wizard steps" className="rounded-[12px] border border-gray-200 bg-gray-50 p-3">
           <ol className="flex flex-wrap items-center gap-2 text-xs font-semibold text-gray-700">
-            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1" style={{borderColor:'var(--gray-200)'}}>
+            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1 ring-gray-200">
               <span className="inline-block h-2 w-2 rounded-full bg-brand-500" aria-hidden /> Upload CSV
             </li>
-            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1" style={{borderColor:'var(--gray-200)'}}>
+            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1 ring-gray-200">
               <span className="inline-block h-2 w-2 rounded-full bg-gray-300" aria-hidden /> Map Columns
             </li>
-            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1" style={{borderColor:'var(--gray-200)'}}>
+            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1 ring-gray-200">
               <span className="inline-block h-2 w-2 rounded-full bg-gray-300" aria-hidden /> Validate Preview
             </li>
-            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1" style={{borderColor:'var(--gray-200)'}}>
+            <li className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 ring-1 ring-gray-200">
               <span className="inline-block h-2 w-2 rounded-full bg-gray-300" aria-hidden /> Commit
             </li>
           </ol>
@@ -85,7 +85,7 @@ export default function ReconciliationPage() {
             <div className="w-full overflow-x-auto">
               <table className="min-w-full text-left text-sm">
                 <thead className="text-gray-600">
-                  <tr className="border-b" style={{ borderColor: 'var(--gray-200)' }}>
+                  <tr className="border-b border-gray-200">
                     <th className="py-2 pr-4">Date</th>
                     <th className="py-2 pr-4">Placement</th>
                     <th className="py-2 pr-4">Network</th>

@@ -378,7 +378,7 @@ function NetworkCard({ network, curFmt, numFmt }: NetworkCardProps) {
         )}
 
         {/* Footer */}
-        <div className="flex items-center justify-between pt-4 border-t" style={{borderColor:'var(--gray-200)'}}>
+        <div className="flex items-center justify-between pt-4 border-t border-gray-200">
           <div className="text-xs text-gray-500 space-y-1">
             {network.uptime !== undefined && (
               <p>Uptime {network.uptime.toFixed(1)}%</p>

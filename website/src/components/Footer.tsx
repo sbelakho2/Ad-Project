@@ -7,12 +7,12 @@ import { legalEntity } from '@/config/legal';
  */
 export default function Footer() {
   return (
-    <footer className="bg-white text-gray-700 py-16 border-t" style={{borderColor:'var(--gray-200)'}}>
+    <footer className="bg-white text-gray-700 py-16 border-t border-gray-200">
       <div className="container">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-8 mb-12">
           {/* About */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
               About {legalEntity.tradingAs}
             </h3>
             <ul className="space-y-2 text-sm">
@@ -30,7 +30,7 @@ export default function Footer() {
 
           {/* Product */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
               Product
             </h3>
             <ul className="space-y-2 text-sm">
@@ -42,7 +42,7 @@ export default function Footer() {
 
           {/* Resources */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
               Resources
             </h3>
             <ul className="space-y-2 text-sm">
@@ -54,7 +54,7 @@ export default function Footer() {
 
           {/* Legal */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
               Legal
             </h3>
             <ul className="space-y-2 text-sm">
@@ -68,7 +68,7 @@ export default function Footer() {
 
           {/* Follow Us */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b" style={{borderColor:'var(--gray-200)'}}>
+            <h3 className="text-sm font-semibold text-gray-900 mb-4 pb-2 border-b border-gray-200">
               Follow Us
             </h3>
             <div className="flex gap-4">
@@ -96,7 +96,7 @@ export default function Footer() {
         </div>
 
         {/* Bottom Section */}
-        <div className="border-t pt-8" style={{borderColor:'var(--gray-200)'}}>
+        <div className="border-t border-gray-200 pt-8">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <p className="text-sm text-gray-600">
               © 2025 Bel Consulting OÜ. ApexMediation is a brand of Bel Consulting OÜ.

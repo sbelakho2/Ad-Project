@@ -18,7 +18,7 @@ export default function TransparencyReceiptsPage() {
         </header>
 
         {/* Bulk actions bar placeholder (appears when rows are selected) */}
-        <div className="rounded-[12px] border bg-gray-50 p-3 text-sm text-gray-600" style={{borderColor:'var(--gray-200)'}} aria-hidden>
+        <div className="rounded-[12px] border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600" aria-hidden>
           <div className="flex items-center justify-between">
             <span>Bulk actions: 0 selected</span>
             <div className="flex items-center gap-2">

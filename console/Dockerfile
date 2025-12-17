@@ -25,6 +25,8 @@ RUN npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 WORKDIR /app
 RUN addgroup -g 1001 nodejs && adduser -G nodejs -g nodejs -s /bin/sh -D nextjs
 COPY --from=builder /app/public ./public

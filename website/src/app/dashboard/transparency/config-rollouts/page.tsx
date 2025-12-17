@@ -31,15 +31,15 @@ export default function TransparencyConfigRolloutsPage() {
             <div className="text-xs text-gray-500">Version 1.0.0 • 35% • 1h 20m remaining</div>
           </div>
           <div className="card-v2-body grid grid-cols-1 gap-4 md:grid-cols-3">
-            <div className="rounded-[12px] border p-3" style={{borderColor:'var(--gray-200)'}}>
+            <div className="rounded-[12px] border border-gray-200 p-3">
               <div className="text-xs text-gray-500">Crash-free</div>
               <div className="text-lg font-semibold text-gray-900">99.9%</div>
             </div>
-            <div className="rounded-[12px] border p-3" style={{borderColor:'var(--gray-200)'}}>
+            <div className="rounded-[12px] border border-gray-200 p-3">
               <div className="text-xs text-gray-500">ANR</div>
               <div className="text-lg font-semibold text-gray-900">0.02%</div>
             </div>
-            <div className="rounded-[12px] border p-3" style={{borderColor:'var(--gray-200)'}}>
+            <div className="rounded-[12px] border border-gray-200 p-3">
               <div className="text-xs text-gray-500">Timeouts</div>
               <div className="text-lg font-semibold text-gray-900">0.8%</div>
             </div>

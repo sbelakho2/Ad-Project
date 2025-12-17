@@ -189,7 +189,7 @@ export default function AnalyticsPage() {
         </div>
 
         <div className="card-v2 p-6">
-          <h2 className="text-gray-900 font-semibold text-lg mb-4 border-b pb-2" style={{borderColor:'var(--gray-200)'}}>Adapter Performance</h2>
+          <h2 className="text-gray-900 font-semibold text-lg mb-4 border-b border-gray-200 pb-2">Adapter Performance</h2>
           {loading ? (
             <div className="space-y-3" aria-busy="true">
               {[...Array(4)].map((_, i) => (
