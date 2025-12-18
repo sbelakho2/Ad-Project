@@ -76,7 +76,8 @@ describe('Navigation feature flags', () => {
     renderNavigation()
 
     expect(screen.getByRole('link', { name: /Transparency/i })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Billing/i })).toBeInTheDocument()
+    // Billing is accessed under Settings (no top-level Billing link)
+    expect(screen.queryByRole('link', { name: /Billing/i })).not.toBeInTheDocument()
   })
 
   it('hides transparency and billing links when features disabled', () => {

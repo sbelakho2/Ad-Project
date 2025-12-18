@@ -27,6 +27,16 @@ describe('VRA Routes', () => {
   let app: express.Application;
 
   beforeEach(() => {
+    // Reset mocked DB helpers between tests so mockResolvedValueOnce queues
+    // never leak across tests (which can cause hangs/incorrect rows).
+    const { query, insertMany } = jest.requireMock('../../utils/postgres');
+    const queryImpl = (query as jest.Mock).getMockImplementation();
+    (query as jest.Mock).mockReset();
+    if (queryImpl) (query as jest.Mock).mockImplementation(queryImpl);
+    const insertManyImpl = (insertMany as jest.Mock).getMockImplementation();
+    (insertMany as jest.Mock).mockReset();
+    if (insertManyImpl) (insertMany as jest.Mock).mockImplementation(insertManyImpl);
+
     app = express();
     app.use(express.json());
     // Reset env flags each test

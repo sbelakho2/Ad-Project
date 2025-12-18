@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DEPRECATED - Fly.io deployment script (do not use)
+# DEPRECATION NOTICE: legacy Fly.io deployment script (do not use)
 #
 # This script is intentionally disabled. The production platform runs on Hetzner:
 # - App Server: 46.62.252.96 (apexmediation.ee)

@@ -17,6 +17,7 @@ describe('Infrastructure Migration Plan — Repository Conformance', () => {
   const nginxSslConf = path.join(repoRoot, 'infrastructure/nginx/apexmediation.ssl.conf');
   const prodChecklist = path.join(repoRoot, 'docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md');
   const localHealthScript = path.join(repoRoot, 'scripts/ops/local_health_snapshot.sh');
+  const tlsScript = path.join(repoRoot, 'scripts/ops/tls_snapshot.sh');
   const backendIndex = path.join(repoRoot, 'backend/src/index.ts');
   const backendDeploy = path.join(repoRoot, 'backend/deploy-backend.sh');
 

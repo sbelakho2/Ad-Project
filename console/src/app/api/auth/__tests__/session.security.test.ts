@@ -3,6 +3,11 @@ import { AxiosError } from 'axios'
 import { apiClient, AUTH_UNAUTHORIZED_EVENT } from '@/lib/api-client'
 import { getCsrfToken, readXsrfCookie } from '@/lib/csrf'
 
+jest.mock('next-auth/react', () => ({
+  __esModule: true,
+  getSession: jest.fn(async () => null),
+}))
+
 jest.mock('next-auth', () => ({
   __esModule: true,
   default: jest.fn(() => ({})),

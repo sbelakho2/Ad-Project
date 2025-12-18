@@ -16,7 +16,7 @@
  */
 
 import { hasRole, assertRole, isCustomerRole, RbacError, type Role } from '@/lib/rbac'
-import { canAccessBilling } from '@/app/billing/access'
+import { canAccessBilling } from '@/app/settings/billing/access'
 
 describe('RBAC Core Functions', () => {
   describe('isCustomerRole', () => {
