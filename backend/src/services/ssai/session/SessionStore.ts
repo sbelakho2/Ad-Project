@@ -42,7 +42,8 @@ export class InMemorySessionStore implements ISessionStore {
     this.ttlConfig = ttlConfig;
 
     // Cleanup expired sessions every minute
-    setInterval(() => this.cleanupExpired(), 60000);
+      const interval = setInterval(() => this.cleanupExpired(), 60000);
+      interval.unref?.();
   }
 
   /**

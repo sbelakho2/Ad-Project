@@ -98,15 +98,23 @@ export const query = <T extends QueryResultRow = QueryResultRow>(
     ? targetPool.query<T>(text, [...params])
     : targetPool.query<T>(text);
 
-  // Wrap with timeout
-  return Promise.race([
-    queryPromise,
-    new Promise<QueryResult<T>>((_, reject) => 
-      setTimeout(() => reject(new Error(`Query timeout after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ])
-  .finally(() => {
-    try { endTimer(); } catch { /* noop */ }
+  // Wrap with timeout (and ensure the timeout handle is cleaned up)
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  const timeoutPromise = new Promise<QueryResult<T>>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(`Query timeout after ${timeoutMs}ms`)), timeoutMs);
+    timeoutHandle.unref?.();
+  });
+
+  return Promise.race([queryPromise, timeoutPromise]).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+    try {
+      endTimer();
+    } catch {
+      /* noop */
+    }
   });
 };
 

@@ -26,17 +26,16 @@ const IMPRESSION_COLUMNS = [
   'placement_id',
   'adapter_id',
   'adapter_name',
-  // 'ad_unit_id',
-  // 'ad_format',
-  // 'country_code',
-  // 'device_type',
-  // 'os',
-  // 'os_version',
-  // 'session_id',
-  // 'user_id',
+  'ad_unit_id',
+  'ad_format',
+  'country_code',
+  'device_type',
+  'os',
+  'os_version',
+  'session_id',
+  'user_id',
   'request_id',
   'latency_ms',
-  'status',
   'meta',
   'is_test_mode',
 ] as const;
@@ -89,9 +88,9 @@ const REVENUE_COLUMNS = [
 const asDate = (value: string): Date => new Date(value);
 const quoteIdentifier = (identifier: string): string => `"${identifier.replace(/"/g, '""')}"`;
 const STAGE_TABLE = {
-  impressions: 'analytics_impressions',
-  clicks: 'analytics_clicks',
-  revenue: 'analytics_revenue_events',
+  impressions: 'analytics_impressions_stage',
+  clicks: 'analytics_clicks_stage',
+  revenue: 'analytics_revenue_events_stage',
 } as const;
 
 const toImpressionRow = (event: ImpressionEventDTO): unknown[] => [
@@ -102,17 +101,16 @@ const toImpressionRow = (event: ImpressionEventDTO): unknown[] => [
   event.placement_id,
   event.adapter_id,
   event.adapter_name,
-  // event.ad_unit_id,
-  // event.ad_format,
-  // event.country_code,
-  // event.device_type,
-  // event.os,
-  // event.os_version,
-  // event.session_id,
-  // event.user_id,
+  event.ad_unit_id,
+  event.ad_format,
+  event.country_code,
+  event.device_type,
+  event.os,
+  event.os_version,
+  event.session_id,
+  event.user_id,
   event.request_id,
   event.latency_ms,
-  'success',
   {
     app_version: event.app_version,
     sdk_version: event.sdk_version,
@@ -293,14 +291,12 @@ export class AnalyticsService {
         [...IMPRESSION_COLUMNS],
         rows
       );
-      /*
       await this.mergeStageIntoTarget(
         STAGE_TABLE.impressions,
         'analytics_impressions',
         [...IMPRESSION_COLUMNS],
         ['observed_at', 'event_id']
       );
-      */
       logger.debug('Flushed impressions', { count: eventsToFlush.length });
     } catch (error) {
       logger.error('Failed to flush impressions', { 
@@ -321,17 +317,22 @@ export class AnalyticsService {
       return;
     }
 
-    // const eventsToFlush = [...this.clickBuffer];
+    const eventsToFlush = [...this.clickBuffer];
     this.clickBuffer = [];
     this.updateBufferGauge('clicks');
 
-    /*
     try {
       const rows = eventsToFlush.map(toClickRow);
       await insertMany(
         STAGE_TABLE.clicks,
         [...CLICK_COLUMNS],
         rows
+      );
+      await this.mergeStageIntoTarget(
+        STAGE_TABLE.clicks,
+        'analytics_clicks',
+        [...CLICK_COLUMNS],
+        ['observed_at', 'event_id']
       );
       logger.debug('Flushed clicks', { count: eventsToFlush.length });
     } catch (error) {
@@ -342,7 +343,6 @@ export class AnalyticsService {
       this.clickBuffer.unshift(...eventsToFlush);
       this.updateBufferGauge('clicks');
     }
-    */
   }
 
   /**
@@ -364,14 +364,12 @@ export class AnalyticsService {
         [...REVENUE_COLUMNS],
         rows
       );
-      /*
       await this.mergeStageIntoTarget(
         STAGE_TABLE.revenue,
         'analytics_revenue_events',
         [...REVENUE_COLUMNS],
         ['observed_at', 'event_id']
       );
-      */
       logger.debug('Flushed revenue events', { count: eventsToFlush.length });
     } catch (error) {
       logger.error('Failed to flush revenue events', { 

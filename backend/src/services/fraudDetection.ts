@@ -2,6 +2,8 @@ import {
   fetchFraudStats,
   fetchRecentFraudAlerts,
   fetchFraudTypeBreakdown,
+  fetchFraudStatsV2,
+  fetchRecentFraudAlertsV2,
 } from '../repositories/fraudRepository';
 import logger from '../utils/logger';
 
@@ -53,6 +55,17 @@ export const getFraudStatistics = async (publisherId: string): Promise<ReturnTyp
   return putCache(key, shaped);
 };
 
+export const getFraudStatisticsV2 = async (
+  publisherId: string,
+  opts: { window?: string } = {}
+): Promise<Awaited<ReturnType<typeof fetchFraudStatsV2>>> => {
+  const key = cacheKey('statsV2', { publisherId, window: opts.window ?? '24h' });
+  const cached = fromCache<Awaited<ReturnType<typeof fetchFraudStatsV2>>>(key);
+  if (cached) return cached;
+  const stats = await fetchFraudStatsV2(publisherId, { window: opts.window });
+  return putCache(key, stats);
+};
+
 export const listFraudAlerts = async (publisherId: string, limit: number) => {
   const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(1, Math.floor(limit)), 200) : 50;
   const key = cacheKey('alerts', { publisherId, limit: safeLimit });
@@ -61,6 +74,22 @@ export const listFraudAlerts = async (publisherId: string, limit: number) => {
   const rows = await fetchRecentFraudAlerts(publisherId, safeLimit).catch((e) => {
     logger.warn('fraudDetection.listFraudAlerts: repository error', { error: e });
     return [] as Awaited<ReturnType<typeof fetchRecentFraudAlerts>>;
+  });
+  return putCache(key, rows);
+};
+
+export const listFraudAlertsV2 = async (
+  publisherId: string,
+  limit: number,
+  opts: { window?: string } = {}
+) => {
+  const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(1, Math.floor(limit)), 200) : 50;
+  const key = cacheKey('alertsV2', { publisherId, limit: safeLimit, window: opts.window ?? '24h' });
+  const cached = fromCache<Awaited<ReturnType<typeof fetchRecentFraudAlertsV2>>>(key);
+  if (cached) return cached;
+  const rows = await fetchRecentFraudAlertsV2(publisherId, safeLimit, { window: opts.window }).catch((e) => {
+    logger.warn('fraudDetection.listFraudAlertsV2: repository error', { error: e });
+    return [] as Awaited<ReturnType<typeof fetchRecentFraudAlertsV2>>;
   });
   return putCache(key, rows);
 };

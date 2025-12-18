@@ -100,6 +100,17 @@ const unwrapSuccessEnvelope = <T>(payload: T | SuccessEnvelope<T>): T => {
   return payload as T
 }
 
+const coerceNumber = (value: unknown): number => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
+}
+
+const isRecord = (value: unknown): value is Record<string, any> => Boolean(value) && typeof value === 'object'
+
 // Publisher API
 export const publisherApi = {
   getCurrent: () => apiClient.get<Publisher>('/publishers/me'),
@@ -255,10 +266,64 @@ export const fraudApi = {
   ) => {
     if (USE_MOCK_API) return mockApiCall<{ alerts: FraudAlert[] }>('fraud-alerts')
     const { signal, ...query } = params ?? {}
-    return fraudApiClient.get<{ alerts: FraudAlert[] }>(`/fraud/alerts/${publisherId}`, {
+
+    const resp = await fraudApiClient.get<SuccessEnvelope<any> | any>(`/fraud/alerts`, {
       params: query,
       signal,
     })
+
+    const payload = unwrapSuccessEnvelope(resp.data as any)
+    const rawAlerts = Array.isArray(payload)
+      ? payload
+      : isRecord(payload) && Array.isArray(payload.alerts)
+        ? payload.alerts
+        : []
+
+    const alerts: FraudAlert[] = rawAlerts.map((raw: any) => {
+      const id = String(raw?.id ?? globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`)
+      const timestamp = String(raw?.detectedAt ?? raw?.timestamp ?? new Date().toISOString())
+
+      const alertTypeRaw = String(raw?.alertType ?? raw?.type ?? 'anomaly').toLowerCase()
+      const alertType: FraudAlert['alertType'] =
+        alertTypeRaw === 'givt' || alertTypeRaw === 'sivt' || alertTypeRaw === 'ml_fraud' || alertTypeRaw === 'anomaly'
+          ? (alertTypeRaw as FraudAlert['alertType'])
+          : 'anomaly'
+
+      const severityRaw = String(raw?.severity ?? 'low').toLowerCase()
+      const severity: FraudAlert['severity'] =
+        severityRaw === 'low' || severityRaw === 'medium' || severityRaw === 'high' || severityRaw === 'critical'
+          ? (severityRaw as FraudAlert['severity'])
+          : 'low'
+
+      const detectionTypeRaw = String(raw?.detectionType ?? 'rule_based')
+      const detectionType: FraudAlert['detectionType'] =
+        detectionTypeRaw === 'rule_based' || detectionTypeRaw === 'ml_based' || detectionTypeRaw === 'anomaly'
+          ? (detectionTypeRaw as FraudAlert['detectionType'])
+          : 'rule_based'
+
+      const actionRaw = String(raw?.action ?? 'flag')
+      const action: FraudAlert['action'] =
+        actionRaw === 'block' || actionRaw === 'flag' || actionRaw === 'monitor' ? (actionRaw as FraudAlert['action']) : 'flag'
+
+      const metadata: Record<string, any> =
+        isRecord(raw?.metadata) ? raw.metadata : isRecord(raw) && typeof raw.details === 'string' ? { details: raw.details } : {}
+
+      return {
+        id,
+        timestamp,
+        alertType,
+        severity,
+        publisherId,
+        deviceId: typeof raw?.deviceId === 'string' ? raw.deviceId : undefined,
+        ipAddress: typeof raw?.ipAddress === 'string' ? raw.ipAddress : undefined,
+        fraudScore: coerceNumber(raw?.fraudScore),
+        detectionType,
+        action,
+        metadata,
+      }
+    })
+
+    return { data: { alerts } }
   },
   getStats: async (
     publisherId: string,
@@ -266,10 +331,44 @@ export const fraudApi = {
   ) => {
     if (USE_MOCK_API) return mockApiCall<FraudStats>('fraud-stats')
     const { signal, ...query } = params ?? {}
-    return fraudApiClient.get<FraudStats>(`/fraud/stats/${publisherId}`, {
+
+    const resp = await fraudApiClient.get<SuccessEnvelope<any> | any>(`/fraud/stats`, {
       params: query,
       signal,
     })
+
+    const payload = unwrapSuccessEnvelope(resp.data as any)
+
+    if (isRecord(payload) && typeof payload.fraudRate === 'number') {
+      return { data: payload as FraudStats }
+    }
+
+    // Backend currently returns a compact fraud stats shape. Normalize to the console's FraudStats contract.
+    const totalAlerts = coerceNumber((payload as any)?.totalAlerts)
+    const highSeverity = coerceNumber((payload as any)?.highSeverity)
+
+    const totalRequests = totalAlerts
+    const fraudRequests = highSeverity
+    const fraudRate = totalRequests > 0 ? fraudRequests / totalRequests : 0
+
+    const normalized: FraudStats = {
+      publisherId,
+      timeWindow: String(params?.window ?? '24h'),
+      totalRequests,
+      fraudRequests,
+      fraudRate,
+      givtDetections: 0,
+      sivtDetections: 0,
+      mlDetections: 0,
+      anomalyDetections: 0,
+      blockedRequests: 0,
+      flaggedRequests: 0,
+      averageFraudScore: 0,
+      topFraudTypes: [],
+      lastUpdated: String((payload as any)?.lastDetectionAt ?? new Date().toISOString()),
+    }
+
+    return { data: normalized }
   },
   getDashboard: (publisherId: string) =>
     fraudApiClient.get(`/fraud/dashboard/${publisherId}`),

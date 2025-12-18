@@ -46,7 +46,8 @@ export class SessionService {
     this.rateLimitConfig = rateLimitConfig;
 
     // Cleanup rate limit entries every minute
-    setInterval(() => this.cleanupRateLimits(), 60000);
+    const interval = setInterval(() => this.cleanupRateLimits(), 60000);
+    interval.unref?.();
   }
 
   /**

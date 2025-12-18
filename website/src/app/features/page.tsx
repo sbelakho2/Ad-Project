@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity,
+  ArrowRight,
   ArrowRightLeft,
   BarChart3,
   Brain,
@@ -206,9 +207,9 @@ function MigrationStudioCard({ className }: { className?: string }) {
   return (
     <VisualCard title="Migration Studio" className={className}>
 {`┌──────────────────────────────────────────┐
-│  Config v12 → Simulate → Canary → 100%  │
+│  Config v12 → Simulate → Canary → 100%   │
 │                    │          │          │
-│                    └─ rollback◀┘          │
+│                    └─ rollback◀┘         │
 └──────────────────────────────────────────┘
 
 Shadow Mode:  Log without serving
@@ -269,8 +270,8 @@ const platformTabs = [
       'Signed logs for every insertion decision',
     ],
     diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│  CTV App     │───▶│  Apex SSAI  │───▶│  Stitched    │
-│  (Player)    │    │  Server     │    │  Stream      │
+│  CTV App     │───▶│  Apex SSAI  │───▶│  Stitched      │
+│  (Player)    │    │  Server     │    │  Stream        │
 └──────────────┘    └─────────────┘    └──────────────┘
                            │
                     ┌──────┴──────┐
@@ -288,8 +289,8 @@ const platformTabs = [
       'Real-time analytics and debug panel in browser',
     ],
     diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│  Web Player  │───▶│  Apex SDK   │───▶│  Ad Request  │
-│  (Browser)   │    │  (TS/JS)    │    │  + Response  │
+│  Web Player  │───▶│  Apex SDK   │───▶│  Ad Request    │
+│  (Browser)   │    │  (TS/JS)    │    │  + Response    │
 └──────────────┘    └─────────────┘    └──────────────┘
                            │
                     ┌──────┴──────┐
@@ -307,8 +308,8 @@ const platformTabs = [
       'Circuit breakers and per-adapter timeouts',
     ],
     diagram: `┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│  Mobile App  │───▶│  Apex SDK   │───▶│  Ad Networks │
-│  (Native)    │    │  (Native)   │    │  (8+)        │
+│  Mobile App  │───▶│  Apex SDK   │───▶│  Ad Networks   │
+│  (Native)    │    │  (Native)   │    │  (8+)          │
 └──────────────┘    └─────────────┘    └──────────────┘
                            │
                     ┌──────┴──────┐
@@ -331,6 +332,8 @@ function PlatformTabsSection() {
             {platformTabs.map((tab) => (
               <button
                 key={tab.id}
+                type="button"
+                aria-pressed={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
                 className={`flex items-center gap-2 px-6 py-3 rounded-lg font-semibold transition-colors ${
                   activeTab === tab.id
@@ -368,7 +371,7 @@ function PlatformTabsSection() {
                   href={activePlatform.docsLink}
                   className="inline-flex items-center gap-2 mt-6 text-brand-600 font-semibold hover:underline"
                 >
-                  How to validate →
+                  How to validate <ArrowRight className="w-4 h-4" />
                 </a>
               </div>
 
@@ -416,7 +419,7 @@ export default function FeaturesPage() {
         <PlatformTabsSection />
 
         {/* SDK Integration - TOP FEATURE #1 */}
-        <section className="py-16">
+        <section className="py-16 bg-white">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-16">
@@ -443,7 +446,10 @@ export default function FeaturesPage() {
                 </motion.div>
               </div>
 
-              <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-success/10 rounded-2xl p-8 border border-brand-200">
+              <motion.div
+                {...getRevealProps(0.2)}
+                className="bg-gradient-to-r from-brand-50 to-success/10 rounded-2xl p-8 border border-brand-200"
+              >
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
                   <MetricCard value="3" label="Lines to integrate" layout="inline" />
                   <MetricCard value="0" label="XML config files" layout="inline" />
@@ -510,50 +516,38 @@ export default function FeaturesPage() {
                 </motion.div>
 
                 <motion.div {...getRevealProps(0.15)} className="space-y-6">
-                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
-                    <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-success">1</span>
-                      </div>
-                      <div>
-                        <h3 className="font-bold text-gray-900 text-lg mb-2">Google UMP integration</h3>
-                        <p className="text-gray-600">
-                          One-liner to show the Google User Messaging Platform consent form.
-                          We handle the callbacks and propagate to all networks.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
-                    <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-success">2</span>
-                      </div>
-                      <div>
-                        <h3 className="font-bold text-gray-900 text-lg mb-2">Direct consent strings</h3>
-                        <p className="text-gray-600">
-                          Pass TCF v2.2, US Privacy, or custom consent directly.
-                          Perfect for apps with existing CMP solutions.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
-                    <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-success">3</span>
-                      </div>
-                      <div>
-                        <h3 className="font-bold text-gray-900 text-lg mb-2">Read IAB-standard consent storage (opt-in)</h3>
-                        <p className="text-gray-600">
-                          Use the SDK helper to read IAB-standard consent keys (TCF + US Privacy) from
-                          app storage, then pass them into the SDK. There is no background scraping.
-                        </p>
+                  {[
+                    {
+                      n: 1,
+                      title: 'Google UMP integration',
+                      desc:
+                        'One-liner to show the Google User Messaging Platform consent form. We handle the callbacks and propagate to all networks.',
+                    },
+                    {
+                      n: 2,
+                      title: 'Direct consent strings',
+                      desc:
+                        'Pass TCF v2.2, US Privacy, or custom consent directly. Perfect for apps with existing CMP solutions.',
+                    },
+                    {
+                      n: 3,
+                      title: 'Read IAB-standard consent storage (opt-in)',
+                      desc:
+                        'Use the SDK helper to read IAB-standard consent keys (TCF + US Privacy) from app storage, then pass them into the SDK. There is no background scraping.',
+                    },
+                  ].map((step) => (
+                    <div key={step.n} className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
+                      <div className="flex items-start gap-4">
+                        <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                          <span className="text-2xl font-bold text-success">{step.n}</span>
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-gray-900 text-lg mb-2">{step.title}</h3>
+                          <p className="text-gray-600">{step.desc}</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ))}
 
                   <div className="bg-gradient-to-r from-success/10 to-brand-50 rounded-xl p-6 border border-success/20">
                     <div className="flex items-start gap-3">
@@ -573,9 +567,11 @@ export default function FeaturesPage() {
           </div>
         </section>
 
+        {/* Divider */}
+        <div className="h-px w-full bg-gray-200/70" />
+
         {/* VRA Section */}
-        <section className="py-16">
-          <div className="section-divider mb-16" />
+        <section className="py-16 bg-white">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
@@ -617,7 +613,7 @@ export default function FeaturesPage() {
         </section>
 
         {/* Migration Studio Section */}
-        <section className="py-16 section-tinted">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
@@ -658,9 +654,11 @@ export default function FeaturesPage() {
           </div>
         </section>
 
+        {/* Divider */}
+        <div className="h-px w-full bg-gray-200/70" />
+
         {/* Transparency Engine Section */}
-        <section className="py-16">
-          <div className="section-divider mb-16" />
+        <section className="py-16 bg-white">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
@@ -702,7 +700,7 @@ export default function FeaturesPage() {
         </section>
 
         {/* ML Optimizer Section */}
-        <section className="py-16 section-tinted">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
@@ -743,9 +741,11 @@ export default function FeaturesPage() {
           </div>
         </section>
 
+        {/* Divider */}
+        <div className="h-px w-full bg-gray-200/70" />
+
         {/* Infrastructure */}
-        <section className="py-16">
-          <div className="section-divider mb-16" />
+        <section className="py-16 bg-white">
           <div className="container mx-auto px-4">
             <motion.div {...getRevealProps(0)} className="text-center mb-16">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
@@ -773,7 +773,7 @@ export default function FeaturesPage() {
         </section>
 
         {/* Observability */}
-        <section className="py-16 section-tinted">
+        <section className="py-16 bg-gray-50">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid md:grid-cols-2 gap-12 items-center">
@@ -828,31 +828,38 @@ rtb_errors{code="timeout"}           2`}
                 </motion.div>
               </div>
 
-              <div className="mt-10 rounded-xl border border-gray-200 bg-gray-50 p-6">
+              <div className="mt-10 rounded-xl border border-gray-200 bg-white p-6">
                 <h3 className="text-lg font-semibold text-gray-900">Debug Panel</h3>
                 <p className="mt-2 text-sm text-gray-600 max-w-prose">
                   A lightweight, on-device view of what the SDK did during an auction—useful for reproducing issues and sharing a sanitized trace with your team.
                 </p>
                 <ul className="mt-4 space-y-2 text-sm text-gray-700">
-                  <li>• Waterfall order and per-adapter outcomes (shown/filled/timeout)</li>
-                  <li>• Latency breakdowns and time budget visibility</li>
-                  <li>• Consent and policy signals surfaced for debugging (no raw PII)</li>
-                  <li>• Export/share a sanitized trace bundle for support</li>
-                  <li>• Correlate traces with Prometheus/Grafana metrics</li>
+                  {[
+                    'Waterfall order and per-adapter outcomes (shown/filled/timeout)',
+                    'Latency breakdowns and time budget visibility',
+                    'Consent and policy signals surfaced for debugging (no raw PII)',
+                    'Export/share a sanitized trace bundle for support',
+                    'Correlate traces with Prometheus/Grafana metrics',
+                  ].map((item) => (
+                    <li key={item} className="flex items-start gap-2">
+                      <CheckCircle className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
                 </ul>
               </div>
             </div>
           </div>
         </section>
 
-        {/* SDKs */}
-        <section className="py-16 bg-gray-900">
+        {/* SDKs (keep light so ONLY hero is dark per your request) */}
+        <section className="py-16 bg-white">
           <div className="container mx-auto px-4">
             <motion.div {...getRevealProps(0)} className="text-center mb-12">
-              <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
+              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                 Native SDKs, native performance
               </h2>
-              <p className="text-lg text-gray-400 max-w-2xl mx-auto">
+              <p className="text-lg text-gray-600 max-w-2xl mx-auto">
                 Built for each platform. Privacy-first. Fully documented.
               </p>
             </motion.div>
@@ -862,16 +869,16 @@ rtb_errors{code="timeout"}           2`}
                 <motion.div
                   key={sdk.platform}
                   {...getRevealProps(index * 0.1)}
-                  className="bg-gray-800 rounded-xl p-6"
+                  className="bg-gray-50 rounded-xl p-6 border border-gray-200"
                 >
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xl font-bold text-white">{sdk.platform}</h3>
-                    <span className="text-xs text-gray-400 font-mono">{sdk.language}</span>
+                    <h3 className="text-xl font-bold text-gray-900">{sdk.platform}</h3>
+                    <span className="text-xs text-gray-500 font-mono">{sdk.language}</span>
                   </div>
                   <ul className="space-y-2">
                     {sdk.features.map((feature) => (
-                      <li key={feature} className="flex items-center gap-2 text-sm text-gray-300">
-                        <Sparkles className="w-3 h-3 text-brand-400" />
+                      <li key={feature} className="flex items-center gap-2 text-sm text-gray-700">
+                        <Sparkles className="w-3 h-3 text-brand-600" />
                         {feature}
                       </li>
                     ))}
@@ -883,8 +890,8 @@ rtb_errors{code="timeout"}           2`}
         </section>
 
         {/* CTA */}
-        <section className="py-16">
-          <div className="section-divider mb-16" />
+        <section className="py-16 bg-white">
+          <div className="h-px w-full bg-gray-200/70 mb-16" />
           <div className="container mx-auto px-4">
             <motion.div {...getRevealProps(0)} className="max-w-3xl mx-auto text-center">
               <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
@@ -895,16 +902,10 @@ rtb_errors{code="timeout"}           2`}
                 consent handling, VRA, and Migration Studio.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
-                <a
-                  href="/contact"
-                  className="btn-primary"
-                >
+                <a href="/contact" className="btn-primary">
                   Request a demo
                 </a>
-                <a
-                  href="/developers"
-                  className="btn-secondary"
-                >
+                <a href="/developers" className="btn-secondary">
                   Read the docs
                 </a>
               </div>

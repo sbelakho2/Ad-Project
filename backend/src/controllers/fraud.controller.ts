@@ -2,7 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../middleware/errorHandler';
 import {
   getFraudStatistics,
+  getFraudStatisticsV2,
   listFraudAlerts,
+  listFraudAlertsV2,
   getFraudByType,
 } from '../services/fraudDetection';
 
@@ -37,7 +39,8 @@ export const getStats = async (
       throw new AppError('Missing publisher context', 401);
     }
 
-    const stats = await getFraudStatistics(publisherId);
+    const windowParam = parseQueryParam(req.query.window);
+    const stats = await getFraudStatisticsV2(publisherId, { window: windowParam });
 
     res.json({
       success: true,
@@ -66,15 +69,17 @@ export const getAlerts = async (
     const limitParam = parseQueryParam(req.query.limit);
     const limit = limitParam ? Number(limitParam) : 10;
 
+    const windowParam = parseQueryParam(req.query.window);
+
     if (!Number.isFinite(limit) || limit <= 0) {
       throw new AppError('Invalid limit parameter', 400);
     }
 
-    const alerts = await listFraudAlerts(publisherId, limit);
+    const alerts = await listFraudAlertsV2(publisherId, limit, { window: windowParam });
 
     res.json({
       success: true,
-      data: alerts,
+      data: { alerts },
     });
   } catch (error) {
     next(error);

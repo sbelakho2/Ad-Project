@@ -14,8 +14,8 @@ function getDefaultHeroVariant(pathname: string): HeroShellVariant {
   const trustRoutes = ['/developers', '/security', '/docs', '/slo', '/status', '/company', '/contact'];
 
   if (pathname === '/') return 'marketingDark';
-  if (marketingRoutes.some(prefix => prefix !== '/' && pathname.startsWith(prefix))) return 'marketingDark';
-  if (trustRoutes.some(prefix => pathname.startsWith(prefix))) return 'trustLight';
+  if (marketingRoutes.some((prefix) => prefix !== '/' && pathname.startsWith(prefix))) return 'marketingDark';
+  if (trustRoutes.some((prefix) => pathname.startsWith(prefix))) return 'trustLight';
 
   return 'trustLight';
 }
@@ -43,10 +43,7 @@ export default function HeroShell({
       className={[variantClasses, className].filter(Boolean).join(' ')}
     >
       {resolvedVariant === 'marketingDark' ? (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0"
-        >
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0">
           <div
             className={[
               'absolute inset-0 opacity-60',

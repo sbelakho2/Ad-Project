@@ -62,7 +62,8 @@ export class PodPlanner {
     this.config = { ...DEFAULT_CONFIG, ...config };
 
     // Cleanup old dedup entries periodically
-    setInterval(() => this.cleanupDedupeCache(), 60000);
+      const interval = setInterval(() => this.cleanupDedupeCache(), 60000);
+      interval.unref?.();
   }
 
   /**

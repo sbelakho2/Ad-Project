@@ -207,6 +207,24 @@
     @apply bg-white/15 no-underline;
   }
 
+  /* NEW: trustLight hero policy */
+  [data-hero-variant='trustLight'] h1,
+  [data-hero-variant='trustLight'] h2,
+  [data-hero-variant='trustLight'] h3,
+  [data-hero-variant='trustLight'] h4,
+  [data-hero-variant='trustLight'] h5,
+  [data-hero-variant='trustLight'] h6 {
+    color: rgb(var(--gray-900));
+  }
+
+  [data-hero-variant='trustLight'] p {
+    color: rgb(var(--gray-600));
+  }
+
+  [data-hero-variant='trustLight'] .btn-secondary:hover {
+    background: rgb(var(--gray-50));
+  }
+
   .hero p {
     color: rgb(var(--muted));
     font-size: 1.125rem;
