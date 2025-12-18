@@ -10,7 +10,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > - **Operator Domain:** admin.apexmediation.ee (Control Plane - separate from Console)  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<App Server IP>` (DB Server only reachable from App Server)
 > - **Project Path:** `/opt/adproject` (NOT `/opt/apex` or `/var/www`)
-> - **Deployment:** Tarball upload or rsync (no git on server)
+> - **Deployment:** Git pull (preferred) or rsync
 > - **Compose File:** `infrastructure/docker/docker-compose.hetzner.yml`
 
 > **⚠️ CRITICAL: Production Paths**
@@ -443,9 +443,57 @@ ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adprojec
 
 ## 8. Deployment Procedure
 
-> **IMPORTANT:** The production server does NOT have git access. Deployment is done via tarball upload.
+> **Deployment Methods (in order of preference):**
+> 1. **Git Pull** - Fastest, simplest (requires deploy key setup)
+> 2. **Rsync** - Good for pre-built artifacts
+> 3. **Tarball** - Fallback method
+>
 > Use `docker-compose.hetzner.yml` (not `docker-compose.yml`) as it excludes Postgres/Redis containers
 > (they run as system services).
+
+### 8.0 Git-Based Deployment (Recommended)
+
+Git is initialized at `/opt/adproject`. Once you add the server's deploy key to GitHub, deployments become simple:
+
+**One-time Setup: Add Deploy Key to GitHub**
+
+1. Copy this public key:
+   ```
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJRHgjXYF6tIU72sZVY9LREzLXWX2You1Bpq6m5oGOy3 root@ApexMain
+   ```
+2. Go to GitHub → Repository → Settings → Deploy Keys → Add deploy key
+3. Paste the key, name it "Hetzner Production", check "Allow write access" (optional)
+
+**Deploy via Git:**
+
+```bash
+# From local machine - commit and push
+cd /path/to/Ad-Project
+git add -A && git commit -m "feat: your changes" && git push origin main
+
+# SSH to server and pull
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+cd /opt/adproject
+git pull origin main
+
+# Rebuild and restart affected services
+cd backend && npm run build && pm2 restart backend
+# OR for console: cd console && npm run build && pm2 restart console
+# OR for website: cd website && npm run build && pm2 restart website
+```
+
+**Quick One-Liner (after deploy key is set up):**
+
+```bash
+# Deploy backend
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 'cd /opt/adproject && git pull && cd backend && npm run build && pm2 restart backend'
+
+# Deploy all services
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 'cd /opt/adproject && git pull && \
+  cd backend && npm run build && pm2 restart backend && \
+  cd ../website && npm run build && pm2 restart website'
+```
 
 ### 8.1 Quick Reference - Working Commands
 
