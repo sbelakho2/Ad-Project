@@ -7,10 +7,8 @@ import type {
   AnalyticsSummary,
   FraudAlert,
   FraudStats,
-  PayoutHistory,
   PaginatedResponse,
   FraudSettings,
-  PayoutSettings,
   TeamMember,
   TeamInvitation,
   TeamRoleDefinition,
@@ -701,81 +699,10 @@ export const migrationApi = {
   },
 }
 
-// Payout API
-type PayoutHistoryRequest = {
-  page?: number
-  pageSize?: number
-  publisherId?: string
-  signal?: AbortSignal
-}
-
-type UpcomingPayoutRequest = {
-  publisherId?: string
-  signal?: AbortSignal
-}
-
-type UpdatePayoutSettingsPayload = {
-  threshold: number
-  method: 'stripe' | 'wire'
-  currency: string
-  schedule?: 'monthly'
-  accountName: string
-  accountReference: string
-  autoPayout: boolean
-  backupMethod?: 'stripe' | 'wire'
-}
-
-export const payoutApi = {
-  getHistory: async (params: PayoutHistoryRequest = {}) => {
-    if (USE_MOCK_API) {
-      const response = await mockApiCall<PaginatedResponse<PayoutHistory>>('payout-history')
-      return response.data
-    }
-    const { signal, ...query } = params
-    const pagination = withPaginationDefaults({ page: query.page, pageSize: query.pageSize })
-    const response = await apiClient.get<
-      PaginatedResponse<PayoutHistory> | SuccessEnvelope<PaginatedResponse<PayoutHistory>>
-    >('/payouts/history', {
-      params: { ...query, ...pagination },
-      signal,
-    })
-    return unwrapSuccessEnvelope(response.data)
-  },
-  getUpcoming: async (params: UpcomingPayoutRequest = {}) => {
-    if (USE_MOCK_API) {
-      const response = await mockApiCall<PayoutHistory | null>('payout-upcoming')
-      return response.data
-    }
-    const { signal, ...query } = params
-    const response = await apiClient.get<
-      PayoutHistory | null | SuccessEnvelope<PayoutHistory | null>
-    >('/payouts/upcoming', {
-      params: query,
-      signal,
-    })
-    return unwrapSuccessEnvelope(response.data)
-  },
-  updateMethod: (method: 'stripe' | 'wire', details: Record<string, any>) =>
-    apiClient.put('/payouts/method', { method, details }),
-}
-
 // Settings API
 export const settingsApi = {
   getFraudSettings: () => apiClient.get<FraudSettings>('/settings/fraud'),
   updateFraudSettings: (data: FraudSettings) => apiClient.put('/settings/fraud', data),
-  getPayoutSettings: async () => {
-    const response = await apiClient.get<
-      PayoutSettings | null | SuccessEnvelope<PayoutSettings | null>
-    >('/settings/payout')
-    return unwrapSuccessEnvelope(response.data)
-  },
-  updatePayoutSettings: async (data: Partial<UpdatePayoutSettingsPayload>) => {
-    const response = await apiClient.put<PayoutSettings | SuccessEnvelope<PayoutSettings>>(
-      '/settings/payout',
-      data
-    )
-    return unwrapSuccessEnvelope(response.data)
-  },
   getNotificationSettings: () => apiClient.get<NotificationSettings>('/settings/notifications'),
   updateNotificationSettings: (data: Partial<NotificationSettings>) =>
     apiClient.put<NotificationSettings>('/settings/notifications', data),
@@ -889,6 +816,17 @@ export const byoApi = {
 
 import type { App, AppApiKey, AppApiKeyWithSecret } from '@/types'
 
+export type CreateAppInput = {
+  name: string
+  bundleId: string
+  platform: string
+}
+
+export type UpdateAppInput = {
+  name?: string
+  bundleId?: string
+}
+
 export const appsApi = {
   /**
    * List all apps for the current publisher
@@ -904,6 +842,29 @@ export const appsApi = {
   get: async (appId: string): Promise<App> => {
     const response = await apiClient.get<SuccessEnvelope<App>>(`/apps/${appId}`)
     return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Create a new app
+   */
+  create: async (input: CreateAppInput): Promise<App> => {
+    const response = await apiClient.post<SuccessEnvelope<App>>('/apps', input)
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Update an existing app
+   */
+  update: async (appId: string, input: UpdateAppInput): Promise<App> => {
+    const response = await apiClient.put<SuccessEnvelope<App>>(`/apps/${appId}`, input)
+    return unwrapSuccessEnvelope(response.data)
+  },
+
+  /**
+   * Delete an app
+   */
+  delete: async (appId: string): Promise<void> => {
+    await apiClient.delete(`/apps/${appId}`)
   },
 }
 
@@ -937,5 +898,14 @@ export const appKeysApi = {
    */
   revoke: async (appId: string, keyId: string): Promise<void> => {
     await apiClient.delete(`/apps/${appId}/keys/${keyId}`)
+  },
+}
+
+// Me API - current user/publisher info
+export const meApi = {
+  get: async () => {
+    const resp = await apiClient.get('/publishers/me')
+    const payload: any = resp.data
+    return payload?.data ?? payload
   },
 }

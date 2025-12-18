@@ -16,6 +16,7 @@ import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
 import { repoPath } from '@/config/links';
+import { StepCard } from '@/components/StepCard';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -93,17 +94,9 @@ export default function VerificationPage() {
 
               {/* Step 1: Export */}
               <motion.div {...getRevealProps(0.1)} className="bg-white rounded-xl p-6 mb-6 border border-gray-100">
-                <div className="flex items-start gap-4 mb-4">
-                  <div className="w-10 h-10 bg-brand-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">
-                    1
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Export the Auction Receipt</h3>
-                    <p className="text-gray-600 mb-4">
-                      Export the signed auction receipt from the Console, or fetch it via the Transparency API.
-                    </p>
-                  </div>
-                </div>
+                <StepCard step={1} title="Export the Auction Receipt" className="mb-4">
+                  Export the signed auction receipt from the Console, or fetch it via the Transparency API.
+                </StepCard>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`# Fetch a specific auction (requires auth)
@@ -118,17 +111,9 @@ curl -s \
 
               {/* Step 2: Inspect */}
               <motion.div {...getRevealProps(0.15)} className="bg-white rounded-xl p-6 mb-6 border border-gray-100">
-                <div className="flex items-start gap-4 mb-4">
-                  <div className="w-10 h-10 bg-brand-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">
-                    2
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Inspect the Bundle Structure</h3>
-                    <p className="text-gray-600 mb-4">
-                      The receipt includes the signature, key id, algorithm, and (optionally) the canonical string.
-                    </p>
-                  </div>
-                </div>
+                <StepCard step={2} title="Inspect the Bundle Structure" className="mb-4">
+                  The receipt includes the signature, key id, algorithm, and (optionally) the canonical string.
+                </StepCard>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`{
@@ -143,7 +128,7 @@ curl -s \
     "signature": "<base64 Ed25519 signature>"
   },
   "canonical": {
-    "string": "{...canonical JSON string...}",
+    "string": "<canonical JSON string placeholder>",
     "truncated": false,
     "size_bytes": 1234
   }
@@ -154,17 +139,9 @@ curl -s \
 
               {/* Step 3: Verify */}
               <motion.div {...getRevealProps(0.2)} className="bg-white rounded-xl p-6 mb-6 border border-gray-100">
-                <div className="flex items-start gap-4 mb-4">
-                  <div className="w-10 h-10 bg-brand-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">
-                    3
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Verify the Signatures</h3>
-                    <p className="text-gray-600 mb-4">
-                      Verify locally (offline) once you have the receipt JSON.
-                    </p>
-                  </div>
-                </div>
+                <StepCard step={3} title="Verify the Signatures" className="mb-4">
+                  Verify locally (offline) once you have the receipt JSON.
+                </StepCard>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`# Extract canonical string + signature from the receipt
@@ -180,17 +157,9 @@ jq -r '.integrity.key_id' auction.json  # key_2025Q4`}
 
               {/* Step 4: Manual Verification */}
               <motion.div {...getRevealProps(0.25)} className="bg-white rounded-xl p-6 border border-gray-100">
-                <div className="flex items-start gap-4 mb-4">
-                  <div className="w-10 h-10 bg-brand-600 text-white rounded-full flex items-center justify-center font-bold flex-shrink-0">
-                    4
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">Manual Verification (OpenSSL)</h3>
-                    <p className="text-gray-600 mb-4">
-                      For independent verification without our tools:
-                    </p>
-                  </div>
-                </div>
+                <StepCard step={4} title="Manual Verification (OpenSSL)" className="mb-4">
+                  For independent verification without our tools:
+                </StepCard>
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`# 1. Download our public key (rotated quarterly)

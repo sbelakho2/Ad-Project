@@ -535,7 +535,7 @@ export default function BillingSettingsPage() {
                 )}
               </div>
               <Link
-                href="/billing/usage"
+                href="/settings/billing/usage"
                 className="px-4 py-2 text-sm font-medium text-primary-700 bg-primary-50 rounded-lg hover:bg-primary-100 transition"
               >
                 View Usage

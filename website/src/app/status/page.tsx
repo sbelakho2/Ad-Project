@@ -103,7 +103,7 @@ export default async function StatusPage() {
                 Current platform availability and where to check deeper diagnostics.
               </p>
               {badge.lastChecked ? (
-                <p className="mt-3 text-sm text-gray-500 font-mono">Last checked: {badge.lastChecked}{usedLkg ? ' (cached)' : ''}</p>
+                <p className="mt-3 text-sm text-gray-500 font-mono">Last checked: {badge.lastChecked} UTC{usedLkg ? ' (cached)' : ''}</p>
               ) : usedLkg ? (
                 <p className="mt-3 text-sm text-gray-500 font-mono">Temporarily unavailable — showing last known good snapshot.</p>
               ) : (

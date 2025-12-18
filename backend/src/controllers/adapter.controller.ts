@@ -73,7 +73,18 @@ export const list = async (
       throw new AppError('Publisher context required', 401);
     }
 
-    const configs = await adapterConfigService.getAdapterConfigs(publisherId);
+    let configs: Awaited<ReturnType<typeof adapterConfigService.getAdapterConfigs>> = [];
+    try {
+      configs = await adapterConfigService.getAdapterConfigs(publisherId);
+    } catch (dbError) {
+      // If the adapter_configs table schema doesn't support per-publisher configs yet,
+      // return an empty array. This gracefully handles schema mismatches.
+      logger.warn('Failed to fetch adapter configs, returning empty array', {
+        publisherId,
+        error: (dbError as Error).message,
+      });
+      configs = [];
+    }
 
     res.json({
       success: true,

@@ -18,6 +18,7 @@ import {
   Globe,
   Tv,
   Gamepad2,
+  Package,
 } from 'lucide-react'
 import { appsApi, appKeysApi, meApi } from '@/lib/api'
 import type { App, AppApiKey, AppApiKeyWithSecret } from '@/types'
@@ -28,8 +29,19 @@ const PLATFORM_ICONS: Record<string, React.FC<{ className?: string }>> = {
   web: Globe,
   tvos: Tv,
   'android-tv': Tv,
+  ctv: Tv,
   unity: Gamepad2,
 }
+
+const PLATFORMS = [
+  { value: 'android', label: 'Android' },
+  { value: 'ios', label: 'iOS' },
+  { value: 'web', label: 'Web' },
+  { value: 'unity', label: 'Unity' },
+  { value: 'ctv', label: 'Connected TV' },
+  { value: 'tvos', label: 'tvOS' },
+  { value: 'android-tv', label: 'Android TV' },
+]
 
 export default function AppKeysPage() {
   const { data: session } = useSession()
@@ -45,6 +57,12 @@ export default function AppKeysPage() {
   const [showSecret, setShowSecret] = useState(false)
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  
+  // Create app modal state
+  const [showCreateApp, setShowCreateApp] = useState(false)
+  const [newAppName, setNewAppName] = useState('')
+  const [newAppBundleId, setNewAppBundleId] = useState('')
+  const [newAppPlatform, setNewAppPlatform] = useState('android')
 
   const { data: apps, isLoading: appsLoading } = useQuery({
     queryKey: ['apps'],
@@ -56,6 +74,21 @@ export default function AppKeysPage() {
     queryKey: ['app-keys', selectedApp],
     queryFn: () => (selectedApp ? appKeysApi.list(selectedApp) : Promise.resolve([])),
     enabled: !!selectedApp,
+  })
+
+  const createAppMutation = useMutation({
+    mutationFn: () => appsApi.create({ name: newAppName, bundleId: newAppBundleId, platform: newAppPlatform }),
+    onSuccess: (app) => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      setSelectedApp(app.id)
+      setShowCreateApp(false)
+      setNewAppName('')
+      setNewAppBundleId('')
+      setNewAppPlatform('android')
+    },
+    onError: (err: Error) => {
+      setError(err.message || 'Failed to create app')
+    },
   })
 
   const createKeyMutation = useMutation({
@@ -161,7 +194,7 @@ export default function AppKeysPage() {
           <p className="text-sm text-gray-600 mb-4">Use these IDs in your SDK initialization and when contacting support.</p>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Publisher ID</label>
+              <span className="block text-xs font-medium text-gray-500 mb-1">Publisher ID</span>
               <div className="flex items-center gap-2">
                 <code className="font-mono text-sm bg-gray-50 border border-gray-200 rounded px-2 py-1 inline-block">
                   {me?.publisher?.id ?? '—'}
@@ -169,7 +202,7 @@ export default function AppKeysPage() {
               </div>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Account Email</label>
+              <span className="block text-xs font-medium text-gray-500 mb-1">Account Email</span>
               <div className="flex items-center gap-2">
                 <code className="font-mono text-sm bg-gray-50 border border-gray-200 rounded px-2 py-1 inline-block">
                   {me?.user?.email ?? '—'}
@@ -180,9 +213,18 @@ export default function AppKeysPage() {
         </div>
         {/* App Selector */}
         <div className="card mb-6">
-          <label htmlFor="app-select" className="block text-sm font-medium text-gray-700 mb-2">
-            Select App
-          </label>
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="app-select" className="block text-sm font-medium text-gray-700">
+              Select App
+            </label>
+            <button
+              onClick={() => setShowCreateApp(true)}
+              className="btn btn-sm btn-secondary flex items-center gap-1"
+            >
+              <Plus className="h-4 w-4" />
+              New App
+            </button>
+          </div>
           {appsLoading ? (
             <div className="h-10 bg-gray-100 rounded animate-pulse" />
           ) : apps && apps.length > 0 ? (
@@ -205,9 +247,87 @@ export default function AppKeysPage() {
               })}
             </select>
           ) : (
-            <p className="text-gray-500">No apps found. Create an app first.</p>
+            <div className="text-center py-8 border-2 border-dashed border-gray-200 rounded-lg">
+              <Package className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+              <h3 className="text-sm font-medium text-gray-900 mb-1">No apps yet</h3>
+              <p className="text-sm text-gray-500 mb-4">Create your first app to get SDK API keys.</p>
+              <button
+                onClick={() => setShowCreateApp(true)}
+                className="btn btn-primary"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create Your First App
+              </button>
+            </div>
           )}
         </div>
+
+        {/* Create App Modal */}
+        {showCreateApp && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4 p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Create New App</h2>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="new-app-name" className="block text-sm font-medium text-gray-700 mb-1">App Name</label>
+                  <input
+                    id="new-app-name"
+                    type="text"
+                    value={newAppName}
+                    onChange={(e) => setNewAppName(e.target.value)}
+                    placeholder="My Awesome App"
+                    className="input w-full"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="new-app-bundle-id" className="block text-sm font-medium text-gray-700 mb-1">Bundle ID / Package Name</label>
+                  <input
+                    id="new-app-bundle-id"
+                    type="text"
+                    value={newAppBundleId}
+                    onChange={(e) => setNewAppBundleId(e.target.value)}
+                    placeholder="com.example.myapp"
+                    className="input w-full"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">e.g., com.company.app for mobile, example.com for web</p>
+                </div>
+                <div>
+                  <label htmlFor="new-app-platform" className="block text-sm font-medium text-gray-700 mb-1">Platform</label>
+                  <select
+                    id="new-app-platform"
+                    value={newAppPlatform}
+                    onChange={(e) => setNewAppPlatform(e.target.value)}
+                    className="input w-full"
+                  >
+                    {PLATFORMS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button
+                  onClick={() => {
+                    setShowCreateApp(false)
+                    setNewAppName('')
+                    setNewAppBundleId('')
+                    setNewAppPlatform('android')
+                  }}
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => createAppMutation.mutate()}
+                  disabled={!newAppName.trim() || !newAppBundleId.trim() || createAppMutation.isPending}
+                  className="btn btn-primary"
+                >
+                  {createAppMutation.isPending ? 'Creating...' : 'Create App'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (

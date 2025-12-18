@@ -40,13 +40,9 @@ export default function DocsLandingPage() {
         <section className="py-16">
           <div className="container mx-auto px-4">
             <div className="max-w-5xl mx-auto">
-              <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
-                <span className="font-mono">DOCS</span>
-                <span className="text-gray-400">/</span>
-                <span>Getting started</span>
-              </div>
+              {/* Breadcrumb chip removed per guidelines to avoid internal-looking label */}
 
-              <h1 className="mt-6 text-4xl md:text-5xl font-bold text-gray-900">Documentation</h1>
+              <h1 className="mt-0 text-4xl md:text-5xl font-bold text-gray-900">Documentation</h1>
               <p className="mt-4 text-lg text-gray-600 max-w-xl">
                 Practical guides for verification, SSAI, and compatibility.
               </p>

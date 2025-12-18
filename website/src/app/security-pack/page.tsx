@@ -17,6 +17,8 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { Badge } from '@/components/ui/Badge';
+import { SLO } from '@/lib/slo';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -217,10 +219,12 @@ export default function SecurityPackPage() {
                     <div className="flex-1">
                       <div className="flex items-center gap-3 mb-2">
                         <h3 className="text-lg font-semibold text-gray-900">{item.threat}</h3>
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/10 text-success text-xs font-medium">
-                          <CheckCircle className="w-3 h-3" />
-                          {item.status}
-                        </span>
+                        <Badge variant="success">
+                          <span className="inline-flex items-center gap-1">
+                            <CheckCircle className="w-3 h-3" />
+                            <span className="uppercase tracking-wide">{item.status}</span>
+                          </span>
+                        </Badge>
                       </div>
                       <p className="text-gray-600 text-sm">{item.control}</p>
                     </div>
@@ -338,6 +342,26 @@ export default function SecurityPackPage() {
                   <h3 className="font-semibold text-gray-900 mb-1">SOC 2</h3>
                   <p className="text-sm text-gray-600">Type II-aligned controls</p>
                 </motion.div>
+              </div>
+
+              {/* SLO Snapshot (single source of truth) */}
+              <div className="mt-12 max-w-3xl mx-auto rounded-xl border border-gray-200 bg-white p-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Operational targets</h3>
+                <div className="grid sm:grid-cols-3 gap-4 text-sm">
+                  <div className="rounded-lg bg-gray-50 p-4 border border-gray-100">
+                    <div className="text-gray-500">Availability</div>
+                    <div className="text-gray-900 font-semibold">{SLO.availability.target}</div>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-4 border border-gray-100">
+                    <div className="text-gray-500">Decision latency (p95)</div>
+                    <div className="text-gray-900 font-semibold">{SLO.latency.p95}</div>
+                  </div>
+                  <div className="rounded-lg bg-gray-50 p-4 border border-gray-100">
+                    <div className="text-gray-500">Failover target</div>
+                    <div className="text-gray-900 font-semibold">{SLO.failover.target}</div>
+                  </div>
+                </div>
+                <p className="mt-3 text-xs text-gray-500">See full details at <a href="/slo" className="underline">/slo</a>.</p>
               </div>
             </div>
           </div>

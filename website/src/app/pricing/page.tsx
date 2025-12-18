@@ -43,7 +43,7 @@ const pricingTiers = [
   {
     name: 'Growth',
     price: '2.5%',
-    badge: 'Most popular',
+    badge: 'Recommended',
     icon: Gauge,
     description: 'For teams ready to scale their ad revenue.',
     features: [
@@ -205,6 +205,56 @@ export default function PricingPage() {
                 </motion.div>
               ))}
             </div>
+          </div>
+        </section>
+
+        {/* Pricing Comparison (Accessible Table) */}
+        <section className="py-12">
+          <div className="container mx-auto px-4 max-w-7xl">
+            <motion.div {...getRevealProps(0)} className="mb-6">
+              <h2 className="text-2xl md:text-3xl font-bold text-gray-900">Compare plans</h2>
+              <p className="text-gray-600">Scan differences quickly. Header is sticky on desktop. On mobile, use the cards above.</p>
+            </motion.div>
+
+            <div className="hidden md:block overflow-x-auto rounded-xl border border-gray-200">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 sticky top-0 z-10">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-semibold text-gray-900 w-1/3">Feature</th>
+                    {pricingTiers.slice(0, 3).map((tier) => (
+                      <th key={tier.name} className="text-left px-4 py-3 font-semibold text-gray-900">
+                        <div className="flex items-center gap-2">
+                          <span>{tier.name}</span>
+                          {tier.badge === 'Recommended' && (
+                            <span className="inline-flex items-center rounded-full bg-brand-600/10 text-brand-700 border border-brand-600/20 px-2 py-0.5 text-xs font-semibold">Recommended</span>
+                          )}
+                        </div>
+                        <div className="text-brand-700 font-bold">{tier.price}{'annualPrice' in tier && tier.annualPrice ? <span className="ml-2 text-xs font-normal text-gray-600">({tier.annualPrice})</span> : null}</div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {[
+                    { feature: 'Mediated revenue limit', vals: ['Up to $10k/mo', 'Unlimited', 'Unlimited'] },
+                    { feature: 'SDKs & Console', vals: ['Included', 'Included', 'Included'] },
+                    { feature: 'A/B testing', vals: ['—', 'Included', 'Included'] },
+                    { feature: 'Log retention', vals: ['30 days', '90 days', '1 year'] },
+                    { feature: 'Data warehouse exports', vals: ['—', '—', 'Included'] },
+                    { feature: 'Support', vals: ['Email', 'Priority email', 'Dedicated integration'] },
+                  ].map((row) => (
+                    <tr key={row.feature} className="align-top">
+                      <td className="px-4 py-3 text-gray-700 font-medium">{row.feature}</td>
+                      {row.vals.map((v, i) => (
+                        <td key={i} className="px-4 py-3 text-gray-800">{v}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="mt-4 text-xs text-gray-500">Enterprise plan offers custom SLAs, data residency, and bespoke retention. Contact us for details.</p>
           </div>
         </section>
 

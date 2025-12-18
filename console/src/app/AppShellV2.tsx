@@ -61,7 +61,7 @@ export function AppShellV2({ children }: { children: ReactNode }) {
   const navLinks = useMemo(() => {
     const items: { href: string; label: string; feature?: keyof typeof resolved }[] = [
       { href: '/dashboard', label: 'Dashboard' },
-      { href: '/billing/usage', label: 'Billing', feature: 'billing' as any },
+      { href: '/settings/billing/usage', label: 'Billing', feature: 'billing' as any },
       { href: '/transparency/auctions', label: 'Transparency', feature: 'transparency' as any },
       { href: '/settings', label: 'Settings' },
       // Admin link removed - operator cockpit is not for customers

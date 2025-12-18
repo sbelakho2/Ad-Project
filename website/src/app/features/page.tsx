@@ -29,6 +29,7 @@ import { VisualCard } from '@/components/VisualCard';
 import { MetricCard } from '@/components/MetricCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { Badge } from '@/components/ui/Badge';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -443,11 +444,11 @@ export default function FeaturesPage() {
               </div>
 
               <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-success/10 rounded-2xl p-8 border border-brand-200">
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                  <MetricCard value="3" label="Lines to integrate" />
-                  <MetricCard value="0" label="XML config files" />
-                  <MetricCard value="1" label="Integration point" />
-                  <MetricCard value="8+" label="Ad networks" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6">
+                  <MetricCard value="3" label="Lines to integrate" layout="inline" />
+                  <MetricCard value="0" label="XML config files" layout="inline" />
+                  <MetricCard value="1" label="Integration point" layout="inline" />
+                  <MetricCard value="8+" label="Ad networks" layout="inline" />
                 </div>
               </motion.div>
 
@@ -583,7 +584,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <Shield className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
+                    <Badge variant="success">Live</Badge>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     Verifiable Revenue Auditor
@@ -628,7 +629,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <ArrowRightLeft className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
+                    <Badge variant="success">Live</Badge>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     Migration Studio
@@ -713,7 +714,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <Brain className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
+                    <Badge variant="success">Live</Badge>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     ML Waterfall Optimizer

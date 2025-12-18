@@ -12,6 +12,7 @@ import {
   Key,
   Hash,
   Shield,
+  Receipt,
 } from 'lucide-react'
 import { authOptions } from '@/lib/auth/options'
 import { hasRole, type Role } from '@/lib/rbac'
@@ -36,10 +37,16 @@ const sections = [
     icon: ShieldAlert,
   },
   {
-    title: 'Payouts & Banking',
-    description: 'Manage payment methods, currencies, and payout triggers.',
-    href: '/settings/payouts',
+    title: 'Billing & Payments',
+    description: 'Manage your Stripe payment method and billing preferences.',
+    href: '/settings/billing',
     icon: CreditCard,
+  },
+  {
+    title: 'Usage & Invoices',
+    description: 'View platform usage, invoices, and billing history.',
+    href: '/settings/billing/usage',
+    icon: Receipt,
   },
   {
     title: 'Network Credentials',
@@ -100,7 +107,7 @@ export default async function SettingsPage() {
           <p className="text-sm font-medium text-primary-600">Control Center</p>
           <h1 className="text-3xl font-semibold text-gray-900 tracking-tight">Settings</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-3xl">
-            Configure fraud defenses, payout preferences, notifications, and compliance policies to tailor the platform to your organization.
+            Configure fraud defenses, billing preferences, notifications, and compliance policies to tailor the platform to your organization.
           </p>
         </div>
       </header>

@@ -4,13 +4,14 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 
 > **Infrastructure Overview:**  
 > - **App Server:** 46.62.252.96 (apexmediation.ee)  
-> - **DB Server:** 77.42.44.35  
+> - **DB Server:** 77.42.44.35 (PostgreSQL only - **not directly accessible**, reach via App Server)  
 > - **Test Server:** 157.90.126.205 (continuous synthetic testing; managed and accessed same as app server)  
-> - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
-> - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
+> - **Customer Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
+> - **Operator Domain:** admin.apexmediation.ee (Control Plane - separate from Console)  
+> - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<App Server IP>` (DB Server only reachable from App Server)
 > - **Project Path:** `/opt/adproject` (NOT `/opt/apex` or `/var/www`)
 > - **Deployment:** Tarball upload or rsync (no git on server)
-> - **Compose File:** `docker-compose.hetzner.yml` (not `docker-compose.yml`)
+> - **Compose File:** `infrastructure/docker/docker-compose.hetzner.yml`
 
 > **⚠️ CRITICAL: Production Paths**
 >
@@ -60,10 +61,14 @@ The following user is configured with `admin` role for production verification:
 
 
 > **⚠️ Important Notes:**
-> - Redis and PostgreSQL run as **system services**, NOT Docker containers
-> - Use `docker-compose.hetzner.yml` to avoid port conflicts
+> - **PostgreSQL runs on DB Server (77.42.44.35)** as a system service - NOT on App Server, NOT in Docker
+> - **Redis runs on App Server** as a system service - NOT in Docker
+> - Backend queries PostgreSQL remotely via `DATABASE_URL` pointing to DB Server
+> - Use `infrastructure/docker/docker-compose.hetzner.yml` to avoid port conflicts
 > - Website runs on port **3002** (Grafana uses 3001)
-> - Control Plane runs as **systemd service**, not Docker
+> - Control Plane runs as **systemd service** on port **4000**
+> - **admin.apexmediation.ee → Control Plane (port 4000)** - completely separate from Console
+> - **console.apexmediation.ee → Console (port 3000)** - customer-facing dashboard
 
 > **Operator Access:** The Control Plane at `https://admin.apexmediation.ee` provides operator telemetry and actions.
 > Access requires IP allowlisting and separate operator authentication.
@@ -79,27 +84,33 @@ The following user is configured with `admin` role for production verification:
 ┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
 │         App Server                  │     │         DB Server                   │
 │         46.62.252.96                │     │         77.42.44.35                 │
-│                                     │     │                                     │
-│  ┌─────────────────────────────┐   │     │  ┌─────────────────────────────┐   │
-│  │  Caddy (HTTPS termination)  │   │     │  │  PostgreSQL 16              │   │
-│  │  - apexmediation.ee         │   │     │  │  - Database: adproject      │   │
-│  │  - console.apexmediation.ee │   │     │  │  - 139+ tables              │   │
-│  │  - api.apexmediation.ee     │   │     │  │  - System service           │   │
-│  └─────────────────────────────┘   │     │  └─────────────────────────────┘   │
-│              │                      │     │                                     │
-│  ┌───────────┴───────────┐         │     └─────────────────────────────────────┘
-│  │                       │         │                    ▲
-│  ▼                       ▼         │                    │
-│  ┌─────────┐     ┌─────────────┐   │                    │
-│  │ Console │     │   Backend   │───┼────────────────────┘
+│                                     │     │         (NOT directly accessible)   │
+│  ┌─────────────────────────────┐   │     │                                     │
+│  │  Caddy (HTTPS termination)  │   │     │  ┌─────────────────────────────┐   │
+│  │  - apexmediation.ee    :3002│   │     │  │  PostgreSQL 16              │   │
+│  │  - console.*           :3000│   │     │  │  - Database: adproject      │   │
+│  │  - api.*               :8080│   │     │  │  - 148+ tables              │   │
+│  │  - admin.*             :4000│   │     │  │  - System service           │   │
+│  └─────────────────────────────┘   │     │  │  - Data storage ONLY        │   │
+│              │                      │     │  └─────────────────────────────┘   │
+│  ┌───────────┴───────────┐         │     │                ▲                    │
+│  │                       │         │     └────────────────┼────────────────────┘
+│  ▼                       ▼         │                      │
+│  ┌─────────┐     ┌─────────────┐   │                      │ TCP 5432
+│  │ Console │     │   Backend   │───┼──────────────────────┘ (queries only)
 │  │ :3000   │     │   :8080     │   │
 │  └─────────┘     └─────────────┘   │
 │                        │           │
-│                        ▼           │
-│                  ┌─────────┐       │
-│                  │  Redis  │       │
-│                  │  :6379  │       │
-│                  └─────────┘       │
+│  ┌─────────┐     ┌─────────┐       │
+│  │ Website │     │  Redis  │       │
+│  │ :3002   │     │  :6379  │       │
+│  │  (PM2)  │     │(systemd)│       │
+│  └─────────┘     └─────────┘       │
+│                                    │
+│  ┌─────────────────────────────┐  │
+│  │  Control Plane :4000        │  │
+│  │  (systemd - operator only)  │  │
+│  └─────────────────────────────┘  │
 │                                    │
 │  ┌─────────────────────────────┐  │
 │  │  Monitoring                 │  │
@@ -109,12 +120,46 @@ The following user is configured with `admin` role for production verification:
 └────────────────────────────────────┘
 ```
 
-### 1.2 Network & Security
+### 1.2 Database Architecture (CRITICAL)
+
+> **⚠️ PostgreSQL runs ONLY on the DB Server (77.42.44.35)**
+>
+> - The App Server does NOT run PostgreSQL
+> - Backend connects to DB Server via `DATABASE_URL=postgresql://...@77.42.44.35:5432/adproject`
+> - All data is stored on DB Server, not App Server
+> - DB Server is NOT directly accessible via SSH from the internet (by design)
+> - To access DB Server, first SSH to App Server, then SSH to DB Server
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     DATA FLOW (READ-ONLY from App Server perspective)   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  App Server (46.62.252.96)              DB Server (77.42.44.35)        │
+│  ┌─────────────────────────┐           ┌─────────────────────────┐     │
+│  │ Backend Container       │           │ PostgreSQL 16           │     │
+│  │                         │  SELECT   │                         │     │
+│  │  - Queries data    ────────────────►│  - Stores ALL data      │     │
+│  │  - CRUD operations ────────────────►│  - Runs migrations      │     │
+│  │  - NO local DB     ◄────────────────│  - Backups              │     │
+│  │                         │  RESULTS  │                         │     │
+│  └─────────────────────────┘           └─────────────────────────┘     │
+│                                                                         │
+│  ❌ App Server does NOT have:          ✅ DB Server has:               │
+│     - PostgreSQL container                - PostgreSQL 16 (systemd)    │
+│     - Local database files                - /var/lib/postgresql/       │
+│     - pg_dump/psql locally                - Backup scripts             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.3 Network & Security
 
 - **SSH Access:** Key-based only (`~/.ssh/hetzner-db-mac`)
-- **Firewall:** UFW enabled, allow 22, 80, 443
-- **Database:** PostgreSQL only accessible from App Server IP
-- **Redis:** Password authentication, localhost only
+- **DB Server SSH:** Only accessible FROM App Server (jump host pattern)
+- **Firewall:** UFW enabled on App Server, allow 22, 80, 443
+- **Database:** PostgreSQL on DB Server accepts connections only from App Server IP
+- **Redis:** Runs on App Server as system service, password-protected
 
 ---
 
@@ -244,26 +289,57 @@ redis-cli -a <password> INFO memory
 
 Caddy handles automatic TLS certificate provisioning and renewal via Let's Encrypt.
 
-Domains served:
-- `apexmediation.ee` / `www.apexmediation.ee` → Website (Next.js standalone via PM2 on port 3002)
-- `console.apexmediation.ee` → Console (port 3000)
-- `api.apexmediation.ee` → Backend API (port 8080)
+#### Domain Routing (CRITICAL)
 
-Operator access:
-- `admin.apexmediation.ee` → Control Plane (port 4000)
+| Domain | Service | Port | Purpose |
+|--------|---------|------|--------|
+| `apexmediation.ee` | Website | 3002 | Marketing site (PM2) |
+| `www.apexmediation.ee` | Website | 3002 | Marketing site (PM2) |
+| `console.apexmediation.ee` | Console | 3000 | Customer dashboard |
+| `api.apexmediation.ee` | Backend | 8080 | API server |
+| `admin.apexmediation.ee` | Control Plane | 4000 | **Operator-only** (systemd) |
 
-#### 5.1.1 Website reverse proxy (Caddy)
+> **⚠️ CRITICAL: admin.apexmediation.ee and console.apexmediation.ee are SEPARATE services.**
+> - `admin.*` → Control Plane (port 4000) - internal operator tools
+> - `console.*` → Console (port 3000) - customer-facing dashboard
+> - These must NEVER be combined in Caddy config!
 
-Update `infrastructure/caddy/Caddyfile`:
+#### 5.1.1 Production Caddyfile (`/etc/caddy/Caddyfile`)
 
 ```
+# Marketing Website
 apexmediation.ee, www.apexmediation.ee {
-  # Next.js standalone served by PM2 on the app server
-  reverse_proxy 127.0.0.1:3002
+  reverse_proxy localhost:3002
+}
+
+# Customer Console (customer-facing dashboard)
+console.apexmediation.ee {
+  reverse_proxy localhost:3000
+}
+
+# Control Plane (operator-only - SEPARATE from Console)
+admin.apexmediation.ee {
+  reverse_proxy localhost:4000
+}
+
+# Backend API
+api.apexmediation.ee {
+  reverse_proxy localhost:8080
 }
 ```
 
-Reload Caddy and verify a specific CSS asset under `/_next/static/css/` returns HTTP 200.
+#### 5.1.2 Verify Caddy Configuration
+
+```bash
+# Reload Caddy config
+caddy reload --config /etc/caddy/Caddyfile
+
+# Verify routes
+curl -I https://apexmediation.ee          # → 200 (Website)
+curl -I https://console.apexmediation.ee  # → 200 (Console login)
+curl -I https://admin.apexmediation.ee    # → 200 (Control Plane login)
+curl -I https://api.apexmediation.ee/health # → 200 (Backend)
+```
 
 ### 5.2 Certificate Status
 

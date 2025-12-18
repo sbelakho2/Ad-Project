@@ -55,7 +55,7 @@ export default async function Home() {
           <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Live Data</p>
             <p className="mt-2 text-sm text-gray-600">
-              Billing, payouts, and transparency views connect directly to production APIs—no demo data here.
+              Billing and transparency views connect directly to production APIs—no demo data here.
             </p>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">

@@ -7,8 +7,9 @@ import { ApiKey } from '../database/entities/apiKey.entity';
 import { User } from '../database/entities/user.entity';
 import { sha256Hex } from '../utils/crypto';
 
-const apiKeyRepository = AppDataSource.getRepository(ApiKey);
-const userRepository = AppDataSource.getRepository(User);
+// Lazy-load repositories to avoid calling getRepository before AppDataSource is initialized
+const getApiKeyRepository = () => AppDataSource.getRepository(ApiKey);
+const getUserRepository = () => AppDataSource.getRepository(User);
 
 const redact = (k: ApiKey) => ({
   id: k.id,
@@ -25,7 +26,7 @@ export async function listKeys(req: Request, res: Response, _next: NextFunction)
   const userId = req.user?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-  const keys = await apiKeyRepository.find({ where: { user: { id: userId } } });
+  const keys = await getApiKeyRepository().find({ where: { user: { id: userId } } });
   return res.json({ data: { keys: keys.map(redact) } });
 }
 
@@ -33,7 +34,7 @@ export async function createKey(req: Request, res: Response, _next: NextFunction
   const userId = req.user?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-  const user = await userRepository.findOneBy({ id: userId });
+  const user = await getUserRepository().findOneBy({ id: userId });
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   const live = Boolean(req.body?.live);
@@ -42,7 +43,8 @@ export async function createKey(req: Request, res: Response, _next: NextFunction
   const secretHash = await bcrypt.hash(secret, 10);
   const secretDigest = sha256Hex(secret);
 
-  const newKey = apiKeyRepository.create({
+  const apiKeyRepo = getApiKeyRepository();
+  const newKey = apiKeyRepo.create({
     user,
     secret: secretHash,
     secretDigest,
@@ -50,7 +52,7 @@ export async function createKey(req: Request, res: Response, _next: NextFunction
     last4: secret.slice(-4),
   });
 
-  await apiKeyRepository.save(newKey);
+  await apiKeyRepo.save(newKey);
 
   logger.info('API key created', { userId, prefix, last4: newKey.last4, id: newKey.id });
   return res.status(201).json({ data: { id: newKey.id, secret, prefix: newKey.prefix, last4: newKey.last4 } });
@@ -60,12 +62,13 @@ export async function rotateKey(req: Request, res: Response, _next: NextFunction
   const userId = req.user?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
+  const apiKeyRepo = getApiKeyRepository();
   const { id } = req.params;
-  const key = await apiKeyRepository.findOne({ where: { id, user: { id: userId } } });
+  const key = await apiKeyRepo.findOne({ where: { id, user: { id: userId } } });
   if (!key) return res.status(404).json({ error: 'Not found' });
 
   key.revokedAt = new Date();
-  await apiKeyRepository.save(key);
+  await apiKeyRepo.save(key);
 
   const live = key.prefix === 'sk_live';
   const prefix = live ? 'sk_live' : 'sk_test';
@@ -73,7 +76,7 @@ export async function rotateKey(req: Request, res: Response, _next: NextFunction
   const secretHash = await bcrypt.hash(secret, 10);
   const secretDigest = sha256Hex(secret);
 
-  const newKey = apiKeyRepository.create({
+  const newKey = apiKeyRepo.create({
     user: key.user,
     secret: secretHash,
     secretDigest,
@@ -81,7 +84,7 @@ export async function rotateKey(req: Request, res: Response, _next: NextFunction
     last4: secret.slice(-4),
   });
 
-  await apiKeyRepository.save(newKey);
+  await apiKeyRepo.save(newKey);
   
   logger.info('API key rotated', { userId, idOld: key.id, idNew: newKey.id, prefix: newKey.prefix, last4: newKey.last4 });
   return res.json({ data: { id: newKey.id, secret, prefix: newKey.prefix, last4: newKey.last4 } });
@@ -91,12 +94,13 @@ export async function deleteKey(req: Request, res: Response, _next: NextFunction
   const userId = req.user?.userId;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
   
+  const apiKeyRepo = getApiKeyRepository();
   const { id } = req.params;
-  const key = await apiKeyRepository.findOne({ where: { id, user: { id: userId } } });
+  const key = await apiKeyRepo.findOne({ where: { id, user: { id: userId } } });
   if (!key) return res.status(404).json({ error: 'Not found' });
 
   key.revokedAt = new Date();
-  await apiKeyRepository.save(key);
+  await apiKeyRepo.save(key);
 
   logger.info('API key deleted', { userId, id });
   return res.status(204).send();

@@ -161,7 +161,7 @@ video/1080p/playlist.m3u8`}
 #EXT-X-TARGETDURATION:6
 #EXT-X-MEDIA-SEQUENCE:2847
 #EXT-X-DISCONTINUITY-SEQUENCE:12
-#EXT-X-PROGRAM-DATE-TIME:2025-01-15T10:30:24.000Z
+#EXT-X-PROGRAM-DATE-TIME:YYYY-MM-DDTHH:MM:SSZ
 
 #EXTINF:6.000,
 https://cdn.example.com/content/seg2847.ts
@@ -170,7 +170,7 @@ https://cdn.example.com/content/seg2848.ts
 #EXTINF:6.000,
 https://cdn.example.com/content/seg2849.ts
 
-#EXT-X-DATERANGE:ID="ad-pod-1",CLASS="com.apple.hls.interstitial",START-DATE="2025-01-15T10:30:42.000Z",DURATION=30
+#EXT-X-DATERANGE:ID="ad-pod-1",CLASS="com.apple.hls.interstitial",START-DATE="YYYY-MM-DDTHH:MM:SSZ",DURATION=30
 #EXT-X-DISCONTINUITY
 
 #EXTINF:6.000,
@@ -232,7 +232,7 @@ https://cdn.example.com/content/seg2851.ts`}
                     <tr>
                       <td className="py-2 pr-4 text-gray-700"><code>START-DATE</code></td>
                       <td className="py-2 pr-4 text-gray-600">ISO 8601 start time</td>
-                      <td className="py-2 text-gray-600"><code>&quot;2025-01-15T10:30:42.000Z&quot;</code></td>
+                      <td className="py-2 text-gray-600"><code>&quot;YYYY-MM-DDTHH:MM:SSZ&quot;</code></td>
                     </tr>
                     <tr>
                       <td className="py-2 pr-4 text-gray-700"><code>DURATION</code></td>

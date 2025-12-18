@@ -74,7 +74,7 @@ export default function InvoiceDetailPage() {
   useEffect(() => {
     if (sessionLoading || featureLoading) return
     if (!invoiceId) {
-      router.replace('/billing/invoices')
+      router.replace('/settings/billing/invoices')
     }
   }, [invoiceId, sessionLoading, featureLoading, router])
 
@@ -207,7 +207,7 @@ export default function InvoiceDetailPage() {
               We couldn’t determine which invoice to display. Please return to the invoices list and choose an invoice again.
             </p>
             <Link
-              href="/billing/invoices"
+              href="/settings/billing/invoices"
               className="inline-flex items-center gap-2 text-sm text-primary-600 hover:text-primary-700 mt-4"
             >
               <ArrowLeft className="h-4 w-4" />
@@ -237,7 +237,7 @@ export default function InvoiceDetailPage() {
       <div className="p-8">
         <div className="max-w-4xl mx-auto">
           <Link
-            href="/billing/invoices"
+            href="/settings/billing/invoices"
             className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 mb-6"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -268,7 +268,7 @@ export default function InvoiceDetailPage() {
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Back Button */}
         <Link
-          href="/billing/invoices"
+          href="/settings/billing/invoices"
           className="inline-flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
         >
           <ArrowLeft className="h-4 w-4" />

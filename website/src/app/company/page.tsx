@@ -18,7 +18,7 @@ import { PrinciplesToProductCard } from '@/components/VisualCard';
 import { CompanyIdentity } from '@/components/CompanyIdentity';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
-import { sloConfig } from '@/config/legal';
+import { SLO } from '@/lib/slo';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -46,7 +46,7 @@ const values = [
   },
   {
     title: 'Reliability',
-    description: `${sloConfig.availability.target} uptime with decision latency p99 ${sloConfig.latency.p99}. We treat downtime as seriously as you do.`,
+    description: `${SLO.availability.target} uptime with decision latency p95 ${SLO.latency.p95}. We treat downtime as seriously as you do.`,
     icon: Scale,
   },
 ];

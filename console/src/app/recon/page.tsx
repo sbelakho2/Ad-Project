@@ -129,7 +129,7 @@ export default function ReconDashboardPage() {
             Starter is limited to core dashboards. VRA reconciliation is available on Growth and above. Current plan: {plan || 'unknown'}.
           </p>
           <div className="mt-3 flex gap-2 flex-wrap">
-            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">
+            <a href="/settings/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">
               Open Billing
             </a>
           </div>

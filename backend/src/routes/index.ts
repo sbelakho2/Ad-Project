@@ -24,12 +24,15 @@ import privacyRoutes from './privacy.routes';
 import migrationRoutes from './migration.routes';
 import keysRoutes from './keys.routes';
 import appsRoutes from './apps.routes';
+import publishersRoutes from './publishers.routes';
 import integrationsRoutes from './integrations.routes';
 import flagsRoutes from './flags.routes';
 import dashboardRoutes from './dashboard.routes';
 import byoRoutes from './byo.routes';
 import toolsRoutes from './tools.routes';
 import configRoutes from './config.routes';
+import teamRoutes from './team.routes';
+import settingsRoutes from './settings.routes';
 import { killSwitchGuard } from '../middleware/featureFlags';
 import vraRoutes from './vra.routes';
 import vraConnectionsRoutes from './vraConnections.routes';
@@ -46,6 +49,7 @@ router.use('/flags', flagsRoutes);
 router.use('/auth', authRoutes);
 router.use('/keys', keysRoutes);
 router.use('/apps', appsRoutes);
+router.use('/publishers', publishersRoutes);
 router.use('/integrations', integrationsRoutes);
 router.use('/meta', metaRoutes);
 router.use('/webhooks', webhooksRoutes);
@@ -66,6 +70,8 @@ router.use('/queues', queuesRoutes);
 router.use('/transparency', transparencyRoutes);
 router.use('/billing', billingRoutes);
 router.use('/config', configRoutes);
+router.use('/team', teamRoutes); // Team member management
+router.use('/settings', settingsRoutes); // Publisher settings (fraud, notifications, compliance)
 // Migration before admin (ordering requirement per FIX-11/694)
 router.use('/migration', migrationRoutes);
 router.use('/admin', adminRoutes);

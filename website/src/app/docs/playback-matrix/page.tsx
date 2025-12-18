@@ -15,6 +15,7 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
+import { StepCard } from '@/components/StepCard';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -46,8 +47,8 @@ const playbackMatrix = {
     platforms: [
       { name: 'Roku', version: '≥ 9.4', status: 'certified', notes: 'Native RSG + SceneGraph' },
       { name: 'Fire TV', version: '≥ 5.2.8', status: 'certified', notes: 'ExoPlayer wrapper' },
-      { name: 'Apple TV', version: '≥ 15.0', status: 'certified', notes: 'AVPlayer + IMA SDK' },
-      { name: 'Android TV', version: '≥ API 21', status: 'certified', notes: 'ExoPlayer + IMA' },
+      { name: 'Apple TV', version: '≥ 15.0', status: 'certified', notes: 'AVPlayer (IMA only for companion UI/tracking where applicable)' },
+      { name: 'Android TV', version: '≥ API 21', status: 'certified', notes: 'ExoPlayer (IMA only for companion UI/tracking where applicable)' },
       { name: 'Samsung Tizen', version: '≥ 4.0', status: 'certified', notes: 'AVPlay' },
       { name: 'LG webOS', version: '≥ 4.0', status: 'certified', notes: 'HTMLMediaElement' },
       { name: 'Chromecast', version: '≥ CAF v3', status: 'certified', notes: 'Cast receiver SDK' },
@@ -73,8 +74,8 @@ const playbackMatrix = {
     label: 'Mobile Apps',
     icon: Smartphone,
     platforms: [
-      { name: 'iOS Native', version: '≥ 14.0', status: 'certified', notes: 'AVPlayer + IMA SDK' },
-      { name: 'Android Native', version: '≥ API 21', status: 'certified', notes: 'ExoPlayer + IMA' },
+      { name: 'iOS Native', version: '≥ 14.0', status: 'certified', notes: 'AVPlayer (IMA only for companion UI/tracking where applicable)' },
+      { name: 'Android Native', version: '≥ API 21', status: 'certified', notes: 'ExoPlayer (IMA only for companion UI/tracking where applicable)' },
       { name: 'React Native', version: '≥ 0.68', status: 'certified', notes: 'Native bridge' },
       { name: 'Flutter', version: '≥ 3.0', status: 'certified', notes: 'Platform channels' },
       { name: 'Cordova/Ionic', version: 'Latest', status: 'partial', notes: 'WebView only' },
@@ -363,37 +364,26 @@ export default function PlaybackMatrixPage() {
                 </p>
               </motion.div>
 
-              <div className="grid md:grid-cols-4 gap-6 mb-12">
-                <motion.div {...getRevealProps(0.1)} className="bg-white rounded-xl p-6 border border-gray-100">
-                  <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
-                    1
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-2">Integration</h3>
-                  <p className="text-sm text-gray-600">SDK integration with platform-specific player</p>
+              <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+                <motion.div {...getRevealProps(0.1)}>
+                  <StepCard step={1} title="Integration">
+                    SDK integration with platform-specific player
+                  </StepCard>
                 </motion.div>
-
-                <motion.div {...getRevealProps(0.15)} className="bg-white rounded-xl p-6 border border-gray-100">
-                  <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
-                    2
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-2">Automated Tests</h3>
-                  <p className="text-sm text-gray-600">200+ test cases covering edge cases</p>
+                <motion.div {...getRevealProps(0.15)}>
+                  <StepCard step={2} title="Automated Tests">
+                    200+ test cases covering edge cases
+                  </StepCard>
                 </motion.div>
-
-                <motion.div {...getRevealProps(0.2)} className="bg-white rounded-xl p-6 border border-gray-100">
-                  <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
-                    3
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-2">Soak Testing</h3>
-                  <p className="text-sm text-gray-600">24+ hour continuous playback testing</p>
+                <motion.div {...getRevealProps(0.2)}>
+                  <StepCard step={3} title="Soak Testing">
+                    24+ hour continuous playback testing
+                  </StepCard>
                 </motion.div>
-
-                <motion.div {...getRevealProps(0.25)} className="bg-white rounded-xl p-6 border border-gray-100">
-                  <div className="w-10 h-10 bg-brand-100 rounded-full flex items-center justify-center text-brand-600 font-bold mb-4">
-                    4
-                  </div>
-                  <h3 className="font-semibold text-gray-900 mb-2">E2E Validation</h3>
-                  <p className="text-sm text-gray-600">End-to-end testing with sample VAST and simulated partners</p>
+                <motion.div {...getRevealProps(0.25)}>
+                  <StepCard step={4} title="E2E Validation">
+                    End-to-end testing with sample VAST and simulated partners
+                  </StepCard>
                 </motion.div>
               </div>
 

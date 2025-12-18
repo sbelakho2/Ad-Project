@@ -945,8 +945,8 @@ Body: {
               <h2 className="text-h3 font-bold uppercase">Your rights & contacts</h2>
               <ul className="mt-4 list-disc space-y-3 pl-6 text-sm text-gray-700">
                 <li>Access, deletion, portability, rectification, and objection rights honoured within 30 days.</li>
-                <li>Use the documented `/v1/gdpr/access` and `/v1/gdpr/delete` endpoints or email <a href="mailto:security@apexmediation.ee" className="underline">security@apexmediation.ee</a>.</li>
-                <li>Privacy inquiries: <a href="mailto:security@apexmediation.ee" className="underline">security@apexmediation.ee</a>.</li>
+                <li>Use the documented `/v1/gdpr/access` and `/v1/gdpr/delete` endpoints or email <a href="mailto:privacy@apexmediation.ee" className="underline">privacy@apexmediation.ee</a>.</li>
+                <li>Privacy inquiries: <a href="mailto:privacy@apexmediation.ee" className="underline">privacy@apexmediation.ee</a>.</li>
                 <li>Sub-processors are limited to the ad networks you enable plus audited infrastructure vendors with SOC 2 Type II-aligned controls.</li>
               </ul>
             </section>

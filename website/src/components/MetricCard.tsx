@@ -8,9 +8,18 @@ interface MetricCardProps {
   label: string;
   caption?: string;
   className?: string;
+  layout?: 'stack' | 'inline';
 }
 
-export function MetricCard({ value, label, caption, className = '' }: MetricCardProps) {
+export function MetricCard({ value, label, caption, className = '', layout = 'stack' }: MetricCardProps) {
+  if (layout === 'inline') {
+    return (
+      <div className={`flex items-baseline gap-3 ${className}`}>
+        <div className="text-3xl md:text-4xl font-bold text-brand-600 leading-none">{value}</div>
+        <div className="text-gray-700 font-medium whitespace-pre-wrap">{label}</div>
+      </div>
+    );
+  }
   return (
     <div className={`text-center ${className}`}>
       <div className="text-4xl font-bold text-brand-600 mb-2">{value}</div>

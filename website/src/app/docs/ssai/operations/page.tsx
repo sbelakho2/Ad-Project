@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { Shield, AlertTriangle, Clock, Zap, Server, RefreshCw, CheckCircle } from 'lucide-react';
+import { SLO } from '@/lib/slo';
 import SiteHeader from '@/components/SiteHeader';
 import Footer from '@/components/Footer';
 
@@ -51,7 +52,7 @@ export default function OperationalGuaranteesPage() {
               SLA Metrics
             </h2>
             
-            <div className="overflow-x-auto mb-6">
+            <div className="overflow-x-auto mb-6 border border-gray-200 rounded-lg">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50">
@@ -62,8 +63,8 @@ export default function OperationalGuaranteesPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-200">
                   <tr>
-                    <td className="p-3 text-gray-900">Pod Decision Latency (p99)</td>
-                    <td className="p-3 text-gray-600">&lt; 200ms</td>
+                    <td className="p-3 text-gray-900">Pod Decision Latency (p95)</td>
+                    <td className="p-3 text-gray-600">{SLO.latency.p95}</td>
                     <td className="p-3 text-gray-600">From cue detection to filled pod</td>
                   </tr>
                   <tr>
@@ -73,7 +74,7 @@ export default function OperationalGuaranteesPage() {
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Session Availability</td>
-                    <td className="p-3 text-gray-600">99.9%</td>
+                    <td className="p-3 text-gray-600">{SLO.availability.target}</td>
                     <td className="p-3 text-gray-600">Active sessions recoverable after incident</td>
                   </tr>
                   <tr>
@@ -237,7 +238,7 @@ export default function OperationalGuaranteesPage() {
                     <h4 className="font-medium text-gray-900 text-sm mb-2">Thresholds (from SafeModeManager)</h4>
                     <ul className="text-sm text-gray-600 space-y-1">
                       <li>• Error rate threshold: <strong>10%</strong> of requests</li>
-                      <li>• Latency threshold: <strong>500ms</strong> p95</li>
+                      <li>• Latency threshold: <strong>{SLO.latency.p95}</strong></li>
                       <li>• Minimum samples: <strong>100</strong> before triggering</li>
                     </ul>
                   </div>

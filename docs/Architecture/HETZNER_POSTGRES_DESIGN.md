@@ -2,7 +2,7 @@
 
 **Status:** Deployed (Production)  
 **Date:** 2025-12-13  
-**Updated:** 2025-01-06 (IP corrections, monitoring stack addition)
+**Updated:** 2025-12-18 (Deployment directory structure, deployment scripts, cleanup procedures)
 **Target:** Long-term heavy load, self-managing, speed-first architecture
 
 ---
@@ -12,7 +12,8 @@
 | Document | Purpose |
 |----------|---------|
 | [Monitoring Infrastructure](../Monitoring/MONITORING_INFRASTRUCTURE.md) | Prometheus, Grafana, Alertmanager setup |
-| [Production Deployment](../Internal/Infrastructure/production-deployment.md) | Deployment procedures |
+| [Production Deployment](../Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md) | Deployment procedures |
+| [Control Plane](./CONTROL_PLANE.md) | Admin/operator service architecture |
 
 ---
 
@@ -21,44 +22,121 @@
 ### Server Topology
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        INTERNET                                  │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    APP SERVER (46.62.252.96)                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Backend   │  │   Console   │  │   Monitoring Stack      │  │
-│  │  (Node.js)  │  │  (Next.js)  │  │  Prometheus/Grafana     │  │
-│  │   :8080     │  │    :3000    │  │  :9090/:3001/:9093      │  │
-│  └──────┬──────┘  └─────────────┘  └───────────┬─────────────┘  │
-│         │                                       │                │
-│  ┌──────┴──────┐                     ┌─────────┴─────────┐      │
-│  │    Redis    │                     │  Node Exporter    │      │
-│  │   (Cache)   │                     │  cAdvisor         │      │
-│  └─────────────┘                     └───────────────────┘      │
-│         │                                       │                │
-│         └───────────────────┬───────────────────┘                │
-└─────────────────────────────┼───────────────────────────────────┘
-                              │
-                    PRIVATE NETWORK ONLY
-                    (Hetzner vSwitch/VLAN)
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    DB SERVER (77.42.44.35)                       │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    PostgreSQL 16  :5432                     ││
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌────────┐││
-│  │  │  core   │ │  config │ │   ops   │ │  events │ │  agg   │││
-│  │  │ schema  │ │ schema  │ │ schema  │ │ schema  │ │ schema │││
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └────────┘││
-│  └─────────────────────────────────────────────────────────────┘│
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │           Postgres Exporter :9187 (for Prometheus)          ││
-│  └─────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              INTERNET                                        │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       APP SERVER (46.62.252.96)                              │
+│                       Ubuntu 24.04, 2 vCPU, 8GB RAM                          │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                         CADDY (Reverse Proxy)                           ││
+│  │                         :80 → :443 (auto TLS)                           ││
+│  │  apexmediation.ee → :3002    console.apexmediation.ee → :3000           ││
+│  │  api.apexmediation.ee → :8080   admin.apexmediation.ee → :4000          ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  ┌─────────────────────── PM2 MANAGED ─────────────────────────────────────┐│
+│  │ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                       ││
+│  │ │  backend    │  │  console    │  │  website    │                       ││
+│  │ │  (Node.js)  │  │  (Next.js)  │  │  (Next.js)  │                       ││
+│  │ │   :8080     │  │   :3000     │  │   :3002     │                       ││
+│  │ │  ~170MB     │  │   ~100MB    │  │   ~100MB    │                       ││
+│  │ └─────────────┘  └─────────────┘  └─────────────┘                       ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  ┌─────────────────────── SYSTEMD SERVICES ────────────────────────────────┐│
+│  │ ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                       ││
+│  │ │   Redis     │  │  PgBouncer  │  │Control Plane│                       ││
+│  │ │   :6379     │  │   :6432     │  │   :4000     │                       ││
+│  │ │   ~2MB      │  │ pool=25     │  │ (operator)  │                       ││
+│  │ └─────────────┘  └─────────────┘  └─────────────┘                       ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  ┌─────────────────────── DOCKER CONTAINERS ───────────────────────────────┐│
+│  │ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐  ││
+│  │ │Prometheus │ │  Grafana  │ │Alertmgr   │ │NodeExport │ │ cAdvisor  │  ││
+│  │ │  :9090    │ │  :3001    │ │  :9093    │ │  :9100    │ │  :8081    │  ││
+│  │ └───────────┘ └───────────┘ └───────────┘ └───────────┘ └───────────┘  ││
+│  │ ┌───────────┐ ┌───────────┐                                            ││
+│  │ │PgExporter │ │ Postgres  │  (Docker PG for dev/backup, not primary)   ││
+│  │ │  :9187    │ │  :5432    │                                            ││
+│  │ └───────────┘ └───────────┘                                            ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   │ PostgreSQL connection via PgBouncer
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       DB SERVER (77.42.44.35)                                │
+│                       Dedicated PostgreSQL Server                            │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                    PostgreSQL 16  :5432                                 ││
+│  │                    listen_addresses = '*'                               ││
+│  │                    max_connections = 200 (7 in use)                     ││
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌────────┐            ││
+│  │  │  core   │ │  config │ │   ops   │ │  events │ │  agg   │            ││
+│  │  │ schema  │ │ schema  │ │ schema  │ │ schema  │ │ schema │            ││
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └────────┘            ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │           Postgres Exporter :9187 (scraped by Prometheus)               ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Service Inventory
+
+#### PM2 Processes (App Server)
+
+| Name | Port | Technology | Purpose | Memory |
+|------|------|------------|---------|--------|
+| `backend` | 8080 | Node.js/Express | REST API, RTB, queues | ~170MB |
+| `console` | 3000 | Next.js 14 (standalone) | Customer dashboard | ~100MB |
+| `website` | 3002 | Next.js 14 (standalone) | Marketing site | ~100MB |
+
+#### Systemd Services (App Server)
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| `redis-server` | 6379 | Caching, rate limiting, queues |
+| `pgbouncer` | 6432 | Connection pooling to PostgreSQL |
+| `caddy` | 80/443 | Reverse proxy, auto TLS |
+
+#### Docker Containers (App Server)
+
+| Container | Port | Purpose |
+|-----------|------|---------|
+| `prometheus` | 9090 | Metrics collection |
+| `grafana` | 3001 | Dashboards |
+| `alertmanager` | 9093 | Alert routing |
+| `node-exporter` | 9100 | Host metrics |
+| `cadvisor` | 8081 | Container metrics |
+| `postgres-exporter` | 9187 | PostgreSQL metrics |
+
+### Caddy Configuration
+
+Note: prefer `127.0.0.1` over `localhost` to avoid IPv6 resolution issues on some hosts.
+
+```caddyfile
+# /etc/caddy/Caddyfile
+apexmediation.ee, www.apexmediation.ee {
+    reverse_proxy 127.0.0.1:3002
+}
+
+console.apexmediation.ee {
+    reverse_proxy 127.0.0.1:3000
+}
+
+admin.apexmediation.ee {
+    reverse_proxy 127.0.0.1:4000
+}
+
+api.apexmediation.ee {
+    reverse_proxy 127.0.0.1:8080
+}
 ```
 
 ### Network Security Model
@@ -67,13 +145,10 @@
 |------|-----|----------|---------|
 | Internet | App Server:80/443 | HTTPS | ✅ |
 | Internet | App Server:22 | SSH | ✅ (key-only) |
-| Internet | App Server:8080 | Backend API | ✅ |
-| Internet | App Server:3000 | Console | ✅ |
-| Internet | App Server:3001 | Grafana | ✅ |
-| Internet | App Server:9090 | Prometheus | ✅ |
 | Internet | DB Server:* | Any | ⚠️ (currently accessible, recommend firewall) |
 | App Server | DB Server:5432 | PostgreSQL | ✅ |
 | App Server | DB Server:9187 | Postgres Exporter | ✅ |
+| Docker (172.17.x.x) | App Server:6379 | Redis | ✅ |
 
 ### SSH Access
 
@@ -84,9 +159,181 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 # DB Server
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# Database connection
-PGPASSWORD='ApexProd2025!' psql -h 77.42.44.35 -U postgres -d adproject
+# Database connection (from app server or direct)
+PGPASSWORD='ApexApp2025!' psql -h 77.42.44.35 -U adproject -d adproject
 ```
+
+---
+
+## 1.05 Deployment Directory Structure
+
+### ⚠️ CRITICAL: Deployment Paths
+
+PM2 runs the Next.js apps from `*_release` directories, NOT the source directories.
+
+| App | PM2 Script Path | Deploy Scripts |
+|-----|-----------------|----------------|
+| `console` | `/opt/adproject/console_release/server.js` | `console/deploy-production.sh` |
+| `website` | `/opt/adproject/website_release/server.js` | `website/deploy-production.sh` |
+| `backend` | `/opt/adproject/backend/dist/index.js` | rsync to `/opt/adproject/backend/` |
+
+### Directory Structure on Server
+
+```
+/opt/adproject/
+├── backend/              # Backend Node.js source + dist
+├── console_release/      # ← PM2 runs console from HERE
+│   ├── .next/           # Server-side build
+│   │   ├── BUILD_ID     # Must match static assets
+│   │   ├── server/      # Server components
+│   │   └── static/      # Client-side JS/CSS (copied separately)
+│   ├── node_modules/    # Minimal standalone deps
+│   ├── public/          # Static public assets
+│   ├── server.js        # Next.js standalone server
+│   └── .env             # Runtime environment
+├── website_release/      # ← PM2 runs website from HERE
+│   ├── .next/
+│   ├── node_modules/
+│   ├── public/
+│   └── server.js
+├── control-plane/        # Admin control plane
+└── [other files]         # DO NOT deploy here
+```
+
+### Common Deployment Errors
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| 404 for `/_next/static/*` | Build ID mismatch | Redeploy static folder, verify BUILD_ID matches |
+| API calls to wrong domain | `NEXT_PUBLIC_*` not baked in | Rebuild with env vars set at BUILD time |
+| Old code served after deploy | Deployed to wrong directory | Deploy to `*_release` directory |
+| `.env` missing after deploy | `rsync --delete` removed it | Recreate `.env` after rsync |
+
+### Deployment Checklist
+
+1. **Build locally** with `NEXT_PUBLIC_*` env vars set
+2. **Verify** API URL is baked in: `grep -r "api.apexmediation.ee" .next/static/`
+3. **Deploy to `*_release`** directory (not source directory)
+4. **Copy static assets** separately (not in standalone)
+5. **Recreate `.env`** if needed
+6. **Verify BUILD_ID** matches between server files and static assets
+7. **Restart PM2** service
+
+### Using Deployment Scripts
+
+```bash
+# Console deployment
+cd console && ./deploy-production.sh
+
+# Website deployment  
+cd website && ./deploy-production.sh
+```
+
+---
+
+## 1.1 Redis Configuration
+
+Redis runs locally on the app server for minimal latency.
+
+### Current Configuration
+
+```ini
+# /etc/redis/redis.conf
+bind 0.0.0.0
+requirepass ApexRedis2025!
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+```
+
+### Environment Variable (Backend)
+
+```bash
+# /opt/adproject/backend/.env
+REDIS_URL=redis://:ApexRedis2025!@127.0.0.1:6379/0
+```
+
+### Usage Patterns
+
+| Use Case | Key Pattern | TTL |
+|----------|-------------|-----|
+| Rate limiting | `rl:*` | Sliding window |
+| API caching | `cache:*` | 5-60 min |
+| Session state | None (JWT-based) | N/A |
+| Queue jobs | `bull:*` | Until processed |
+
+### Memory Usage
+
+- **Current:** ~2.5 MB
+- **Limit:** 2 GB
+- **Policy:** LRU eviction
+
+---
+
+## 1.2 PgBouncer Configuration
+
+```ini
+# /etc/pgbouncer/pgbouncer.ini
+[databases]
+adproject = host=77.42.44.35 port=5432 dbname=adproject
+
+[pgbouncer]
+listen_addr = *
+listen_port = 6432
+pool_mode = transaction
+max_client_conn = 1000
+default_pool_size = 25
+min_pool_size = 5
+reserve_pool_size = 5
+```
+
+---
+
+## 1.3 Horizontal Scaling Readiness
+
+### Current State: **95% Ready**
+
+| Component | Horizontally Scalable | Notes |
+|-----------|----------------------|-------|
+| **Backend API** | ✅ Yes | Stateless, JWT auth |
+| **Console** | ✅ Yes | JWT sessions (not server-side) |
+| **Website** | ✅ Yes | Static + SSR, stateless |
+| **PostgreSQL** | ✅ Ready | Accepts remote connections |
+| **Redis** | ⚠️ Firewall needed | Bound to 0.0.0.0 but UFW blocks external |
+
+### Adding a Second App Server
+
+1. **Provision new server** (same Hetzner DC: Finland)
+2. **Open Redis firewall:**
+   ```bash
+   ssh root@46.62.252.96 'ufw allow from NEW_SERVER_IP to any port 6379'
+   ```
+3. **Deploy same code with shared env:**
+   ```bash
+   DATABASE_URL=postgresql://adproject:ApexApp2025!@77.42.44.35:5432/adproject
+   REDIS_URL=redis://:ApexRedis2025!@46.62.252.96:6379/0
+   JWT_SECRET=hetzner-prod-jwt-secret-ApexMediation-2025-SecureRandomKey
+   NEXTAUTH_SECRET=hetzner-prod-nextauth-secret-ApexMediation-2025-SecureSession
+   ```
+4. **Add to Caddy upstream** (on primary):
+   ```caddyfile
+   api.apexmediation.ee {
+       reverse_proxy {
+           to localhost:8080
+           to NEW_SERVER_IP:8080
+           lb_policy round_robin
+           health_uri /health
+       }
+   }
+   ```
+
+### Scaling Triggers
+
+| Metric | Current | Threshold | Action |
+|--------|---------|-----------|--------|
+| CPU usage | <5% | >70% sustained | Add app server |
+| Memory usage | 14% | >80% | Add app server |
+| Redis memory | 2.5 MB | >1 GB | Consider dedicated Redis |
+| PostgreSQL connections | 7 | >150 | Increase pool or add read replicas |
 
 ---
 

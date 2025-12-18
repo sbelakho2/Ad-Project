@@ -98,7 +98,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Publisher-Id', 'X-CSRF-Token'],
 }));
 
 // Rate limiting - Tiered by customer plan

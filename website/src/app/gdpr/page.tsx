@@ -44,7 +44,7 @@ export default function GdprPage() {
                   <h2 className="text-2xl font-bold text-gray-900">3) How to make a request</h2>
                   <p className="text-gray-700">
                     If your request relates to the ApexMediation website or your account as a business contact,
-                    email <a className="underline" href="mailto:security@apexmediation.ee">security@apexmediation.ee</a>.
+                    email <a className="underline" href="mailto:privacy@apexmediation.ee">privacy@apexmediation.ee</a>.
                   </p>
                   <p className="text-gray-700">
                     If your request relates to end-user data in a publisher&apos;s app, contact the publisher first.

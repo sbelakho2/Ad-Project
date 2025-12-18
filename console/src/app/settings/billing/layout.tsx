@@ -22,9 +22,9 @@ type BillingNavItem = {
 }
 
 const BILLING_NAV: BillingNavItem[] = [
-  { name: 'Usage', href: '/billing/usage', icon: TrendingUp },
-  { name: 'Invoices', href: '/billing/invoices', icon: FileText },
-  { name: 'Settings', href: '/billing/settings', icon: Settings },
+  { name: 'Usage', href: '/settings/billing/usage', icon: TrendingUp },
+  { name: 'Invoices', href: '/settings/billing/invoices', icon: FileText },
+  { name: 'Settings', href: '/settings/billing/settings', icon: Settings },
 ]
 
 

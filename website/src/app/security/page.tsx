@@ -22,7 +22,8 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
-import { sloConfig, tcfConfig } from '@/config/legal';
+import { tcfConfig } from '@/config/legal';
+import { SLO } from '@/lib/slo';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -87,10 +88,9 @@ const privacyFeatures = [
 ];
 
 const reliabilityMetrics = [
-  { label: 'Uptime SLO', value: sloConfig.availability.target, icon: CheckCircle },
-  { label: 'Latency (p95)', value: sloConfig.latency.p95, icon: Zap },
-  { label: 'Regions', value: sloConfig.regions.map(r => `${r.code} (${r.name})`).join(', '), icon: Server },
-  { label: 'Failover target', value: sloConfig.failover.target, icon: RefreshCw },
+  { label: 'Uptime SLO', value: SLO.availability.target, icon: CheckCircle },
+  { label: 'Latency (p95)', value: SLO.latency.p95, icon: Zap },
+  { label: 'Failover target', value: SLO.failover.target, icon: RefreshCw },
 ];
 
 const complianceBadges = [

@@ -11,24 +11,27 @@
 }
 
 # -----------------------------------------------------------------------------
-# Control Plane (operator-only)
+# Control Plane (operator-only) - COMPLETELY SEPARATE from customer console
+# This is the internal operator admin panel, NOT customer-facing
+# Access: admin.apexmediation.ee → Control Plane service on port 4000
 # -----------------------------------------------------------------------------
 admin.apexmediation.ee {
-  reverse_proxy control-plane:4000
+  reverse_proxy localhost:4000
 }
 
 # -----------------------------------------------------------------------------
 # Customer API
 # -----------------------------------------------------------------------------
 api.apexmediation.ee {
-  reverse_proxy backend:8080
+  reverse_proxy localhost:8080
 }
 
 # -----------------------------------------------------------------------------
-# Customer Console
+# Customer Console - Customer-facing dashboard
+# Access: console.apexmediation.ee → Console service on port 3000
 # -----------------------------------------------------------------------------
 console.apexmediation.ee {
-  reverse_proxy console:3000
+  reverse_proxy localhost:3000
 }
 
 # -----------------------------------------------------------------------------

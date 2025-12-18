@@ -28,7 +28,7 @@ const FALLBACK_ROLES: TeamRoleDefinition[] = [
   {
     id: 'finance',
     label: 'Finance',
-    description: 'View revenue, manage payouts, limited placement access',
+    description: 'View revenue, manage billing, limited placement access',
   },
 ]
 

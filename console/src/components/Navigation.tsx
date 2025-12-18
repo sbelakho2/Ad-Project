@@ -18,8 +18,6 @@ import {
   TrendingUp,
   Eye,
   ShieldAlert,
-  Wallet,
-  Receipt,
   Link2,
   FileCheck,
   FileSearch,
@@ -51,8 +49,6 @@ const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'analytics', label: 'Analytics', href: '/analytics', icon: TrendingUp },
   { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: Eye, featureFlag: 'transparency', minTier: 'growth' },
   { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert, minTier: 'growth' },
-  { key: 'payouts', label: 'Payouts', href: '/payouts', icon: Wallet },
-  { key: 'billing', label: 'Billing', href: '/billing/usage', icon: Receipt, featureFlag: 'billing' },
   { key: 'supply-chain', label: 'Supply Chain', href: '/supply-chain', icon: Link2 },
   { key: 'tool-supply-chain-status', label: 'Supply Chain Status', href: '/tools/supply-chain-status', icon: FileCheck },
   { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: FileSearch },
@@ -142,7 +138,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
         .filter(Boolean) as typeof navigation,
     })
     return [
-      build('Workspace', ['dashboard', 'placements', 'migration-studio', 'adapters', 'analytics', 'transparency', 'fraud', 'payouts', 'billing']),
+      build('Workspace', ['dashboard', 'placements', 'migration-studio', 'adapters', 'analytics', 'transparency', 'fraud']),
       build('Tools', ['supply-chain', 'tool-supply-chain-status', 'tool-app-ads-inspector', 'tool-mediation-debugger']),
       build('Settings', ['settings']),
       build('Admin', ['admin']),

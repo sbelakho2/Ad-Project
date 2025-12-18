@@ -20,7 +20,7 @@ import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
-import { sloConfig } from '@/config/legal';
+import { SLO } from '@/lib/slo';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -32,20 +32,20 @@ const getRevealProps = (delay = 0) => ({
  * SLO Definitions - CANONICAL SOURCE
  * 
  * This page is the authoritative source for all SLO metrics.
- * Other pages (home, security, company) reference these values
- * via the sloConfig in /config/legal.ts
+ * Other pages (home, security, company, SSAI docs) reference these values
+ * via the SLO constants in /lib/slo.ts
  */
 const sloDefinitions = [
   {
     name: 'Manifest/API Availability',
-    target: sloConfig.availability.target,
+    target: SLO.availability.target,
     measurement: 'Percentage of successful responses (2xx) from manifest and API endpoints over a 30-day rolling window.',
     unit: 'availability',
     icon: Server,
   },
   {
     name: 'Decision Latency (p95)',
-    target: sloConfig.latency.p95,
+    target: SLO.latency.p95,
     measurement: 'Time from cue receipt to pod decision completion, measured at the 95th percentile.',
     unit: 'latency',
     icon: Clock,
@@ -77,7 +77,7 @@ const mitigations = [
   {
     title: 'Safe Mode',
     description: 'When error rates exceed thresholds, the system automatically enters safe mode: reduced fanout, strict deadlines, and slate fallback for ad breaks.',
-    trigger: `Error rate > 5% or latency p95 > ${sloConfig.latency.p95.replace(/^[<≤]\s*/, '')}`,
+    trigger: `Error rate > 5% or latency p95 > ${SLO.latency.p95.replace(/^[<≤]\s*/, '')}`,
     icon: Shield,
   },
   {
@@ -102,59 +102,47 @@ const mitigations = [
 
 export default function SLOPage() {
   const [liveStatus, setLiveStatus] = useState<any | null>(null);
+  const [usedLkg, setUsedLkg] = useState(false);
   const [sloRollup, setSloRollup] = useState<any | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-
-    fetch('/api/public/status', {
+    fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ''}/api/public/status`, {
       signal: controller.signal,
       headers: { accept: 'application/json' },
     })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data && typeof data === 'object') {
-          setLiveStatus(data);
-        }
-      })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error('bad status')))
+      .then((data) => setLiveStatus(data))
       .catch(() => {
-        // Always fail open; the page should render even without live status.
+        // Try last-known-good snapshot from /status page storage if exposed later.
+        setUsedLkg(true);
       });
-
     return () => controller.abort();
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-
-    fetch('/api/public/slo?days=30', {
+    fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ''}/api/public/slo?days=30`, {
       signal: controller.signal,
       headers: { accept: 'application/json' },
     })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data && typeof data === 'object') {
-          setSloRollup(data);
-        }
-      })
-      .catch(() => {
-        // Fail open.
-      });
-
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setSloRollup(data))
+      .catch(() => {});
     return () => controller.abort();
   }, []);
 
-  const targets = useMemo(() => {
-    const availabilityTargetPct = Number((sloConfig.availability.target || '').replace('%', ''));
-    const latencyTargetMs = Number((sloConfig.latency.p95 || '').replace(/[^0-9.]/g, ''));
+  const targets = (() => {
+    const availabilityTargetPct = Number((SLO.availability.target || '').replace('%', ''));
+    const latencyTargetMs = Number((SLO.latency.p95 || '').replace(/[^0-9.]/g, ''));
     return {
       availabilityTargetPct: Number.isFinite(availabilityTargetPct) ? availabilityTargetPct : 99.9,
-      latencyTargetMs: Number.isFinite(latencyTargetMs) ? latencyTargetMs : 100,
+      latencyTargetMs: Number.isFinite(latencyTargetMs) ? latencyTargetMs : 200,
       deadlineTargetPct: 98,
       invalidManifestTargetPct: 0.01,
       trackingIntegrityTargetPct: 100,
     };
-  }, []);
+  })();
 
   const computedSlo = useMemo(() => {
     // Check if we have any data at all (sloRollup loaded)
@@ -448,7 +436,7 @@ export default function SLOPage() {
                 We publish our service level objectives so you know exactly what to expect. When we miss, here&apos;s what happens.
               </p>
               {badge.lastChecked ? (
-                <p className="mt-4 text-sm text-gray-500 font-mono">Last checked: {badge.lastChecked}</p>
+                <p className="mt-4 text-sm text-gray-500 font-mono">Last checked: {badge.lastChecked} UTC{usedLkg ? ' (cached)' : ''}</p>
               ) : null}
             </motion.div>
           </div>

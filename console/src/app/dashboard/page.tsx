@@ -10,7 +10,6 @@ import { formatCurrency, formatNumber, formatPercentage } from '@/lib/utils'
 import { MetricCard, MetricCardSkeleton } from '@/components/dashboard/MetricCard'
 import { DashboardCharts } from '@/components/dashboard/DashboardCharts'
 import { FraudWidget } from '@/components/dashboard/FraudWidget'
-import { PayoutWidget } from '@/components/dashboard/PayoutWidget'
 import {
   CalendarRange,
   DollarSign,
@@ -277,13 +276,12 @@ export default function DashboardPage() {
             {canRenderOperationalWidgets ? (
               <>
                 <FraudWidget publisherId={publisherId!} />
-                <PayoutWidget />
               </>
             ) : (
               <div className="card col-span-full">
                 <h3 className="text-lg font-semibold text-gray-900">Connect a publisher account</h3>
                 <p className="text-sm text-gray-600 mt-2">
-                  Fraud and payout insights unlock once your session includes an active publisher context. Contact support if
+                  Fraud insights unlock once your session includes an active publisher context. Contact support if
                   you expect to see one here.
                 </p>
               </div>
@@ -320,8 +318,8 @@ const quickActions: QuickAction[] = [
     icon: BarChart3,
   },
   {
-    label: 'Update Payment Method',
-    href: '/settings/payouts',
+    label: 'Manage Billing',
+    href: '/settings/billing',
     icon: CreditCard,
   },
 ]

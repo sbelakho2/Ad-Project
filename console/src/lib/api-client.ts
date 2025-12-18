@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, AxiosError, AxiosHeaders, InternalAxiosRequestConfig } from 'axios'
 import { getCsrfToken, readXsrfCookie } from './csrf'
+import { getSession } from 'next-auth/react'
 
 // Mock API is never enabled in production
 const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true' && process.env.NODE_ENV !== 'production'
@@ -99,6 +100,22 @@ async function ensureBrowserCsrfToken(): Promise<string | null> {
 
 const requestInterceptor = async (config: InternalAxiosRequestConfig) => {
   const method = (config.method || 'get').toLowerCase()
+  
+  // Add Bearer token from NextAuth session for API authentication
+  if (typeof window !== 'undefined') {
+    try {
+      const session = await getSession()
+      const accessToken = (session as any)?.accessToken
+      if (accessToken) {
+        const headers = AxiosHeaders.from(config.headers || {})
+        headers.set('Authorization', `Bearer ${accessToken}`)
+        config.headers = headers
+      }
+    } catch {
+      // Session fetch failed, continue without token
+    }
+  }
+
   if (MUTATING_METHODS.has(method)) {
     const token = await ensureBrowserCsrfToken()
     if (token) {

@@ -192,7 +192,7 @@ export default function SignupPage() {
               <p className="text-gray-700"><span className="font-semibold text-gray-900">Scale:</span> From 2% with volume discounts</p>
             </div>
             <p className="text-xs text-gray-500 pt-1">
-              You keep 100% of your ad network payouts. Platform fee only.
+              You keep 100% of your ad network revenue. Platform fee only.
             </p>
           </div>
 

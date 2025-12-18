@@ -2,19 +2,20 @@ import { buildBreadcrumbsFromPath } from '../Breadcrumbs'
 
 describe('buildBreadcrumbsFromPath', () => {
   it('localizes known route segments', () => {
-    const breadcrumbs = buildBreadcrumbsFromPath('/billing/invoices')
+    const breadcrumbs = buildBreadcrumbsFromPath('/settings/billing/invoices')
     expect(breadcrumbs).toEqual([
-      { label: 'Billing', href: '/billing' },
-      { label: 'Invoices', href: '/billing/invoices' },
+      { label: 'Settings', href: '/settings' },
+      { label: 'Billing', href: '/settings/billing' },
+      { label: 'Invoices', href: '/settings/billing/invoices' },
     ])
   })
 
   it('masks invoice identifiers to avoid leaking full values', () => {
-    const breadcrumbs = buildBreadcrumbsFromPath('/billing/invoices/1234567890abcdef')
+    const breadcrumbs = buildBreadcrumbsFromPath('/settings/billing/invoices/1234567890abcdef')
     const lastCrumb = breadcrumbs[breadcrumbs.length - 1]
     expect(lastCrumb).toEqual({
       label: 'Invoice #12345678…',
-      href: '/billing/invoices/1234567890abcdef',
+      href: '/settings/billing/invoices/1234567890abcdef',
     })
   })
 

@@ -171,35 +171,12 @@ export interface FraudStats {
   lastUpdated: string
 }
 
-// Payment types
-export interface PayoutHistory {
-  id: string
-  amount: number
-  currency: string
-  status: 'pending' | 'processing' | 'completed' | 'failed'
-  method: 'stripe' | 'wire'
-  scheduledFor: string
-  processedAt?: string
-}
-
 export interface FraudSettings {
   alertEmails: string[]
   warningThreshold: number
   blockThreshold: number
   autoBlock: boolean
   webhookUrl?: string
-}
-
-export interface PayoutSettings {
-  threshold: number
-  method: 'stripe' | 'wire'
-  currency: string
-  schedule: 'monthly'
-  accountName: string
-  accountReference: string
-  autoPayout: boolean
-  backupMethod?: 'stripe' | 'wire'
-  updatedAt: string
 }
 
 // Team types

@@ -157,7 +157,7 @@ export default function AdminBillingOpsPage() {
         <p className="text-gray-600 mt-2">Open Stripe Customer Portal for the current organization (if configured).</p>
         <a
           className="inline-block mt-4 px-4 py-2 bg-white border rounded-lg hover:bg-gray-50 text-sm"
-          href="/billing/settings"
+          href="/settings/billing/settings"
         >
           Go to Billing Settings
         </a>

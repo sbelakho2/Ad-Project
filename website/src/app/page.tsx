@@ -21,7 +21,9 @@ import Footer from '@/components/Footer';
 import { MediationFlowCard } from '@/components/VisualCard';
 import PageHero from '@/components/PageHero';
 import SiteHeader from '@/components/SiteHeader';
-import { sloConfig } from '@/config/legal';
+import { SLO } from '@/lib/slo';
+import { StepCard } from '@/components/StepCard';
+import { Badge } from '@/components/ui/Badge';
 
 // Animation helpers - use animate for reliable rendering
 const getRevealProps = (delay = 0) => ({
@@ -240,7 +242,7 @@ function ProofStripSection() {
     {
       icon: Target,
       title: 'Public SLO Targets',
-      description: `${sloConfig.availability.target} availability, decision latency p95 ${sloConfig.latency.p95}`,
+      description: `${SLO.availability.target} availability, decision latency p95 ${SLO.latency.p95}`,
       href: '/slo',
     },
     {
@@ -378,24 +380,12 @@ function HowItWorksSection() {
             How ApexMediation fits into your stack
           </h2>
         </motion.div>
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-4xl mx-auto space-y-4">
           {howItWorksSteps.map((item, index) => (
-            <motion.div
-              key={item.step}
-              {...getRevealProps(index * 0.1)}
-              className="flex gap-6 mb-8 last:mb-0"
-            >
-              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-brand-600 text-white flex items-center justify-center text-xl font-bold">
-                {item.step}
-              </div>
-              <div>
-                <h3 className="text-xl font-semibold text-gray-900 mb-2">
-                  {item.title}
-                </h3>
-                <p className="text-gray-600 leading-relaxed">
-                  {item.description}
-                </p>
-              </div>
+            <motion.div key={item.step} {...getRevealProps(index * 0.1)}>
+              <StepCard step={item.step} title={item.title}>
+                {item.description}
+              </StepCard>
             </motion.div>
           ))}
         </div>

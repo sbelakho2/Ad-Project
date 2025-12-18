@@ -16,7 +16,7 @@ export async function list(req: Request, res: Response, next: NextFunction) {
     if (!appId) throw new AppError('appId is required', 400)
 
     const keys = await appKeysRepo.listByApp(publisherId, appId)
-    return res.json({ success: true, data: { keys } })
+    return res.json({ success: true, data: keys })
   } catch (e) {
     return next(e)
   }

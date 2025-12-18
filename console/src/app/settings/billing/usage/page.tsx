@@ -254,7 +254,7 @@ export default function BillingUsagePage() {
             <div className="flex flex-col items-start gap-2 md:items-end">
               <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2 shadow-sm">
                 <span className="text-sm font-medium text-gray-900">{subscriptionTier.label} plan</span>
-                <Link className="text-sm font-medium text-primary-700 hover:text-primary-800" href="/billing/settings">
+                <Link className="text-sm font-medium text-primary-700 hover:text-primary-800" href="/settings/billing/settings">
                   Change plan
                 </Link>
               </div>

@@ -120,7 +120,7 @@ export default function FraudPage() {
             Starter includes core dashboards only. Fraud/quality dashboards unlock on Growth and above. Current plan: {plan || 'unknown'}.
           </p>
           <div className="flex gap-2 justify-center mt-4 flex-wrap">
-            <a href="/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">Open Billing</a>
+            <a href="/settings/billing/settings" className="px-3 py-2 text-sm font-semibold text-primary-700 border border-primary-200 rounded-lg hover:bg-primary-50">Open Billing</a>
             <a href="mailto:billing@apexmediation.ee" className="px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700">Talk to billing</a>
           </div>
           {planError && <p className="text-xs text-red-600 mt-2">{planError}</p>}

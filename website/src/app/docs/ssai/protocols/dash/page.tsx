@@ -52,8 +52,8 @@ export default function DASHProtocolPage() {
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
      type="dynamic"
      minimumUpdatePeriod="PT2S"
-     availabilityStartTime="2025-01-15T10:00:00Z"
-     publishTime="2025-01-15T10:35:00Z">
+     availabilityStartTime="YYYY-MM-DDTHH:MM:SSZ"
+     publishTime="YYYY-MM-DDTHH:MM:SSZ">
   
   <UTCTiming schemeIdUri="urn:mpeg:dash:utc:http-xsdate:2014"
              value="https://time.apexmediation.ee/xsdate"/>

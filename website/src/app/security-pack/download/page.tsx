@@ -565,8 +565,8 @@ export default function SecurityPackDownloadPage() {
         <section className="mb-8">
           <h2 className="text-xl font-bold mb-4 text-gray-900 border-b border-gray-300 pb-2">12. Contact Information</h2>
           <div className="space-y-2 text-gray-700 text-sm">
-            <p><strong>Security Inquiries:</strong> security@apexmediation.ee</p>
-            <p><strong>Privacy / DPO:</strong> privacy@apexmediation.ee</p>
+            <p><strong>Security Inquiries (incidents):</strong> security@apexmediation.ee</p>
+            <p><strong>Privacy / DPO (data rights):</strong> privacy@apexmediation.ee</p>
             <p><strong>General Contact:</strong> hello@apexmediation.ee</p>
             <p><strong>Website:</strong> https://apexmediation.ee</p>
             <p><strong>Registered Entity:</strong> Bel Consulting OÜ, Estonia</p>

@@ -146,7 +146,7 @@ export default function InvoicesListPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-3 mb-1">
                           <Link
-                            href={`/billing/invoices/${invoice.id}`}
+                            href={`/settings/billing/invoices/${invoice.id}`}
                             className="font-semibold text-gray-900 hover:text-primary-600 transition"
                           >
                             {invoice.invoice_number}
@@ -170,7 +170,7 @@ export default function InvoicesListPage() {
                         <p className="text-xs text-gray-600">{invoice.currency.toUpperCase()}</p>
                       </div>
                       <Link
-                        href={`/billing/invoices/${invoice.id}`}
+                        href={`/settings/billing/invoices/${invoice.id}`}
                         className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition font-medium text-sm flex items-center gap-2"
                       >
                         <Download className="h-4 w-4" />

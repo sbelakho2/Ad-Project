@@ -43,14 +43,14 @@ This directory contains scripts and configuration for deploying the Ad-Project t
 
 | Server | IP Address | Role | Ports |
 |--------|------------|------|-------|
-| App Server | 77.42.44.35 | Backend, Console, Redis, Nginx | 22, 80, 443 |
-| DB Server | 46.62.252.96 | PostgreSQL, Autopilot | 22, 5432, 8090 (from App only) |
+| App Server | 46.62.252.96 | Backend, Console, Website, Redis, Caddy | 22, 80, 443 |
+| DB Server | 77.42.44.35 | PostgreSQL | 22, 5432 |
 
 ## Security Model
 
 ### DB Server (CRITICAL)
-- **NO PUBLIC INTERNET ACCESS**
-- Only accepts connections from App Server (77.42.44.35)
+- **NO PUBLIC INTERNET ACCESS** (recommended)
+- Only accepts connections from App Server (46.62.252.96)
 - Firewall rules strictly limit access to:
   - SSH (port 22) - from App Server only
   - PostgreSQL (port 5432) - from App Server only
@@ -66,10 +66,13 @@ This directory contains scripts and configuration for deploying the Ad-Project t
 
 ```bash
 # App Server (public)
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+# DB Server (direct access currently enabled)
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# DB Server (via App Server as jump host)
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@46.62.252.96
+# Alternative: DB Server via App Server as jump host
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 ```
 
 ## Deployment Steps

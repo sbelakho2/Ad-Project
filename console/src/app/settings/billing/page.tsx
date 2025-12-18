@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
 
 export default function BillingPage() {
-  redirect('/billing/usage')
+  redirect('/settings/billing/usage')
 }
