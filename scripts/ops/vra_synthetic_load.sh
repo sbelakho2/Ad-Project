@@ -22,7 +22,9 @@ PUBLISHER_ID="${PUBLISHER_ID:-}"
 
 # Per-SDK app IDs (must belong to the dummy publisher account)
 APP_ID_ANDROID="${APP_ID_ANDROID:-}"
+APP_ID_ANDROID_2="${APP_ID_ANDROID_2:-}"
 APP_ID_IOS="${APP_ID_IOS:-}"
+APP_ID_IOS_2="${APP_ID_IOS_2:-}"
 APP_ID_WEB="${APP_ID_WEB:-}"
 APP_ID_UNITY="${APP_ID_UNITY:-}"
 APP_ID_CTV="${APP_ID_CTV:-}"
@@ -53,7 +55,9 @@ OS_LIST=("ios" "android")
 available_platforms() {
   local plats=()
   [[ -n "$APP_ID_ANDROID" ]] && plats+=("android")
+  [[ -n "$APP_ID_ANDROID_2" ]] && plats+=("android")
   [[ -n "$APP_ID_IOS" ]] && plats+=("ios")
+  [[ -n "$APP_ID_IOS_2" ]] && plats+=("ios")
   [[ -n "$APP_ID_WEB" ]] && plats+=("web")
   [[ -n "$APP_ID_UNITY" ]] && plats+=("unity")
   [[ -n "$APP_ID_CTV" ]] && plats+=("ctv")
@@ -111,8 +115,22 @@ generate_impression_batch() {
     # Determine app_id based on selected platform
     local app_id=""
     case "$platformType" in
-      ios) app_id="$APP_ID_IOS" ;;
-      android) app_id="$APP_ID_ANDROID" ;;
+      ios)
+        if [[ -n "$APP_ID_IOS" && -n "$APP_ID_IOS_2" ]]; then
+          # 60/40 split across iOS apps
+          if [[ $((RANDOM % 10)) -lt 6 ]]; then app_id="$APP_ID_IOS"; else app_id="$APP_ID_IOS_2"; fi
+        else
+          app_id="$APP_ID_IOS"
+        fi
+        ;;
+      android)
+        if [[ -n "$APP_ID_ANDROID" && -n "$APP_ID_ANDROID_2" ]]; then
+          # 60/40 split across Android apps
+          if [[ $((RANDOM % 10)) -lt 6 ]]; then app_id="$APP_ID_ANDROID"; else app_id="$APP_ID_ANDROID_2"; fi
+        else
+          app_id="$APP_ID_ANDROID"
+        fi
+        ;;
       web) app_id="$APP_ID_WEB" ;;
       unity) app_id="$APP_ID_UNITY" ;;
       ctv) app_id="$APP_ID_CTV" ;;
@@ -180,8 +198,20 @@ generate_revenue_batch() {
     # Determine app_id based on selected platform
     local app_id=""
     case "$platformType" in
-      ios) app_id="$APP_ID_IOS" ;;
-      android) app_id="$APP_ID_ANDROID" ;;
+      ios)
+        if [[ -n "$APP_ID_IOS" && -n "$APP_ID_IOS_2" ]]; then
+          if [[ $((RANDOM % 10)) -lt 6 ]]; then app_id="$APP_ID_IOS"; else app_id="$APP_ID_IOS_2"; fi
+        else
+          app_id="$APP_ID_IOS"
+        fi
+        ;;
+      android)
+        if [[ -n "$APP_ID_ANDROID" && -n "$APP_ID_ANDROID_2" ]]; then
+          if [[ $((RANDOM % 10)) -lt 6 ]]; then app_id="$APP_ID_ANDROID"; else app_id="$APP_ID_ANDROID_2"; fi
+        else
+          app_id="$APP_ID_ANDROID"
+        fi
+        ;;
       web) app_id="$APP_ID_WEB" ;;
       unity) app_id="$APP_ID_UNITY" ;;
       ctv) app_id="$APP_ID_CTV" ;;

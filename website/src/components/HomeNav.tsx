@@ -78,7 +78,7 @@ export default function HomeNav() {
 
           <div className="flex items-center gap-3 ml-4">
             <Link
-              href="https://console.apexmediation.ee/login"
+              href="/signin"
               className="text-gray-700 font-medium text-sm hover:text-brand-600 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand-600"
             >
               Sign In
@@ -164,7 +164,7 @@ export default function HomeNav() {
               ))}
               <hr className="border-white/20 my-2" />
               <Link
-                href="https://console.apexmediation.ee/login"
+                href="/signin"
                 onClick={closeMenu}
                 className="text-brand-100 font-bold uppercase text-sm py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
               >

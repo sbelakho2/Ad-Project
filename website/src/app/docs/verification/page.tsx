@@ -132,6 +132,8 @@ curl -s \
                 <div className="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-x-auto">
                   <pre className="text-gray-300">
 {`{
+  "sessionId": "sess_abc123",
+  "bundleId": "bundle_abc123",
   "auction_id": "auc_abc123",
   "timestamp": "2025-12-15T10:30:00Z",
   "winner": { "source": "network_a", "bid_ecpm": 2.5, "currency": "USD" },

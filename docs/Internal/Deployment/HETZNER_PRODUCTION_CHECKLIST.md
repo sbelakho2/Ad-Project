@@ -245,12 +245,25 @@ redis-cli -a <password> INFO memory
 Caddy handles automatic TLS certificate provisioning and renewal via Let's Encrypt.
 
 Domains served:
-- `apexmediation.ee` / `www.apexmediation.ee` → Website (port 3002)
+- `apexmediation.ee` / `www.apexmediation.ee` → Website (Next.js standalone via PM2 on port 3002)
 - `console.apexmediation.ee` → Console (port 3000)
 - `api.apexmediation.ee` → Backend API (port 8080)
 
 Operator access:
 - `admin.apexmediation.ee` → Control Plane (port 4000)
+
+#### 5.1.1 Website reverse proxy (Caddy)
+
+Update `infrastructure/caddy/Caddyfile`:
+
+```
+apexmediation.ee, www.apexmediation.ee {
+  # Next.js standalone served by PM2 on the app server
+  reverse_proxy 127.0.0.1:3002
+}
+```
+
+Reload Caddy and verify a specific CSS asset under `/_next/static/css/` returns HTTP 200.
 
 ### 5.2 Certificate Status
 
@@ -476,7 +489,7 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env
 
 # 5. Verify deployment
 curl -I https://apexmediation.ee
-curl -I https://apexmediation.ee/_next/static/css/  # Should return 200, not 404
+curl -I https://apexmediation.ee/_next/static/css/  # Should return 200, not 308/404
 ```
 
 #### 8.4.2 Tarball Method (Alternative - Server-built)

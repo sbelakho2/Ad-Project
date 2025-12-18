@@ -19,7 +19,7 @@ import {
   Tv,
   Gamepad2,
 } from 'lucide-react'
-import { appsApi, appKeysApi } from '@/lib/api'
+import { appsApi, appKeysApi, meApi } from '@/lib/api'
 import type { App, AppApiKey, AppApiKeyWithSecret } from '@/types'
 
 const PLATFORM_ICONS: Record<string, React.FC<{ className?: string }>> = {
@@ -33,6 +33,11 @@ const PLATFORM_ICONS: Record<string, React.FC<{ className?: string }>> = {
 
 export default function AppKeysPage() {
   const { data: session } = useSession()
+  const { data: me } = useQuery({
+    queryKey: ['me'],
+    queryFn: meApi.get,
+    enabled: !!session,
+  })
   const queryClient = useQueryClient()
   const [selectedApp, setSelectedApp] = useState<string | null>(null)
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null)
@@ -150,6 +155,29 @@ export default function AppKeysPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Publisher Identifiers */}
+        <div className="card mb-6">
+          <h2 className="text-lg font-medium text-gray-900 mb-2">Publisher Identifiers</h2>
+          <p className="text-sm text-gray-600 mb-4">Use these IDs in your SDK initialization and when contacting support.</p>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Publisher ID</label>
+              <div className="flex items-center gap-2">
+                <code className="font-mono text-sm bg-gray-50 border border-gray-200 rounded px-2 py-1 inline-block">
+                  {me?.publisher?.id ?? '—'}
+                </code>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Account Email</label>
+              <div className="flex items-center gap-2">
+                <code className="font-mono text-sm bg-gray-50 border border-gray-200 rounded px-2 py-1 inline-block">
+                  {me?.user?.email ?? '—'}
+                </code>
+              </div>
+            </div>
+          </div>
+        </div>
         {/* App Selector */}
         <div className="card mb-6">
           <label htmlFor="app-select" className="block text-sm font-medium text-gray-700 mb-2">

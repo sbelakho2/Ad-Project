@@ -32,7 +32,9 @@ TOKEN=${TOKEN:-}
 SDK_KEY=${SDK_KEY:-}
 PUBLISHER_ID=${PUBLISHER_ID:-}
 APP_ID_ANDROID=${APP_ID_ANDROID:-}
+APP_ID_ANDROID_2=${APP_ID_ANDROID_2:-}
 APP_ID_IOS=${APP_ID_IOS:-}
+APP_ID_IOS_2=${APP_ID_IOS_2:-}
 APP_ID_WEB=${APP_ID_WEB:-}
 APP_ID_UNITY=${APP_ID_UNITY:-}
 APP_ID_CTV=${APP_ID_CTV:-}
@@ -99,11 +101,16 @@ main_cycle() {
   require_env SDK_KEY "$SDK_KEY"
   require_env PUBLISHER_ID "$PUBLISHER_ID"
   require_env APP_ID_ANDROID "$APP_ID_ANDROID"
+  # Secondary app IDs are optional; if provided they will receive traffic
+  # and make the test more life-like across multiple apps under same tenant.
+  APP_ID_ANDROID_2="$APP_ID_ANDROID_2" 
   require_env APP_ID_IOS "$APP_ID_IOS"
+  APP_ID_IOS_2="$APP_ID_IOS_2"
   require_env APP_ID_WEB "$APP_ID_WEB"
   # Pass env explicitly to child
   bash -c "API_URL='$API_URL' TOKEN='$TOKEN' SDK_KEY='$SDK_KEY' PUBLISHER_ID='$PUBLISHER_ID' \
-           APP_ID_ANDROID='$APP_ID_ANDROID' APP_ID_IOS='$APP_ID_IOS' APP_ID_WEB='$APP_ID_WEB' \
+           APP_ID_ANDROID='$APP_ID_ANDROID' APP_ID_ANDROID_2='$APP_ID_ANDROID_2' \
+           APP_ID_IOS='$APP_ID_IOS' APP_ID_IOS_2='$APP_ID_IOS_2' APP_ID_WEB='$APP_ID_WEB' \
            \"$ROOT_DIR/scripts/ops/vra_synthetic_load.sh\" $CYCLE_MINUTES $RATE_EPM" || log "[warn] synthetic load returned non-zero"
 
   # SSAI smoke (non-fatal)

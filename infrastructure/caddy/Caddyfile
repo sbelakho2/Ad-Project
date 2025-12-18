@@ -35,5 +35,6 @@ console.apexmediation.ee {
 # Marketing Website
 # -----------------------------------------------------------------------------
 apexmediation.ee, www.apexmediation.ee {
-  reverse_proxy website:3001
+  # Next.js standalone served by PM2 on the app server
+  reverse_proxy 127.0.0.1:3002
 }

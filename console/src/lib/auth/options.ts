@@ -171,7 +171,30 @@ export const authOptions: NextAuthOptions = {
     maxAge: 24 * 60 * 60,
     updateAge: 60 * 60,
   },
-  cookies: {},
+  cookies: (() => {
+    const cookies: any = {}
+    // In production, scope cookies to the console origin to avoid redirect loops caused by cookie mismatch
+    if (process.env.NODE_ENV === 'production') {
+      const url = process.env.NEXTAUTH_URL || ''
+      try {
+        const u = new URL(url)
+        const domain = u.hostname
+        cookies.sessionToken = {
+          name: `__Secure-next-auth.session-token`,
+          options: {
+            httpOnly: true,
+            sameSite: 'lax',
+            path: '/',
+            secure: true,
+            domain,
+          },
+        }
+      } catch {
+        // Fallback: let NextAuth defaults apply
+      }
+    }
+    return cookies
+  })(),
   useSecureCookies: process.env.NODE_ENV === 'production',
   secret: process.env.NEXTAUTH_SECRET || 'development-secret-change-in-production',
   events: {

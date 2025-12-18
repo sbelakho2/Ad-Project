@@ -410,6 +410,56 @@
     color: rgb(var(--brand-700));
   }
 
+  .icon-pill {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: rgb(var(--brand-500) / 0.06);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .icon-pill svg {
+    width: 22px;
+    height: 22px;
+    color: rgb(var(--brand-600));
+    stroke-width: 1.75;
+  }
+
+  .feature-card {
+    border-radius: var(--card-radius);
+    padding: 22px 24px;
+    border: 1px solid rgb(var(--gray-200));
+    background: rgb(var(--surface));
+    box-shadow: 0 10px 30px rgb(15 23 42 / 0.04);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  }
+
+  .dark .feature-card {
+    border-color: rgb(var(--divider-dark));
+    background: rgb(var(--card-dark));
+  }
+
+  .feature-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 14px 40px rgb(15 23 42 / 0.08);
+    border-color: rgb(var(--brand-200));
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    background: rgb(var(--brand-500) / 0.08);
+    color: rgb(var(--brand-600));
+  }
+
   /* Animations */
   .animate-on-scroll {
     @apply translate-y-4 opacity-0 transition-all duration-700;
@@ -437,64 +487,6 @@
   }
 }
 
-/*
-  Global styles for the Website app
-  - Align tokens with ThemeProvider: toggles `.dark` class on <html>
-  - Provide shared utility classes used across dashboard/components
-  - De‑duplicate any ad‑hoc utilities by centralizing here
-*/
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* Legacy theme alias variables removed; base colors already defined in WEBSITE_FIX tokens above */
-
-/* Shared component utilities */
-@layer components {
-  /* Buttons */
-  .btn-primary-yellow {
-    /* Deprecated: map to brand tokens for safety */
-    @apply inline-flex items-center justify-center rounded font-bold uppercase tracking-wide transition;
-    background: rgb(var(--brand-500));
-    color: #fff;
-  }
-  .btn-primary-yellow:hover { background: rgb(var(--brand-600)); }
-  .btn-outline {
-    @apply inline-flex items-center justify-center rounded border font-bold uppercase tracking-wide transition;
-    border-color: rgb(var(--brand-500));
-    color: rgb(var(--brand-600));
-  }
-  .btn-outline:hover {
-    @apply text-white;
-    background: rgb(var(--brand-600));
-  }
-
-  /* Cards */
-  .card {
-    border-radius: var(--card-radius);
-    border: 1px solid #e5e7eb;
-    background: #ffffff;
-    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
-    padding: 22px 24px;
-    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-  }
-  .dark .card {
-    border-color: rgb(var(--gray-700));
-    background: rgb(var(--surface-dark));
-  }
-
-  .card-blue { @apply rounded-lg text-white; border: 2px solid rgb(var(--brand-600)); background: rgb(var(--brand-600)); }
-  .dark .card-blue { border-color: rgb(var(--brand-500)); }
-
-  /* Inputs */
-  .input { @apply rounded border px-4 py-3 transition; border-color: rgb(var(--gray-300)); }
-  .input:focus { @apply outline-none; box-shadow: 0 0 0 2px rgb(var(--focus)); border-color: rgb(var(--brand-500)); }
-
-  /* Text helpers matching design tokens */
-  /* Legacy utility classes removed — use Tailwind color tokens (brand/*, gray/*, success/warning/danger) */
-}
-
 /* Reduce motion preference */
 @media (prefers-reduced-motion: reduce) {
   * {
@@ -502,50 +494,5 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
-  }
-
-  .icon-pill {
-    width: 40px;
-    height: 40px;
-    border-radius: 999px;
-    background: rgba(37, 99, 235, 0.06);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .icon-pill svg {
-    width: 22px;
-    height: 22px;
-    color: #2563eb;
-    stroke-width: 1.75;
-  }
-
-  .feature-card {
-    border-radius: var(--card-radius);
-    padding: 22px 24px;
-    border: 1px solid #e5e7eb;
-    background: #fff;
-    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
-    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-  }
-
-  .feature-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
-    border-color: #cbd5f5;
-  }
-
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.25rem 0.65rem;
-    border-radius: 999px;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    background: rgba(37, 99, 235, 0.08);
-    color: rgb(var(--brand-600));
   }
 }

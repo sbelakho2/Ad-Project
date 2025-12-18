@@ -317,7 +317,7 @@ export default function SecurityPackPage() {
                 </h2>
               </motion.div>
 
-              <div className="grid md:grid-cols-3 gap-6">
+              <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
                 <motion.div {...getRevealProps(0.1)} className="bg-success/10 rounded-xl p-6 text-center">
                   <CheckCircle className="w-10 h-10 text-success mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">GDPR</h3>
@@ -332,6 +332,11 @@ export default function SecurityPackPage() {
                   <Shield className="w-10 h-10 text-info mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">IAB TCF 2.2</h3>
                   <p className="text-sm text-gray-600">Consent Propagation</p>
+                </motion.div>
+                <motion.div {...getRevealProps(0.25)} className="bg-info/10 rounded-xl p-6 text-center">
+                  <Shield className="w-10 h-10 text-info mx-auto mb-3" />
+                  <h3 className="font-semibold text-gray-900 mb-1">SOC 2</h3>
+                  <p className="text-sm text-gray-600">Type II-aligned controls</p>
                 </motion.div>
               </div>
             </div>

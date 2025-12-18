@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { useSession } from 'next-auth/react'
+import DashboardGate from './DashboardGate'
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useMemo, useState, type ChangeEvent } from 'react'
 import { revenueApi } from '@/lib/api'
@@ -151,6 +152,7 @@ export default function DashboardPage() {
   const canRenderOperationalWidgets = Boolean(publisherId)
 
   return (
+    <DashboardGate>
     <div className="min-h-screen bg-[#f9fafb]">
       <header className="bg-white/90 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -291,6 +293,7 @@ export default function DashboardPage() {
         </section>
       </main>
     </div>
+    </DashboardGate>
   )
 }
 

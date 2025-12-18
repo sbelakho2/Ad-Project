@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { signIn } from 'next-auth/react'
+import { signIn, useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import Image from 'next/image'
 
@@ -24,6 +24,11 @@ function getControlPlaneOrigin(): string {
 
 export default function LoginPage() {
   const router = useRouter()
+  const { status } = useSession()
+  // If already authenticated, go straight to dashboard
+  if (typeof window !== 'undefined' && status === 'authenticated') {
+    router.replace('/dashboard')
+  }
   
   // Redirect admin subdomain users to operator login
   useEffect(() => {
@@ -113,7 +118,9 @@ export default function LoginPage() {
         email,
         password,
         csrfToken,
-        redirect: false,
+        // Let NextAuth handle cookie + redirect in one flow
+        redirect: true,
+        callbackUrl: '/dashboard',
       })
 
       if (result?.error) {
@@ -139,9 +146,10 @@ export default function LoginPage() {
           return next
         })
       } else if (result?.ok) {
+        // In case redirect:false is returned in some environments, ensure client-side nav as fallback
         setFailedAttempts(0)
         setHumanCheck(false)
-        router.push('/dashboard')
+        router.replace('/dashboard')
         router.refresh()
       } else {
         setError('An unexpected error occurred.')
@@ -174,13 +182,14 @@ export default function LoginPage() {
         tempToken: twofaToken,
         twofaCode: twofaCode.trim(),
         csrfToken,
-        redirect: false,
+        redirect: true,
+        callbackUrl: '/dashboard',
       })
 
       if (result?.error) {
         setTwofaError('Invalid or expired code. Try again or use a backup code.')
       } else if (result?.ok) {
-        router.push('/dashboard')
+        router.replace('/dashboard')
         router.refresh()
       } else {
         setTwofaError('Unable to complete verification. Please try again.')
