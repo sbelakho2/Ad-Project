@@ -45,14 +45,14 @@ const typeLabels: Record<string, string> = {
 };
 
 // Map fraud type to a semantic color used by FraudTypeBar
-function typeColor(t: string): 'red' | 'yellow' | 'blue' | 'gray' {
+function typeColor(t: string): 'danger' | 'warning' | 'info' | 'gray' {
   switch (t as FraudType) {
     case 'click_fraud':
-      return 'red';
+      return 'danger';
     case 'install_fraud':
-      return 'yellow';
+      return 'warning';
     case 'bot_traffic':
-      return 'blue';
+      return 'info';
     case 'vpn_abuse':
       return 'gray';
     default:
@@ -170,7 +170,7 @@ export default function FraudPage() {
             ))}
           </div>
         ) : error ? (
-          <div role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <div role="alert" aria-live="polite" className="rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
             {error}
           </div>
         ) : summary ? (
@@ -201,28 +201,28 @@ export default function FraudPage() {
           title="Detections"
           value={summary ? numberFmt.format(summary.totalDetected) : '—'}
           subtitle="Fraud attempts"
-          color="red"
+          color="danger"
           icon={XCircleIcon}
         />
         <StatCard
           title="Blocked Revenue"
           value={summary ? currencyFmt.format(Math.max(0, summary.blockedRevenue)) : '—'}
           subtitle="Current window"
-          color="yellow"
+          color="warning"
           icon={ShieldCheckIcon}
         />
         <StatCard
           title="Detection Rate"
           value={summary ? percentFmt.format(Math.max(0, summary.detectionRate / 100)) : '—'}
           subtitle="Of total traffic"
-          color="blue"
+          color="info"
           icon={ExclamationTriangleIcon}
         />
         <StatCard
           title="Avg Fraud Score"
           value={summary ? summary.avgFraudScore.toFixed(2) : '—'}
           subtitle="0 (low) to 1 (high)"
-          color="green"
+          color="success"
           icon={CheckCircleIcon}
         />
       </div>
@@ -279,7 +279,7 @@ export default function FraudPage() {
             ))}
           </div>
         ) : error ? (
-          <div role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <div role="alert" aria-live="polite" className="rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
             {error}
           </div>
         ) : fraudEvents.length === 0 ? (
@@ -308,16 +308,16 @@ interface StatCardProps {
   title: string;
   value: string;
   subtitle: string;
-  color: 'red' | 'yellow' | 'blue' | 'green';
+  color: 'danger' | 'warning' | 'info' | 'success';
   icon: React.ComponentType<{ className?: string }>;
 }
 
 function StatCard({ title, value, subtitle, color, icon: Icon }: StatCardProps) {
   const colorMap = {
-    red: 'bg-red-500 text-white',
-    yellow: 'bg-brand-50 text-brand-700',
-    blue: 'bg-brand-600 text-white',
-    green: 'bg-green-500 text-white',
+    danger: 'bg-danger text-white',
+    warning: 'bg-warning text-white',
+    info: 'bg-info text-white',
+    success: 'bg-success text-white',
   } as const;
 
   return (
@@ -340,14 +340,14 @@ interface FraudTypeBarProps {
   type: string;
   count: number;
   percentage: number;
-  color: 'red' | 'yellow' | 'blue' | 'gray';
+  color: 'danger' | 'warning' | 'info' | 'gray';
 }
 
 function FraudTypeBar({ type, count, percentage, color }: FraudTypeBarProps) {
   const colorMap = {
-    red: 'bg-red-500',
-    yellow: 'bg-warning',
-    blue: 'bg-brand-600',
+    danger: 'bg-danger',
+    warning: 'bg-warning',
+    info: 'bg-info',
     gray: 'bg-gray-400',
   };
 
@@ -375,8 +375,8 @@ interface FraudEventCardProps {
 
 function FraudEventCard({ event }: FraudEventCardProps) {
   const severityConfig = {
-    high: { color: 'border-red-500 bg-red-50', badge: 'bg-red-500', label: 'High severity' },
-    medium: { color: 'border-yellow-500 bg-yellow-50', badge: 'bg-yellow-500', label: 'Medium severity' },
+    high: { color: 'border-danger bg-danger/10', badge: 'bg-danger', label: 'High severity' },
+    medium: { color: 'border-warning bg-warning/10', badge: 'bg-warning', label: 'Medium severity' },
     low: { color: 'border-gray-400 bg-gray-50', badge: 'bg-gray-400', label: 'Low severity' },
   };
 
@@ -392,12 +392,12 @@ function FraudEventCard({ event }: FraudEventCardProps) {
           <span className="text-sm text-gray-600">{formatTs(event.ts)}</span>
         </div>
         {event.blocked ? (
-          <div className="flex items-center gap-1 text-green-600 text-sm font-bold">
+          <div className="flex items-center gap-1 text-success text-sm font-bold">
             <CheckCircleIcon className="w-4 h-4" />
             Blocked
           </div>
         ) : (
-          <div className="flex items-center gap-1 text-yellow-600 text-sm font-bold">
+          <div className="flex items-center gap-1 text-warning text-sm font-bold">
             <ExclamationTriangleIcon className="w-4 h-4" />
             Review
           </div>

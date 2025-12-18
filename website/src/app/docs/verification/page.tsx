@@ -13,8 +13,9 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
+import { repoPath } from '@/config/links';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -25,25 +26,21 @@ const getRevealProps = (delay = 0) => ({
 export default function VerificationPage() {
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         {/* Hero */}
-        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-gray-50 to-white border-b border-gray-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <Key className="w-4 h-4" />
                 Signed Log Verification
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-ink leading-tight mb-6">
                 Verify Any Auction, Pod, or Session
               </h1>
-              <p className="text-xl text-slate-600">
+              <p className="text-xl text-inkMuted">
                 Every decision ApexMediation makes is cryptographically signed. Here&apos;s how to verify it.
               </p>
             </motion.div>
@@ -299,35 +296,35 @@ openssl pkeyutl -verify -pubin -inkey apex-key.pem \\
               <motion.div {...getRevealProps(0.1)} className="bg-white rounded-xl p-6 border border-gray-100">
                 <ul className="space-y-4">
                   <li className="flex items-start gap-3">
-                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="font-medium text-gray-900">Complete Trace</span>
                       <p className="text-sm text-gray-600">Request flow from SDK to partners and back, with timestamps.</p>
                     </div>
                   </li>
                   <li className="flex items-start gap-3">
-                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="font-medium text-gray-900">Decision Rationale</span>
                       <p className="text-sm text-gray-600">Why each ad was selected or rejected (format, latency, bid, cap).</p>
                     </div>
                   </li>
                   <li className="flex items-start gap-3">
-                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="font-medium text-gray-900">Partner Responses</span>
                       <p className="text-sm text-gray-600">What each partner returned (sanitized of sensitive data).</p>
                     </div>
                   </li>
                   <li className="flex items-start gap-3">
-                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="font-medium text-gray-900">Cryptographic Signatures</span>
                       <p className="text-sm text-gray-600">All components signed for tamper-evidence.</p>
                     </div>
                   </li>
                   <li className="flex items-start gap-3">
-                    <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="font-medium text-gray-900">Reconciliation Data</span>
                       <p className="text-sm text-gray-600">Event counts, discrepancies, and resolution notes.</p>
@@ -358,7 +355,7 @@ openssl pkeyutl -verify -pubin -inkey apex-key.pem \\
                   Run Sandbox
                 </a>
                 <a
-                  href={require('@/config/links').repoPath('tools/cli')}
+                  href={repoPath('tools/cli')}
                   className="inline-flex items-center gap-2 px-6 py-3 bg-white/10 text-white border border-white/20 rounded-lg font-semibold hover:bg-white/20 transition-colors"
                 >
                   <Code className="w-5 h-5" />

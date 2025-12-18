@@ -12,7 +12,7 @@ import { initializeDatabase } from './database';
 import { redis } from './utils/redis';
 import { initializeQueues, shutdownQueues } from './queues/queueInitializer';
 import { promRegister, httpRequestDurationSeconds, httpRequestsTotal } from './utils/prometheus';
-import { authRateLimiter } from './middleware/redisRateLimiter';
+import { authTieredRateLimiter } from './middleware/tieredRateLimiter';
 import swaggerUi from 'swagger-ui-express';
 import { getOpenAPIDocument } from './utils/openapi';
 import csrfProtection from './middleware/csrf';
@@ -101,29 +101,49 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Rate limiting
+// Rate limiting - Tiered by customer plan
+// Industry benchmarks: Stripe 100/sec, GitHub 5000/hour, Twitter Pro 900/15min
+// Default: 1000 req/min (Starter tier) - much higher than previous 100/15min
+import { defaultRateLimiter, isRateLimitExempt } from './middleware/tieredRateLimiter';
+import { TIER_RATE_LIMITS } from './config/rateLimits';
+
+// Log rate limit configuration at startup
+logger.info('Rate limiting configured', {
+  starterGlobal: `${TIER_RATE_LIMITS.starter.global.max} req/${TIER_RATE_LIMITS.starter.global.windowMs / 1000}s`,
+  growthGlobal: `${TIER_RATE_LIMITS.growth.global.max} req/${TIER_RATE_LIMITS.growth.global.windowMs / 1000}s`,
+  scaleGlobal: `${TIER_RATE_LIMITS.scale.global.max} req/${TIER_RATE_LIMITS.scale.global.windowMs / 1000}s`,
+  enterpriseGlobal: `${TIER_RATE_LIMITS.enterprise.global.max} req/${TIER_RATE_LIMITS.enterprise.global.windowMs / 1000}s`,
+});
+
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000'), // 1 minute default (was 15 minutes)
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000'),    // 1000/min default (was 100/15min = 6.7/min)
   standardHeaders: true,
   legacyHeaders: false,
-  message: 'Too many requests from this IP, please try again later.',
+  message: {
+    success: false,
+    error: 'Too many requests',
+    message: 'Rate limit exceeded. Upgrade your plan for higher limits.',
+    upgradeUrl: '/pricing',
+  },
   skip: (req: Request) => {
     const originalUrl = req.originalUrl || '';
 
-    // Auth routes have their own limiter.
+    // Auth routes have their own stricter limiter
     if (originalUrl.startsWith(`/api/${API_VERSION}/auth`)) return true;
 
-    // Public status/SLO endpoints must be resilient for customer-facing pages.
-    // These endpoints are cache-protected on the backend and the website; rate-limiting them
-    // at low thresholds causes false-positive 429s (especially via server-side fetches).
-    if (req.method === 'GET') {
+    // Public status/SLO endpoints must be resilient for customer-facing pages
+    // These are cache-protected and need high availability
+    if (req.method === 'GET' || req.method === 'HEAD') {
       if (originalUrl.startsWith(`/api/${API_VERSION}/status.json`)) return true;
       if (originalUrl.startsWith(`/api/${API_VERSION}/slo.json`)) return true;
     }
 
-    // High-volume ingest endpoints: do not apply the generic IP limiter.
+    // High-volume SDK ingest endpoints have their own analytics limiter
     if (originalUrl.startsWith(`/api/${API_VERSION}/analytics/events/`)) return true;
+
+    // Health/readiness endpoints are always exempt
+    if (isRateLimitExempt(originalUrl)) return true;
 
     return false;
   },
@@ -188,8 +208,8 @@ app.get('/metrics', async (_req: Request, res: Response) => {
 });
 
 // API routes
-// Attach stricter rate limiting for auth endpoints
-app.use(`/api/${API_VERSION}/auth`, authRateLimiter);
+// Attach stricter rate limiting for auth endpoints (tier-aware)
+app.use(`/api/${API_VERSION}/auth`, authTieredRateLimiter);
 
 // OpenAPI/Swagger endpoints
 app.get('/openapi.json', (_req, res) => {

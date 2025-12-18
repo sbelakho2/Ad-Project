@@ -16,7 +16,7 @@ import HomeNav from '@/components/HomeNav';
  * 
  * This component ensures:
  * - Consistent white background (bg-white)
- * - Consistent border (border-b border-slate-200/60)
+ * - Consistent border (border-b border-gray-200/60)
  * - Consistent padding (py-6)
  * - Single navigation implementation
  * 
@@ -25,7 +25,7 @@ import HomeNav from '@/components/HomeNav';
 
 export default function SiteHeader() {
   return (
-    <header className="bg-white border-b border-slate-200/60">
+    <header className="bg-white border-b border-gray-200/60">
       <div className="container mx-auto px-4 py-6">
         <HomeNav />
       </div>

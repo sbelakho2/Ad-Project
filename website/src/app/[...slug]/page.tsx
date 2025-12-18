@@ -225,13 +225,13 @@ function renderContent(slugKey: string, breadcrumbs: Breadcrumb[]): React.ReactN
             <aside>
               <nav className="sticky top-24 space-y-3 rounded-3xl bg-gray-50 p-6 text-sm font-semibold tracking-wide text-gray-700">
                 <span className="block text-gray-500">Contents</span>
-                <a href="#getting-started" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">Getting started</a>
-                <a href="#real-time-bidding" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">Real-time bidding</a>
-                <a href="#ml-fraud-detection" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">ML fraud detection</a>
-                <a href="#ab-testing-platform" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">A/B testing</a>
-                <a href="#integration-checklist" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">Integration checklist</a>
-                <a href="#sdk-reference" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">SDK reference</a>
-                <a href="#ssai-documentation" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]">SSAI documentation</a>
+                <a href="#getting-started" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">Getting started</a>
+                <a href="#real-time-bidding" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">Real-time bidding</a>
+                <a href="#ml-fraud-detection" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">ML fraud detection</a>
+                <a href="#ab-testing-platform" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">A/B testing</a>
+                <a href="#integration-checklist" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">Integration checklist</a>
+                <a href="#sdk-reference" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">SDK reference</a>
+                <a href="#ssai-documentation" className="block hover:text-brand-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]">SSAI documentation</a>
               </nav>
             </aside>
             <div className="space-y-8">
@@ -352,37 +352,37 @@ Body: {
                 <h2 className="text-h3 font-semibold text-gray-900">5. Integration Checklist</h2>
                 <ul className="mt-4 space-y-3 text-body text-gray-700">
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>Add the SDK to your project and confirm no build errors.</span>
                   </li>
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>Verify GDPR/CCPA consent flow for European and Californian users.</span>
                   </li>
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>Test rewarded and interstitial placements using device test mode.</span>
                   </li>
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>Enable analytics streaming to your data warehouse of choice.</span>
                   </li>
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>View payout schedule and invoices (NET 30 payment terms) in <Link href="/dashboard/settings?tab=payment" className="font-bold underline">Settings → Payment Methods</Link>.</span>
                   </li>
                   <li className="flex items-start gap-3">
-                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <span className="mt-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-success/10 text-success">
                       <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     </span>
                     <span>Review <Link href="/docs/ssai/prerequisites" className="font-bold underline">SSAI prerequisites</Link> if using server-side ad insertion.</span>

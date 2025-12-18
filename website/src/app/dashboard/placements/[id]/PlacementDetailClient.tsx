@@ -138,7 +138,7 @@ export default function PlacementDetailClient({ id }: { id: string }) {
                 <button onClick={toggleActive} className="btn-secondary text-sm px-4">
                   {placement.status === 'active' ? 'Deactivate' : 'Activate'}
                 </button>
-                <button onClick={archive} className="px-4 py-2 text-sm rounded text-white bg-[var(--danger)] hover:bg-[#b91c1c]">
+                <button onClick={archive} className="px-4 py-2 text-sm rounded text-white bg-[rgb(var(--danger))] hover:opacity-90">
                   Archive
                 </button>
               </div>

@@ -14,9 +14,9 @@ export default function MeasurementSemanticsPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">Measurement Semantics</span>
           </div>
@@ -33,9 +33,9 @@ export default function MeasurementSemanticsPage() {
           </div>
 
           {/* Core Guarantee */}
-          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-6 mb-12">
+          <div className="bg-brand-50 border border-brand-200 rounded-lg p-6 mb-12">
             <h2 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-              <Shield className="w-5 h-5 text-emerald-600" />
+              <Shield className="w-5 h-5 text-brand-600" />
               Core Guarantee: Exactly-Once Delivery
             </h2>
             <p className="text-gray-600 text-sm">
@@ -47,7 +47,7 @@ export default function MeasurementSemanticsPage() {
           {/* Event Definitions */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <BarChart3 className="w-6 h-6 text-emerald-600" />
+              <BarChart3 className="w-6 h-6 text-brand-600" />
               Event Definitions
             </h2>
 
@@ -114,7 +114,7 @@ export default function MeasurementSemanticsPage() {
               </table>
             </div>
 
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="bg-info/10 border border-info/20 rounded-lg p-4">
               <h3 className="font-semibold text-gray-900 text-sm mb-2">Note on Segment-Based Tracking</h3>
               <p className="text-sm text-gray-600">
                 SSAI tracks based on segment fetches, not player-reported time positions. This is more 
@@ -127,7 +127,7 @@ export default function MeasurementSemanticsPage() {
           {/* Deduplication */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Target className="w-6 h-6 text-emerald-600" />
+              <Target className="w-6 h-6 text-brand-600" />
               Deduplication Keys
             </h2>
 
@@ -154,7 +154,7 @@ export default function MeasurementSemanticsPage() {
             <div className="grid md:grid-cols-2 gap-4">
               <div className="border rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 text-sm mb-2 flex items-center gap-2">
-                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  <CheckCircle className="w-4 h-4 text-success" />
                   Dedupe Behavior
                 </h3>
                 <ul className="text-sm text-gray-600 space-y-1">
@@ -166,7 +166,7 @@ export default function MeasurementSemanticsPage() {
               </div>
               <div className="border rounded-lg p-4">
                 <h3 className="font-semibold text-gray-900 text-sm mb-2 flex items-center gap-2">
-                  <RefreshCw className="w-4 h-4 text-emerald-600" />
+                  <RefreshCw className="w-4 h-4 text-brand-600" />
                   Retry Behavior
                 </h3>
                 <ul className="text-sm text-gray-600 space-y-1">
@@ -183,35 +183,35 @@ export default function MeasurementSemanticsPage() {
           {/* Live vs VOD Differences */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               Live vs VOD Tracking Differences
             </h2>
 
             <div className="space-y-6">
               <div className="border rounded-lg overflow-hidden">
-                <div className="bg-blue-50 px-4 py-3 border-b border-blue-200">
-                  <h3 className="font-semibold text-blue-800">Live Mode</h3>
+                <div className="bg-info/10 px-4 py-3 border-b border-info/20">
+                  <h3 className="font-semibold text-info">Live Mode</h3>
                 </div>
                 <div className="p-4">
                   <ul className="space-y-2 text-sm text-gray-600">
                     <li className="flex items-start gap-2">
-                      <span className="text-blue-600 mt-1">●</span>
+                      <span className="text-info mt-1">●</span>
                       <span><strong>Real-time tracking:</strong> Events fired as segments are fetched (sub-second latency)</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-blue-600 mt-1">●</span>
+                      <span className="text-info mt-1">●</span>
                       <span><strong>Session TTL:</strong> 4 hours (covers typical live viewing session)</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-blue-600 mt-1">●</span>
+                      <span className="text-info mt-1">●</span>
                       <span><strong>Seek handling:</strong> Seeks within ad break don&apos;t re-fire events (dedupe)</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-blue-600 mt-1">●</span>
+                      <span className="text-info mt-1">●</span>
                       <span><strong>DVR playback:</strong> Events fire on DVR catch-up if within TTL</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-blue-600 mt-1">●</span>
+                      <span className="text-info mt-1">●</span>
                       <span><strong>Pause handling:</strong> Paused session still valid, events fire on resume</span>
                     </li>
                   </ul>
@@ -219,29 +219,29 @@ export default function MeasurementSemanticsPage() {
               </div>
 
               <div className="border rounded-lg overflow-hidden">
-                <div className="bg-purple-50 px-4 py-3 border-b border-purple-200">
-                  <h3 className="font-semibold text-purple-800">VOD Mode</h3>
+                <div className="bg-brand-50 px-4 py-3 border-b border-brand-200">
+                  <h3 className="font-semibold text-brand-800">VOD Mode</h3>
                 </div>
                 <div className="p-4">
                   <ul className="space-y-2 text-sm text-gray-600">
                     <li className="flex items-start gap-2">
-                      <span className="text-purple-600 mt-1">●</span>
+                      <span className="text-brand-700 mt-1">●</span>
                       <span><strong>Segment-based tracking:</strong> Events mapped to pre-computed segment positions</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-purple-600 mt-1">●</span>
+                      <span className="text-brand-700 mt-1">●</span>
                       <span><strong>Session TTL:</strong> 24 hours (covers multi-day binge watching)</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-purple-600 mt-1">●</span>
+                      <span className="text-brand-700 mt-1">●</span>
                       <span><strong>Resume position:</strong> Tracked; events only fire for unwatched segments</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-purple-600 mt-1">●</span>
+                      <span className="text-brand-700 mt-1">●</span>
                       <span><strong>Re-watch:</strong> Same session → no duplicate events. New session → full event set.</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-purple-600 mt-1">●</span>
+                      <span className="text-brand-700 mt-1">●</span>
                       <span><strong>Fast-forward:</strong> Skipped segments don&apos;t trigger quartile events</span>
                     </li>
                   </ul>
@@ -253,7 +253,7 @@ export default function MeasurementSemanticsPage() {
           {/* Late Events */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <AlertTriangle className="w-6 h-6 text-amber-600" />
+              <AlertTriangle className="w-6 h-6 text-warning" />
               Late Event Handling
             </h2>
 
@@ -261,7 +261,7 @@ export default function MeasurementSemanticsPage() {
               Events that arrive after the session TTL are considered &quot;late&quot; and handled specially:
             </p>
 
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 mb-4">
+            <div className="bg-warning/10 border border-warning/20 rounded-lg p-6 mb-4">
               <h3 className="font-semibold text-gray-900 mb-3">Late Event Policy</h3>
               <div className="grid md:grid-cols-2 gap-4">
                 <div>
@@ -294,7 +294,7 @@ export default function MeasurementSemanticsPage() {
           {/* Reconciliation */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Reconciliation &amp; Reporting
             </h2>
 
@@ -372,29 +372,29 @@ export default function MeasurementSemanticsPage() {
           </section>
 
           {/* Related Documentation */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Live Mode →</h3>
                 <p className="text-sm text-gray-600">Real-time ad insertion flow</p>
               </Link>
-              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">VOD Mode →</h3>
                 <p className="text-sm text-gray-600">Pre-stitched manifest tracking</p>
               </Link>
-              <Link href="/docs/ssai/operations" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/operations" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Operations →</h3>
                 <p className="text-sm text-gray-600">Failure modes and SLAs</p>
               </Link>
-              <Link href="/reporting" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/reporting" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Reporting Dashboard →</h3>
                 <p className="text-sm text-gray-600">Real-time metrics and exports</p>
               </Link>
             </div>
             
-            <div className="mt-6 pt-6 border-t border-emerald-200">
-              <Link href="/docs/ssai" className="inline-flex items-center text-emerald-700 font-medium hover:text-emerald-800">
+            <div className="mt-6 pt-6 border-t border-brand-200">
+              <Link href="/docs/ssai" className="inline-flex items-center text-brand-700 font-medium hover:text-brand-800">
                 ← Back to SSAI Overview
               </Link>
             </div>

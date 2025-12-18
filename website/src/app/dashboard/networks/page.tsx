@@ -224,7 +224,7 @@ export default function NetworksPage() {
 
       {/* Error/empty */}
       {error && (
-        <div role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">{error}</div>
+        <div role="alert" aria-live="polite" className="rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">{error}</div>
       )}
 
       {/* Networks Grid */}
@@ -250,31 +250,31 @@ export default function NetworksPage() {
         <div className="card-v2-body">
           <ol className="space-y-3 text-sm text-gray-700">
             <li className="flex gap-3">
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{borderColor:'var(--brand-500)'}}>1</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{ borderColor: 'rgb(var(--brand-500))' }}>1</span>
               <span>
                 Click the &ldquo;Add Network&rdquo; button above and select your ad network from the list
               </span>
             </li>
             <li className="flex gap-3">
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{borderColor:'var(--brand-500)'}}>2</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{ borderColor: 'rgb(var(--brand-500))' }}>2</span>
               <span>
                 Enter your API credentials (App ID, API Key, etc.) from the network&rsquo;s dashboard
               </span>
             </li>
             <li className="flex gap-3">
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{borderColor:'var(--brand-500)'}}>3</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{ borderColor: 'rgb(var(--brand-500))' }}>3</span>
               <span>
                 Configure bidding parameters: min eCPM, timeout, priority level
               </span>
             </li>
             <li className="flex gap-3">
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{borderColor:'var(--brand-500)'}}>4</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{ borderColor: 'rgb(var(--brand-500))' }}>4</span>
               <span>
                 Test the connection and wait for the first ad request (usually within 5 minutes)
               </span>
             </li>
             <li className="flex gap-3">
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{borderColor:'var(--brand-500)'}}>5</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border text-xs font-semibold text-brand-700" style={{ borderColor: 'rgb(var(--brand-500))' }}>5</span>
               <span>
                 Monitor performance in real-time and adjust settings as needed
               </span>
@@ -297,8 +297,8 @@ function NetworkCard({ network, curFmt, numFmt }: NetworkCardProps) {
   const statusConfig = {
     active: {
       icon: CheckCircleIcon,
-      color: 'text-green-600',
-      bg: 'bg-green-50',
+      color: 'text-success',
+      bg: 'bg-success/10',
       label: 'Active',
     },
     inactive: {
@@ -309,8 +309,8 @@ function NetworkCard({ network, curFmt, numFmt }: NetworkCardProps) {
     },
     error: {
       icon: ExclamationTriangleIcon,
-      color: 'text-red-600',
-      bg: 'bg-red-50',
+      color: 'text-danger',
+      bg: 'bg-danger/10',
       label: 'Error',
     },
   };
@@ -332,7 +332,7 @@ function NetworkCard({ network, curFmt, numFmt }: NetworkCardProps) {
             </div>
           </div>
           {network.status === 'active' && (
-            <div className="inline-flex items-center rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold uppercase text-brand-700 border" style={{borderColor:'var(--brand-500)'}}>
+            <div className="inline-flex items-center rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold uppercase text-brand-700 border" style={{ borderColor: 'rgb(var(--brand-500))' }}>
               Live
             </div>
           )}

@@ -19,7 +19,7 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -69,19 +69,19 @@ const sampleEvents = [
 ];
 
 const eventColors: Record<string, string> = {
-  SESSION_INIT: 'text-blue-600 bg-blue-100',
-  CUE_RECEIVED: 'text-purple-600 bg-purple-100',
-  AUCTION_START: 'text-indigo-600 bg-indigo-100',
-  BID_RECEIVED: 'text-green-600 bg-green-100',
-  PARTNER_TIMEOUT: 'text-amber-600 bg-amber-100',
+  SESSION_INIT: 'text-info bg-info/10',
+  CUE_RECEIVED: 'text-brand-700 bg-brand-100',
+  AUCTION_START: 'text-info bg-info/10',
+  BID_RECEIVED: 'text-success bg-success/10',
+  PARTNER_TIMEOUT: 'text-warning bg-warning/10',
   AUCTION_COMPLETE: 'text-brand-600 bg-brand-100',
-  STITCH_START: 'text-cyan-600 bg-cyan-100',
-  STITCH_COMPLETE: 'text-teal-600 bg-teal-100',
-  IMPRESSION: 'text-emerald-600 bg-emerald-100',
-  QUARTILE_25: 'text-lime-600 bg-lime-100',
-  QUARTILE_50: 'text-lime-600 bg-lime-100',
-  QUARTILE_75: 'text-lime-600 bg-lime-100',
-  COMPLETE: 'text-green-700 bg-green-200',
+  STITCH_START: 'text-info bg-info/10',
+  STITCH_COMPLETE: 'text-success bg-success/10',
+  IMPRESSION: 'text-success bg-success/10',
+  QUARTILE_25: 'text-success bg-success/10',
+  QUARTILE_50: 'text-success bg-success/10',
+  QUARTILE_75: 'text-success bg-success/10',
+  COMPLETE: 'text-success bg-success/20',
 };
 
 export default function SandboxPage() {
@@ -124,15 +124,11 @@ export default function SandboxPage() {
 
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         {/* Hero */}
-        <section className="py-16 md:py-16 bg-gradient-to-b from-gray-900 to-gray-800">
+        <section className="py-16 md:py-16 bg-gradient-to-b from-[rgb(var(--bg-dark))] to-[rgb(var(--surface-dark))]">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-600/20 text-brand-400 text-sm font-medium mb-6">
@@ -142,7 +138,7 @@ export default function SandboxPage() {
               <h1 className="text-4xl md:text-5xl font-bold text-white leading-tight mb-6">
                 SSAI Evaluation Sandbox
               </h1>
-              <p className="text-xl text-gray-300 mb-8">
+              <p className="text-xl text-white/80 mb-8">
                 Run a simulated SSAI session without any credentials. See exactly how ApexMediation handles ad breaks, auctions, and playback.
               </p>
               <div className="flex flex-wrap justify-center gap-4">
@@ -183,21 +179,21 @@ export default function SandboxPage() {
                 <Terminal className="w-6 h-6 text-gray-700" />
                 <h2 className="text-2xl font-bold text-gray-900">Live Event Console</h2>
                 {isRunning && (
-                  <span className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
-                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                  <span className="flex items-center gap-2 px-3 py-1 bg-success/10 text-success rounded-full text-sm font-medium">
+                    <span className="w-2 h-2 bg-success rounded-full animate-pulse"></span>
                     Live
                   </span>
                 )}
               </motion.div>
 
-              <motion.div {...getRevealProps(0.1)} className="bg-gray-900 rounded-xl overflow-hidden shadow-xl">
+              <motion.div {...getRevealProps(0.1)} className="bg-[rgb(var(--bg-dark))] rounded-xl overflow-hidden shadow-xl">
                 {/* Console Header */}
                 <div className="flex items-center justify-between px-4 py-3 bg-gray-800 border-b border-gray-700">
                   <div className="flex items-center gap-3">
                     <div className="flex gap-2">
-                      <span className="w-3 h-3 bg-red-500 rounded-full"></span>
-                      <span className="w-3 h-3 bg-yellow-500 rounded-full"></span>
-                      <span className="w-3 h-3 bg-green-500 rounded-full"></span>
+                      <span className="w-3 h-3 bg-danger rounded-full"></span>
+                      <span className="w-3 h-3 bg-warning rounded-full"></span>
+                      <span className="w-3 h-3 bg-success rounded-full"></span>
                     </div>
                     <span className="text-gray-400 text-sm font-mono">apex-sandbox-console</span>
                   </div>
@@ -213,7 +209,7 @@ export default function SandboxPage() {
                 {/* Console Body */}
                 <div className={`font-mono text-sm p-4 overflow-y-auto transition-all ${showFullLog ? 'max-h-[600px]' : 'max-h-[300px]'}`}>
                   {currentEventIndex < 0 ? (
-                    <div className="text-gray-500 text-center py-8">
+                    <div className="text-white/60 text-center py-8">
                       Click &quot;Start Demo Session&quot; to begin the simulation
                     </div>
                   ) : (
@@ -225,15 +221,15 @@ export default function SandboxPage() {
                           animate={{ opacity: 1, x: 0 }}
                           className="flex items-start gap-3"
                         >
-                          <span className="text-gray-500 w-20 flex-shrink-0">{event.time}</span>
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${eventColors[event.event] || 'text-gray-600 bg-gray-700'}`}>
+                          <span className="text-white/60 w-20 flex-shrink-0">{event.time}</span>
+                          <span className={`px-2 py-0.5 rounded text-xs font-medium flex-shrink-0 ${eventColors[event.event] || 'text-white/80 bg-white/10'}`}>
                             {event.event}
                           </span>
-                          <span className="text-gray-300">{event.details}</span>
+                          <span className="text-white/80">{event.details}</span>
                         </motion.div>
                       ))}
                       {isRunning && (
-                        <div className="flex items-center gap-2 text-gray-500">
+                        <div className="flex items-center gap-2 text-white/60">
                           <span className="w-2 h-2 bg-brand-500 rounded-full animate-pulse"></span>
                           Waiting for next event...
                         </div>
@@ -285,7 +281,7 @@ export default function SandboxPage() {
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-gray-600">Fill Rate</dt>
-                        <dd className="font-medium text-green-600">100% (3/3)</dd>
+                        <dd className="font-medium text-success">100% (3/3)</dd>
                       </div>
                     </dl>
                   </div>
@@ -313,17 +309,17 @@ export default function SandboxPage() {
                               </td>
                               <td className="py-3">
                                 {partner.status === 'won' && (
-                                  <span className="inline-flex items-center gap-1 text-green-700 bg-green-100 px-2 py-0.5 rounded-full text-xs font-medium">
+                                  <span className="inline-flex items-center gap-1 text-success bg-success/10 px-2 py-0.5 rounded-full text-xs font-medium">
                                     <CheckCircle className="w-3 h-3" /> Winner
                                   </span>
                                 )}
                                 {partner.status === 'filled' && (
-                                  <span className="inline-flex items-center gap-1 text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full text-xs font-medium">
+                                  <span className="inline-flex items-center gap-1 text-info bg-info/10 px-2 py-0.5 rounded-full text-xs font-medium">
                                     <CheckCircle className="w-3 h-3" /> Filled
                                   </span>
                                 )}
                                 {partner.status === 'timeout' && (
-                                  <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full text-xs font-medium">
+                                  <span className="inline-flex items-center gap-1 text-warning bg-warning/10 px-2 py-0.5 rounded-full text-xs font-medium">
                                     <AlertCircle className="w-3 h-3" /> Timeout
                                   </span>
                                 )}
@@ -382,8 +378,8 @@ export default function SandboxPage() {
                 {/* DASH */}
                 <motion.div {...getRevealProps(0.15)} className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
                   <div className="flex items-center gap-2 mb-4">
-                    <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
-                      <Activity className="w-4 h-4 text-purple-600" />
+                    <div className="w-8 h-8 bg-info/10 rounded-lg flex items-center justify-center">
+                      <Activity className="w-4 h-4 text-info" />
                     </div>
                     <h3 className="font-semibold text-gray-900">DASH Manifest</h3>
                   </div>
@@ -430,21 +426,21 @@ export default function SandboxPage() {
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h4 className="font-semibold text-gray-900 mb-2">Web (HLS.js / Shaka)</h4>
                     <p className="text-sm text-gray-600 mb-3">Pass the HLS URL to your web player.</p>
-                    <code className="text-xs bg-gray-900 text-gray-300 rounded px-2 py-1 block overflow-x-auto">
+                    <code className="text-xs bg-[rgb(var(--bg-dark))] text-white/80 rounded px-2 py-1 block overflow-x-auto">
                       player.loadSource(hlsUrl);
                     </code>
                   </div>
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h4 className="font-semibold text-gray-900 mb-2">iOS (AVPlayer)</h4>
                     <p className="text-sm text-gray-600 mb-3">Load as AVAsset with the HLS URL.</p>
-                    <code className="text-xs bg-gray-900 text-gray-300 rounded px-2 py-1 block overflow-x-auto">
+                    <code className="text-xs bg-[rgb(var(--bg-dark))] text-white/80 rounded px-2 py-1 block overflow-x-auto">
                       AVPlayer(url: hlsUrl)
                     </code>
                   </div>
                   <div className="bg-gray-50 rounded-lg p-4">
                     <h4 className="font-semibold text-gray-900 mb-2">Android (ExoPlayer)</h4>
                     <p className="text-sm text-gray-600 mb-3">Create HLS media source.</p>
-                    <code className="text-xs bg-gray-900 text-gray-300 rounded px-2 py-1 block overflow-x-auto">
+                    <code className="text-xs bg-[rgb(var(--bg-dark))] text-white/80 rounded px-2 py-1 block overflow-x-auto">
                       HlsMediaSource.Factory(...)
                     </code>
                   </div>
@@ -456,16 +452,16 @@ export default function SandboxPage() {
 
         {/* Export Evidence */}
         {currentEventIndex >= sampleEvents.length - 1 && (
-          <section className="py-12 bg-gray-900 text-white">
+          <section className="py-12 bg-[rgb(var(--bg-dark))] text-white">
             <div className="container mx-auto px-4">
               <div className="max-w-4xl mx-auto text-center">
                 <motion.div
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                 >
-                  <CheckCircle className="w-12 h-12 text-green-400 mx-auto mb-6" />
+                  <CheckCircle className="w-12 h-12 text-success mx-auto mb-6" />
                   <h2 className="text-3xl font-bold mb-4">Session Complete!</h2>
-                  <p className="text-gray-300 mb-8">
+                  <p className="text-white/80 mb-8">
                     This demo session generated a signed evidence bundle that you can verify independently. In production, every session produces these bundles automatically.
                   </p>
                   <div className="flex flex-wrap justify-center gap-4">

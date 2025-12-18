@@ -313,7 +313,7 @@ function PlacementsPageInner() {
             ))}
           </div>
         ) : error ? (
-          <div role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <div role="alert" aria-live="polite" className="rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
             {error}
           </div>
         ) : filteredPlacements.length === 0 ? (
@@ -493,7 +493,7 @@ function PlacementCard({ placement, onConfigure, onViewDetails, onActivate }: Pl
           <h3 className="text-lg font-bold text-gray-900">{placement.name}</h3>
           <p className="text-sm text-gray-600">{placement.app} • {placement.format.toUpperCase()}</p>
         </div>
-        <div className={`text-sm font-bold ${placement.status === 'active' ? 'text-green-600' : 'text-gray-600'}`}>
+        <div className={`text-sm font-bold ${placement.status === 'active' ? 'text-success' : 'text-gray-600'}`}>
           {placement.status}
         </div>
       </div>
@@ -664,7 +664,7 @@ function PlacementModal({
                   <div className="text-sm text-gray-600">Status: <span className="font-semibold text-gray-900">{state.placement.status}</span></div>
                   <div className="flex items-center gap-2">
                     <a href={`/dashboard/placements/${state.placement.id}`} className="btn-primary px-4 py-2 text-sm">View full report</a>
-                    <button onClick={() => onArchive(state.placement.id)} className="px-4 py-2 text-sm rounded text-white bg-[var(--danger)] hover:bg-[#b91c1c]">Archive</button>
+                    <button onClick={() => onArchive(state.placement.id)} className="px-4 py-2 text-sm rounded text-white bg-[rgb(var(--danger))] hover:opacity-90">Archive</button>
                   </div>
                 </div>
               </div>
@@ -682,7 +682,7 @@ function PlacementModal({
                       onChange={(e) => setGeos(e.target.value)}
                     />
                     {fieldErrors.geos && (
-                      <p className="mt-1 text-xs text-red-600" role="alert">{fieldErrors.geos}</p>
+                      <p className="mt-1 text-xs text-danger" role="alert">{fieldErrors.geos}</p>
                     )}
                   </Field>
                   <Field label="Platforms">
@@ -706,7 +706,7 @@ function PlacementModal({
                       onChange={(e) => setFrequencyCap(e.target.value === '' ? '' : Number(e.target.value))}
                     />
                     {fieldErrors.frequencyCap && (
-                      <p className="mt-1 text-xs text-red-600" role="alert">{fieldErrors.frequencyCap}</p>
+                      <p className="mt-1 text-xs text-danger" role="alert">{fieldErrors.frequencyCap}</p>
                     )}
                   </Field>
                   <Field label="Floor price (USD)">
@@ -720,7 +720,7 @@ function PlacementModal({
                       onChange={(e) => setFloorPriceUsd(e.target.value === '' ? '' : Number(e.target.value))}
                     />
                     {fieldErrors.floorPriceUsd && (
-                      <p className="mt-1 text-xs text-red-600" role="alert">{fieldErrors.floorPriceUsd}</p>
+                      <p className="mt-1 text-xs text-danger" role="alert">{fieldErrors.floorPriceUsd}</p>
                     )}
                   </Field>
                 </div>

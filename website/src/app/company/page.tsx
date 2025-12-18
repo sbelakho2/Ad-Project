@@ -61,7 +61,7 @@ const stats = [
 export default function CompanyPage() {
   return (
     <>
-      <main className="relative bg-white text-slate-900">
+      <main className="relative bg-white text-ink">
         <SiteHeader />
 
         <PageHero variant="light">
@@ -69,10 +69,10 @@ export default function CompanyPage() {
             {...getRevealProps(0)}
             className="max-w-3xl mx-auto text-center md:text-left"
           >
-            <h1 className="text-4xl md:text-5xl font-bold leading-tight text-slate-900 mb-6">
+            <h1 className="text-4xl md:text-5xl font-bold leading-tight text-ink mb-6">
               Mediation shouldn&apos;t mean compromise.
             </h1>
-            <p className="text-xl leading-relaxed text-slate-600">
+            <p className="text-xl leading-relaxed text-inkMuted">
               We started ApexMediation as ad engineers who were tired of mediation
               platforms that weren’t built for publishers.
             </p>
@@ -88,21 +88,21 @@ export default function CompanyPage() {
                     <Heart className="w-6 h-6 text-brand-600" />
                   </div>
                   <div>
-                    <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mt-0 mb-4">
+                    <h2 className="text-2xl md:text-3xl font-bold text-ink mt-0 mb-4">
                       Our story
                     </h2>
-                    <p className="text-slate-600 leading-relaxed mb-4">
+                    <p className="text-inkMuted leading-relaxed mb-4">
                       We built ApexMediation after years of watching legacy mediators erode
                       publisher trust: hidden algorithms, opaque fees, and networks that
                       couldn’t be removed. That integration tax made switching feel like
                       rebuilding from scratch.
                     </p>
-                    <p className="text-slate-600 leading-relaxed mb-4">
+                    <p className="text-inkMuted leading-relaxed mb-4">
                       We believed there had to be a better way—one where the publisher
                       retains control of every network relationship, where auctions are
                       auditable, and where the mediation layer is a tool, not a gatekeeper.
                     </p>
-                    <p className="text-slate-600 leading-relaxed">
+                    <p className="text-inkMuted leading-relaxed">
                       Today, ApexMediation is built alongside design-partner studios who
                       demand transparency, reliability, and the flexibility to run their ad
                       stack their way.
@@ -114,15 +114,15 @@ export default function CompanyPage() {
           </div>
         </section>
 
-        <section className="py-16 bg-white border-t border-slate-200/60">
+        <section className="py-16 bg-white border-t border-gray-200/60">
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <div className="grid lg:grid-cols-2 gap-12 items-start">
                 <motion.div {...getRevealProps(0)}>
-                  <h2 className="text-3xl md:text-4xl font-bold text-slate-900 mb-4">
+                  <h2 className="text-3xl md:text-4xl font-bold text-ink mb-4">
                     What we believe
                   </h2>
-                  <p className="text-lg text-slate-600 mb-8 max-w-prose">
+                  <p className="text-lg text-inkMuted mb-8 max-w-prose">
                     Our values aren&apos;t just words on a wall—they&apos;re built into every
                     line of code.
                   </p>
@@ -137,10 +137,10 @@ export default function CompanyPage() {
                           <value.icon className="w-6 h-6 text-brand-600" />
                         </div>
                         <div>
-                          <h3 className="text-lg font-semibold text-slate-900 mb-1">
+                          <h3 className="text-lg font-semibold text-ink mb-1">
                             {value.title}
                           </h3>
-                          <p className="text-slate-600 text-sm">{value.description}</p>
+                          <p className="text-inkMuted text-sm">{value.description}</p>
                         </div>
                       </motion.div>
                     ))}
@@ -181,7 +181,7 @@ export default function CompanyPage() {
                 <motion.div {...getRevealProps(0)}>
                   <div className="flex items-center gap-3 mb-4">
                     <Building2 className="w-6 h-6 text-brand-600" />
-                    <h3 className="text-xl font-bold text-slate-900">Legal entity</h3>
+                    <h3 className="text-xl font-bold text-ink">Legal entity</h3>
                   </div>
                   <CompanyIdentity variant="full" />
                 </motion.div>
@@ -189,18 +189,18 @@ export default function CompanyPage() {
                 <motion.div {...getRevealProps(0.1)}>
                   <div className="flex items-center gap-3 mb-4">
                     <Globe className="w-6 h-6 text-brand-600" />
-                    <h3 className="text-xl font-bold text-slate-900">Global presence</h3>
+                    <h3 className="text-xl font-bold text-ink">Global presence</h3>
                   </div>
-                  <div className="bg-slate-50 rounded-xl p-6 border border-slate-200/70">
-                    <p className="text-slate-600 mb-4">
+                  <div className="bg-gray-50 rounded-xl p-6 border border-gray-200/70">
+                    <p className="text-inkMuted mb-4">
                       Headquartered in Estonia, serving publishers worldwide with
                       infrastructure designed for regional redundancy. Current regions and
                       reliability targets are published on our SLO page.
                     </p>
-                    <p className="text-sm text-slate-600">
+                    <p className="text-sm text-inkMuted">
                       <a href="/slo" className="underline">apexmediation.ee/slo</a>
                     </p>
-                    <ul className="space-y-2 text-slate-600">
+                    <ul className="space-y-2 text-inkMuted">
                       <li className="flex items-center gap-2">
                         <Users className="w-4 h-4 text-brand-600" />
                         Remote-first team
@@ -221,13 +221,13 @@ export default function CompanyPage() {
           </div>
         </section>
 
-        <section className="py-16 bg-white border-t border-slate-200/60">
+        <section className="py-16 bg-white border-t border-gray-200/60">
           <div className="container mx-auto px-4 text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
-              <h2 className="text-3xl md:text-4xl font-bold text-slate-900 mb-6">
+              <h2 className="text-3xl md:text-4xl font-bold text-ink mb-6">
                 Want to learn more?
               </h2>
-              <p className="text-xl text-slate-600 mb-8">
+              <p className="text-xl text-inkMuted mb-8">
                 We&apos;d love to hear from you. Reach out to discuss how Apex can help your
                 team.
               </p>

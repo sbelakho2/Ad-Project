@@ -14,9 +14,9 @@ export default function LiveModePage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">Live Mode</span>
           </div>
@@ -35,7 +35,7 @@ export default function LiveModePage() {
           {/* Latency Requirements */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               Latency Requirements
             </h2>
             
@@ -65,8 +65,8 @@ export default function LiveModePage() {
                     </tr>
                     <tr>
                       <td className="py-2 pr-4 text-gray-700">Pod Decisioning</td>
-                      <td className="py-2 pr-4 text-right text-gray-600">&lt;100ms</td>
-                      <td className="py-2 pr-4 text-right text-gray-600">200ms</td>
+                      <td className="py-2 pr-4 text-right text-gray-600">&lt;200ms</td>
+                      <td className="py-2 pr-4 text-right text-gray-600">300ms</td>
                       <td className="py-2 text-gray-600">Partner requests + filtering</td>
                     </tr>
                     <tr>
@@ -75,7 +75,7 @@ export default function LiveModePage() {
                       <td className="py-2 pr-4 text-right text-gray-600">50ms</td>
                       <td className="py-2 text-gray-600">Segment list + discontinuities</td>
                     </tr>
-                    <tr className="bg-emerald-50">
+                    <tr className="bg-brand-50">
                       <td className="py-2 pr-4 text-gray-900 font-medium">Total</td>
                       <td className="py-2 pr-4 text-right text-gray-900 font-medium">&lt;130ms</td>
                       <td className="py-2 pr-4 text-right text-gray-900 font-medium">300ms</td>
@@ -86,11 +86,11 @@ export default function LiveModePage() {
               </div>
             </div>
 
-            <div className="border-l-4 border-amber-500 pl-4 bg-amber-50 p-4 rounded-r-lg">
+            <div className="border-l-4 border-l-warning pl-4 bg-warning/10 p-4 rounded-r-lg">
               <h3 className="font-semibold text-gray-900 mb-2">Deadline Enforcement</h3>
               <p className="text-gray-600 text-sm">
                 The <code>DecisionSLAEnforcer</code> tracks time remaining until break start. 
-                If the deadline approaches (&lt;100ms remaining), the system enters &quot;safe mode&quot;: 
+                If the deadline approaches (&lt;200ms remaining), the system enters &quot;safe mode&quot;: 
                 partner fanout is reduced, and slate (fallback) content is served rather than risking 
                 a late decision that causes black screen.
               </p>
@@ -100,7 +100,7 @@ export default function LiveModePage() {
           {/* Sliding Window */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Activity className="w-6 h-6 text-emerald-600" />
+              <Activity className="w-6 h-6 text-brand-600" />
               Sliding Window Management
             </h2>
             
@@ -115,19 +115,19 @@ export default function LiveModePage() {
                 <h3 className="font-semibold text-gray-900 mb-3">HLS Live Window</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Window size: <code>liveWindowSize</code> segments (default: 6)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>EXT-X-MEDIA-SEQUENCE</code> increments monotonically</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>EXT-X-DISCONTINUITY-SEQUENCE</code> tracks sliding discontinuities</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>No <code>EXT-X-PLAYLIST-TYPE</code> for live streams</span>
                   </li>
                 </ul>
@@ -137,19 +137,19 @@ export default function LiveModePage() {
                 <h3 className="font-semibold text-gray-900 mb-3">DASH Live Window</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>type=&quot;dynamic&quot;</code> MPD</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>timeShiftBufferDepth=&quot;PT5M&quot;</code> (default)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>minimumUpdatePeriod=&quot;PT2S&quot;</code> for manifest refresh</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Stable <code>UTCTiming</code> for player sync</span>
                   </li>
                 </ul>
@@ -176,7 +176,7 @@ export default function LiveModePage() {
           {/* Resilience */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Shield className="w-6 h-6 text-emerald-600" />
+              <Shield className="w-6 h-6 text-brand-600" />
               Resilience Patterns
             </h2>
             
@@ -187,7 +187,7 @@ export default function LiveModePage() {
 
             <div className="space-y-4">
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Zap className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Zap className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Circuit Breaker</h3>
                   <p className="text-gray-600 text-sm mb-2">
@@ -204,7 +204,7 @@ export default function LiveModePage() {
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Settings className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Settings className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Safe Mode</h3>
                   <p className="text-gray-600 text-sm mb-2">
@@ -214,13 +214,13 @@ export default function LiveModePage() {
                     <li>• <strong>Error rate threshold:</strong> 10% triggers safe mode</li>
                     <li>• <strong>Latency threshold:</strong> 500ms p99 triggers safe mode</li>
                     <li>• <strong>Minimum samples:</strong> 100 requests before evaluation</li>
-                    <li>• <strong>Behaviors:</strong> Use slate, reduced timeouts (100ms), disable non-critical</li>
+                    <li>• <strong>Behaviors:</strong> Use slate, reduced timeouts (200ms), disable non-critical</li>
                   </ul>
                 </div>
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Server className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Server className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Slate Fallback</h3>
                   <p className="text-gray-600 text-sm">
@@ -236,7 +236,7 @@ export default function LiveModePage() {
           {/* Operational Controls */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Settings className="w-6 h-6 text-emerald-600" />
+              <Settings className="w-6 h-6 text-brand-600" />
               Operational Controls
             </h2>
             
@@ -280,7 +280,7 @@ export default function LiveModePage() {
           {/* Session Management */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Activity className="w-6 h-6 text-emerald-600" />
+              <Activity className="w-6 h-6 text-brand-600" />
               Live Session Management
             </h2>
             
@@ -323,9 +323,9 @@ export default function LiveModePage() {
               </table>
             </div>
 
-            <div className="bg-amber-50 rounded-lg p-6 mt-6">
+            <div className="bg-warning/10 rounded-lg p-6 mt-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <AlertTriangle className="w-5 h-5 text-warning" />
                 Retry Storm Prevention
               </h3>
               <p className="text-sm text-gray-600">
@@ -348,21 +348,21 @@ export default function LiveModePage() {
 
             <div className="space-y-3">
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Timeline Continuity</span>
                   <p className="text-sm text-gray-600">Media sequence and discontinuity sequence continue from pre-restart values</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Break State Preservation</span>
                   <p className="text-sm text-gray-600">Active ad breaks complete even if origin restarts mid-break</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Automatic Discontinuity</span>
                   <p className="text-sm text-gray-600">Discontinuity tags inserted at origin restart boundary</p>
@@ -404,22 +404,22 @@ export default function LiveModePage() {
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">VOD Mode →</h3>
                 <p className="text-sm text-gray-600">Seeking, manifest stability, measurement</p>
               </Link>
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">RFC 8216 compliance, DATERANGE markers</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol →</h3>
                 <p className="text-sm text-gray-600">MPD structure, EventStream</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>

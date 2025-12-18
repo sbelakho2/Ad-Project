@@ -150,7 +150,7 @@ export default function MediationDebuggerPage() {
         </div>
       </div>
 
-      {error && <div className="rounded border border-red-200 bg-red-50 p-3 text-red-800" role="alert" aria-live="polite">{error}</div>}
+      {error && <div className="rounded border border-danger/20 bg-danger/10 p-3 text-danger" role="alert" aria-live="polite">{error}</div>}
       {loading && <div aria-busy="true">Loading…</div>}
 
       {!loading && events && events.length === 0 && (
@@ -218,7 +218,7 @@ function fmtTime(iso: string) {
 }
 
 function OutcomeChip({ outcome, reason }: { outcome: 'success' | 'no_bid'; reason?: string }) {
-  const color = outcome === 'success' ? 'bg-green-100 text-green-800 border-green-200' : 'bg-yellow-100 text-yellow-800 border-yellow-200';
+  const color = outcome === 'success' ? 'bg-success/10 text-success border-success/20' : 'bg-warning/10 text-warning border-warning/20';
   return (
     <div className="flex items-center gap-2">
       <span className={`inline-block rounded border px-2 py-0.5 text-xs font-semibold ${color}`}>{outcome}</span>

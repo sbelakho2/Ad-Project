@@ -20,7 +20,6 @@ export default function Footer() {
             <ul className="space-y-2 text-sm">
               <li><a href="/company" className="text-brand-600 hover:text-brand-700 hover:underline">Company</a></li>
               <li><a href="/contact" className="text-brand-600 hover:text-brand-700 hover:underline">Contact</a></li>
-              <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
             <CompanyIdentity variant="compact" className="mt-6" />
           </div>
@@ -45,6 +44,8 @@ export default function Footer() {
             <ul className="space-y-2 text-sm">
               <li><a href="/docs" className="text-brand-600 hover:text-brand-700 hover:underline">Documentation</a></li>
               <li><a href={REPO_URL} className="text-brand-600 hover:text-brand-700 hover:underline">GitHub</a></li>
+              <li><a href="/status" className="text-brand-600 hover:text-brand-700 hover:underline">System Status</a></li>
+              <li><a href="/slo" className="text-brand-600 hover:text-brand-700 hover:underline">SLO &amp; Reliability</a></li>
               <li><a href="/security" className="text-brand-600 hover:text-brand-700 hover:underline">Security</a></li>
             </ul>
           </div>

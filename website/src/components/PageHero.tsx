@@ -20,12 +20,12 @@ import HeroShell, { type HeroShellVariant } from '@/components/HeroShell';
  * 
  * Variants:
  * - "dark": Marketing pages (/, /product, /features, /pricing, /company)
- *   Colors: text-white, text-slate-200/90, text-slate-300/80
+ *   Colors: text-white, text-white/90, text-white/80
  *   Buttons: bg-brand-600 hover:bg-brand-700, bg-white/10 hover:bg-white/15
  * 
  * - "light": Trust/docs pages (/developers, /security, /contact)
- *   Colors: text-slate-900, text-slate-600
- *   Optional tint: className="bg-slate-50 border-b border-slate-200/60"
+ *   Colors: text-ink, text-inkMuted
+ *   Optional tint: className="bg-gray-50 border-b border-gray-200/60"
  * 
  * @see DESIGN_SYSTEM.md for full standards
  */

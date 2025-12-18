@@ -14,9 +14,9 @@ export default function DASHProtocolPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">DASH Protocol</span>
           </div>
@@ -35,7 +35,7 @@ export default function DASHProtocolPage() {
           {/* MPD Structure */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Layers className="w-6 h-6 text-emerald-600" />
+              <Layers className="w-6 h-6 text-brand-600" />
               MPD Structure
             </h2>
             
@@ -118,7 +118,7 @@ export default function DASHProtocolPage() {
           {/* Single to Multi-Period Conversion */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Single-to-Multi-Period Conversion
             </h2>
             
@@ -145,7 +145,7 @@ export default function DASHProtocolPage() {
                 </pre>
               </div>
               
-              <div className="bg-emerald-50 rounded-lg p-6">
+              <div className="bg-brand-50 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">SSAI MPD (Multi Period)</h3>
                 <pre className="bg-gray-900 rounded-lg p-3 text-xs text-gray-300 overflow-x-auto">
 {`<MPD type="dynamic">
@@ -163,7 +163,7 @@ export default function DASHProtocolPage() {
               </div>
             </div>
 
-            <div className="bg-blue-50 rounded-lg p-6">
+            <div className="bg-info/10 rounded-lg p-6">
               <h3 className="font-semibold text-gray-900 mb-2">Conversion Process</h3>
               <ol className="space-y-2 text-sm text-gray-600">
                 <li><strong>1. Parse Events:</strong> Detect SCTE-35 or custom ad markers in origin EventStream</li>
@@ -177,7 +177,7 @@ export default function DASHProtocolPage() {
           {/* EventStream */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Code className="w-6 h-6 text-emerald-600" />
+              <Code className="w-6 h-6 text-brand-600" />
               EventStream Signaling
             </h2>
             
@@ -240,7 +240,7 @@ export default function DASHProtocolPage() {
           {/* Live Behavior */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               Live DASH Behavior
             </h2>
             
@@ -250,7 +250,7 @@ export default function DASHProtocolPage() {
             </p>
 
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">UTCTiming Strategy</h3>
                 <p className="text-gray-600 text-sm">
                   Stable <code>UTCTiming</code> elements ensure players sync correctly. We use 
@@ -258,7 +258,7 @@ export default function DASHProtocolPage() {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Segment Timeline Evolution</h3>
                 <p className="text-gray-600 text-sm">
                   Segment timelines evolve predictably. The <code>minimumUpdatePeriod</code> and 
@@ -266,7 +266,7 @@ export default function DASHProtocolPage() {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Period Continuity</h3>
                 <p className="text-gray-600 text-sm">
                   Period IDs are stable across MPD updates. Periods are never removed or reordered 
@@ -275,9 +275,9 @@ export default function DASHProtocolPage() {
               </div>
             </div>
 
-            <div className="bg-amber-50 rounded-lg p-6 mt-6">
+            <div className="bg-warning/10 rounded-lg p-6 mt-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <AlertTriangle className="w-5 h-5 text-warning" />
                 Avoided Issues
               </h3>
               <ul className="space-y-2 text-sm text-gray-600">
@@ -291,7 +291,7 @@ export default function DASHProtocolPage() {
           {/* Player Support */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               Player Compatibility
             </h2>
             
@@ -315,49 +315,49 @@ export default function DASHProtocolPage() {
                 <tbody className="divide-y divide-gray-200">
                   <tr>
                     <td className="p-3 text-gray-900">Shaka Player</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Best cross-platform support</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">dash.js</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Reference implementation</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">ExoPlayer</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Android, Fire TV</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Bitmovin</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Commercial player</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Roku (native)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-amber-600">△</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-warning">△</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">EventStream via RAF</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
-            <div className="bg-blue-50 rounded-lg p-6">
+            <div className="bg-info/10 rounded-lg p-6">
               <h3 className="font-semibold text-gray-900 mb-3">SDK Integration for Event Handling</h3>
               <pre className="bg-gray-900 rounded-lg p-4 text-sm text-gray-300 overflow-x-auto">
 {`// Web SDK - Shaka Player integration
@@ -386,7 +386,7 @@ player.addEventListener('timelineregionexit', (event) => {
             
             <div className="space-y-4">
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Static MPD Type</h3>
                   <p className="text-gray-600 text-sm">
@@ -397,7 +397,7 @@ player.addEventListener('timelineregionexit', (event) => {
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Complete Period List</h3>
                   <p className="text-gray-600 text-sm">
@@ -408,7 +408,7 @@ player.addEventListener('timelineregionexit', (event) => {
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Seek Support</h3>
                   <p className="text-gray-600 text-sm">
@@ -465,22 +465,22 @@ player.addEventListener('timelineregionexit', (event) => {
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">RFC 8216 compliance, DATERANGE markers</p>
               </Link>
-              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Live Mode →</h3>
                 <p className="text-sm text-gray-600">Latency requirements, resilience patterns</p>
               </Link>
-              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DRM Support →</h3>
                 <p className="text-sm text-gray-600">Widevine, PlayReady integration</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>

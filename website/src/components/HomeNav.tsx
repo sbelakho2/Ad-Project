@@ -58,7 +58,11 @@ export default function HomeNav() {
       {/* Desktop Navigation */}
       <div className="hidden md:flex items-center justify-between w-full">
         <Link href="/" className="flex-shrink-0">
-          <img src="/api/brand/logo" alt="ApexMediation" className="h-44 w-auto" />
+          <img
+            src="/api/brand/logo"
+            alt="ApexMediation"
+            className="h-44 w-auto dark:invert dark:opacity-90"
+          />
         </Link>
         <div className="flex items-center gap-6">
           {navItems.map((item) => (
@@ -92,7 +96,11 @@ export default function HomeNav() {
       {/* Mobile Navigation */}
       <div className="md:hidden flex items-center justify-between py-4">
         <Link href="/" className="flex items-center gap-2">
-          <img src="/api/brand/logo" alt="ApexMediation" className="h-28 w-auto" />
+          <img
+            src="/api/brand/logo"
+            alt="ApexMediation"
+            className="h-28 w-auto dark:invert dark:opacity-90"
+          />
         </Link>
         <button
           type="button"

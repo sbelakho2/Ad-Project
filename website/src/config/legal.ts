@@ -81,8 +81,8 @@ export const sloConfig = {
   // Latency targets
   latency: {
     p50: '<50ms',
-    p95: '<100ms',
-    p99: '<200ms',
+    p95: '<200ms',
+    p99: '<500ms',
     scope: 'Bid request processing (excluding network transit)',
   },
   

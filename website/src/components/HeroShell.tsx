@@ -34,8 +34,8 @@ export default function HeroShell({
 
   const variantClasses =
     resolvedVariant === 'marketingDark'
-      ? 'relative overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800'
-      : 'bg-white text-slate-900';
+      ? 'relative overflow-hidden bg-gradient-to-br from-[rgb(var(--bg-dark))] via-[rgb(var(--surface-dark))] to-[rgb(var(--divider-dark))]'
+      : 'bg-white text-ink';
 
   return (
     <section

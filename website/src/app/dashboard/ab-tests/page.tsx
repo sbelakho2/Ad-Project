@@ -151,7 +151,7 @@ export default function ABTestsPage() {
         </div>
         <div className="card-v2 p-6">
           <div className="flex items-center gap-3 mb-2">
-            <CheckCircleIcon className="w-6 h-6 text-green-500" />
+            <CheckCircleIcon className="w-6 h-6 text-success" />
             <p className="text-gray-900 font-semibold text-sm">Completed</p>
           </div>
           <p className="text-3xl font-semibold text-gray-900">{completedTests}</p>
@@ -245,10 +245,10 @@ interface ABTestCardProps {
 
 function ABTestCard({ test }: ABTestCardProps) {
   const statusConfig = {
-    running: { color: 'border-green-500 bg-green-50', badge: 'bg-green-500', icon: PlayIcon },
-    completed: { color: 'border-blue-500 bg-blue-50', badge: 'bg-blue-500', icon: CheckCircleIcon },
+    running: { color: 'border-success/20 bg-success/10', badge: 'bg-success', icon: PlayIcon },
+    completed: { color: 'border-info/20 bg-info/10', badge: 'bg-info', icon: CheckCircleIcon },
     draft: { color: 'border-gray-400 bg-gray-50', badge: 'bg-gray-400', icon: ClockIcon },
-    paused: { color: 'border-yellow-500 bg-yellow-50', badge: 'bg-yellow-500', icon: StopIcon },
+    paused: { color: 'border-warning/20 bg-warning/10', badge: 'bg-warning', icon: StopIcon },
   };
 
   const config = statusConfig[test.status];
@@ -282,7 +282,7 @@ function ABTestCard({ test }: ABTestCardProps) {
           <div className="flex items-center justify-between mb-4">
             <h4 className="font-bold text-gray-900">Variant A: {test.variantA.name}</h4>
             {test.winner === 'A' && (
-              <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{borderColor:'var(--brand-500)'}}>
+              <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{ borderColor: 'rgb(var(--brand-500))' }}>
                 WINNER
               </div>
             )}
@@ -308,7 +308,7 @@ function ABTestCard({ test }: ABTestCardProps) {
           <div className="flex items-center justify-between mb-4">
             <h4 className="font-bold text-gray-900">Variant B: {test.variantB.name}</h4>
             {test.winner === 'B' && (
-              <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{borderColor:'var(--brand-500)'}}>
+              <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{ borderColor: 'rgb(var(--brand-500))' }}>
                 WINNER
               </div>
             )}
@@ -339,7 +339,7 @@ function ABTestCard({ test }: ABTestCardProps) {
           </div>
           <div className="text-right">
             <p className="text-sm text-gray-600 mb-1">Variant B Lift</p>
-            <p className={`text-2xl font-bold ${liftB > 0 ? 'text-green-600' : 'text-red-600'}`}>
+            <p className={`text-2xl font-bold ${liftB > 0 ? 'text-success' : 'text-danger'}`}>
               {liftB > 0 ? '+' : ''}{liftB.toFixed(1)}%
             </p>
           </div>
@@ -373,10 +373,10 @@ function ABTestCard({ test }: ABTestCardProps) {
         )}
         {test.status === 'paused' && (
           <>
-            <button className="px-4 py-2 text-sm font-bold text-white bg-green-500 rounded hover:bg-green-600">
+            <button className="px-4 py-2 text-sm font-bold text-white bg-success rounded hover:opacity-90">
               Resume Test
             </button>
-            <button className="px-4 py-2 text-sm font-bold text-red-600 border border-red-600 rounded hover:bg-red-50">
+            <button className="px-4 py-2 text-sm font-bold text-danger border border-danger rounded hover:bg-danger/10">
               Delete Test
             </button>
           </>

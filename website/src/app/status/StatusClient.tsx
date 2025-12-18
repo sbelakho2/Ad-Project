@@ -65,33 +65,33 @@ export default function StatusClient() {
     const lastChecked = typeof liveStatus?.timestamp === 'string' ? liveStatus.timestamp : null
 
     if (status === 'operational') {
-      return { className: 'bg-green-50 border-green-100 text-green-700', label: 'Operational', dot: 'bg-green-500', lastChecked }
+      return { className: 'bg-success/10 border-success/20 text-success', label: 'Operational', dot: 'bg-success', lastChecked }
     }
     if (status === 'degraded') {
-      return { className: 'bg-amber-50 border-amber-100 text-amber-700', label: 'Degraded', dot: 'bg-amber-500', lastChecked }
+      return { className: 'bg-warning/10 border-warning/20 text-warning', label: 'Degraded', dot: 'bg-warning', lastChecked }
     }
     if (status === 'down') {
-      return { className: 'bg-red-50 border-red-100 text-red-700', label: 'Down', dot: 'bg-red-500', lastChecked }
+      return { className: 'bg-danger/10 border-danger/20 text-danger', label: 'Down', dot: 'bg-danger', lastChecked }
     }
-    return { className: 'bg-gray-50 border-gray-200 text-gray-700', label: liveStatus ? 'Unknown' : 'Loading…', dot: 'bg-gray-400', lastChecked }
+    return { className: 'bg-gray-50 border-gray-200 text-inkMuted', label: liveStatus ? 'Unknown' : 'Loading…', dot: 'bg-gray-400', lastChecked }
   }, [liveStatus])
 
   const getServiceBadge = (svcName: string) => {
     if (svcName !== 'API') {
-      return { dot: 'bg-green-500', pill: 'text-green-700 bg-green-50 border border-green-100', label: 'Operational' }
+      return { dot: 'bg-success', pill: 'text-success bg-success/10 border border-success/20', label: 'Operational' }
     }
 
     if (liveBadge.label === 'Operational') {
-      return { dot: 'bg-green-500', pill: 'text-green-700 bg-green-50 border border-green-100', label: 'Operational' }
+      return { dot: 'bg-success', pill: 'text-success bg-success/10 border border-success/20', label: 'Operational' }
     }
     if (liveBadge.label === 'Degraded') {
-      return { dot: 'bg-amber-500', pill: 'text-amber-700 bg-amber-50 border border-amber-100', label: 'Degraded' }
+      return { dot: 'bg-warning', pill: 'text-warning bg-warning/10 border border-warning/20', label: 'Degraded' }
     }
     if (liveBadge.label === 'Down') {
-      return { dot: 'bg-red-500', pill: 'text-red-700 bg-red-50 border border-red-100', label: 'Down' }
+      return { dot: 'bg-danger', pill: 'text-danger bg-danger/10 border border-danger/20', label: 'Down' }
     }
 
-    return { dot: 'bg-gray-400', pill: 'text-gray-700 bg-gray-50 border border-gray-200', label: 'Unknown' }
+    return { dot: 'bg-gray-400', pill: 'text-inkMuted bg-gray-50 border border-gray-200', label: 'Unknown' }
   }
 
   return (

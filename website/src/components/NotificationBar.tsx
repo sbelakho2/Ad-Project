@@ -41,7 +41,7 @@ export default function NotificationBar() {
         >
           <path
             d="M0,0 Q30,20 60,0 T120,0 T180,0 T240,0 T300,0 T360,0 T420,0 T480,0 T540,0 T600,0 T660,0 T720,0 T780,0 T840,0 T900,0 T960,0 T1020,0 T1080,0 T1140,0 T1200,0 L1200,20 L0,20 Z"
-            fill="var(--brand-600)"
+            fill="rgb(var(--brand-600))"
           />
         </svg>
       </div>

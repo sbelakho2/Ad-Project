@@ -15,8 +15,8 @@ interface VisualCardProps {
  */
 export function VisualCard({ children, className, title, variant = 'default' }: VisualCardProps) {
   const variants = {
-    default: 'bg-slate-50/80 border-slate-200 text-slate-700',
-    dark: 'bg-slate-900/95 border-slate-700 text-slate-300',
+    default: 'bg-gray-50/80 border-gray-200 text-gray-700',
+    dark: 'bg-[rgb(var(--bg-dark)/0.95)] border-white/10 text-white/80',
     brand: 'bg-brand-50/80 border-brand-200 text-brand-800',
   };
 

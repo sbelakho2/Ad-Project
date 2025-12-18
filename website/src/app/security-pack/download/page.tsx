@@ -310,7 +310,7 @@ export default function SecurityPackDownloadPage() {
               ))}
             </tbody>
           </table>
-          <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm">
+          <div className="bg-info/10 border border-info/20 rounded p-3 text-sm">
             <strong>Network Diagram:</strong> App Server ↔ (Internal Network) ↔ DB Server. 
             External traffic terminates at Caddy (TLS). Database accessible only from App Server IP.
           </div>
@@ -419,7 +419,7 @@ export default function SecurityPackDownloadPage() {
                 <tr key={item.threat}>
                   <td className="border border-gray-300 px-2 py-2 font-medium">{item.threat}</td>
                   <td className="border border-gray-300 px-2 py-2 text-gray-700">{item.control}</td>
-                  <td className="border border-gray-300 px-2 py-2 text-green-700 font-medium">{item.status}</td>
+                  <td className="border border-gray-300 px-2 py-2 text-success font-medium">{item.status}</td>
                 </tr>
               ))}
             </tbody>
@@ -454,7 +454,7 @@ export default function SecurityPackDownloadPage() {
               ))}
             </tbody>
           </table>
-          <div className="bg-yellow-50 border border-yellow-200 rounded p-3 mt-4 text-sm">
+          <div className="bg-warning/10 border border-warning/20 rounded p-3 mt-4 text-sm">
             <strong>Data Minimization:</strong> We aim to minimize collection. IP addresses may be processed (and in some cases retained) for security, fraud prevention, and rate limiting.
             Device identifiers (IDFA, GAID) are only collected when consent is provided. No direct PII is stored 
             in tracking events.
@@ -492,14 +492,14 @@ export default function SecurityPackDownloadPage() {
           <h2 className="text-xl font-bold mb-4 text-gray-900 border-b border-gray-300 pb-2">9. Privacy & Compliance</h2>
           <div className="grid grid-cols-2 gap-4 mb-4">
             <div className="border border-gray-300 rounded p-4">
-              <div className="text-xl font-bold text-green-700 mb-1">✓ GDPR</div>
+              <div className="text-xl font-bold text-success mb-1">✓ GDPR</div>
               <div className="text-sm text-gray-600">
                 Data subject rights supported (access, rectification, erasure, portability). 
                 Privacy by design. Data minimization enforced.
               </div>
             </div>
             <div className="border border-gray-300 rounded p-4">
-              <div className="text-xl font-bold text-green-700 mb-1">✓ CCPA</div>
+              <div className="text-xl font-bold text-success mb-1">✓ CCPA</div>
               <div className="text-sm text-gray-600">
                 Do Not Sell signals honored. Consumer rights workflow implemented. 
                 12-month data disclosure available.
@@ -507,7 +507,7 @@ export default function SecurityPackDownloadPage() {
             </div>
           </div>
           <div className="border border-gray-300 rounded p-4">
-            <div className="text-xl font-bold text-blue-700 mb-1">IAB TCF 2.2</div>
+            <div className="text-xl font-bold text-info mb-1">IAB TCF 2.2</div>
             <div className="text-sm text-gray-600">
               Consent string propagation implemented. TC strings passed through auction pipeline 
               to demand partners. Consent signal encryption available in Console.

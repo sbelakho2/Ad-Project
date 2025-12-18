@@ -14,9 +14,9 @@ export default function OperationalGuaranteesPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">Operational Guarantees</span>
           </div>
@@ -33,9 +33,9 @@ export default function OperationalGuaranteesPage() {
           </div>
 
           {/* Core Principle */}
-          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-6 mb-12">
+          <div className="bg-brand-50 border border-brand-200 rounded-lg p-6 mb-12">
             <h2 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-              <Shield className="w-5 h-5 text-emerald-600" />
+              <Shield className="w-5 h-5 text-brand-600" />
               Core Principle: Never Black Screen
             </h2>
             <p className="text-gray-600 text-sm">
@@ -47,7 +47,7 @@ export default function OperationalGuaranteesPage() {
           {/* SLA Metrics */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               SLA Metrics
             </h2>
             
@@ -94,7 +94,7 @@ export default function OperationalGuaranteesPage() {
           {/* Failure Scenarios */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <AlertTriangle className="w-6 h-6 text-amber-600" />
+              <AlertTriangle className="w-6 h-6 text-warning" />
               Failure Scenarios &amp; Fallbacks
             </h2>
 
@@ -109,7 +109,7 @@ export default function OperationalGuaranteesPage() {
                     Demand partner doesn&apos;t respond within the bid deadline.
                   </p>
                   <div className="grid md:grid-cols-2 gap-4">
-                    <div className="bg-blue-50 rounded p-3">
+                    <div className="bg-info/10 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">Live Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Partner excluded from current pod</li>
@@ -118,7 +118,7 @@ export default function OperationalGuaranteesPage() {
                         <li>• Auto-heal after 60s cooldown</li>
                       </ul>
                     </div>
-                    <div className="bg-purple-50 rounded p-3">
+                    <div className="bg-brand-50 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">VOD Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Partner excluded, try next partner</li>
@@ -141,7 +141,7 @@ export default function OperationalGuaranteesPage() {
                     SCTE-35 cue arrives after expected position or with unexpected timing.
                   </p>
                   <div className="grid md:grid-cols-2 gap-4">
-                    <div className="bg-blue-50 rounded p-3">
+                    <div className="bg-info/10 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">Live Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Late cue (&lt;2s): align to next segment boundary</li>
@@ -150,7 +150,7 @@ export default function OperationalGuaranteesPage() {
                         <li>• Metrics track drift distribution</li>
                       </ul>
                     </div>
-                    <div className="bg-purple-50 rounded p-3">
+                    <div className="bg-brand-50 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">VOD Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Cue positions fixed at manifest generation</li>
@@ -172,7 +172,7 @@ export default function OperationalGuaranteesPage() {
                     Ad segment returns 404 or times out during playback.
                   </p>
                   <div className="grid md:grid-cols-2 gap-4">
-                    <div className="bg-blue-50 rounded p-3">
+                    <div className="bg-info/10 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">Live Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Substitute slate segment at same duration</li>
@@ -181,7 +181,7 @@ export default function OperationalGuaranteesPage() {
                         <li>• Alert to ops if pattern detected</li>
                       </ul>
                     </div>
-                    <div className="bg-purple-50 rounded p-3">
+                    <div className="bg-brand-50 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">VOD Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Manifest pre-validated before serving</li>
@@ -204,7 +204,7 @@ export default function OperationalGuaranteesPage() {
                     Origin stream resets with new sequence numbers or timestamp discontinuity.
                   </p>
                   <div className="grid md:grid-cols-2 gap-4">
-                    <div className="bg-blue-50 rounded p-3">
+                    <div className="bg-info/10 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">Live Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• Detect via media sequence jump</li>
@@ -213,7 +213,7 @@ export default function OperationalGuaranteesPage() {
                         <li>• Session continues (no reconnect needed)</li>
                       </ul>
                     </div>
-                    <div className="bg-purple-50 rounded p-3">
+                    <div className="bg-brand-50 rounded p-3">
                       <h4 className="font-medium text-gray-900 text-sm mb-2">VOD Mode</h4>
                       <ul className="text-sm text-gray-600 space-y-1">
                         <li>• N/A (VOD origin is immutable)</li>
@@ -233,7 +233,7 @@ export default function OperationalGuaranteesPage() {
                   <p className="text-sm text-gray-600 mb-4">
                     System detects elevated error rates or latency.
                   </p>
-                  <div className="bg-amber-50 border border-amber-200 rounded p-4 mb-4">
+                  <div className="bg-warning/10 border border-warning/20 rounded p-4 mb-4">
                     <h4 className="font-medium text-gray-900 text-sm mb-2">Thresholds (from SafeModeManager)</h4>
                     <ul className="text-sm text-gray-600 space-y-1">
                       <li>• Error rate threshold: <strong>10%</strong> of requests</li>
@@ -243,19 +243,19 @@ export default function OperationalGuaranteesPage() {
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-start gap-2">
-                      <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                      <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                       <span className="text-sm text-gray-600"><strong>Reduced fanout:</strong> Only healthy partners called</span>
                     </div>
                     <div className="flex items-start gap-2">
-                      <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
-                      <span className="text-sm text-gray-600"><strong>Reduced timeout:</strong> 100ms hard deadline</span>
+                      <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
+                      <span className="text-sm text-gray-600"><strong>Reduced timeout:</strong> 200ms hard deadline</span>
                     </div>
                     <div className="flex items-start gap-2">
-                      <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                      <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                       <span className="text-sm text-gray-600"><strong>Slate fallback:</strong> Enabled by default</span>
                     </div>
                     <div className="flex items-start gap-2">
-                      <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                      <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                       <span className="text-sm text-gray-600"><strong>Config freeze:</strong> No config changes during incident</span>
                     </div>
                   </div>
@@ -267,7 +267,7 @@ export default function OperationalGuaranteesPage() {
           {/* Fallback Ladder */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <RefreshCw className="w-6 h-6 text-emerald-600" />
+              <RefreshCw className="w-6 h-6 text-brand-600" />
               Fallback Ladder
             </h2>
             
@@ -309,7 +309,7 @@ export default function OperationalGuaranteesPage() {
           {/* Circuit Breakers */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Circuit Breakers
             </h2>
             
@@ -335,16 +335,16 @@ export const CircuitBreakerConfig = {
             </div>
 
             <div className="mt-4 grid md:grid-cols-3 gap-4">
-              <div className="bg-emerald-50 rounded p-4 text-center">
-                <div className="text-2xl font-bold text-emerald-700">CLOSED</div>
+              <div className="bg-success/10 rounded p-4 text-center">
+                <div className="text-2xl font-bold text-success">CLOSED</div>
                 <p className="text-sm text-gray-600 mt-1">Normal operation</p>
               </div>
-              <div className="bg-red-50 rounded p-4 text-center">
-                <div className="text-2xl font-bold text-red-700">OPEN</div>
+              <div className="bg-danger/10 rounded p-4 text-center">
+                <div className="text-2xl font-bold text-danger">OPEN</div>
                 <p className="text-sm text-gray-600 mt-1">Partner bypassed</p>
               </div>
-              <div className="bg-amber-50 rounded p-4 text-center">
-                <div className="text-2xl font-bold text-amber-700">HALF-OPEN</div>
+              <div className="bg-warning/10 rounded p-4 text-center">
+                <div className="text-2xl font-bold text-warning">HALF-OPEN</div>
                 <p className="text-sm text-gray-600 mt-1">Testing recovery</p>
               </div>
             </div>
@@ -353,7 +353,7 @@ export const CircuitBreakerConfig = {
           {/* Incident Response */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Server className="w-6 h-6 text-emerald-600" />
+              <Server className="w-6 h-6 text-brand-600" />
               Incident Response
             </h2>
             
@@ -363,28 +363,28 @@ export const CircuitBreakerConfig = {
 
             <div className="space-y-3">
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Incident Bundle</h3>
                   <p className="text-sm text-gray-600">Exportable evidence bundle with decision traces, manifest versions, partner timings, and error logs.</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Auto-Rollback</h3>
                   <p className="text-sm text-gray-600">If new config causes degradation, automatic rollback to last-known-good state.</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Partner Quarantine</h3>
                   <p className="text-sm text-gray-600">Problematic partners automatically isolated until manual review.</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Real-time Alerting</h3>
                   <p className="text-sm text-gray-600">PagerDuty/Slack integration for p1 incidents with runbook links.</p>
@@ -394,29 +394,29 @@ export const CircuitBreakerConfig = {
           </section>
 
           {/* Related Documentation */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Live Mode →</h3>
                 <p className="text-sm text-gray-600">Latency budgets and sliding window</p>
               </Link>
-              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/vod" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">VOD Mode →</h3>
                 <p className="text-sm text-gray-600">Pre-stitched manifest handling</p>
               </Link>
-              <Link href="/docs/ssai/measurement" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/measurement" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Measurement →</h3>
                 <p className="text-sm text-gray-600">Tracking and exactly-once semantics</p>
               </Link>
-              <Link href="/slo" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/slo" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">SLO Dashboard →</h3>
                 <p className="text-sm text-gray-600">Real-time service level objectives</p>
               </Link>
             </div>
             
-            <div className="mt-6 pt-6 border-t border-emerald-200">
-              <Link href="/docs/ssai" className="inline-flex items-center text-emerald-700 font-medium hover:text-emerald-800">
+            <div className="mt-6 pt-6 border-t border-brand-200">
+              <Link href="/docs/ssai" className="inline-flex items-center text-brand-700 font-medium hover:text-brand-800">
                 ← Back to SSAI Overview
               </Link>
             </div>

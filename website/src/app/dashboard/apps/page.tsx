@@ -337,24 +337,24 @@ function AppCard({ app, onConfigure, onViewStats, onResume, onFixIntegration }: 
   const statusConfig = {
     active: {
       icon: CheckCircleIcon,
-      color: 'text-green-500',
-      bg: 'bg-green-50 text-green-800 border-green-300',
+      color: 'text-success',
+      bg: 'bg-success/10 text-success border-success/20',
       label: 'Active',
       border: 'border-gray-200',
     },
     paused: {
       icon: ExclamationTriangleIcon,
-      color: 'text-yellow-500',
-      bg: 'bg-yellow-50 text-yellow-800 border-yellow-300',
+      color: 'text-warning',
+      bg: 'bg-warning/10 text-warning border-warning/20',
       label: 'Paused',
       border: 'border-gray-300',
     },
     error: {
       icon: ExclamationTriangleIcon,
-      color: 'text-red-500',
-      bg: 'bg-red-50 text-red-700 border-red-300',
+      color: 'text-danger',
+      bg: 'bg-danger/10 text-danger border-danger/20',
       label: 'Error',
-      border: 'border-red-300',
+      border: 'border-danger/20',
     },
   };
 
@@ -415,8 +415,8 @@ function AppCard({ app, onConfigure, onViewStats, onResume, onFixIntegration }: 
 
           {/* SDK Version Warning */}
           {app.sdkVersion !== '4.2.1' && (
-            <div className="bg-yellow-50 border border-yellow-300 rounded p-3 mb-4">
-              <p className="text-sm text-yellow-800 font-medium">
+            <div className="bg-warning/10 border border-warning/20 rounded p-3 mb-4">
+              <p className="text-sm text-warning font-medium">
                 ⚠ SDK update available: v4.2.1 includes performance improvements
               </p>
             </div>
@@ -454,7 +454,7 @@ function AppCard({ app, onConfigure, onViewStats, onResume, onFixIntegration }: 
           {app.status === 'paused' && (
             <button
               onClick={onResume}
-              className="px-4 py-2 text-sm font-bold text-white bg-green-500 rounded hover:bg-green-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-blue"
+              className="px-4 py-2 text-sm font-bold text-white bg-success rounded hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-blue"
             >
               Resume
             </button>
@@ -462,7 +462,7 @@ function AppCard({ app, onConfigure, onViewStats, onResume, onFixIntegration }: 
           {app.status === 'error' && (
             <button
               onClick={onFixIntegration}
-              className="px-4 py-2 text-sm font-bold text-white bg-red-500 rounded hover:bg-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-blue"
+              className="px-4 py-2 text-sm font-bold text-white bg-danger rounded hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-blue"
             >
               Fix Integration
             </button>
@@ -541,7 +541,7 @@ function AppModal({ state, onClose }: { state: ModalState; onClose: () => void }
           </h2>
           <button
             onClick={onClose}
-            className="text-gray-900 text-2xl leading-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]"
+            className="text-gray-900 text-2xl leading-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]"
             aria-label="Close dialog"
           >
             ×

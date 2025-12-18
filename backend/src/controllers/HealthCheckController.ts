@@ -58,7 +58,8 @@ export class HealthCheckController {
         ...snapshot,
         timestamp,
       });
-    } catch (error) {      console.error('SLO Error:', error);      logger.error('[HealthCheck] Public status failed', { error });
+    } catch (error) {
+      logger.error('[HealthCheck] Public status failed', { error });
       res.set('Cache-Control', 'public, max-age=5, s-maxage=10, stale-while-revalidate=60');
       res.status(200).json({
         status: 'unknown',
@@ -98,7 +99,6 @@ export class HealthCheckController {
     const startTime = new Date(endTime.getTime() - days * 24 * 60 * 60 * 1000);
 
     try {
-      console.log('Starting SLO query with params:', startTime, endTime);
       const sql = `
         WITH impression_metrics AS (
           SELECT

@@ -13,8 +13,8 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -27,13 +27,13 @@ const StatusDot = ({ status }: { status: 'certified' | 'partial' | 'unsupported'
   if (status === 'certified') {
     return (
       <span className="relative flex h-2.5 w-2.5">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-40"></span>
-        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-40"></span>
+        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-success"></span>
       </span>
     );
   }
   if (status === 'partial') {
-    return <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-400"></span>;
+    return <span className="inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>;
   }
   return <span className="inline-flex h-2.5 w-2.5 rounded-full bg-gray-300"></span>;
 };
@@ -84,16 +84,16 @@ const playbackMatrix = {
 
 const statusConfig = {
   certified: {
-    color: 'text-emerald-700',
-    bgColor: 'bg-emerald-50',
-    borderColor: 'border-emerald-200',
+    color: 'text-success',
+    bgColor: 'bg-success/10',
+    borderColor: 'border-success/20',
     label: 'Certified',
     order: 1,
   },
   partial: {
-    color: 'text-amber-700',
-    bgColor: 'bg-amber-50',
-    borderColor: 'border-amber-200',
+    color: 'text-warning',
+    bgColor: 'bg-warning/10',
+    borderColor: 'border-warning/20',
     label: 'Partial',
     order: 2,
   },
@@ -222,25 +222,21 @@ function SortableTable({ platforms, columns }: SortableTableProps) {
 export default function PlaybackMatrixPage() {
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         {/* Hero */}
-        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-gray-50 to-white border-b border-gray-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <Play className="w-4 h-4" />
                 SSAI Compatibility
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-ink leading-tight mb-6">
                 Certified Playback Matrix
               </h1>
-              <p className="text-xl text-slate-600">
+              <p className="text-xl text-inkMuted">
                 Our SSAI solution has been tested and certified across 20+ platforms and players. Here&apos;s the complete compatibility matrix.
               </p>
             </motion.div>

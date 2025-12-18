@@ -68,7 +68,7 @@
   ```bash
   # Load test with k6
   k6 run --vus 100 --duration 5m load-test.js
-  # Targets: P95 latency < 100ms; error rate < 0.1%
+  # Targets: P95 latency < 200ms; error rate < 0.1%
   ```
 - [ ] Smoke tests:
   ```bash
@@ -680,7 +680,7 @@
 ## 📊 Success Metrics (End of Week 16)
 
 ### Technical Metrics
-- ✅ API P95 latency: <100ms
+- ✅ API P95 latency: <200ms
 - ✅ Uptime: >99.9%
 - ✅ Error rate: <0.1%
 - ✅ SDK crash rate: <0.01%

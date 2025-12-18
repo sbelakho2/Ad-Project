@@ -30,7 +30,7 @@ export default function AboutPage() {
               alt="ApexMediation logo"
               fill
               sizes="48px"
-              className="object-contain"
+              className="object-contain dark:invert dark:opacity-90"
               priority
             />
           </div>

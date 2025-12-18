@@ -42,15 +42,15 @@ function resolveBadge(ls: LiveStatus | null) {
   const lastChecked = typeof ls?.timestamp === 'string' ? ls!.timestamp : null
 
   if (status === 'operational') {
-    return { className: 'bg-green-50 border-green-100 text-green-700', label: 'Operational', dot: 'bg-green-500', lastChecked }
+    return { className: 'bg-success/10 border-success/20 text-success', label: 'Operational', dot: 'bg-success', lastChecked }
   }
   if (status === 'degraded') {
-    return { className: 'bg-amber-50 border-amber-100 text-amber-700', label: 'Degraded', dot: 'bg-amber-500', lastChecked }
+    return { className: 'bg-warning/10 border-warning/20 text-warning', label: 'Degraded', dot: 'bg-warning', lastChecked }
   }
   if (status === 'down') {
-    return { className: 'bg-red-50 border-red-100 text-red-700', label: 'Down', dot: 'bg-red-500', lastChecked }
+    return { className: 'bg-danger/10 border-danger/20 text-danger', label: 'Down', dot: 'bg-danger', lastChecked }
   }
-  return { className: 'bg-gray-50 border-gray-200 text-gray-700', label: 'Unknown', dot: 'bg-gray-400', lastChecked }
+  return { className: 'bg-gray-50 border-gray-200 text-inkMuted', label: 'Unknown', dot: 'bg-gray-400', lastChecked }
 }
 
 export default async function StatusPage() {
@@ -112,9 +112,9 @@ export default async function StatusPage() {
 
               <div className="mt-10 grid gap-4">
                 {SERVICES.map((svc) => {
-                  const dot = badge.label === 'Operational' ? 'bg-green-500' : badge.label === 'Degraded' ? 'bg-amber-500' : badge.label === 'Down' ? 'bg-red-500' : 'bg-gray-400'
-                  const pill = dot === 'bg-green-500' ? 'text-green-700 bg-green-50 border border-green-100' : dot === 'bg-amber-500' ? 'text-amber-700 bg-amber-50 border border-amber-100' : dot === 'bg-red-500' ? 'text-red-700 bg-red-50 border border-red-100' : 'text-gray-700 bg-gray-50 border border-gray-200'
-                  const label = dot === 'bg-green-500' ? 'Operational' : dot === 'bg-amber-500' ? 'Degraded' : dot === 'bg-red-500' ? 'Down' : 'Unknown'
+                  const dot = badge.label === 'Operational' ? 'bg-success' : badge.label === 'Degraded' ? 'bg-warning' : badge.label === 'Down' ? 'bg-danger' : 'bg-gray-400'
+                  const pill = dot === 'bg-success' ? 'text-success bg-success/10 border border-success/20' : dot === 'bg-warning' ? 'text-warning bg-warning/10 border border-warning/20' : dot === 'bg-danger' ? 'text-danger bg-danger/10 border border-danger/20' : 'text-inkMuted bg-gray-50 border border-gray-200'
+                  const label = dot === 'bg-success' ? 'Operational' : dot === 'bg-warning' ? 'Degraded' : dot === 'bg-danger' ? 'Down' : 'Unknown'
                   return (
                     <div key={svc.name} className="rounded-xl border border-gray-100 bg-white p-6 shadow-sm">
                       <div className="flex flex-wrap items-center justify-between gap-4">

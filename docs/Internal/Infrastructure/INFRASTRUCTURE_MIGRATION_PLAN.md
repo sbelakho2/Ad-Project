@@ -986,7 +986,7 @@ umami.track('sdk_download', { platform: 'ios' });
 ## Success Criteria
 
 ✅ **Cost Reduction**: <$200/month operational costs (target achieved at $133/month)
-✅ **Performance**: <100ms P95 latency (comparable to old stack)
+✅ **Performance**: <200ms P95 latency (comparable to old stack)
 ✅ **Reliability**: >99.9% uptime (measured over 30 days)
 ✅ **Break-even**: 2 customers @ $67/month (vs 7 in old stack)
 ✅ **Profit Margin**: 95%+ at 100 customers ($15K MRR - $800 costs = $14.2K profit)

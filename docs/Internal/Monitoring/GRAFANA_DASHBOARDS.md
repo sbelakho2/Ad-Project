@@ -656,7 +656,7 @@ histogram_quantile(0.99,
 ```
 
 **Thresholds:**
-- p95: Green <100ms, Yellow 100-500ms, Red >500ms
+- p95: Green <200ms, Yellow 200-500ms, Red >500ms
 - p99: Green <500ms, Yellow 500-1000ms, Red >1000ms
 
 #### Connection Pool Utilization

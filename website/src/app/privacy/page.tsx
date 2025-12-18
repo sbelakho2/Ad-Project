@@ -1,7 +1,7 @@
 'use client';
 
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
+import SiteHeader from '@/components/SiteHeader';
 import CookieBanner from '@/components/CookieBanner';
 import { legalEntity } from '@/config/legal';
 
@@ -24,12 +24,8 @@ export default function PrivacyPolicyPage() {
 
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         <section className="py-12 md:py-16">
           <div className="container mx-auto px-4">

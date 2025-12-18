@@ -15,8 +15,8 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 
 const getRevealProps = (delay = 0) => ({
   initial: false,
@@ -136,25 +136,21 @@ const dataProcessing = [
 export default function SecurityPackPage() {
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         {/* Hero */}
-        <PageHero className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200/60">
+        <PageHero className="bg-gradient-to-b from-gray-50 to-white border-b border-gray-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-brand-100 text-brand-700 text-sm font-medium mb-6">
                 <ShieldCheck className="w-4 h-4" />
                 Security Documentation
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-ink leading-tight mb-6">
                 Security Pack
               </h1>
-              <p className="text-xl text-slate-600 mb-8">
+              <p className="text-xl text-inkMuted mb-8">
                 Everything your security team needs to evaluate ApexMediation: architecture, threat model, compliance, and data handling.
               </p>
               <a
@@ -221,7 +217,7 @@ export default function SecurityPackPage() {
                     <div className="flex-1">
                       <div className="flex items-center gap-3 mb-2">
                         <h3 className="text-lg font-semibold text-gray-900">{item.threat}</h3>
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-medium">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/10 text-success text-xs font-medium">
                           <CheckCircle className="w-3 h-3" />
                           {item.status}
                         </span>
@@ -322,18 +318,18 @@ export default function SecurityPackPage() {
               </motion.div>
 
               <div className="grid md:grid-cols-3 gap-6">
-                <motion.div {...getRevealProps(0.1)} className="bg-green-50 rounded-xl p-6 text-center">
-                  <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-3" />
+                <motion.div {...getRevealProps(0.1)} className="bg-success/10 rounded-xl p-6 text-center">
+                  <CheckCircle className="w-10 h-10 text-success mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">GDPR</h3>
                   <p className="text-sm text-gray-600">Aligned</p>
                 </motion.div>
-                <motion.div {...getRevealProps(0.15)} className="bg-green-50 rounded-xl p-6 text-center">
-                  <CheckCircle className="w-10 h-10 text-green-600 mx-auto mb-3" />
+                <motion.div {...getRevealProps(0.15)} className="bg-success/10 rounded-xl p-6 text-center">
+                  <CheckCircle className="w-10 h-10 text-success mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">CCPA</h3>
                   <p className="text-sm text-gray-600">Aligned</p>
                 </motion.div>
-                <motion.div {...getRevealProps(0.2)} className="bg-blue-50 rounded-xl p-6 text-center">
-                  <Shield className="w-10 h-10 text-blue-600 mx-auto mb-3" />
+                <motion.div {...getRevealProps(0.2)} className="bg-info/10 rounded-xl p-6 text-center">
+                  <Shield className="w-10 h-10 text-info mx-auto mb-3" />
                   <h3 className="font-semibold text-gray-900 mb-1">IAB TCF 2.2</h3>
                   <p className="text-sm text-gray-600">Consent Propagation</p>
                 </motion.div>

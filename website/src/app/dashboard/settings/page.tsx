@@ -103,7 +103,7 @@ function TabButton({ active, onClick, icon: Icon, label }: TabButtonProps) {
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex items-center gap-2 px-5 py-3 font-semibold text-sm transition-colors border-b-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)] ${
+      className={`flex items-center gap-2 px-5 py-3 font-semibold text-sm transition-colors border-b-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))] ${
         active
           ? 'border-brand-500 text-brand-700'
           : 'border-transparent text-gray-600 hover:text-brand-700 hover:border-brand-200'
@@ -204,8 +204,8 @@ function ProfileTab() {
         </div>
       </form>
 
-      <div className="card-v2 p-6 border-2 border-red-300">
-        <h2 className="text-red-600 font-bold uppercase text-lg mb-4">
+      <div className="card-v2 p-6 border-2 border-danger/20">
+        <h2 className="text-danger font-bold uppercase text-lg mb-4">
           Danger Zone
         </h2>
         <p className="text-gray-700 mb-4">
@@ -214,7 +214,7 @@ function ProfileTab() {
         <button
           type="button"
           onClick={handleDelete}
-          className="px-6 py-2 text-sm font-semibold text-white rounded bg-[var(--danger)] hover:bg-[#b91c1c] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]"
+          className="px-6 py-2 text-sm font-semibold text-white rounded bg-[rgb(var(--danger))] hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]"
         >
           Delete Account
         </button>
@@ -311,8 +311,8 @@ function PaymentTab() {
           Tax Information
         </h2>
         <div className="space-y-4">
-          <div className="bg-green-50 border border-green-300 rounded p-4">
-            <div className="flex items-center gap-2 text-green-700 font-bold mb-2">
+          <div className="bg-success/10 border border-success/20 rounded p-4">
+            <div className="flex items-center gap-2 text-success font-bold mb-2">
               <ShieldCheckIcon className="w-5 h-5" />
               W-9 Form Submitted
             </div>
@@ -423,10 +423,10 @@ function NotificationsTab() {
               {slackLoading ? 'Connecting…' : (slackConnected ? 'Reconnect Slack' : 'Connect Slack Workspace')}
             </button>
             {slackConnected === true && (
-              <span className="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">CONNECTED</span>
+              <span className="text-success bg-success/10 px-2 py-1 rounded text-xs font-bold">CONNECTED</span>
             )}
             {slackError && (
-              <span className="text-red-700 text-xs">{slackError}</span>
+              <span className="text-danger text-xs">{slackError}</span>
             )}
           </div>
         </div>
@@ -639,8 +639,8 @@ function SecurityTab() {
           </div>
         )}
         {backupCodes && backupCodes.length > 0 && (
-          <div className="bg-green-50 border border-green-300 rounded p-4">
-            <p className="text-sm text-green-800 font-bold mb-2">Save these backup codes in a safe place:</p>
+          <div className="bg-success/10 border border-success/20 rounded p-4">
+            <p className="text-sm text-success font-bold mb-2">Save these backup codes in a safe place:</p>
             <ul className="grid grid-cols-2 gap-2 font-mono text-sm">
               {backupCodes.map((c) => (
                 <li key={c} className="bg-white border px-2 py-1">{c}</li>
@@ -656,7 +656,7 @@ function SecurityTab() {
         </h2>
         <div className="space-y-3">
           {keysLoading && <p className="text-sm text-gray-600">Loading keys…</p>}
-          {keysError && <p className="text-sm text-red-700">{keysError}</p>}
+          {keysError && <p className="text-sm text-danger">{keysError}</p>}
           {newKeySecret && (
             <div className="bg-warning/10 border border-warning rounded p-3">
               <p className="text-sm text-gray-800 mb-1 font-bold">New API key (copy now, it will not be shown again):</p>
@@ -675,7 +675,7 @@ function SecurityTab() {
                 </div>
                 <div className="flex items-center gap-3">
                   <button className="text-sm font-bold text-brand-700" onClick={() => rotateKey(k.id)}>Rotate</button>
-                  <button className="text-sm font-bold text-red-600 hover:text-red-700" onClick={() => revokeKey(k.id)}>Revoke</button>
+                  <button className="text-sm font-bold text-danger hover:opacity-90" onClick={() => revokeKey(k.id)}>Revoke</button>
                 </div>
               </div>
               <p className="text-xs text-gray-500">Created: {new Date(k.createdAt).toLocaleString()} {k.lastUsedAt ? `• Last used: ${new Date(k.lastUsedAt).toLocaleString()}` : ''}</p>
@@ -733,7 +733,7 @@ function PaymentMethodCard({ type, icon, details, primary }: PaymentMethodCardPr
           </div>
         </div>
         {primary && (
-          <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{borderColor:'var(--brand-500)'}}>
+          <div className="bg-brand-100 text-brand-700 px-3 py-1 rounded text-xs font-bold border" style={{ borderColor: 'rgb(var(--brand-500))' }}>
             PRIMARY
           </div>
         )}
@@ -781,11 +781,11 @@ function SessionCard({ device, location, lastActive, current }: SessionCardProps
           <p className="text-xs text-gray-500 mt-1">{lastActive}</p>
         </div>
         {current ? (
-          <div className="bg-green-100 text-green-700 px-3 py-1 rounded text-xs font-bold">
+          <div className="bg-success/10 text-success px-3 py-1 rounded text-xs font-bold">
             CURRENT
           </div>
         ) : (
-          <button className="text-sm font-bold text-red-600 hover:text-red-700">
+          <button className="text-sm font-bold text-danger hover:opacity-90">
             Revoke
           </button>
         )}

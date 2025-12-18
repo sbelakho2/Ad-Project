@@ -14,9 +14,9 @@ export default function DRMPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">DRM Integration</span>
           </div>
@@ -36,7 +36,7 @@ export default function DRMPage() {
           {/* Supported Systems */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Shield className="w-6 h-6 text-emerald-600" />
+              <Shield className="w-6 h-6 text-brand-600" />
               Supported DRM Systems
             </h2>
             
@@ -104,7 +104,7 @@ export interface DRMInfo {
           {/* Policy Configuration */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Settings className="w-6 h-6 text-emerald-600" />
+              <Settings className="w-6 h-6 text-brand-600" />
               Policy Configuration
             </h2>
             
@@ -131,7 +131,7 @@ export interface DRMInfo {
             <div className="grid md:grid-cols-2 gap-6">
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600" />
+                  <CheckCircle className="w-5 h-5 text-success" />
                   allowClearAdsInEncryptedContent
                 </h3>
                 <p className="text-sm text-gray-600 mb-2">
@@ -146,7 +146,7 @@ export interface DRMInfo {
               
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-amber-600" />
+                  <AlertTriangle className="w-5 h-5 text-warning" />
                   allowEncryptedAdsInClearContent
                 </h3>
                 <p className="text-sm text-gray-600 mb-2">
@@ -160,7 +160,7 @@ export interface DRMInfo {
               
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <Lock className="w-5 h-5 text-emerald-600" />
+                  <Lock className="w-5 h-5 text-brand-600" />
                   requireSameScheme
                 </h3>
                 <p className="text-sm text-gray-600 mb-2">
@@ -174,7 +174,7 @@ export interface DRMInfo {
               
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <Key className="w-5 h-5 text-emerald-600" />
+                  <Key className="w-5 h-5 text-brand-600" />
                   requireKeyContinuity
                 </h3>
                 <p className="text-sm text-gray-600 mb-2">
@@ -191,7 +191,7 @@ export interface DRMInfo {
           {/* Compatibility Validation */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <CheckCircle className="w-6 h-6 text-emerald-600" />
+              <CheckCircle className="w-6 h-6 text-brand-600" />
               Compatibility Validation
             </h2>
             
@@ -215,8 +215,8 @@ export interface DRMInfo {
 
             <h3 className="font-semibold text-gray-900 mb-3">Validation Checks</h3>
             <div className="space-y-3">
-              <div className="flex items-start gap-3 p-4 bg-emerald-50 rounded-lg">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 bg-success/10 rounded-lg">
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Scheme Support</p>
                   <p className="text-sm text-gray-600">
@@ -225,8 +225,8 @@ export interface DRMInfo {
                 </div>
               </div>
               
-              <div className="flex items-start gap-3 p-4 bg-emerald-50 rounded-lg">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 bg-success/10 rounded-lg">
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Clear/Encrypted Mixing</p>
                   <p className="text-sm text-gray-600">
@@ -235,8 +235,8 @@ export interface DRMInfo {
                 </div>
               </div>
               
-              <div className="flex items-start gap-3 p-4 bg-emerald-50 rounded-lg">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 bg-success/10 rounded-lg">
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Scheme Matching</p>
                   <p className="text-sm text-gray-600">
@@ -250,7 +250,7 @@ export interface DRMInfo {
           {/* Key Continuity */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Key className="w-6 h-6 text-emerald-600" />
+              <Key className="w-6 h-6 text-brand-600" />
               Key Continuity
             </h2>
             
@@ -278,9 +278,9 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
               </pre>
             </div>
 
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-6">
+            <div className="bg-warning/10 border border-warning/20 rounded-lg p-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <AlertTriangle className="w-5 h-5 text-warning" />
                 Key Rotation Handling
               </h3>
               <p className="text-sm text-gray-600 mb-3">
@@ -302,7 +302,7 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
             <h2 className="text-2xl font-bold text-gray-900 mb-4">Best Practices</h2>
             
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Use Clear Ads by Default</h3>
                 <p className="text-gray-600 text-sm">
                   Most programmatic ad sources deliver clear (unencrypted) creatives. The default 
@@ -310,7 +310,7 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Match Container Formats</h3>
                 <p className="text-gray-600 text-sm">
                   DRM only works with CMAF containers. If using DRM, ensure both content and ads 
@@ -318,7 +318,7 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Monitor Key Changes</h3>
                 <p className="text-gray-600 text-sm">
                   Enable key continuity tracking to identify ads that cause decryption delays. 
@@ -326,7 +326,7 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Test Multi-DRM Scenarios</h3>
                 <p className="text-gray-600 text-sm">
                   If serving to multiple platforms, test DRM on each: Widevine for Chrome/Android, 
@@ -353,51 +353,51 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
                 <tbody className="divide-y divide-gray-200">
                   <tr>
                     <td className="p-3 text-gray-900">Chrome/Firefox</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Safari/macOS</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">iOS/tvOS</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Android/Android TV</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Edge/Windows</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Xbox</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Fire TV</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Roku</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                 </tbody>
               </table>
@@ -405,22 +405,22 @@ checkKeyContinuity(contentDrm: DRMInfo, adDrm: DRMInfo): {
           </section>
 
           {/* Related Documentation */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Container Formats →</h3>
                 <p className="text-sm text-gray-600">TS vs CMAF for DRM content</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol →</h3>
                 <p className="text-sm text-gray-600">ContentProtection elements in MPD</p>
               </Link>
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">EXT-X-KEY and EXT-X-SESSION-KEY</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>

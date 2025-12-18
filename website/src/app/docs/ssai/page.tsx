@@ -13,7 +13,7 @@ export default function SSAIOverviewPage() {
       <main className="pt-24 pb-16">
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
-          <Link href="/docs" className="inline-flex items-center gap-2 text-emerald-600 hover:text-emerald-700 mb-8">
+          <Link href="/docs" className="inline-flex items-center gap-2 text-brand-700 hover:text-brand-800 mb-8">
             <ArrowLeft className="w-4 h-4" />
             Back to Documentation
           </Link>
@@ -30,47 +30,47 @@ export default function SSAIOverviewPage() {
 
           {/* Quick Navigation */}
           <div className="grid md:grid-cols-3 gap-4 mb-12">
-            <Link href="/docs/ssai/protocols/hls" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/protocols/hls" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">HLS Protocol</h3>
               <p className="text-sm text-gray-600">RFC 8216 compliance, DATERANGE, CDN caching</p>
             </Link>
-            <Link href="/docs/ssai/protocols/dash" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/protocols/dash" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">DASH Protocol</h3>
               <p className="text-sm text-gray-600">MPD structure, EventStream, multi-period</p>
             </Link>
-            <Link href="/docs/ssai/modes/live" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/modes/live" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Live Mode</h3>
               <p className="text-sm text-gray-600">Latency, resilience, operational controls</p>
             </Link>
-            <Link href="/docs/ssai/modes/vod" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/modes/vod" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">VOD Mode</h3>
               <p className="text-sm text-gray-600">Seeking, manifest stability, measurement</p>
             </Link>
-            <Link href="/docs/ssai/containers" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/containers" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Containers</h3>
               <p className="text-sm text-gray-600">TS and CMAF/fMP4 segment formats</p>
             </Link>
-            <Link href="/docs/ssai/drm" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/drm" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">DRM Support</h3>
               <p className="text-sm text-gray-600">Widevine, FairPlay, PlayReady policies</p>
             </Link>
-            <Link href="/docs/ssai/prerequisites" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/prerequisites" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Prerequisites</h3>
               <p className="text-sm text-gray-600">Origin, cue types, codec ladder requirements</p>
             </Link>
-            <Link href="/docs/ssai/operations" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/operations" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Operations</h3>
               <p className="text-sm text-gray-600">Failure modes, fallback ladder, SLAs</p>
             </Link>
-            <Link href="/docs/ssai/cdn" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/cdn" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">CDN Guidance</h3>
               <p className="text-sm text-gray-600">Cache policies, headers, misconfigurations</p>
             </Link>
-            <Link href="/docs/ssai/measurement" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/measurement" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Measurement</h3>
               <p className="text-sm text-gray-600">Tracking events, exactly-once, reconciliation</p>
             </Link>
-            <Link href="/docs/ssai/coverage" className="p-4 border border-gray-200 rounded-lg hover:border-emerald-500 transition-colors">
+            <Link href="/docs/ssai/coverage" className="p-4 border border-gray-200 rounded-lg hover:border-brand-500 transition-colors">
               <h3 className="font-semibold text-gray-900">Playback Matrix</h3>
               <p className="text-sm text-gray-600">Certified player/platform compatibility</p>
             </Link>
@@ -79,7 +79,7 @@ export default function SSAIOverviewPage() {
           {/* What is SSAI */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Server className="w-6 h-6 text-emerald-600" />
+              <Server className="w-6 h-6 text-brand-600" />
               What is Server-Side Ad Insertion?
             </h2>
             <p className="text-gray-600 mb-4">
@@ -92,19 +92,19 @@ export default function SSAIOverviewPage() {
               <h3 className="font-semibold text-gray-900 mb-3">Key Benefits</h3>
               <ul className="space-y-2">
                 <li className="flex items-start gap-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                  <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                   <span className="text-gray-600"><strong>Ad blocker resistant:</strong> Ads are part of the content stream, indistinguishable from program content</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                  <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                   <span className="text-gray-600"><strong>Seamless experience:</strong> No buffering or player reinitialization between content and ads</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-                  <span className="text-gray-600"><strong>Broad compatibility:</strong> Designed to work across modern HLS and DASH players. Exact compatibility depends on protocol, container, DRM policy, and player capabilities—see the <Link href="/docs/ssai/coverage" className="text-emerald-600 hover:underline">Certified Playback Matrix</Link> and protocol pages.</span>
+                  <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
+                  <span className="text-gray-600"><strong>Broad compatibility:</strong> Designed to work across modern HLS and DASH players. Exact compatibility depends on protocol, container, DRM policy, and player capabilities—see the <Link href="/docs/ssai/coverage" className="text-brand-700 hover:underline">Certified Playback Matrix</Link> and protocol pages.</span>
                 </li>
                 <li className="flex items-start gap-2">
-                  <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                  <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                   <span className="text-gray-600"><strong>Accurate measurement:</strong> Server-side tracking with exactly-once delivery guarantees</span>
                 </li>
               </ul>
@@ -114,7 +114,7 @@ export default function SSAIOverviewPage() {
           {/* Architecture */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Settings className="w-6 h-6 text-emerald-600" />
+              <Settings className="w-6 h-6 text-brand-600" />
               Architecture Overview
             </h2>
             
@@ -182,7 +182,7 @@ export default function SSAIOverviewPage() {
           {/* Integration */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Integration
             </h2>
             
@@ -239,7 +239,7 @@ export default function SSAIOverviewPage() {
           {/* Ad Decisioning */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Play className="w-6 h-6 text-emerald-600" />
+              <Play className="w-6 h-6 text-brand-600" />
               Ad Decisioning & Timing
             </h2>
             
@@ -270,15 +270,15 @@ export default function SSAIOverviewPage() {
             <h3 className="font-semibold text-gray-900 mb-3">SLA Guarantees</h3>
             <ul className="space-y-2 text-gray-600">
               <li className="flex items-start gap-2">
-                <Clock className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <Clock className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
                 <span><strong>Decision Deadline:</strong> Pod decisions complete before break start (p99 &lt; 200ms)</span>
               </li>
               <li className="flex items-start gap-2">
-                <Shield className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <Shield className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
                 <span><strong>Fallback Behavior:</strong> If deadline approaches, slate (fallback content) is served rather than black screen</span>
               </li>
               <li className="flex items-start gap-2">
-                <Settings className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <Settings className="w-5 h-5 text-brand-600 flex-shrink-0 mt-0.5" />
                 <span><strong>Safe Mode:</strong> During incidents, system reduces fanout and enforces strict deadlines</span>
               </li>
             </ul>
@@ -287,7 +287,7 @@ export default function SSAIOverviewPage() {
           {/* Content Correctness */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <CheckCircle className="w-6 h-6 text-emerald-600" />
+              <CheckCircle className="w-6 h-6 text-brand-600" />
               Content Correctness
             </h2>
             
@@ -296,28 +296,28 @@ export default function SSAIOverviewPage() {
             </p>
             
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Format Compatibility</h3>
                 <p className="text-gray-600 text-sm">
                   Ads must match content codec, resolution tier, and container format. HLS/TS content receives 
                   HLS/TS ads; DASH/CMAF content receives DASH/CMAF ads.
                 </p>
               </div>
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Audio Continuity</h3>
                 <p className="text-gray-600 text-sm">
                   Audio layout (stereo/5.1/Atmos) and loudness (EBU R128/ATSC A/85) are validated and normalized 
                   to prevent jarring transitions.
                 </p>
               </div>
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Timing Alignment</h3>
                 <p className="text-gray-600 text-sm">
                   Segment durations are aligned to GOP boundaries. Discontinuity sequences are maintained 
                   consistently across renditions.
                 </p>
               </div>
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Caption Handling</h3>
                 <p className="text-gray-600 text-sm">
                   CEA-608/708 captions are preserved through ad breaks. WebVTT timing is adjusted to account 
@@ -330,7 +330,7 @@ export default function SSAIOverviewPage() {
           {/* Observability */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Eye className="w-6 h-6 text-emerald-600" />
+              <Eye className="w-6 h-6 text-brand-600" />
               Observability & Forensics
             </h2>
             
@@ -364,27 +364,27 @@ export default function SSAIOverviewPage() {
             <h3 className="font-semibold text-gray-900 mb-3">Metrics Exposed</h3>
             <ul className="grid md:grid-cols-2 gap-2 text-gray-600">
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Session counts by tenant/channel
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Pod decision latency (p50/p95/p99)
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Fill rate by break type
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Format rejection reasons
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Partner response times
               </li>
               <li className="flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                <CheckCircle className="w-4 h-4 text-success" />
                 Tracking event success rate
               </li>
             </ul>
@@ -393,13 +393,13 @@ export default function SSAIOverviewPage() {
           {/* Security */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Shield className="w-6 h-6 text-emerald-600" />
+              <Shield className="w-6 h-6 text-brand-600" />
               Security & Privacy
             </h2>
             
             <div className="space-y-4">
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Shield className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Shield className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Signed Session Tokens</h3>
                   <p className="text-gray-600 text-sm">
@@ -409,7 +409,7 @@ export default function SSAIOverviewPage() {
                 </div>
               </div>
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Shield className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Shield className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Anti-Tampering</h3>
                   <p className="text-gray-600 text-sm">
@@ -419,7 +419,7 @@ export default function SSAIOverviewPage() {
                 </div>
               </div>
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Shield className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Shield className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Rate Limiting</h3>
                   <p className="text-gray-600 text-sm">
@@ -429,7 +429,7 @@ export default function SSAIOverviewPage() {
                 </div>
               </div>
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <Shield className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <Shield className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Cache Isolation</h3>
                   <p className="text-gray-600 text-sm">
@@ -444,18 +444,18 @@ export default function SSAIOverviewPage() {
           {/* Platform Support */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               Platform Coverage Matrix
             </h2>
 
             {/* Legend */}
             <div className="flex flex-wrap gap-6 mb-4 text-sm">
               <div className="flex items-center gap-2">
-                <span className="text-emerald-600">✓</span>
+                <span className="text-success">✓</span>
                 <span className="text-gray-600">Certified</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-amber-600">△</span>
+                <span className="text-warning">△</span>
                 <span className="text-gray-600">Limited (player-specific config required)</span>
               </div>
               <div className="flex items-center gap-2">
@@ -480,92 +480,92 @@ export default function SSAIOverviewPage() {
                 <tbody className="divide-y divide-gray-200">
                   <tr>
                     <td className="p-3 text-gray-900">Web (hls.js)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Web (Shaka)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-amber-600" title="Limited: TS with DASH requires player-specific configuration">△</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-warning" title="Limited: TS with DASH requires player-specific configuration">△</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">tvOS (AVPlayer)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-center text-gray-400">—</td>
                     <td className="p-3 text-center text-gray-400">—</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Android TV (ExoPlayer)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-amber-600" title="Limited: ExoPlayer TS with DASH requires explicit configuration">△</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-warning" title="Limited: ExoPlayer TS with DASH requires explicit configuration">△</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Roku</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-amber-600" title="Limited: Roku DASH+TS requires specific firmware">△</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-warning" title="Limited: Roku DASH+TS requires specific firmware">△</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Fire TV</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-amber-600" title="Limited: Fire TV DASH+TS via ExoPlayer workaround">△</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-warning" title="Limited: Fire TV DASH+TS via ExoPlayer workaround">△</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                   </tr>
                 </tbody>
               </table>
             </div>
 
             {/* DASH/TS Note */}
-            <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="mt-4 p-4 bg-warning/10 border border-warning/20 rounded-lg flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm text-gray-700">
                   <strong>DASH + TS containers:</strong> While technically supported by some players (Shaka, ExoPlayer), 
                   DASH with TS segments requires player-specific configuration and is not recommended for new deployments. 
-                  Use <strong>DASH + CMAF</strong> for full compatibility. See <Link href="/docs/ssai/containers" className="text-emerald-600 hover:underline">Container Formats</Link> for details.
+                  Use <strong>DASH + CMAF</strong> for full compatibility. See <Link href="/docs/ssai/containers" className="text-brand-700 hover:underline">Container Formats</Link> for details.
                 </p>
               </div>
             </div>
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Next Steps</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol Details →</h3>
                 <p className="text-sm text-gray-600">RFC 8216 compliance, DATERANGE markers, live sliding window</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol Details →</h3>
                 <p className="text-sm text-gray-600">MPD structure, EventStream, multi-period ad insertion</p>
               </Link>
-              <Link href="/docs/getting-started/sandbox" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/getting-started/sandbox" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Try the Sandbox →</h3>
                 <p className="text-sm text-gray-600">Test SSAI integration without credentials</p>
               </Link>
-              <Link href="/contact" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/contact" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Talk to an Expert →</h3>
                 <p className="text-sm text-gray-600">Get help planning your SSAI integration</p>
               </Link>

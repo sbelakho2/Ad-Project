@@ -124,10 +124,10 @@ export default function SignUpPage() {
 
         <form className="mt-8 space-y-6" onSubmit={handleSubmit} aria-label="Create account form">
           {error && (
-            <div className="rounded-md bg-red-50 p-4">
+            <div className="rounded-md bg-danger/10 p-4">
               <div className="flex">
                 <div className="ml-3">
-                  <h3 className="text-sm font-medium text-red-800">{error}</h3>
+                  <h3 className="text-sm font-medium text-danger">{error}</h3>
                 </div>
               </div>
             </div>

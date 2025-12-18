@@ -442,7 +442,7 @@ export default function FeaturesPage() {
                 </motion.div>
               </div>
 
-              <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-green-50 rounded-2xl p-8 border border-brand-200">
+              <motion.div {...getRevealProps(0.2)} className="bg-gradient-to-r from-brand-50 to-success/10 rounded-2xl p-8 border border-brand-200">
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
                   <MetricCard value="3" label="Lines to integrate" />
                   <MetricCard value="0" label="XML config files" />
@@ -489,7 +489,7 @@ export default function FeaturesPage() {
           <div className="container mx-auto px-4">
             <div className="max-w-6xl mx-auto">
               <motion.div {...getRevealProps(0)} className="text-center mb-16">
-                <div className="inline-flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-full font-semibold text-sm mb-6">
+                <div className="inline-flex items-center gap-2 px-4 py-2 bg-success/10 text-success rounded-full font-semibold text-sm mb-6">
                   <ShieldCheck className="w-4 h-4" />
                   Privacy First
                 </div>
@@ -511,8 +511,8 @@ export default function FeaturesPage() {
                 <motion.div {...getRevealProps(0.15)} className="space-y-6">
                   <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
                     <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-green-600">1</span>
+                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <span className="text-2xl font-bold text-success">1</span>
                       </div>
                       <div>
                         <h3 className="font-bold text-gray-900 text-lg mb-2">Google UMP integration</h3>
@@ -526,8 +526,8 @@ export default function FeaturesPage() {
 
                   <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
                     <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-green-600">2</span>
+                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <span className="text-2xl font-bold text-success">2</span>
                       </div>
                       <div>
                         <h3 className="font-bold text-gray-900 text-lg mb-2">Direct consent strings</h3>
@@ -541,8 +541,8 @@ export default function FeaturesPage() {
 
                   <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
                     <div className="flex items-start gap-4">
-                      <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                        <span className="text-2xl font-bold text-green-600">3</span>
+                      <div className="w-12 h-12 bg-success/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                        <span className="text-2xl font-bold text-success">3</span>
                       </div>
                       <div>
                         <h3 className="font-bold text-gray-900 text-lg mb-2">Read IAB-standard consent storage (opt-in)</h3>
@@ -554,9 +554,9 @@ export default function FeaturesPage() {
                     </div>
                   </div>
 
-                  <div className="bg-gradient-to-r from-green-50 to-brand-50 rounded-xl p-6 border border-green-200">
+                  <div className="bg-gradient-to-r from-success/10 to-brand-50 rounded-xl p-6 border border-success/20">
                     <div className="flex items-start gap-3">
-                      <CheckCircle className="w-6 h-6 text-green-600 flex-shrink-0 mt-0.5" />
+                      <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-0.5" />
                       <div>
                         <h4 className="font-bold text-gray-900 mb-1">Consistent signal plumbing</h4>
                         <p className="text-gray-600 text-sm">
@@ -583,7 +583,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <Shield className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded">Live</span>
+                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     Verifiable Revenue Auditor
@@ -628,7 +628,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <ArrowRightLeft className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded">Live</span>
+                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     Migration Studio
@@ -713,7 +713,7 @@ export default function FeaturesPage() {
                     <div className="w-12 h-12 bg-brand-600 rounded-xl flex items-center justify-center">
                       <Brain className="w-6 h-6 text-white" />
                     </div>
-                    <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded">Live</span>
+                    <span className="px-2 py-1 bg-success/10 text-success text-xs font-semibold rounded">Live</span>
                   </div>
                   <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-4">
                     ML Waterfall Optimizer
@@ -802,12 +802,12 @@ export default function FeaturesPage() {
                 <motion.div {...getRevealProps(0.1)}>
                   <div className="bg-gray-900 rounded-xl p-6 text-sm font-mono">
                     <div className="flex items-center gap-2 mb-4">
-                      <div className="w-3 h-3 rounded-full bg-red-500" />
-                      <div className="w-3 h-3 rounded-full bg-yellow-500" />
-                      <div className="w-3 h-3 rounded-full bg-green-500" />
+                      <div className="w-3 h-3 rounded-full bg-danger" />
+                      <div className="w-3 h-3 rounded-full bg-warning" />
+                      <div className="w-3 h-3 rounded-full bg-success" />
                       <span className="text-gray-400 ml-2">example metrics</span>
                     </div>
-                    <pre className="text-green-400 overflow-x-auto text-xs">
+                    <pre className="text-success/80 overflow-x-auto text-xs">
 {`# VRA reconciliation
 vra_coverage_ratio{network="admob"}  0.98
 vra_delta_count{kind="underpay"}     3

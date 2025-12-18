@@ -206,7 +206,7 @@ export default function RevenuePage() {
 
       {/* Error state */}
       {error && (
-        <div role="alert" aria-live="polite" className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+        <div role="alert" aria-live="polite" className="rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
           {error}
         </div>
       )}
@@ -411,7 +411,7 @@ function StatCard({ title, value, change, subtitle, icon: Icon, color }: StatCar
       </div>
       {change !== undefined && (
         <div className="flex items-center gap-1 text-sm">
-          <span className={change >= 0 ? 'text-green-600' : 'text-red-600'}>
+          <span className={change >= 0 ? 'text-success' : 'text-danger'}>
             {change >= 0 ? '↑' : '↓'} {Math.abs(change).toFixed(1)}%
           </span>
           <span className="text-gray-500">vs last period</span>

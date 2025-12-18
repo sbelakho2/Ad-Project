@@ -14,9 +14,9 @@ export default function PrerequisitesPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">Publisher Prerequisites</span>
           </div>
@@ -33,7 +33,7 @@ export default function PrerequisitesPage() {
           </div>
 
           {/* Summary Box */}
-          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-6 mb-12">
+          <div className="bg-brand-50 border border-brand-200 rounded-lg p-6 mb-12">
             <h2 className="font-semibold text-gray-900 mb-2">Quick Summary</h2>
             <p className="text-gray-600 text-sm">
               You provide: origin manifest URL, ad break signals (SCTE-35/DATERANGE), content with keyframe-aligned segments. 
@@ -44,7 +44,7 @@ export default function PrerequisitesPage() {
           {/* What You Must Provide */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileCheck className="w-6 h-6 text-emerald-600" />
+              <FileCheck className="w-6 h-6 text-brand-600" />
               What You Must Provide
             </h2>
 
@@ -52,7 +52,7 @@ export default function PrerequisitesPage() {
               {/* Origin Manifest */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded">Required</span>
+                  <span className="bg-brand-100 text-brand-700 text-xs px-2 py-1 rounded">Required</span>
                   Origin Manifest URL
                 </h3>
                 <p className="text-gray-600 text-sm mb-4">
@@ -60,15 +60,15 @@ export default function PrerequisitesPage() {
                 </p>
                 <div className="bg-gray-50 rounded p-4 space-y-3">
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">HTTPS endpoint (no self-signed certs)</span>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">Stable URL pattern (or webhook notification for URL changes)</span>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">IP allowlisting or token-based access for our manifest fetcher</span>
                   </div>
                 </div>
@@ -77,7 +77,7 @@ export default function PrerequisitesPage() {
               {/* Ad Break Signals */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded">Required</span>
+                  <span className="bg-brand-100 text-brand-700 text-xs px-2 py-1 rounded">Required</span>
                   Ad Break Signals
                 </h3>
                 <p className="text-gray-600 text-sm mb-4">
@@ -101,7 +101,7 @@ export default function PrerequisitesPage() {
                     </ul>
                   </div>
                 </div>
-                <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
+                <div className="mt-4 p-3 bg-warning/10 border border-warning/20 rounded text-sm text-warning">
                   <strong>Important:</strong> Cues with <code>DURATION</code> or <code>PLANNED-DURATION</code> improve fill rates. 
                   Without duration, we wait for the &quot;end&quot; cue before ad selection.
                 </div>
@@ -110,26 +110,26 @@ export default function PrerequisitesPage() {
               {/* Segment Requirements */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded">Required</span>
+                  <span className="bg-brand-100 text-brand-700 text-xs px-2 py-1 rounded">Required</span>
                   Segment Requirements
                 </h3>
                 <div className="space-y-3">
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="text-sm text-gray-900 font-medium">Keyframe alignment at cue points</span>
                       <p className="text-sm text-gray-600">Every ad break cue must land on an IDR frame. Encoder must insert keyframes at signaled positions.</p>
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="text-sm text-gray-900 font-medium">Consistent segment duration</span>
                       <p className="text-sm text-gray-600">Segments should be 2-6 seconds. Recommended: 4s for VOD, 2s for low-latency live.</p>
                     </div>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <div>
                       <span className="text-sm text-gray-900 font-medium">A/V muxed or aligned</span>
                       <p className="text-sm text-gray-600">Audio and video segment boundaries must align. Separate audio renditions require matching timelines.</p>
@@ -141,7 +141,7 @@ export default function PrerequisitesPage() {
               {/* Codec Ladder */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-emerald-100 text-emerald-700 text-xs px-2 py-1 rounded">Required</span>
+                  <span className="bg-brand-100 text-brand-700 text-xs px-2 py-1 rounded">Required</span>
                   Codec &amp; Resolution Ladder
                 </h3>
                 <p className="text-gray-600 text-sm mb-4">
@@ -185,7 +185,7 @@ export default function PrerequisitesPage() {
               {/* Caption Format */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded">Optional</span>
+                  <span className="bg-info/10 text-info text-xs px-2 py-1 rounded">Optional</span>
                   Caption Format
                 </h3>
                 <p className="text-gray-600 text-sm mb-4">
@@ -193,11 +193,11 @@ export default function PrerequisitesPage() {
                 </p>
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">CEA-608/708 embedded (recommended)</span>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">WebVTT sidecar files</span>
                   </div>
                 </div>
@@ -206,7 +206,7 @@ export default function PrerequisitesPage() {
               {/* DRM Constraints */}
               <div className="border rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span className="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded">If Applicable</span>
+                  <span className="bg-warning/10 text-warning text-xs px-2 py-1 rounded">If Applicable</span>
                   DRM Requirements
                 </h3>
                 <p className="text-gray-600 text-sm mb-4">
@@ -214,15 +214,15 @@ export default function PrerequisitesPage() {
                 </p>
                 <div className="space-y-2">
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">DRM scheme(s) used (Widevine, FairPlay, PlayReady)</span>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">Policy: Can ads be clear (unencrypted) in encrypted content? (Default: yes)</span>
                   </div>
                   <div className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span className="text-sm text-gray-600">License server URL if ads must use same DRM</span>
                   </div>
                 </div>
@@ -233,7 +233,7 @@ export default function PrerequisitesPage() {
           {/* What We Validate Automatically */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Settings className="w-6 h-6 text-emerald-600" />
+              <Settings className="w-6 h-6 text-brand-600" />
               What We Validate Automatically
             </h2>
             
@@ -285,7 +285,7 @@ export default function PrerequisitesPage() {
           {/* What Causes Issues */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <XCircle className="w-6 h-6 text-red-600" />
+              <XCircle className="w-6 h-6 text-danger" />
               What Causes Rejects / No-Fill / Slate
             </h2>
             
@@ -294,36 +294,36 @@ export default function PrerequisitesPage() {
             </p>
 
             <div className="space-y-3">
-              <div className="flex items-start gap-3 p-4 border border-red-200 bg-red-50 rounded-lg">
-                <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 border border-danger/20 bg-danger/10 rounded-lg">
+                <XCircle className="w-5 h-5 text-danger flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Cue not at keyframe</p>
                   <p className="text-sm text-gray-600">Splice point mid-GOP causes glitches. We reject or align to nearest safe boundary.</p>
                 </div>
               </div>
-              <div className="flex items-start gap-3 p-4 border border-red-200 bg-red-50 rounded-lg">
-                <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 border border-danger/20 bg-danger/10 rounded-lg">
+                <XCircle className="w-5 h-5 text-danger flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">No compatible ad creative</p>
                   <p className="text-sm text-gray-600">Content codec/resolution has no matching ad inventory. Consider H.264 1080p baseline.</p>
                 </div>
               </div>
-              <div className="flex items-start gap-3 p-4 border border-red-200 bg-red-50 rounded-lg">
-                <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 border border-danger/20 bg-danger/10 rounded-lg">
+                <XCircle className="w-5 h-5 text-danger flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Partner timeout</p>
                   <p className="text-sm text-gray-600">Demand partner didn&apos;t respond within deadline. System serves slate to avoid black screen.</p>
                 </div>
               </div>
-              <div className="flex items-start gap-3 p-4 border border-amber-200 bg-amber-50 rounded-lg">
-                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 border border-warning/20 bg-warning/10 rounded-lg">
+                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Cue without duration</p>
                   <p className="text-sm text-gray-600">Forces wait for end-cue before decisioning, reducing available think time.</p>
                 </div>
               </div>
-              <div className="flex items-start gap-3 p-4 border border-amber-200 bg-amber-50 rounded-lg">
-                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-3 p-4 border border-warning/20 bg-warning/10 rounded-lg">
+                <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="font-medium text-gray-900">Origin latency spikes</p>
                   <p className="text-sm text-gray-600">Slow manifest fetch reduces time budget for ad selection.</p>
@@ -335,7 +335,7 @@ export default function PrerequisitesPage() {
           {/* Pre-Integration Checklist */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Pre-Integration Checklist
             </h2>
             
@@ -343,55 +343,55 @@ export default function PrerequisitesPage() {
               <ul className="space-y-3">
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Origin manifest URL accessible via HTTPS</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Ad break cues present (SCTE-35, DATERANGE, or CUE-OUT/IN)</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Cues include DURATION or PLANNED-DURATION</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Encoder inserts keyframes at cue positions</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Segments are 2-6 seconds duration</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Audio and video segment boundaries align</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Encoding ladder documented (codecs, resolutions, bitrates)</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">DRM requirements documented (if applicable)</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <div className="mt-1 bg-white rounded border border-gray-300 w-5 h-5 flex items-center justify-center flex-shrink-0">
-                    <CheckCircle className="w-3 h-3 text-emerald-600" />
+                    <CheckCircle className="w-3 h-3 text-success" />
                   </div>
                   <span className="text-gray-600">Our manifest fetcher IPs allowlisted (or token provided)</span>
                 </li>
@@ -400,29 +400,29 @@ export default function PrerequisitesPage() {
           </section>
 
           {/* Related Documentation */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">DATERANGE and CUE-OUT/IN signaling</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol →</h3>
                 <p className="text-sm text-gray-600">EventStream and SCTE-35 schemes</p>
               </Link>
-              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Container Formats →</h3>
                 <p className="text-sm text-gray-600">TS vs CMAF requirements</p>
               </Link>
-              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DRM Integration →</h3>
                 <p className="text-sm text-gray-600">Widevine, FairPlay, PlayReady policies</p>
               </Link>
             </div>
             
-            <div className="mt-6 pt-6 border-t border-emerald-200">
-              <Link href="/docs/ssai" className="inline-flex items-center text-emerald-700 font-medium hover:text-emerald-800">
+            <div className="mt-6 pt-6 border-t border-brand-200">
+              <Link href="/docs/ssai" className="inline-flex items-center text-brand-700 font-medium hover:text-brand-800">
                 ← Back to SSAI Overview
               </Link>
             </div>

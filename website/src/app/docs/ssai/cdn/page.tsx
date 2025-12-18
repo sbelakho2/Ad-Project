@@ -14,9 +14,9 @@ export default function CDNGuidancePage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">CDN Guidance</span>
           </div>
@@ -33,12 +33,12 @@ export default function CDNGuidancePage() {
           </div>
 
           {/* Critical Warning */}
-          <div className="bg-red-50 border border-red-200 rounded-lg p-6 mb-12">
-            <h2 className="font-semibold text-red-800 mb-2 flex items-center gap-2">
+          <div className="bg-danger/10 border border-danger/20 rounded-lg p-6 mb-12">
+            <h2 className="font-semibold text-danger mb-2 flex items-center gap-2">
               <AlertTriangle className="w-5 h-5" />
               Critical: Session Manifests Must Not Be Cached
             </h2>
-            <p className="text-red-700 text-sm">
+            <p className="text-danger text-sm">
               SSAI session manifests (for example <code>/v1/session/&#123;id&#125;/master.m3u8</code>) are 
               per-viewer personalized. Caching them will serve wrong ads to viewers and break tracking.
               Configure your CDN to bypass cache (or use very low TTL) for session manifest paths.
@@ -48,15 +48,15 @@ export default function CDNGuidancePage() {
           {/* Cache vs No-Cache */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Layers className="w-6 h-6 text-emerald-600" />
+              <Layers className="w-6 h-6 text-brand-600" />
               What to Cache vs Never Cache
             </h2>
 
             <div className="grid md:grid-cols-2 gap-6">
               {/* Cacheable */}
-              <div className="border border-emerald-200 rounded-lg">
-                <div className="bg-emerald-50 px-4 py-3 border-b border-emerald-200">
-                  <h3 className="font-semibold text-emerald-800 flex items-center gap-2">
+              <div className="border border-success/20 rounded-lg">
+                <div className="bg-success/10 px-4 py-3 border-b border-success/20">
+                  <h3 className="font-semibold text-success flex items-center gap-2">
                     <CheckCircle className="w-5 h-5" />
                     Safe to Cache
                   </h3>
@@ -64,35 +64,35 @@ export default function CDNGuidancePage() {
                 <div className="p-4">
                   <ul className="space-y-3">
                     <li className="flex items-start gap-2">
-                      <span className="text-emerald-600 mt-1">●</span>
+                      <span className="text-success mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/segments/*.ts</code>
                         <p className="text-sm text-gray-600 mt-1">Media segments are immutable. Cache 24h+</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-emerald-600 mt-1">●</span>
+                      <span className="text-success mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/segments/*.m4s</code>
                         <p className="text-sm text-gray-600 mt-1">DASH segments. Cache 24h+</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-emerald-600 mt-1">●</span>
+                      <span className="text-success mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/init/*.mp4</code>
                         <p className="text-sm text-gray-600 mt-1">Init segments. Cache 7d</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-emerald-600 mt-1">●</span>
+                      <span className="text-success mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/slate/*</code>
                         <p className="text-sm text-gray-600 mt-1">Slate assets. Cache 7d</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-emerald-600 mt-1">●</span>
+                      <span className="text-success mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/ads/&#123;creative_id&#125;/*</code>
                         <p className="text-sm text-gray-600 mt-1">Transcoded creatives. Cache 1h (with stale-while-revalidate)</p>
@@ -103,9 +103,9 @@ export default function CDNGuidancePage() {
               </div>
 
               {/* Never Cache */}
-              <div className="border border-red-200 rounded-lg">
-                <div className="bg-red-50 px-4 py-3 border-b border-red-200">
-                  <h3 className="font-semibold text-red-800 flex items-center gap-2">
+              <div className="border border-danger/20 rounded-lg">
+                <div className="bg-danger/10 px-4 py-3 border-b border-danger/20">
+                  <h3 className="font-semibold text-danger flex items-center gap-2">
                     <XCircle className="w-5 h-5" />
                     Never Cache
                   </h3>
@@ -113,35 +113,35 @@ export default function CDNGuidancePage() {
                 <div className="p-4">
                   <ul className="space-y-3">
                     <li className="flex items-start gap-2">
-                      <span className="text-red-600 mt-1">●</span>
+                      <span className="text-danger mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/v1/session/*</code>
                         <p className="text-sm text-gray-600 mt-1">Session manifests. Personalized per viewer.</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-red-600 mt-1">●</span>
+                      <span className="text-danger mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/v1/session/init</code>
                         <p className="text-sm text-gray-600 mt-1">Session creation endpoint. Unique per request.</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-red-600 mt-1">●</span>
+                      <span className="text-danger mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/tracking/*</code>
                         <p className="text-sm text-gray-600 mt-1">Tracking pixels. Must hit origin.</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-red-600 mt-1">●</span>
+                      <span className="text-danger mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">/live/*.m3u8</code>
                         <p className="text-sm text-gray-600 mt-1">Live manifests. Updates every segment duration.</p>
                       </div>
                     </li>
                     <li className="flex items-start gap-2">
-                      <span className="text-red-600 mt-1">●</span>
+                      <span className="text-danger mt-1">●</span>
                       <div>
                         <code className="text-sm bg-gray-100 px-1 rounded">*?_sid=*</code>
                         <p className="text-sm text-gray-600 mt-1">Any URL with session ID param. Personalized.</p>
@@ -156,7 +156,7 @@ export default function CDNGuidancePage() {
           {/* Recommended Headers */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Shield className="w-6 h-6 text-emerald-600" />
+              <Shield className="w-6 h-6 text-brand-600" />
               Required Response Headers
             </h2>
 
@@ -201,7 +201,7 @@ export default function CDNGuidancePage() {
               </table>
             </div>
 
-            <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="mt-4 bg-info/10 border border-info/20 rounded-lg p-4">
               <h3 className="font-semibold text-gray-900 text-sm mb-2">CORS Headers</h3>
               <p className="text-sm text-gray-600">
                 For cross-origin playback, ensure your CDN forwards our CORS headers:
@@ -218,7 +218,7 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
           {/* CDN Config */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Globe className="w-6 h-6 text-emerald-600" />
+              <Globe className="w-6 h-6 text-brand-600" />
               CDN Configuration (Vendor-Agnostic)
             </h2>
 
@@ -253,17 +253,17 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
           {/* Common Misconfigurations */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <AlertTriangle className="w-6 h-6 text-amber-600" />
+              <AlertTriangle className="w-6 h-6 text-warning" />
               Common Misconfigurations
             </h2>
 
             <div className="space-y-4">
-              <div className="border border-red-200 rounded-lg p-4 bg-red-50">
-                <h3 className="font-semibold text-red-800 mb-2 flex items-center gap-2">
+              <div className="border border-danger/20 rounded-lg p-4 bg-danger/10">
+                <h3 className="font-semibold text-danger mb-2 flex items-center gap-2">
                   <XCircle className="w-5 h-5" />
                   ❌ Caching based on file extension only
                 </h3>
-                <p className="text-sm text-red-700 mb-2">
+                <p className="text-sm text-danger mb-2">
                   <strong>Problem:</strong> Caching all <code>.m3u8</code> files ignores that session manifests are personalized.
                 </p>
                 <p className="text-sm text-gray-600">
@@ -272,12 +272,12 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                 </p>
               </div>
 
-              <div className="border border-red-200 rounded-lg p-4 bg-red-50">
-                <h3 className="font-semibold text-red-800 mb-2 flex items-center gap-2">
+              <div className="border border-danger/20 rounded-lg p-4 bg-danger/10">
+                <h3 className="font-semibold text-danger mb-2 flex items-center gap-2">
                   <XCircle className="w-5 h-5" />
                   ❌ Stripping query parameters
                 </h3>
-                <p className="text-sm text-red-700 mb-2">
+                <p className="text-sm text-danger mb-2">
                   <strong>Problem:</strong> CDN removes <code>?_sid=...</code> for cache normalization. Session ID lost.
                 </p>
                 <p className="text-sm text-gray-600">
@@ -285,12 +285,12 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                 </p>
               </div>
 
-              <div className="border border-red-200 rounded-lg p-4 bg-red-50">
-                <h3 className="font-semibold text-red-800 mb-2 flex items-center gap-2">
+              <div className="border border-danger/20 rounded-lg p-4 bg-danger/10">
+                <h3 className="font-semibold text-danger mb-2 flex items-center gap-2">
                   <XCircle className="w-5 h-5" />
                   ❌ Ignoring Vary headers
                 </h3>
-                <p className="text-sm text-red-700 mb-2">
+                <p className="text-sm text-danger mb-2">
                   <strong>Problem:</strong> CDN caches a single variant, ignoring <code>Vary: Accept-Encoding</code>.
                 </p>
                 <p className="text-sm text-gray-600">
@@ -298,12 +298,12 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                 </p>
               </div>
 
-              <div className="border border-red-200 rounded-lg p-4 bg-red-50">
-                <h3 className="font-semibold text-red-800 mb-2 flex items-center gap-2">
+              <div className="border border-danger/20 rounded-lg p-4 bg-danger/10">
+                <h3 className="font-semibold text-danger mb-2 flex items-center gap-2">
                   <XCircle className="w-5 h-5" />
                   ❌ Over-aggressive connection coalescing
                 </h3>
-                <p className="text-sm text-red-700 mb-2">
+                <p className="text-sm text-danger mb-2">
                   <strong>Problem:</strong> HTTP/2 connection reuse serves wrong session&apos;s segments.
                 </p>
                 <p className="text-sm text-gray-600">
@@ -311,12 +311,12 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                 </p>
               </div>
 
-              <div className="border border-amber-200 rounded-lg p-4 bg-amber-50">
-                <h3 className="font-semibold text-amber-800 mb-2 flex items-center gap-2">
+              <div className="border border-warning/20 rounded-lg p-4 bg-warning/10">
+                <h3 className="font-semibold text-warning mb-2 flex items-center gap-2">
                   <AlertTriangle className="w-5 h-5" />
                   ⚠️ Short TTL on segments
                 </h3>
-                <p className="text-sm text-amber-700 mb-2">
+                <p className="text-sm text-warning mb-2">
                   <strong>Problem:</strong> 5-minute TTL on segments causes unnecessary origin load.
                 </p>
                 <p className="text-sm text-gray-600">
@@ -329,7 +329,7 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
           {/* Verification Checklist */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <CheckCircle className="w-6 h-6 text-emerald-600" />
+              <CheckCircle className="w-6 h-6 text-success" />
               Verification Checklist
             </h2>
 
@@ -340,7 +340,7 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
             <div className="bg-gray-50 rounded-lg p-6">
               <ol className="space-y-4">
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-700 font-semibold text-sm flex-shrink-0">1</span>
+                  <span className="w-6 h-6 bg-success/10 rounded-full flex items-center justify-center text-success font-semibold text-sm flex-shrink-0">1</span>
                   <div>
                     <h3 className="font-semibold text-gray-900">Session manifest bypass</h3>
                     <code className="text-xs bg-gray-200 px-2 py-1 rounded block mt-1">
@@ -350,7 +350,7 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-700 font-semibold text-sm flex-shrink-0">2</span>
+                  <span className="w-6 h-6 bg-success/10 rounded-full flex items-center justify-center text-success font-semibold text-sm flex-shrink-0">2</span>
                   <div>
                     <h3 className="font-semibold text-gray-900">Segment caching</h3>
                     <code className="text-xs bg-gray-200 px-2 py-1 rounded block mt-1">
@@ -360,7 +360,7 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-700 font-semibold text-sm flex-shrink-0">3</span>
+                  <span className="w-6 h-6 bg-success/10 rounded-full flex items-center justify-center text-success font-semibold text-sm flex-shrink-0">3</span>
                   <div>
                     <h3 className="font-semibold text-gray-900">Tracking bypass</h3>
                     <code className="text-xs bg-gray-200 px-2 py-1 rounded block mt-1">
@@ -370,14 +370,14 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-700 font-semibold text-sm flex-shrink-0">4</span>
+                  <span className="w-6 h-6 bg-success/10 rounded-full flex items-center justify-center text-success font-semibold text-sm flex-shrink-0">4</span>
                   <div>
                     <h3 className="font-semibold text-gray-900">Cross-origin playback</h3>
                     <p className="text-sm text-gray-600">Test from a different origin domain, verify CORS headers present.</p>
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-700 font-semibold text-sm flex-shrink-0">5</span>
+                  <span className="w-6 h-6 bg-success/10 rounded-full flex items-center justify-center text-success font-semibold text-sm flex-shrink-0">5</span>
                   <div>
                     <h3 className="font-semibold text-gray-900">Load test with unique sessions</h3>
                     <p className="text-sm text-gray-600">
@@ -390,29 +390,29 @@ Access-Control-Expose-Headers: Content-Range, Content-Length`}
           </section>
 
           {/* Related Documentation */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Details →</h3>
                 <p className="text-sm text-gray-600">Manifest structure and segment naming</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Details →</h3>
                 <p className="text-sm text-gray-600">MPD structure and period handling</p>
               </Link>
-              <Link href="/docs/ssai/operations" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/operations" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Operations →</h3>
                 <p className="text-sm text-gray-600">Failure modes and fallback behavior</p>
               </Link>
-              <Link href="/docs/ssai/prerequisites" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/prerequisites" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Prerequisites →</h3>
                 <p className="text-sm text-gray-600">Origin and encoder requirements</p>
               </Link>
             </div>
             
-            <div className="mt-6 pt-6 border-t border-emerald-200">
-              <Link href="/docs/ssai" className="inline-flex items-center text-emerald-700 font-medium hover:text-emerald-800">
+            <div className="mt-6 pt-6 border-t border-brand-200">
+              <Link href="/docs/ssai" className="inline-flex items-center text-brand-700 font-medium hover:text-brand-800">
                 ← Back to SSAI Overview
               </Link>
             </div>

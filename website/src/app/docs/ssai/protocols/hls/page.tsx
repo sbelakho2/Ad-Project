@@ -14,9 +14,9 @@ export default function HLSProtocolPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">HLS Protocol</span>
           </div>
@@ -35,7 +35,7 @@ export default function HLSProtocolPage() {
           {/* RFC 8216 Compliance */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               RFC 8216 Compliance
             </h2>
             
@@ -64,28 +64,28 @@ video/1080p/playlist.m3u8`}
             <h3 className="font-semibold text-gray-900 mb-3">Compliance Checkpoints</h3>
             <div className="space-y-3">
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">#EXTM3U Required</span>
                   <p className="text-sm text-gray-600">Every playlist starts with the required #EXTM3U tag</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">EXT-X-VERSION Consistency</span>
                   <p className="text-sm text-gray-600">Version tag matches features used (v6+ for EXT-X-DATERANGE)</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">EXTINF Precision</span>
                   <p className="text-sm text-gray-600">Every segment has nonzero duration with correct precision</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">TARGETDURATION Accuracy</span>
                   <p className="text-sm text-gray-600">EXT-X-TARGETDURATION is ceiling of longest segment (never exceeded)</p>
@@ -97,7 +97,7 @@ video/1080p/playlist.m3u8`}
           {/* Live Behavior */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               Live Sliding Window Behavior
             </h2>
             
@@ -112,41 +112,41 @@ video/1080p/playlist.m3u8`}
                 <h3 className="font-semibold text-gray-900 mb-3">✅ Correct Behavior</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>EXT-X-MEDIA-SEQUENCE</code> is monotonically increasing</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Sequence increments by exactly 1 per removed segment</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>No <code>EXT-X-PLAYLIST-TYPE</code> tag in live playlists</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Window doesn&apos;t shrink too aggressively (prevents drift)</span>
                   </li>
                 </ul>
               </div>
               
-              <div className="bg-red-50 rounded-lg p-6">
+              <div className="bg-danger/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">❌ Avoided Problems</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
                     <span>Media sequence jumping or decreasing (causes player errors)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
                     <span>Adding <code>EVENT</code>/<code>VOD</code> type to live streams</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
                     <span>Discontinuity drift from aggressive window shrinking</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-danger flex-shrink-0 mt-0.5" />
                     <span>Segments falling out mid-ad break</span>
                   </li>
                 </ul>
@@ -197,7 +197,7 @@ https://cdn.example.com/content/seg2851.ts`}
           {/* EXT-X-DATERANGE */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Code className="w-6 h-6 text-emerald-600" />
+              <Code className="w-6 h-6 text-brand-600" />
               EXT-X-DATERANGE for Ad Markers
             </h2>
             
@@ -207,18 +207,18 @@ https://cdn.example.com/content/seg2851.ts`}
               appropriate UI treatment.
             </p>
 
-            <div className="bg-blue-50 rounded-lg p-6 mb-6">
+            <div className="bg-info/10 rounded-lg p-6 mb-6">
               <h3 className="font-semibold text-gray-900 mb-3">DATERANGE Attributes</h3>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-full text-sm border-collapse">
                   <thead>
-                    <tr className="border-b border-blue-200">
+                    <tr className="border-b border-info/20">
                       <th className="text-left py-2 pr-4 font-semibold text-gray-900">Attribute</th>
                       <th className="text-left py-2 pr-4 font-semibold text-gray-900">Description</th>
                       <th className="text-left py-2 font-semibold text-gray-900">Example</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-blue-100">
+                  <tbody className="divide-y divide-info/20">
                     <tr>
                       <td className="py-2 pr-4 text-gray-700"><code>ID</code></td>
                       <td className="py-2 pr-4 text-gray-600">Unique pod identifier</td>
@@ -272,7 +272,7 @@ adBreaks.forEach(adBreak => {
           {/* Discontinuity */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               Discontinuity Handling
             </h2>
             
@@ -282,7 +282,7 @@ adBreaks.forEach(adBreak => {
             </p>
 
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">EXT-X-DISCONTINUITY</h3>
                 <p className="text-gray-600 text-sm">
                   Inserted at content-to-ad and ad-to-content transitions when encoding parameters 
@@ -290,7 +290,7 @@ adBreaks.forEach(adBreak => {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">EXT-X-DISCONTINUITY-SEQUENCE</h3>
                 <p className="text-gray-600 text-sm">
                   Maintained monotonically across manifest updates. Increments correctly when 
@@ -298,7 +298,7 @@ adBreaks.forEach(adBreak => {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Cross-Rendition Consistency</h3>
                 <p className="text-gray-600 text-sm">
                   All renditions have matching discontinuity counts at equivalent playback positions 
@@ -307,9 +307,9 @@ adBreaks.forEach(adBreak => {
               </div>
             </div>
 
-            <div className="bg-amber-50 rounded-lg p-6 mt-6">
+            <div className="bg-warning/10 rounded-lg p-6 mt-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <AlertTriangle className="w-5 h-5 text-warning" />
                 Common Integration Issues
               </h3>
               <ul className="space-y-2 text-sm text-gray-600">
@@ -323,7 +323,7 @@ adBreaks.forEach(adBreak => {
           {/* CDN Caching */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Shield className="w-6 h-6 text-emerald-600" />
+              <Shield className="w-6 h-6 text-brand-600" />
               CDN Caching Strategy
             </h2>
             
@@ -359,9 +359,9 @@ Vary: Accept-Encoding, Cookie`}
               </div>
             </div>
 
-            <div className="bg-red-50 rounded-lg p-6 mt-6">
+            <div className="bg-danger/10 rounded-lg p-6 mt-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-red-600" />
+                <AlertTriangle className="w-5 h-5 text-danger" />
                 Cache Poisoning Prevention
               </h3>
               <p className="text-sm text-gray-600">
@@ -375,13 +375,13 @@ Vary: Accept-Encoding, Cookie`}
           {/* VOD Requirements */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               VOD-Specific Requirements
             </h2>
             
             <div className="space-y-4">
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">EXT-X-ENDLIST Required</h3>
                   <p className="text-gray-600 text-sm">
@@ -392,7 +392,7 @@ Vary: Accept-Encoding, Cookie`}
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">EXT-X-PLAYLIST-TYPE:VOD</h3>
                   <p className="text-gray-600 text-sm">
@@ -403,7 +403,7 @@ Vary: Accept-Encoding, Cookie`}
               </div>
               
               <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg">
-                <CheckCircle className="w-6 h-6 text-emerald-600 flex-shrink-0 mt-1" />
+                <CheckCircle className="w-6 h-6 text-success flex-shrink-0 mt-1" />
                 <div>
                   <h3 className="font-semibold text-gray-900">Complete Timeline</h3>
                   <p className="text-gray-600 text-sm">
@@ -434,42 +434,42 @@ Vary: Accept-Encoding, Cookie`}
                 <tbody className="divide-y divide-gray-200">
                   <tr>
                     <td className="p-3 text-gray-900">hls.js</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Web, most browsers</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Safari AVPlayer</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Native HLS support</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">tvOS AVPlayer</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Apple TV native</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">ExoPlayer (HLS)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Android, Fire TV</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">Shaka Player (HLS)</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Cross-platform</td>
                   </tr>
                 </tbody>
@@ -478,22 +478,22 @@ Vary: Accept-Encoding, Cookie`}
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol →</h3>
                 <p className="text-sm text-gray-600">MPD structure, EventStream, multi-period</p>
               </Link>
-              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Live Mode →</h3>
                 <p className="text-sm text-gray-600">Latency requirements, resilience patterns</p>
               </Link>
-              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Container Formats →</h3>
                 <p className="text-sm text-gray-600">TS vs CMAF segment formats</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>

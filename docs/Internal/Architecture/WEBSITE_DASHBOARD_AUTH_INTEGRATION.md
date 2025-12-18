@@ -543,21 +543,45 @@ module.exports = {
 
 ### 4. Rate Limiting
 
-**Backend** rate limits authentication endpoints:
+**Backend** implements **tiered rate limiting** based on customer subscription tier. Limits scale from Starter to Enterprise.
+
+**Rate Limit Configuration** (`backend/src/config/rateLimits.ts`):
+
+| Endpoint Category | Starter | Growth | Scale | Enterprise |
+|-------------------|---------|--------|-------|------------|
+| **Auth** (login, register) | 20/min | 50/min | 100/min | 200/min |
+| **Global** (all API) | 1,000/min | 5,000/min | 20,000/min | 100,000/min |
+| **Dashboard** | 300/min | 1,000/min | 3,000/min | 10,000/min |
+| **Analytics** (SDK) | 5,000/min | 25,000/min | 100,000/min | 500,000/min |
+
+**Security-Sensitive Endpoints** (stricter limits):
+- Login: 5 attempts/minute per IP
+- Register: 3 attempts/5 minutes per IP
+- Password Reset: 3 attempts/5 minutes per IP
+- 2FA Verification: 5 attempts/minute per IP
 
 ```typescript
-// backend/src/middleware/rateLimiter.ts
+// backend/src/middleware/tieredRateLimiter.ts
 
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 attempts per window
-  message: 'Too many login attempts, please try again in 15 minutes',
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+import { createTieredRateLimiter, authTieredRateLimiter } from './middleware/tieredRateLimiter';
 
-router.post('/auth/login', loginLimiter, AuthController.login);
+// Auth routes use stricter tier-aware limiter
+app.use('/api/v1/auth', authTieredRateLimiter);
+
+// Global rate limiter applied to all routes
+app.use('/api/v1/', limiter);
 ```
+
+**Rate Limit Headers** (standard):
+- `X-RateLimit-Limit`: Maximum requests allowed
+- `X-RateLimit-Remaining`: Requests remaining in window
+- `X-RateLimit-Reset`: Unix timestamp when window resets
+- `Retry-After`: Seconds until retry allowed (on 429)
+
+**Exempt Routes** (no rate limiting):
+- `/health`, `/ready`, `/metrics` (monitoring)
+- `/api/v1/status.json`, `/api/v1/slo.json` (status page)
+- `/api/v1/public/*` (public cacheable endpoints)
 
 ---
 

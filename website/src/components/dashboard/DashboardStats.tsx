@@ -126,7 +126,7 @@ export default function DashboardStats() {
 
   if (error) {
     return (
-      <div role="alert" aria-live="polite" className="mt-8 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+      <div role="alert" aria-live="polite" className="mt-8 rounded-md border border-danger/20 bg-danger/10 p-4 text-sm text-danger">
         {error}
       </div>
     );
@@ -171,9 +171,9 @@ function StatCard({
   trend: 'up' | 'down' | 'neutral';
 }) {
   const trendColor = {
-    up: 'text-green-600',
-    down: 'text-red-600',
-    neutral: 'text-gray-600',
+    up: 'text-success',
+    down: 'text-danger',
+    neutral: 'text-inkMuted',
   }[trend];
 
   return (

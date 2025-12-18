@@ -164,7 +164,7 @@ export default function QuizPage() {
                     key={option.label}
                     type="button"
                     onClick={() => handleSelect(option)}
-                    className="w-full rounded-2xl border border-gray-300 bg-white px-5 py-4 text-left transition hover:border-brand-500 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus)]"
+                    className="w-full rounded-2xl border border-gray-300 bg-white px-5 py-4 text-left transition hover:border-brand-500 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgb(var(--focus))]"
                   >
                     <span className="text-sm font-bold uppercase text-gray-900">{option.label}</span>
                     <p className="mt-1 text-sm text-gray-600">{option.helper}</p>

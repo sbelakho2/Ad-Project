@@ -16,7 +16,7 @@ export default function TransparencyConfigRolloutsPage() {
             <button className="btn-ghost">Pause</button>
             <button className="btn-secondary">Advance</button>
             <button
-              className="btn-primary !bg-[var(--danger)] hover:!bg-[#b91c1c]"
+              className="btn-primary !bg-[rgb(var(--danger))] hover:opacity-90"
               aria-label="Rollback configuration"
             >
               Rollback

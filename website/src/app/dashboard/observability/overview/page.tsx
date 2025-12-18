@@ -159,7 +159,7 @@ export default function ObservabilityOverviewPage() {
         </div>
       )}
 
-      {error && <div className="rounded border border-red-200 bg-red-50 p-3 text-red-800" role="alert" aria-live="polite">{error}</div>}
+      {error && <div className="rounded border border-danger/20 bg-danger/10 p-3 text-danger" role="alert" aria-live="polite">{error}</div>}
       {loading && <div aria-busy="true">Loading…</div>}
 
       {!loading && series && series.length > 0 && (
@@ -222,11 +222,11 @@ function AdapterCard({ snapshot, slo }: { snapshot: AdapterSeriesSnapshot; slo: 
       <div className="mt-2 grid grid-cols-2 gap-4 text-sm">
         <div>
           <div className="text-gray-500">p95 latency (ms)</div>
-          <Sparkline data={p95} color="#1d4ed8" />
+          <Sparkline data={p95} color="rgb(var(--brand-600))" />
         </div>
         <div>
           <div className="text-gray-500">Requests</div>
-          <Sparkline data={reqs.map((v) => v || 0)} color="#16a34a" />
+          <Sparkline data={reqs.map((v) => v || 0)} color="rgb(var(--success))" />
         </div>
         <div>
           <div className="text-gray-500">Error rate</div>
@@ -244,14 +244,14 @@ function AdapterCard({ snapshot, slo }: { snapshot: AdapterSeriesSnapshot; slo: 
 
 function SLOBadge({ level }: { level: "OK" | "WARN" | "CRIT" }) {
   const map = {
-    OK: "bg-green-100 text-green-800 border-green-200",
-    WARN: "bg-yellow-100 text-yellow-800 border-yellow-200",
-    CRIT: "bg-red-100 text-red-800 border-red-200",
+    OK: "bg-success/10 text-success border-success/20",
+    WARN: "bg-warning/10 text-warning border-warning/20",
+    CRIT: "bg-danger/10 text-danger border-danger/20",
   } as const;
   return <span className={`rounded border px-2 py-0.5 text-xs font-semibold ${map[level]}`}>{level}</span>;
 }
 
-function Sparkline({ data, color = "#1f2937", width = 240, height = 60 }: { data: number[]; color?: string; width?: number; height?: number }) {
+function Sparkline({ data, color = "rgb(var(--muted))", width = 240, height = 60 }: { data: number[]; color?: string; width?: number; height?: number }) {
   const path = useMemo(() => {
     if (!data || data.length === 0) return "";
     const max = Math.max(...data, 1);

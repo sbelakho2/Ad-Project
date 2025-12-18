@@ -18,8 +18,8 @@ import {
 
 import CookieBanner from '@/components/CookieBanner';
 import Footer from '@/components/Footer';
-import HomeNav from '@/components/HomeNav';
 import PageHero from '@/components/PageHero';
+import SiteHeader from '@/components/SiteHeader';
 import { sloConfig } from '@/config/legal';
 
 const getRevealProps = (delay = 0) => ({
@@ -231,7 +231,7 @@ export default function SLOPage() {
 
     if (status === 'operational') {
       return {
-        className: 'bg-green-100 text-green-700',
+        className: 'bg-success/10 text-success',
         label: 'Operational',
         icon: CheckCircle,
         lastChecked,
@@ -240,7 +240,7 @@ export default function SLOPage() {
 
     if (status === 'degraded') {
       return {
-        className: 'bg-amber-100 text-amber-700',
+        className: 'bg-warning/10 text-warning',
         label: 'Degraded',
         icon: AlertTriangle,
         lastChecked,
@@ -250,7 +250,7 @@ export default function SLOPage() {
     // Conservative fallback: never show "down" on public page
     // Internal failures should show as "temporarily unavailable"
     return {
-      className: 'bg-slate-100 text-slate-700',
+      className: 'bg-gray-100 text-gray-700',
       label: 'Temporarily unavailable',
       icon: Activity,
       lastChecked,
@@ -267,7 +267,7 @@ export default function SLOPage() {
 
       if (showLoading) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+          <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
             <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
@@ -275,20 +275,20 @@ export default function SLOPage() {
 
       if (ok === null) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+          <div className="hidden md:flex flex-col items-end gap-1 text-gray-500">
             <span className="text-sm font-medium">No data yet</span>
-            <span className="text-xs text-slate-400">Awaiting traffic</span>
+            <span className="text-xs text-gray-400">Awaiting traffic</span>
           </div>
         );
       }
 
       return (
-        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-success' : 'text-danger'}`}>
           <div className="flex items-center gap-2">
-            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <CheckCircle className={`w-5 h-5 ${ok ? 'text-success' : 'text-danger'}`} />
             <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
           </div>
-          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+          <span className="text-xs font-mono text-gray-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
         </div>
       );
     }
@@ -299,7 +299,7 @@ export default function SLOPage() {
 
       if (showLoading) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+          <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
             <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
@@ -307,20 +307,20 @@ export default function SLOPage() {
 
       if (ok === null) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+          <div className="hidden md:flex flex-col items-end gap-1 text-gray-500">
             <span className="text-sm font-medium">No data yet</span>
-            <span className="text-xs text-slate-400">Awaiting traffic</span>
+            <span className="text-xs text-gray-400">Awaiting traffic</span>
           </div>
         );
       }
 
       return (
-        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-success' : 'text-danger'}`}>
           <div className="flex items-center gap-2">
-            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <CheckCircle className="w-5 h-5" />
             <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
           </div>
-          <span className="text-xs font-mono text-slate-500">{typeof current === 'number' ? `${Math.round(current)}ms` : '—'}</span>
+          <span className="text-xs font-mono text-gray-500">{typeof current === 'number' ? `${Math.round(current)}ms` : '—'}</span>
         </div>
       );
     }
@@ -331,7 +331,7 @@ export default function SLOPage() {
 
       if (showLoading) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+          <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
             <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
@@ -339,20 +339,20 @@ export default function SLOPage() {
 
       if (ok === null) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
-            <span className="text-sm font-medium">No data yet</span>
-            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          <div className="hidden md:flex flex-col items-end gap-1 text-gray-500">
+            <span className="text-sm font-medium">SSAI metric</span>
+            <span className="text-xs text-gray-400">Awaiting SSAI traffic</span>
           </div>
         );
       }
 
       return (
-        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-success' : 'text-danger'}`}>
           <div className="flex items-center gap-2">
-            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <CheckCircle className="w-5 h-5" />
             <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
           </div>
-          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+          <span className="text-xs font-mono text-gray-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
         </div>
       );
     }
@@ -363,7 +363,7 @@ export default function SLOPage() {
 
       if (showLoading) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+          <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
             <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
@@ -371,20 +371,20 @@ export default function SLOPage() {
 
       if (ok === null) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
-            <span className="text-sm font-medium">No data yet</span>
-            <span className="text-xs text-slate-400">Awaiting traffic</span>
+          <div className="hidden md:flex flex-col items-end gap-1 text-gray-500">
+            <span className="text-sm font-medium">SSAI metric</span>
+            <span className="text-xs text-gray-400">Awaiting SSAI traffic</span>
           </div>
         );
       }
 
       return (
-        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-success' : 'text-danger'}`}>
           <div className="flex items-center gap-2">
-            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <CheckCircle className="w-5 h-5" />
             <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
           </div>
-          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(4)}%`}</span>
+          <span className="text-xs font-mono text-gray-500">{current === null ? '—' : `${current.toFixed(4)}%`}</span>
         </div>
       );
     }
@@ -395,7 +395,7 @@ export default function SLOPage() {
 
       if (showLoading) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+          <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
             <span className="text-sm font-medium">Temporarily unavailable</span>
           </div>
         );
@@ -403,26 +403,26 @@ export default function SLOPage() {
 
       if (ok === null) {
         return (
-          <div className="hidden md:flex flex-col items-end gap-1 text-slate-500">
+          <div className="hidden md:flex flex-col items-end gap-1 text-gray-500">
             <span className="text-sm font-medium">No data yet</span>
-            <span className="text-xs text-slate-400">Awaiting traffic</span>
+            <span className="text-xs text-gray-400">Awaiting traffic</span>
           </div>
         );
       }
 
       return (
-        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-green-600' : 'text-red-600'}`}>
+        <div className={`hidden md:flex flex-col items-end gap-1 ${ok ? 'text-success' : 'text-danger'}`}>
           <div className="flex items-center gap-2">
-            <CheckCircle className={`w-5 h-5 ${ok ? 'text-green-600' : 'text-red-600'}`} />
+            <CheckCircle className="w-5 h-5" />
             <span className="text-sm font-medium">{ok ? 'Meeting' : 'Missed'}</span>
           </div>
-          <span className="text-xs font-mono text-slate-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
+          <span className="text-xs font-mono text-gray-500">{current === null ? '—' : `${current.toFixed(3)}%`}</span>
         </div>
       );
     }
 
     return (
-      <div className="hidden md:flex flex-col items-end gap-1 text-slate-600">
+      <div className="hidden md:flex flex-col items-end gap-1 text-inkMuted">
         <span className="text-sm font-medium">Not published</span>
       </div>
     );
@@ -430,29 +430,25 @@ export default function SLOPage() {
 
   return (
     <>
-      <main className="relative bg-white text-slate-900">
-        <header className="bg-white border-b border-slate-200/60">
-          <div className="container mx-auto px-4 py-6">
-            <HomeNav />
-          </div>
-        </header>
+      <main className="relative bg-white text-ink">
+        <SiteHeader />
 
         {/* Hero */}
-        <PageHero className="bg-white border-b border-slate-200/60">
+        <PageHero className="bg-white border-b border-gray-200/60">
           <div className="text-center">
             <motion.div {...getRevealProps(0)} className="max-w-prose mx-auto">
               <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full ${badge.className} text-sm font-medium mb-6`}>
                 <badge.icon className="w-4 h-4" />
                 Live Status: {badge.label}
               </div>
-              <h1 className="text-4xl md:text-5xl font-bold text-slate-900 leading-tight mb-6">
+              <h1 className="text-4xl md:text-5xl font-bold text-ink leading-tight mb-6">
                 SLOs & System Reliability
               </h1>
-              <p className="text-xl text-slate-600">
+              <p className="text-xl text-inkMuted">
                 We publish our service level objectives so you know exactly what to expect. When we miss, here&apos;s what happens.
               </p>
               {badge.lastChecked ? (
-                <p className="mt-4 text-sm text-slate-500 font-mono">Last checked: {badge.lastChecked}</p>
+                <p className="mt-4 text-sm text-gray-500 font-mono">Last checked: {badge.lastChecked}</p>
               ) : null}
             </motion.div>
           </div>
@@ -568,8 +564,8 @@ export default function SLOPage() {
                   className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
                 >
                   <div className="flex items-center gap-4 mb-4">
-                    <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center">
-                      <mitigation.icon className="w-6 h-6 text-amber-600" />
+                    <div className="w-12 h-12 bg-warning/10 rounded-xl flex items-center justify-center">
+                      <mitigation.icon className="w-6 h-6 text-warning" />
                     </div>
                     <h3 className="text-lg font-semibold text-gray-900">{mitigation.title}</h3>
                   </div>

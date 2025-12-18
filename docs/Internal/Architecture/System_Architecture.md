@@ -137,12 +137,38 @@ Internal tool for system operators.
 
 ### 4.2 Redis
 
-- **Role**: Caching, Session Store, Job Queues (BullMQ).
+- **Role**: Caching, Session Store, Job Queues (BullMQ), Rate Limiting.
 - **Persistence**: RDB snapshots enabled.
 - **Key Usage**:
     - RTB Caching (critical for low latency).
-    - Rate Limiting counters.
+    - Tiered Rate Limiting counters (key pattern: `rl:{category}:{tier}:{publisherId}:{ip}`).
     - User Sessions.
+
+### 4.3 Rate Limiting Architecture
+
+The platform implements **tier-aware rate limiting** with Redis backing. Limits scale with customer subscription tier.
+
+**Rate Limit Categories:**
+
+| Category | Purpose | Starter | Growth | Scale | Enterprise |
+|----------|---------|---------|--------|-------|------------|
+| **Global** | All API endpoints | 1,000/min | 5,000/min | 20,000/min | 100,000/min |
+| **Auth** | Login, register, password | 20/min | 50/min | 100/min | 200/min |
+| **Dashboard** | Console API calls | 300/min | 1,000/min | 3,000/min | 10,000/min |
+| **Analytics** | SDK telemetry ingestion | 5,000/min | 25,000/min | 100,000/min | 500,000/min |
+| **Transparency** | VRA/audit APIs | 120/min | 500/min | 2,000/min | 10,000/min |
+| **RTB** | Bidding/SSAI endpoints | 1,000/min | 5,000/min | 20,000/min | 100,000/min |
+
+**Unauthenticated requests** are limited to 60 req/min global.
+
+**Key Files:**
+- `backend/src/config/rateLimits.ts` - Tier configuration
+- `backend/src/middleware/tieredRateLimiter.ts` - Redis-backed middleware
+
+**Industry Benchmarks Used:**
+- Stripe: 100 req/sec (6,000/min)
+- GitHub: 5,000/hour (83/min authenticated)
+- Twitter/X Pro: 900/15min (60/min)
 
 ---
 

@@ -29,7 +29,7 @@ const sdks = [
   {
     platform: 'Android',
     icon: Smartphone,
-    color: 'bg-green-500',
+    color: 'bg-success',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/core/android',
     description: 'Kotlin-first SDK for Android apps targeting API 21+.',
@@ -38,7 +38,7 @@ const sdks = [
   {
     platform: 'Android TV',
     icon: Smartphone,
-    color: 'bg-green-600',
+    color: 'bg-success',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/core/android',
     description: 'Lean-back optimized SDK for Android TV and Fire TV.',
@@ -47,7 +47,7 @@ const sdks = [
   {
     platform: 'iOS',
     icon: Smartphone,
-    color: 'bg-blue-500',
+    color: 'bg-info',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/core/ios',
     description: 'Swift SDK for iOS 14+ with full SwiftUI support.',
@@ -56,7 +56,7 @@ const sdks = [
   {
     platform: 'tvOS',
     icon: Smartphone,
-    color: 'bg-blue-600',
+    color: 'bg-info',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/core/ios',
     description: 'Native tvOS SDK for Apple TV apps.',
@@ -65,7 +65,7 @@ const sdks = [
   {
     platform: 'Unity',
     icon: Puzzle,
-    color: 'bg-purple-500',
+    color: 'bg-brand-600',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/core/unity',
     description: 'C# plugin for Unity 2021+ with native bridge.',
@@ -74,7 +74,7 @@ const sdks = [
   {
     platform: 'Web (JS/TS)',
     icon: Code,
-    color: 'bg-yellow-500',
+    color: 'bg-warning',
     repo: 'apex-mediation-platform',
     repoPath: 'sdk/web',
     description: 'TypeScript SDK for web apps and PWAs.',
@@ -165,7 +165,7 @@ banner.show(document.getElementById('ad-container'));`,
 export default function DevelopersPage() {
   return (
     <>
-      <main className="relative bg-white text-slate-900">
+      <main className="relative bg-white text-ink">
         <SiteHeader />
 
         {/* Hero */}
@@ -195,8 +195,8 @@ export default function DevelopersPage() {
                 </a>
               </div>
 
-              <div className="mt-8 mx-auto max-w-2xl rounded-xl border border-slate-200 bg-slate-50 px-5 py-4 text-left">
-                <p className="text-sm text-slate-700 max-w-none">
+              <div className="mt-8 mx-auto max-w-2xl rounded-xl border border-gray-200 bg-gray-50 px-5 py-4 text-left">
+                <p className="text-sm text-inkMuted max-w-none">
                   <span className="font-semibold">Naming:</span> Bel Consulting OÜ is the legal entity. ApexMediation is the platform and SDK namespace.
                 </p>
               </div>
@@ -223,8 +223,8 @@ export default function DevelopersPage() {
                 className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
               >
                 <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-                    <Code className="w-5 h-5 text-yellow-600" />
+                  <div className="w-10 h-10 bg-warning/10 rounded-lg flex items-center justify-center">
+                    <Code className="w-5 h-5 text-warning" />
                   </div>
                   <h3 className="text-lg font-bold text-gray-900 group-hover:text-brand-600">Web Video SSAI Quickstart</h3>
                 </div>
@@ -239,8 +239,8 @@ export default function DevelopersPage() {
                 className="bg-white rounded-xl p-6 border border-gray-200 hover:shadow-lg transition-shadow group"
               >
                 <div className="flex items-center gap-3 mb-3">
-                  <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-                    <Smartphone className="w-5 h-5 text-purple-600" />
+                  <div className="w-10 h-10 bg-info/10 rounded-lg flex items-center justify-center">
+                    <Smartphone className="w-5 h-5 text-info" />
                   </div>
                   <h3 className="text-lg font-bold text-gray-900 group-hover:text-brand-600">CTV SSAI Quickstart</h3>
                 </div>
@@ -318,9 +318,9 @@ export default function DevelopersPage() {
                   <div key={platform} className="bg-gray-800 rounded-xl p-4 overflow-hidden">
                     <div className="flex items-center gap-2 mb-3 pb-3 border-b border-gray-700">
                       <div className="flex gap-1.5">
-                        <div className="w-3 h-3 rounded-full bg-red-500" />
-                        <div className="w-3 h-3 rounded-full bg-yellow-500" />
-                        <div className="w-3 h-3 rounded-full bg-green-500" />
+                        <div className="w-3 h-3 rounded-full bg-danger" />
+                        <div className="w-3 h-3 rounded-full bg-warning" />
+                        <div className="w-3 h-3 rounded-full bg-success" />
                       </div>
                       <span className="text-xs text-gray-500 uppercase ml-2">{platform}</span>
                     </div>

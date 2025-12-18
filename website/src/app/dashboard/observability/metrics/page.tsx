@@ -116,7 +116,7 @@ export default function AdapterMetricsPage() {
       </div>
 
       {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-3 text-red-800" role="alert" aria-live="polite">{error}</div>
+        <div className="rounded border border-danger/20 bg-danger/10 p-3 text-danger" role="alert" aria-live="polite">{error}</div>
       )}
 
       {loading && <div aria-busy="true">Loading…</div>}

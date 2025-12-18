@@ -14,9 +14,9 @@ export default function ContainersPage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">Container Formats</span>
           </div>
@@ -36,7 +36,7 @@ export default function ContainersPage() {
           {/* Overview */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Box className="w-6 h-6 text-emerald-600" />
+              <Box className="w-6 h-6 text-brand-600" />
               Container Comparison
             </h2>
             
@@ -82,13 +82,13 @@ export default function ContainersPage() {
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">HLS Support</td>
-                    <td className="p-3 text-emerald-600">✓ Full</td>
-                    <td className="p-3 text-emerald-600">✓ Full (HLS v6+)</td>
+                    <td className="p-3 text-success">✓ Full</td>
+                    <td className="p-3 text-success">✓ Full (HLS v6+)</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">DASH Support</td>
-                    <td className="p-3 text-amber-600">△ Limited</td>
-                    <td className="p-3 text-emerald-600">✓ Full</td>
+                    <td className="p-3 text-warning">△ Limited</td>
+                    <td className="p-3 text-success">✓ Full</td>
                   </tr>
                 </tbody>
               </table>
@@ -98,7 +98,7 @@ export default function ContainersPage() {
           {/* TS Format */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileCode className="w-6 h-6 text-emerald-600" />
+              <FileCode className="w-6 h-6 text-brand-600" />
               MPEG Transport Stream (TS)
             </h2>
             
@@ -108,45 +108,45 @@ export default function ContainersPage() {
             </p>
 
             <div className="grid md:grid-cols-2 gap-6 mb-6">
-              <div className="bg-emerald-50 rounded-lg p-6">
+              <div className="bg-success/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">Advantages</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Universal device compatibility</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Self-contained segments (no init needed)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Simple error recovery (each segment independent)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Legacy encoder support</span>
                   </li>
                 </ul>
               </div>
               
-              <div className="bg-amber-50 rounded-lg p-6">
+              <div className="bg-warning/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">Disadvantages</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>~15% overhead per segment (repeated headers)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>Limited DASH support (requires player-specific config)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>No native browser support (requires hls.js)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>Limited DRM options</span>
                   </li>
                 </ul>
@@ -177,7 +177,7 @@ private static readonly MIME_TYPES = {
           {/* CMAF Format */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Layers className="w-6 h-6 text-emerald-600" />
+              <Layers className="w-6 h-6 text-brand-600" />
               Common Media Application Format (CMAF)
             </h2>
             
@@ -188,45 +188,45 @@ private static readonly MIME_TYPES = {
             </p>
 
             <div className="grid md:grid-cols-2 gap-6 mb-6">
-              <div className="bg-emerald-50 rounded-lg p-6">
+              <div className="bg-success/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">Advantages</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Lower overhead (shared init segment)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Full HLS + DASH support</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Native browser support (MSE)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Full DRM support (Widevine, FairPlay, PlayReady)</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Low-latency streaming capable</span>
                   </li>
                 </ul>
               </div>
               
-              <div className="bg-amber-50 rounded-lg p-6">
+              <div className="bg-warning/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-3">Considerations</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>Init segment required before media segments</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>Init segment must match at discontinuities</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
                     <span>Older devices may lack support</span>
                   </li>
                 </ul>
@@ -262,7 +262,7 @@ segment2.m4s`}
           {/* SSAI Considerations */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Zap className="w-6 h-6 text-emerald-600" />
+              <Zap className="w-6 h-6 text-brand-600" />
               SSAI Container Requirements
             </h2>
             
@@ -272,7 +272,7 @@ segment2.m4s`}
             </p>
 
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Format Matching</h3>
                 <p className="text-gray-600 text-sm">
                   HLS/TS content requires HLS/TS ads. DASH/CMAF content requires DASH/CMAF ads. 
@@ -280,7 +280,7 @@ segment2.m4s`}
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Init Segment Handling (CMAF)</h3>
                 <p className="text-gray-600 text-sm">
                   At content-to-ad transitions, the SSAI stitcher inserts the ad init segment 
@@ -289,7 +289,7 @@ segment2.m4s`}
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Codec Consistency</h3>
                 <p className="text-gray-600 text-sm">
                   Beyond container format, codecs must be compatible. The system validates 
@@ -333,29 +333,29 @@ private static readonly CODEC_PATTERNS = {
                   <tr>
                     <td className="p-3 text-gray-900">HLS</td>
                     <td className="p-3 text-gray-600">TS</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">AVPlayer, hls.js, ExoPlayer</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">HLS</td>
                     <td className="p-3 text-gray-600">CMAF</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">AVPlayer, hls.js, ExoPlayer, Shaka</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">DASH</td>
                     <td className="p-3 text-gray-600">TS</td>
-                    <td className="p-3 text-center text-amber-600">△</td>
-                    <td className="p-3 text-center text-amber-600">△</td>
+                    <td className="p-3 text-center text-warning">△</td>
+                    <td className="p-3 text-center text-warning">△</td>
                     <td className="p-3 text-gray-600">Limited ExoPlayer support</td>
                   </tr>
                   <tr>
                     <td className="p-3 text-gray-900">DASH</td>
                     <td className="p-3 text-gray-600">CMAF</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
-                    <td className="p-3 text-center text-emerald-600">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
+                    <td className="p-3 text-center text-success">✓</td>
                     <td className="p-3 text-gray-600">Shaka, dash.js, ExoPlayer</td>
                   </tr>
                 </tbody>
@@ -368,7 +368,7 @@ private static readonly CODEC_PATTERNS = {
             <h2 className="text-2xl font-bold text-gray-900 mb-4">Recommendations</h2>
             
             <div className="space-y-4">
-              <div className="bg-emerald-50 rounded-lg p-6">
+              <div className="bg-brand-50 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-2">For New Deployments</h3>
                 <p className="text-sm text-gray-600">
                   Use <strong>CMAF/fMP4</strong> as your primary container. It provides the best 
@@ -376,7 +376,7 @@ private static readonly CODEC_PATTERNS = {
                 </p>
               </div>
               
-              <div className="bg-blue-50 rounded-lg p-6">
+              <div className="bg-info/10 rounded-lg p-6">
                 <h3 className="font-semibold text-gray-900 mb-2">For Maximum Compatibility</h3>
                 <p className="text-sm text-gray-600">
                   Offer both <strong>HLS/TS</strong> and <strong>HLS/CMAF</strong>. Let the SDK 
@@ -396,22 +396,22 @@ private static readonly CODEC_PATTERNS = {
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/drm" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DRM Support →</h3>
                 <p className="text-sm text-gray-600">Widevine, FairPlay, PlayReady integration</p>
               </Link>
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">RFC 8216 compliance, DATERANGE</p>
               </Link>
-              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/dash" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">DASH Protocol →</h3>
                 <p className="text-sm text-gray-600">MPD structure, EventStream</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>

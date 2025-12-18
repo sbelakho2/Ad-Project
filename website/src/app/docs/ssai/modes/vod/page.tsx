@@ -14,9 +14,9 @@ export default function VODModePage() {
         <div className="max-w-4xl mx-auto px-6">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-8">
-            <Link href="/docs" className="hover:text-emerald-600">Docs</Link>
+            <Link href="/docs" className="hover:text-brand-600">Docs</Link>
             <span>/</span>
-            <Link href="/docs/ssai" className="hover:text-emerald-600">SSAI</Link>
+            <Link href="/docs/ssai" className="hover:text-brand-600">SSAI</Link>
             <span>/</span>
             <span className="text-gray-900">VOD Mode</span>
           </div>
@@ -35,7 +35,7 @@ export default function VODModePage() {
           {/* Overview */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Play className="w-6 h-6 text-emerald-600" />
+              <Play className="w-6 h-6 text-brand-600" />
               VOD vs Live SSAI
             </h2>
             
@@ -88,7 +88,7 @@ export default function VODModePage() {
           {/* Marker Processing */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               VOD Marker Processing
             </h2>
             
@@ -134,7 +134,7 @@ export default function VODModePage() {
           {/* Manifest Stability */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FileText className="w-6 h-6 text-emerald-600" />
+              <FileText className="w-6 h-6 text-brand-600" />
               Manifest Stability
             </h2>
             
@@ -148,19 +148,19 @@ export default function VODModePage() {
                 <h3 className="font-semibold text-gray-900 mb-3">HLS VOD Requirements</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>#EXT-X-ENDLIST</code> tag required at end</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>#EXT-X-PLAYLIST-TYPE:VOD</code> present</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>All segments listed from start to end</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Complete DATERANGE markers for all ad breaks</span>
                   </li>
                 </ul>
@@ -170,28 +170,28 @@ export default function VODModePage() {
                 <h3 className="font-semibold text-gray-900 mb-3">DASH VOD Requirements</h3>
                 <ul className="space-y-2 text-sm text-gray-600">
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>type=&quot;static&quot;</code> MPD</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span><code>mediaPresentationDuration</code> set</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>All periods present from start</span>
                   </li>
                   <li className="flex items-start gap-2">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="w-4 h-4 text-success flex-shrink-0 mt-0.5" />
                     <span>Complete EventStream for ad metadata</span>
                   </li>
                 </ul>
               </div>
             </div>
 
-            <div className="bg-amber-50 rounded-lg p-6">
+            <div className="bg-warning/10 rounded-lg p-6">
               <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
+                <AlertTriangle className="w-5 h-5 text-warning" />
                 Common Issue: Missing ENDLIST
               </h3>
               <p className="text-sm text-gray-600">
@@ -205,7 +205,7 @@ export default function VODModePage() {
           {/* Seeking Behavior */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <FastForward className="w-6 h-6 text-emerald-600" />
+              <FastForward className="w-6 h-6 text-brand-600" />
               Seeking Behavior
             </h2>
             
@@ -215,7 +215,7 @@ export default function VODModePage() {
             </p>
 
             <div className="space-y-4">
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Seek Into Ad Break</h3>
                 <p className="text-gray-600 text-sm">
                   When seeking into an ad break, playback starts from the ad at that position. 
@@ -223,7 +223,7 @@ export default function VODModePage() {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Seek Past Ad Break</h3>
                 <p className="text-gray-600 text-sm">
                   When seeking past an ad break (skipping), the ads are not credited. 
@@ -231,7 +231,7 @@ export default function VODModePage() {
                 </p>
               </div>
               
-              <div className="border-l-4 border-emerald-500 pl-4">
+              <div className="border-l-4 border-brand-500 pl-4">
                 <h3 className="font-semibold text-gray-900">Seek Backward</h3>
                 <p className="text-gray-600 text-sm">
                   Seeking backward does not re-fire already-credited impressions. 
@@ -260,7 +260,7 @@ Seek to 70m → Player position 71m (after both ad breaks)`}
           {/* Quartile Tracking */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <BarChart3 className="w-6 h-6 text-emerald-600" />
+              <BarChart3 className="w-6 h-6 text-brand-600" />
               Deterministic Quartile Tracking
             </h2>
             
@@ -344,7 +344,7 @@ Seek to 70m → Player position 71m (after both ad breaks)`}
           {/* Reconciliation */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-emerald-600" />
+              <Clock className="w-6 h-6 text-brand-600" />
               Session Reconciliation
             </h2>
             
@@ -385,7 +385,7 @@ Seek to 70m → Player position 71m (after both ad breaks)`}
           {/* Pre-roll Handling */}
           <section className="mb-12">
             <h2 className="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <Rewind className="w-6 h-6 text-emerald-600" />
+              <Rewind className="w-6 h-6 text-brand-600" />
               Pre-roll Handling
             </h2>
             
@@ -395,21 +395,21 @@ Seek to 70m → Player position 71m (after both ad breaks)`}
 
             <div className="space-y-3">
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Immediate Insertion</span>
                   <p className="text-sm text-gray-600">Pre-roll ads are at position 0 in the stitched manifest</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Seek Protection</span>
                   <p className="text-sm text-gray-600">Optional: SDK can prevent seeking until pre-roll complete</p>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                 <div>
                   <span className="font-medium text-gray-900">Deep Link Support</span>
                   <p className="text-sm text-gray-600">Deep links to specific content positions still show pre-roll first</p>
@@ -438,22 +438,22 @@ const sessionTTL = contentDuration + (24 * 60 * 60); // +24 hours buffer
           </section>
 
           {/* Next Steps */}
-          <section className="bg-emerald-50 rounded-lg p-8">
+          <section className="bg-brand-50 rounded-lg p-8">
             <h2 className="text-xl font-bold text-gray-900 mb-4">Related Documentation</h2>
             <div className="grid md:grid-cols-2 gap-4">
-              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/modes/live" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Live Mode →</h3>
                 <p className="text-sm text-gray-600">Latency, resilience, operational controls</p>
               </Link>
-              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/protocols/hls" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">HLS Protocol →</h3>
                 <p className="text-sm text-gray-600">RFC 8216 compliance, ENDLIST</p>
               </Link>
-              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai/containers" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">Containers →</h3>
                 <p className="text-sm text-gray-600">TS and CMAF segment formats</p>
               </Link>
-              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-emerald-200 hover:border-emerald-400 transition-colors">
+              <Link href="/docs/ssai" className="bg-white p-4 rounded-lg border border-brand-200 hover:border-brand-400 transition-colors">
                 <h3 className="font-semibold text-gray-900">← Back to SSAI Overview</h3>
                 <p className="text-sm text-gray-600">Integration guide and architecture</p>
               </Link>
