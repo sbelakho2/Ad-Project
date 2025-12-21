@@ -87,7 +87,7 @@ fi
 # Step 5: Restart service
 echo ""
 echo -e "${YELLOW}Step 4: Restarting website service...${NC}"
-ssh -i "$SSH_KEY" "$SERVER" "pm2 restart website"
+ssh -i "$SSH_KEY" "$SERVER" "cd $RELEASE_DIR && pm2 delete website 2>/dev/null || true && PORT=3002 NODE_ENV=production pm2 start server.js --name website"
 echo -e "${GREEN}✓ Website service restarted${NC}"
 
 # Step 6: Health check

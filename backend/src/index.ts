@@ -20,6 +20,7 @@ import metricsRouteMiddleware from './middleware/metricsRouteMiddleware';
 import { createHealthCheckRoutes } from './routes/healthCheck';
 import pool from './utils/postgres';
 import { initVraConnectionRoutes } from './routes/vraConnections.routes';
+import { issueCsrfToken } from './middleware/csrf';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';
@@ -85,21 +86,50 @@ app.use(helmet({
 }));
 
 // Strict CORS allowlist
-const allowlist = (process.env.CORS_ALLOWLIST || process.env.CORS_ORIGIN || 'http://localhost:3000')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+const splitCsv = (value: string | undefined): string[] =>
+  (value || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 
-app.use(cors({
+const uniq = <T,>(values: T[]): T[] => Array.from(new Set(values));
+
+const DEFAULT_LOCAL_ORIGINS = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+];
+
+const DEFAULT_PROD_ORIGINS = [
+  'https://console.apexmediation.ee',
+  'https://apexmediation.ee',
+  'https://www.apexmediation.ee',
+];
+
+const allowlist = uniq([
+  ...splitCsv(env.CORS_ALLOWLIST),
+  ...splitCsv(env.CORS_ORIGIN),
+  ...(env.NODE_ENV === 'production' ? DEFAULT_PROD_ORIGINS : DEFAULT_LOCAL_ORIGINS),
+]);
+
+const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true); // allow non-browser clients
     if (allowlist.includes(origin)) return callback(null, true);
-    return callback(new Error('CORS: origin not allowed'));
+
+    // Reject without throwing (avoid turning CORS misses into 500s)
+    logger.warn('CORS origin rejected', { origin });
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Publisher-Id', 'X-CSRF-Token'],
-}));
+};
+
+app.use(cors(corsOptions));
+// Ensure preflight requests always get a consistent 204 response when allowed.
+app.options('*', cors(corsOptions));
 
 // Rate limiting - Tiered by customer plan
 // Industry benchmarks: Stripe 100/sec, GitHub 5000/hour, Twitter Pro 900/15min
@@ -168,6 +198,9 @@ app.use(metricsRouteMiddleware);
 // CSRF protection (double-submit cookie). Safe methods are ignored by csurf.
 // Must be after cookie parser and before routes.
 app.use(csrfProtection);
+
+// Compatibility: some clients request CSRF at /auth/csrf (without /api/v1)
+app.get('/auth/csrf', issueCsrfToken);
 
 // RED metrics (Rate, Errors, Duration) by route
 app.use((req: Request, res: Response, next: NextFunction) => {

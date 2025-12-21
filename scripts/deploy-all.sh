@@ -110,6 +110,8 @@ deploy_backend() {
     rsync -avz --delete \
         --exclude 'node_modules' \
         --exclude '.git' \
+        --exclude '.env' \
+        --exclude '.env.*' \
         --exclude 'logs/*' \
         --exclude 'coverage' \
         --exclude '.env.local' \
@@ -192,6 +194,12 @@ deploy_console() {
     # Copy static files
     cp -r .next/static "$STANDALONE_DIR/.next/"
     cp -r public "$STANDALONE_DIR/"
+
+    # Include lockfile so we can do deterministic installs on the server.
+    # Note: In this repo, Next.js standalone output does not include node_modules.
+    if [[ -f "package-lock.json" ]]; then
+        cp package-lock.json "$STANDALONE_DIR/"
+    fi
     
     # 7. Create backup on server
     BACKUP_NAME="console_backup_$DEPLOY_TIMESTAMP"
@@ -205,10 +213,18 @@ deploy_console() {
         -e "ssh -i $SSH_KEY" \
         "$STANDALONE_DIR/" \
         "$DEPLOY_USER@$SERVER:$DEPLOY_PATH/console_release_new/"
+
+    # Preserve server-side secrets/config that aren't part of the build output.
+    log_info "Preserving console .env..."
+    ssh_cmd "[ -f $DEPLOY_PATH/console_release/.env ] && cp $DEPLOY_PATH/console_release/.env $DEPLOY_PATH/console_release_new/.env || true"
     
     # 9. Install sharp for image optimization
+    log_info "Installing production dependencies on server..."
+    # Standalone output doesn't include app scripts; ignore lifecycle scripts to avoid postinstall failures.
+    ssh_cmd "cd $DEPLOY_PATH/console_release_new && (npm ci --omit=dev --ignore-scripts --prefer-offline 2>/dev/null || npm ci --omit=dev --ignore-scripts || npm install --omit=dev --ignore-scripts)"
+
     log_info "Installing sharp for image optimization..."
-    ssh_cmd "cd $DEPLOY_PATH/console_release_new && npm install sharp --platform=linux --arch=x64 2>/dev/null || true"
+    ssh_cmd "cd $DEPLOY_PATH/console_release_new && npm install sharp --no-save --platform=linux --arch=x64 2>/dev/null || true"
     
     # 10. Atomic swap
     log_info "Performing atomic swap..."
@@ -273,19 +289,73 @@ deploy_website() {
         exit 1
     }
     log_success "Website build OK"
-    
-    # 4. Sync to server
-    log_info "Syncing website to server..."
+
+    # 4. Ensure standalone output exists
+    if [[ ! -d ".next/standalone" ]]; then
+        log_error "Standalone build not found. Check next.config.js has output: 'standalone'"
+        exit 1
+    fi
+
+    # 5. Prepare standalone package
+    log_info "Preparing standalone package..."
+    STANDALONE_DIR=".next/standalone"
+    cp -r .next/static "$STANDALONE_DIR/.next/"
+    cp -r public "$STANDALONE_DIR/"
+    if [[ -f "package-lock.json" ]]; then
+        cp package-lock.json "$STANDALONE_DIR/"
+    fi
+
+    # 6. Create backup on server
+    BACKUP_NAME="website_backup_$DEPLOY_TIMESTAMP"
+    log_info "Creating backup: $BACKUP_NAME"
+    ssh_cmd "[ -d $DEPLOY_PATH/website_release ] && cp -r $DEPLOY_PATH/website_release $DEPLOY_PATH/$BACKUP_NAME || true"
+
+    # 7. Sync standalone to server
+    log_info "Syncing website standalone to server..."
+    ssh_cmd "rm -rf $DEPLOY_PATH/website_release_new"
     rsync -avz --delete \
-        --exclude 'node_modules' \
-        --exclude '.git' \
         -e "ssh -i $SSH_KEY" \
-        "$PROJECT_ROOT/website/.next/" \
-        "$DEPLOY_USER@$SERVER:$DEPLOY_PATH/website/.next/"
-    
-    # 5. Restart if PM2 managed
-    ssh_cmd "pm2 restart website 2>/dev/null || true"
-    
+        "$STANDALONE_DIR/" \
+        "$DEPLOY_USER@$SERVER:$DEPLOY_PATH/website_release_new/"
+
+    # Preserve server-side secrets/config that aren't part of the build output.
+    log_info "Preserving website .env..."
+    ssh_cmd "[ -f $DEPLOY_PATH/website_release/.env ] && cp $DEPLOY_PATH/website_release/.env $DEPLOY_PATH/website_release_new/.env || true"
+
+    # 8. Atomic swap
+    log_info "Performing atomic swap..."
+    ssh_cmd "rm -rf $DEPLOY_PATH/website_release_old && \
+             [ -d $DEPLOY_PATH/website_release ] && mv $DEPLOY_PATH/website_release $DEPLOY_PATH/website_release_old || true && \
+             mv $DEPLOY_PATH/website_release_new $DEPLOY_PATH/website_release"
+
+    # 9. Restart PM2 process with environment
+    log_info "Restarting website service..."
+    ssh_cmd "pm2 delete website 2>/dev/null || true && \
+             cd $DEPLOY_PATH/website_release && \
+             PORT=3002 \
+             NODE_ENV=production \
+             pm2 start server.js --name website"
+
+    # 10. Wait and verify
+    sleep 3
+    log_info "Verifying website health..."
+    if ssh_cmd "curl -sf http://127.0.0.1:3002 -o /dev/null"; then
+        log_success "Website is healthy!"
+    else
+        log_error "Website health check failed!"
+        ssh_cmd "pm2 logs website --lines 50 --nostream"
+        # Rollback
+        log_warn "Rolling back..."
+        ssh_cmd "[ -d $DEPLOY_PATH/website_release_old ] && \
+                 rm -rf $DEPLOY_PATH/website_release && \
+                 mv $DEPLOY_PATH/website_release_old $DEPLOY_PATH/website_release && \
+                 pm2 delete website 2>/dev/null || true && \
+                 cd $DEPLOY_PATH/website_release && PORT=3002 NODE_ENV=production pm2 start server.js --name website"
+        exit 1
+    fi
+
+    # 11. Clean old
+    ssh_cmd "rm -rf $DEPLOY_PATH/website_release_old"
     log_success "Website deployment complete!"
 }
 
