@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation'
 import { signIn } from 'next-auth/react'
 import { CheckCircle2 } from 'lucide-react'
 import { apiClient, handleApiError } from '@/lib/api-client'
+import axios from 'axios'
 
 const MIN_PASSWORD_LENGTH = 8
 
@@ -42,10 +43,26 @@ export default function SignupPage() {
       })
 
       setSuccess('Account created. Completing sign-in...')
-      await signIn('credentials', { email, password, redirect: false })
+
+      const loginResp = await apiClient.post('/auth/login', { email, password })
+      const payload = loginResp.data?.data ?? loginResp.data
+      const token = payload?.token
+      if (!token) {
+        throw new Error('Unable to complete sign-in')
+      }
+
+      const result = await signIn('credentials', { accessToken: token, redirect: false })
+      if (result?.error) {
+        throw new Error('Unable to complete sign-in')
+      }
+
       router.push('/dashboard')
       router.refresh()
     } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 503) {
+        setError('Authentication temporarily unavailable. Please try again in a moment.')
+        return
+      }
       setError(handleApiError(err))
     } finally {
       setIsSubmitting(false)

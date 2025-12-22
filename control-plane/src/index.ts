@@ -84,11 +84,7 @@ function escapeHtml(input: string): string {
 }
 
 app.get('/', (req: Request, res: Response) => {
-  res.redirect('/admin/');
-});
-
-app.get('/admin', (req: Request, res: Response) => {
-  res.redirect('/admin/');
+  res.redirect('/admin');
 });
 
 app.get('/admin/login', (req: Request, res: Response) => {
@@ -147,7 +143,7 @@ app.get('/admin/login', (req: Request, res: Response) => {
   );
 });
 
-app.get('/admin/', (req: Request, res: Response) => {
+app.get('/admin', (req: Request, res: Response) => {
   const title = 'Control Plane';
   sendHtml(
     res,

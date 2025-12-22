@@ -525,7 +525,7 @@ async function getSystemSnapshot(): Promise<unknown> {
 
 async function checkDatabaseConnectivity(): Promise<{ name: string; ok: boolean }> {
   try {
-    const { queryReadOnly } = await import('../database');
+    const { queryReadOnly } = await import('../database.js');
     await queryReadOnly('SELECT 1');
     return { name: 'database', ok: true };
   } catch {
@@ -547,7 +547,7 @@ async function checkMemory(): Promise<{ name: string; ok: boolean }> {
 
 async function getSystemMode(): Promise<{ mode: string; updatedAt: string }> {
   try {
-    const { queryReadOnly } = await import('../database');
+    const { queryReadOnly } = await import('../database.js');
     const rows = await queryReadOnly<any>(
       `SELECT value as mode, updated_at FROM system_state WHERE key = 'mode'`
     );
@@ -559,7 +559,7 @@ async function getSystemMode(): Promise<{ mode: string; updatedAt: string }> {
 
 async function getPartitionInfo(tableName: string): Promise<string[]> {
   try {
-    const { queryReadOnly } = await import('../database');
+    const { queryReadOnly } = await import('../database.js');
     const rows = await queryReadOnly<{ partition_name: string }>(
       `SELECT inhrelid::regclass::text as partition_name
        FROM pg_inherits
@@ -575,7 +575,7 @@ async function getPartitionInfo(tableName: string): Promise<string[]> {
 
 async function getPartitionDetails(partitionName: string): Promise<unknown> {
   try {
-    const { queryReadOnly } = await import('../database');
+    const { queryReadOnly } = await import('../database.js');
     const rows = await queryReadOnly<any>(
       `SELECT relname, pg_total_relation_size(oid) as size_bytes
        FROM pg_class
@@ -590,7 +590,7 @@ async function getPartitionDetails(partitionName: string): Promise<unknown> {
 
 async function getSessionInfo(pid: number): Promise<unknown> {
   try {
-    const { queryReadOnly } = await import('../database');
+    const { queryReadOnly } = await import('../database.js');
     const rows = await queryReadOnly<any>(
       `SELECT pid, usename, application_name, state, query, query_start
        FROM pg_stat_activity

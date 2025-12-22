@@ -43,6 +43,38 @@ const requireRepositories = (): TwofaRepositories => {
   return repositories;
 };
 
+type TwofaRow = {
+  enabled: boolean;
+  secret: string | null;
+  secret_ciphertext: string | null;
+  backup_codes: string | null;
+};
+
+const getTwofaRow = async (userId: string): Promise<TwofaRow | null> => {
+  if (!AppDataSource.isInitialized) return null;
+
+  // Use raw SQL here to avoid any runtime entity/metadata mismatch issues.
+  // This is intentionally resilient: it only relies on actual table/column names.
+  const rows = (await AppDataSource.query(
+    `SELECT enabled, secret, secret_ciphertext, backup_codes
+     FROM two_factor_auth
+     WHERE user_id = $1
+     LIMIT 1`,
+    [userId]
+  )) as Array<TwofaRow>;
+
+  return rows?.[0] ?? null;
+};
+
+const parseBackupCodes = (raw: string | null): string[] => {
+  if (!raw) return [];
+  // TypeORM simple-array stores as comma-separated string.
+  return raw
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+};
+
 const maskSecret = (secret: string) => secret.replace(/.(?=.{4})/g, '*');
 
 type AuditCtx = { actorEmail?: string | null; ip?: string | null };
@@ -66,19 +98,13 @@ async function writeAudit(userId: string, action: 'enroll' | 'enable' | 'regen' 
 
 export const twofaService = {
   async isEnabled(userId: string): Promise<boolean> {
-    const repositories = getRepositories();
-    if (!repositories) return false;
-
-    const tfaRecord = await repositories.tfaRepository.findOne({ where: { user: { id: userId } } });
-    return tfaRecord?.enabled === true;
+    const row = await getTwofaRow(userId);
+    return row?.enabled === true;
   },
 
   async getBackupCodesCount(userId: string): Promise<number> {
-    const repositories = getRepositories();
-    if (!repositories) return 0;
-
-    const tfaRecord = await repositories.tfaRepository.findOne({ where: { user: { id: userId } } });
-    return tfaRecord?.backupCodes?.length ?? 0;
+    const row = await getTwofaRow(userId);
+    return parseBackupCodes(row?.backup_codes ?? null).length;
   },
 
   async enroll(userId: string, email: string, issuer = 'ApexMediation', auditCtx?: AuditCtx) {
@@ -163,18 +189,22 @@ export const twofaService = {
     const repositories = getRepositories();
     if (!repositories) return false;
 
-    const tfaRecord = await repositories.tfaRepository.findOne({ where: { user: { id: userId } } });
-    if (!tfaRecord) return false;
+    const row = await getTwofaRow(userId);
+    if (!row) return false;
 
     let secret: string;
     try {
-      secret = tfaRecord.secretCiphertext
-        ? aesGcmDecrypt(JSON.parse(tfaRecord.secretCiphertext))
-        : (tfaRecord.secret as string);
+      secret = row.secret_ciphertext
+        ? aesGcmDecrypt(JSON.parse(row.secret_ciphertext))
+        : (row.secret as string);
     } catch (e) {
-      secret = (tfaRecord.secret as string);
+      secret = (row.secret as string);
     }
     if (authenticator.check(code, secret)) return true;
+
+    // Backup codes require a write on success; use the ORM entity for updates.
+    const tfaRecord = await repositories.tfaRepository.findOne({ where: { user: { id: userId } } });
+    if (!tfaRecord) return false;
 
     for (let i = 0; i < tfaRecord.backupCodes.length; i++) {
       const hashedCode = tfaRecord.backupCodes[i];

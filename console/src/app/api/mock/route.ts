@@ -280,6 +280,17 @@ export async function GET(request: Request) {
 
   try {
     switch (endpoint) {
+      case 'csrf': {
+        const token = 'mock-csrf-token'
+        const response = NextResponse.json({ token })
+        response.cookies.set('XSRF-TOKEN', token, {
+          httpOnly: false,
+          sameSite: 'lax',
+          path: '/',
+        })
+        return response
+      }
+
       case 'revenue-summary':
         return NextResponse.json(mockData.revenueSummary)
       
@@ -318,6 +329,46 @@ export async function GET(request: Request) {
       
       case 'analytics':
         return NextResponse.json(mockData.analytics)
+
+      case 'migration-experiments':
+        return NextResponse.json({
+          success: true,
+          data: [
+            {
+              id: 'exp-1',
+              name: 'Unity to Apex Migration',
+              status: 'active',
+              mirror_percent: 5,
+              created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+              updated_at: new Date().toISOString(),
+              guardrails: {
+                latency_budget_ms: 200,
+                revenue_floor_percent: -5,
+                max_error_rate_percent: 1,
+                min_impressions: 1000,
+              },
+            },
+          ],
+        })
+
+      case 'migration-experiment':
+        return NextResponse.json({
+          success: true,
+          data: {
+            id: 'exp-1',
+            name: 'Unity to Apex Migration',
+            status: 'active',
+            mirror_percent: 5,
+            created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+            updated_at: new Date().toISOString(),
+            guardrails: {
+              latency_budget_ms: 200,
+              revenue_floor_percent: -5,
+              max_error_rate_percent: 1,
+              min_impressions: 1000,
+            },
+          },
+        })
       
       default:
         return NextResponse.json({ error: 'Unknown endpoint' }, { status: 404 })

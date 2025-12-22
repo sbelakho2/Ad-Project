@@ -141,6 +141,128 @@ async function stubPlacementApi(
     onUnauthorizedLookup: () => void
   }
 ) {
+  // When running with NEXT_PUBLIC_USE_MOCK_API=true (default in Playwright), the app uses:
+  // - fetch('/api/mock?endpoint=...') for some reads
+  // - axios baseURL '/api/mock' for most CRUD (e.g. POST /placements => /api/mock/placements)
+  await page.route('**/api/mock?endpoint=csrf', async (route) => {
+    return route.fulfill({
+      status: 200,
+      headers: { 'set-cookie': 'XSRF-TOKEN=csrf-token; Path=/; HttpOnly' },
+      contentType: 'application/json',
+      body: JSON.stringify({ token: 'csrf-token' }),
+    })
+  })
+
+  await page.route('**/api/mock?endpoint=placement-formats', async (route) => {
+    return respondJson(route, 200, {
+      banner: ['320x50', '300x250', '728x90'],
+      interstitial: ['fullscreen'],
+      rewarded: ['rewarded-video', 'rewarded-interstitial'],
+    })
+  })
+
+  await page.route('**/api/mock?endpoint=placements', async (route) => {
+    const data = Array.from(placementStore.values()).filter((placement) => placement.publisherId === CURRENT_PUBLISHER_ID)
+    return respondJson(route, 200, {
+      data: data,
+      total: data.length,
+      page: 1,
+      pageSize: data.length || 20,
+      hasMore: false,
+    })
+  })
+
+  // CRUD + lookups in mock mode go through axios with baseURL '/api/mock'
+  await page.route('**/api/mock/placements', async (route) => {
+    const request = route.request()
+    const method = request.method().toUpperCase()
+
+    if (method === 'GET') {
+      const data = Array.from(placementStore.values()).filter((placement) => placement.publisherId === CURRENT_PUBLISHER_ID)
+      return respondJson(route, 200, {
+        success: true,
+        data: {
+          items: data,
+          total: data.length,
+          page: 1,
+          pageSize: data.length || 20,
+          hasMore: false,
+        },
+      })
+    }
+
+    if (method === 'POST') {
+      hooks.onCreate()
+      const payload = JSON.parse(request.postData() || '{}') as Partial<PlacementRecord>
+      const timestamp = new Date().toISOString()
+      const newPlacement: PlacementRecord = {
+        id: `plc-generated-${Date.now()}`,
+        name: payload.name || 'Untitled Placement',
+        type: (payload.type as PlacementRecord['type']) || 'banner',
+        format: payload.format || '320x50',
+        platformId: payload.platformId || 'com.example.app',
+        status: 'active',
+        publisherId: CURRENT_PUBLISHER_ID,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }
+      placementStore.set(newPlacement.id, newPlacement)
+      return respondJson(route, 200, newPlacement)
+    }
+
+    return route.continue()
+  })
+
+  await page.route(/\/api\/mock\/placements\/[^/]+$/, async (route) => {
+    const request = route.request()
+    const method = request.method().toUpperCase()
+    const pathname = pathFrom(request.url())
+    const placementMatch = pathname.match(/\/placements\/([^/]+)$/)
+
+    if (!placementMatch) {
+      return route.continue()
+    }
+
+    const placementId = placementMatch[1]
+    const existing = placementStore.get(placementId)
+
+    if (method === 'GET') {
+      if (!existing || existing.publisherId !== CURRENT_PUBLISHER_ID) {
+        if (existing && existing.publisherId !== CURRENT_PUBLISHER_ID) {
+          hooks.onUnauthorizedLookup()
+        }
+        return respondJson(route, 200, null)
+      }
+      return respondJson(route, 200, { success: true, data: existing })
+    }
+
+    if (method === 'PUT') {
+      if (!existing || existing.publisherId !== CURRENT_PUBLISHER_ID) {
+        return respondJson(route, 404, { message: 'Not found' })
+      }
+      hooks.onUpdate()
+      const payload = JSON.parse(request.postData() || '{}') as Partial<PlacementRecord>
+      const updated: PlacementRecord = {
+        ...existing,
+        ...payload,
+        updatedAt: new Date().toISOString(),
+      }
+      placementStore.set(placementId, updated)
+      return respondJson(route, 200, updated)
+    }
+
+    if (method === 'DELETE') {
+      if (!existing || existing.publisherId !== CURRENT_PUBLISHER_ID) {
+        return respondJson(route, 404, { message: 'Not found' })
+      }
+      hooks.onDelete()
+      placementStore.delete(placementId)
+      return route.fulfill({ status: 204, body: '' })
+    }
+
+    return route.continue()
+  })
+
   await page.route('**/auth/csrf', async (route) => {
     return route.fulfill({
       status: 200,

@@ -40,6 +40,17 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Prometheus | ✅ Running | 9090 | Monitoring |
 | Grafana | ✅ Running | 3001 | Dashboards |
 
+### Port Allocation (DO NOT CHANGE WITHOUT UPDATING CADDY)
+
+| Hostname | Service | Local Port | Process |
+|----------|---------|------------|---------|
+| `admin.apexmediation.ee` | Control Plane (Admin) | 4000 | systemd |
+| `api.apexmediation.ee` | Backend API | 8080 | Docker/PM2 (deployment-dependent) |
+| `console.apexmediation.ee` | Console (Customer) | 3000 | Docker/PM2 (deployment-dependent) |
+| `apexmediation.ee` / `www.apexmediation.ee` | Website | 3002 | PM2 |
+
+> **Rule:** `admin.*` MUST route ONLY to port 4000. Never proxy admin UI paths to the customer console.
+
 ### Console Security Status (2025-12-17)
 
 | Feature | Status | Notes |

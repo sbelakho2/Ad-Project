@@ -18,6 +18,9 @@
 
 import { test, expect, request } from '@playwright/test';
 
+const CONTROL_PLANE_E2E_ENABLED = process.env.RUN_CONTROL_PLANE_E2E === 'true';
+test.skip(!CONTROL_PLANE_E2E_ENABLED, 'Set RUN_CONTROL_PLANE_E2E=true to run control-plane integration tests.');
+
 const ADMIN_API = 'https://admin.apexmediation.ee';
 
 // Operator credentials

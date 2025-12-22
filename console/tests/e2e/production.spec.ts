@@ -11,11 +11,20 @@
 
 import { test, expect, Page } from '@playwright/test';
 
-// Production credentials
+// This spec is intended to run against real production services.
+// It is intentionally disabled by default to avoid accidental traffic/credential use.
+const PRODUCTION_E2E_ENABLED = process.env.RUN_PRODUCTION_E2E === 'true';
+test.skip(!PRODUCTION_E2E_ENABLED, 'Set RUN_PRODUCTION_E2E=true to run production E2E tests.');
+
+// Production credentials must be provided via environment variables.
 const TEST_USER = {
-  email: 'sales@apexmediation.ee',
-  password: '&&Pw20354491',
+  email: process.env.PROD_E2E_EMAIL || '',
+  password: process.env.PROD_E2E_PASSWORD || '',
 };
+
+if (PRODUCTION_E2E_ENABLED && (!TEST_USER.email || !TEST_USER.password)) {
+  throw new Error('RUN_PRODUCTION_E2E=true requires PROD_E2E_EMAIL and PROD_E2E_PASSWORD to be set.');
+}
 
 const PROD_API = 'https://api.apexmediation.ee';
 const PROD_CONSOLE = 'https://console.apexmediation.ee';

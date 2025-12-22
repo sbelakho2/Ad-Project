@@ -27,13 +27,29 @@ const DEFAULT_LOGIN_PATH = '/login'
 
 let MOCK_SESSION: SessionUser | null = null
 
-if (process.env.NEXT_PUBLIC_E2E_SESSION) {
-  try {
-    MOCK_SESSION = JSON.parse(process.env.NEXT_PUBLIC_E2E_SESSION) as SessionUser
-  } catch {
-    MOCK_SESSION = null
+function readMockSession(): SessionUser | null {
+  // Preferred: build-time env (available to Next client bundles via NEXT_PUBLIC_*)
+  if (process.env.NEXT_PUBLIC_E2E_SESSION) {
+    try {
+      return JSON.parse(process.env.NEXT_PUBLIC_E2E_SESSION) as SessionUser
+    } catch {
+      return null
+    }
   }
+
+  // Fallback for E2E: runtime-injected session (Playwright can set this before navigation).
+  // Never allow this in production builds.
+  if (process.env.NODE_ENV !== 'production' && typeof window !== 'undefined') {
+    const candidate = (window as any).__APEX_E2E_SESSION__ as SessionUser | undefined
+    if (candidate && typeof candidate === 'object' && typeof candidate.userId === 'string') {
+      return candidate
+    }
+  }
+
+  return null
 }
+
+MOCK_SESSION = readMockSession()
 
 function resolveSessionScope(): string {
   if (typeof window === 'undefined') return 'ssr'

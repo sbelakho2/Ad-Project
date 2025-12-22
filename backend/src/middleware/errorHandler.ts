@@ -21,6 +21,17 @@ export const errorHandler = (
   res: Response,
   _next: NextFunction
 ) => {
+  // Invalid JSON body (from express.json/body-parser)
+  const parseErr = err as unknown as { status?: number; type?: string };
+  if (
+    (err instanceof SyntaxError && parseErr?.status === 400) ||
+    parseErr?.type === 'entity.parse.failed'
+  ) {
+    try { errorCounter.inc({ type: 'operational' }); } catch (e) { void e; }
+    logger.warn('Invalid JSON body', { path: req.path, method: req.method });
+    return res.status(400).json({ success: false, error: 'Invalid JSON body' });
+  }
+
   // CSRF errors (from csurf)
   const anyErr = err as unknown as { code?: string };
   if (anyErr && anyErr.code === 'EBADCSRFTOKEN') {

@@ -124,7 +124,7 @@ router.get('/health', (req: Request, res: Response) => {
  */
 router.get('/ready', asyncHandler(async (req: Request, res: Response) => {
   try {
-    const { getReadOnlyPool } = await import('./database');
+    const { getReadOnlyPool } = await import('./database.js');
     const pool = getReadOnlyPool();
     await pool.query('SELECT 1');
     res.json({ status: 'ready' });
@@ -715,7 +715,7 @@ router.post('/api/v1/actions/drop-partition', asyncHandler(async (req: Request, 
  * Get recent audit logs
  */
 router.get('/api/v1/audit', asyncHandler(async (req: Request, res: Response) => {
-  const { queryReadOnly } = await import('./database');
+  const { queryReadOnly } = await import('./database.js');
   const limit = parseInt(req.query.limit as string) || 100;
   const actor = req.query.actor as string;
   const action = req.query.action as string;
@@ -752,7 +752,7 @@ router.get('/api/v1/audit', asyncHandler(async (req: Request, res: Response) => 
  * Get current system state
  */
 router.get('/api/v1/system/state', asyncHandler(async (req: Request, res: Response) => {
-  const { queryReadOnly } = await import('./database');
+  const { queryReadOnly } = await import('./database.js');
   const rows = await queryReadOnly<{ key: string; value: string; updated_at: string }>(`
     SELECT key, value, updated_at FROM system_state ORDER BY key
   `);

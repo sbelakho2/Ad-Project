@@ -18,6 +18,8 @@ type GetCsrfTokenOptions = {
 }
 
 const AUTH_CSRF_PATH = '/auth/csrf'
+const DEFAULT_BACKEND_PREFIX = '/api/v1'
+const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true' && process.env.NODE_ENV !== 'production'
 
 export function readXsrfCookie(): string | null {
   if (typeof document === 'undefined') return null
@@ -34,13 +36,18 @@ function resolveCsrfUrl(baseUrl?: string): string {
   const normalizedBase = baseUrl?.replace(/\/$/, '')
   if (normalizedBase) return `${normalizedBase}${AUTH_CSRF_PATH}`
 
+  if (USE_MOCK_API) {
+    return `/api/mock?endpoint=csrf`
+  }
+
   const envBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '')
   if (envBase) {
     return `${envBase}${AUTH_CSRF_PATH}`
   }
 
   if (typeof window !== 'undefined') {
-    return `/api${AUTH_CSRF_PATH}`
+    // In the browser, prefer the backend CSRF endpoint (proxied via Next.js)
+    return `${DEFAULT_BACKEND_PREFIX}${AUTH_CSRF_PATH}`
   }
 
   throw new CsrfFetchError('Unable to resolve CSRF endpoint URL. Set NEXT_PUBLIC_API_URL for server-side calls.')
@@ -70,7 +77,7 @@ export async function getCsrfToken(options?: GetCsrfTokenOptions): Promise<strin
     throw new CsrfFetchError('Failed to parse CSRF response payload', response.status, { cause: error })
   }
 
-  const token = data?.token || readXsrfCookie()
+  const token = data?.token || data?.csrfToken || readXsrfCookie()
   if (!token) {
     throw new CsrfFetchError('CSRF token missing in response payload', response.status)
   }

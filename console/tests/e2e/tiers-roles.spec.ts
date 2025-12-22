@@ -1,5 +1,9 @@
 import { test, expect, Page, Route } from '@playwright/test';
 
+// This suite assumes real /api/v1* endpoints and is intended for integration-style runs.
+// Default Playwright runs enable mock mode and should not execute this spec.
+test.skip(process.env.RUN_TIER_ROLE_E2E !== 'true', 'Set RUN_TIER_ROLE_E2E=true to enable tier/role E2E');
+
 /**
  * Comprehensive E2E tests for Console - Role and Tier-based access
  * Tests all user roles: publisher, admin

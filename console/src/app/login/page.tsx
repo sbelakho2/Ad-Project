@@ -5,6 +5,8 @@ import Link from 'next/link'
 import { signIn, useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import Image from 'next/image'
+import axios from 'axios'
+import { apiClient, handleApiError } from '@/lib/api-client'
 
 const MAX_ATTEMPTS_BEFORE_COOLDOWN = 5
 const COOLDOWN_MS = 30_000
@@ -114,48 +116,62 @@ export default function LoginPage() {
     setError('')
 
     try {
+      const response = await apiClient.post('/auth/login', { email, password })
+      const payload = response.data?.data ?? response.data
+
+      if (payload?.twofaRequired) {
+        setTwofaToken(payload?.tempToken || null)
+        setTwofaCode('')
+        setTwofaError('')
+        setError(
+          'Two-factor authentication required. Enter your 6-digit code or a backup code to continue.'
+        )
+        return
+      }
+
+      const token = payload?.token
+      if (!token) {
+        setError('An unexpected error occurred.')
+        return
+      }
+
       const result = await signIn('credentials', {
-        email,
-        password,
+        accessToken: token,
         csrfToken,
-        // Let NextAuth handle cookie + redirect in one flow
-        redirect: true,
-        callbackUrl: '/dashboard',
+        redirect: false,
       })
 
       if (result?.error) {
-        try {
-          const parsed = JSON.parse(result.error)
-          if (parsed?.code === 'TWOFA_REQUIRED') {
-            setTwofaToken(parsed.tempToken || null)
-            setTwofaCode('')
-            setTwofaError('')
-            setError('Two-factor authentication required. Enter your 6-digit code or a backup code to continue.')
-            return
-          }
-        } catch (parseError) {
-          void parseError
-        }
-        setError('Invalid credentials. Please try again.')
-        setFailedAttempts((prev) => {
-          const next = prev + 1
-          if (next >= MAX_ATTEMPTS_BEFORE_COOLDOWN) {
-            setCooldownUntil(Date.now() + COOLDOWN_MS)
-            return 0
-          }
-          return next
-        })
-      } else if (result?.ok) {
-        // In case redirect:false is returned in some environments, ensure client-side nav as fallback
-        setFailedAttempts(0)
-        setHumanCheck(false)
-        router.replace('/dashboard')
-        router.refresh()
-      } else {
-        setError('An unexpected error occurred.')
+        setError('Unable to complete sign-in. Please try again.')
+        return
       }
+
+      setFailedAttempts(0)
+      setHumanCheck(false)
+      router.replace('/dashboard')
+      router.refresh()
     } catch (err) {
-      setError('An error occurred. Please try again.')
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status
+        if (status === 401) {
+          setError('Invalid credentials. Please try again.')
+          setFailedAttempts((prev) => {
+            const next = prev + 1
+            if (next >= MAX_ATTEMPTS_BEFORE_COOLDOWN) {
+              setCooldownUntil(Date.now() + COOLDOWN_MS)
+              return 0
+            }
+            return next
+          })
+          return
+        }
+        if (status === 503) {
+          setError('Authentication temporarily unavailable. Please try again in a moment.')
+          return
+        }
+      }
+
+      setError(handleApiError(err))
     } finally {
       setIsLoading(false)
     }
@@ -177,25 +193,36 @@ export default function LoginPage() {
     setError('')
 
     try {
-      const result = await signIn('credentials', {
-        email,
+      const response = await apiClient.post('/auth/login/2fa', {
         tempToken: twofaToken,
-        twofaCode: twofaCode.trim(),
+        code: twofaCode.trim(),
+      })
+      const payload = response.data?.data ?? response.data
+      const token = payload?.token
+      if (!token) {
+        setTwofaError('Unable to complete verification. Please try again.')
+        return
+      }
+
+      const result = await signIn('credentials', {
+        accessToken: token,
         csrfToken,
-        redirect: true,
-        callbackUrl: '/dashboard',
+        redirect: false,
       })
 
       if (result?.error) {
-        setTwofaError('Invalid or expired code. Try again or use a backup code.')
-      } else if (result?.ok) {
-        router.replace('/dashboard')
-        router.refresh()
-      } else {
         setTwofaError('Unable to complete verification. Please try again.')
+        return
       }
+
+      router.replace('/dashboard')
+      router.refresh()
     } catch (err) {
-      setTwofaError('Verification failed. Please try again.')
+      if (axios.isAxiosError(err) && err.response?.status === 401) {
+        setTwofaError('Invalid or expired code. Try again or use a backup code.')
+        return
+      }
+      setTwofaError(handleApiError(err))
     } finally {
       setIsLoading(false)
     }

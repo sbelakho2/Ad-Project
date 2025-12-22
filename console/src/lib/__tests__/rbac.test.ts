@@ -114,31 +114,63 @@ describe('RBAC Core Functions', () => {
 
 describe('Billing Access Control', () => {
   it('allows admin role', () => {
-    expect(canAccessBilling({ email: 'test@example.com', role: 'admin', permissions: [] })).toBe(true)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'admin',
+        permissions: [],
+      })
+    ).toBe(true)
   })
 
   it('allows publisher role', () => {
-    expect(canAccessBilling({ email: 'test@example.com', role: 'publisher', permissions: [] })).toBe(true)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'publisher',
+        permissions: [],
+      })
+    ).toBe(true)
   })
 
   it('denies readonly role without billing permissions', () => {
-    expect(canAccessBilling({ email: 'test@example.com', role: 'readonly', permissions: [] })).toBe(false)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'readonly',
+        permissions: [],
+      })
+    ).toBe(false)
   })
 
   it('allows readonly role with billing:view permission', () => {
-    expect(canAccessBilling({ 
-      email: 'test@example.com', 
-      role: 'readonly', 
-      permissions: ['billing:view'] 
-    })).toBe(true)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'readonly',
+        permissions: ['billing:view'],
+      })
+    ).toBe(true)
   })
 
   it('allows readonly role with billing:manage permission', () => {
-    expect(canAccessBilling({ 
-      email: 'test@example.com', 
-      role: 'readonly', 
-      permissions: ['billing:manage'] 
-    })).toBe(true)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'readonly',
+        permissions: ['billing:manage'],
+      })
+    ).toBe(true)
   })
 
   it('denies null user', () => {
@@ -151,11 +183,15 @@ describe('Billing Access Control', () => {
   })
 
   it('handles undefined permissions array', () => {
-    expect(canAccessBilling({ 
-      email: 'test@example.com', 
-      role: 'admin',
-      permissions: undefined
-    })).toBe(true)
+    expect(
+      canAccessBilling({
+        userId: 'user_test',
+        publisherId: 'pub_test',
+        email: 'test@example.com',
+        role: 'admin',
+        permissions: undefined,
+      })
+    ).toBe(true)
   })
 })
 

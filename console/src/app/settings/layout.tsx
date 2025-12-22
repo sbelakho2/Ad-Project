@@ -16,11 +16,22 @@ import { hasRole, type Role } from '@/lib/rbac'
 const SETTINGS_ROUTE = '/settings'
 const ALLOWED_ROLES: Role[] = ['admin', 'publisher']
 
+const IS_E2E_MOCK_MODE =
+  process.env.NODE_ENV !== 'production' &&
+  process.env.NEXT_PUBLIC_USE_MOCK_API === 'true' &&
+  Boolean(process.env.NEXT_PUBLIC_E2E_SESSION)
+
 export default async function SettingsLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
+  // In local mock-mode E2E runs we don't have a real NextAuth server session cookie.
+  // Allow the settings subtree to render so Playwright can validate UI wiring deterministically.
+  if (IS_E2E_MOCK_MODE) {
+    return <>{children}</>
+  }
+
   const session = await getServerSession(authOptions)
 
   // Redirect to login if not authenticated

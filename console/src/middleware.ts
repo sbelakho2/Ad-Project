@@ -11,11 +11,20 @@ export function middleware(request: NextRequest) {
   const hostname = request.headers.get('host') || ''
   const isAdminSubdomain = hostname.startsWith('admin.')
 
+  const { pathname } = request.nextUrl
+
   // Hard separation:
-  // The admin hostname must never be served by the customer console.
-  // If traffic is misrouted here, fail closed (stealthy 404).
+  // The admin hostname must never be served by customer console routes.
+  // Only /admin/* UI routes are allowed on admin.*
   if (isAdminSubdomain) {
-    return new NextResponse('Not found', { status: 404 })
+    if (pathname.startsWith('/admin')) {
+      return NextResponse.next()
+    }
+
+    const url = request.nextUrl.clone()
+    url.pathname = '/admin/login'
+    url.search = ''
+    return NextResponse.redirect(url)
   }
 
   return NextResponse.next()

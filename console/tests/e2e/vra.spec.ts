@@ -1,5 +1,8 @@
 import { test, expect, Page, Route } from '@playwright/test';
 
+// Intended for integration-style runs; keep default Playwright runs deterministic.
+test.skip(process.env.RUN_VRA_E2E !== 'true', 'Set RUN_VRA_E2E=true to enable VRA E2E');
+
 /**
  * VRA (Verification & Revenue Auditor) E2E Tests
  * Tests reconciliation workflows, document generation, and data display

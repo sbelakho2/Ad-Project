@@ -2,6 +2,7 @@ import { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import GithubProvider from 'next-auth/providers/github'
 import { apiClient } from '@/lib/api-client'
+import axios from 'axios'
 
 const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true'
 const ALLOW_DEMO_AUTH = process.env.NEXT_PUBLIC_ALLOW_DEMO_AUTH !== 'false'
@@ -39,13 +40,51 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Password', type: 'password' },
         twofaCode: { label: '2FA Code', type: 'text' },
         tempToken: { label: 'Temp Token', type: 'text' },
+        accessToken: { label: 'Access Token', type: 'text' },
       },
       async authorize(credentials) {
         const email = credentials?.email
         const password = credentials?.password
         const twofaCode = credentials?.twofaCode
         const tempToken = credentials?.tempToken
+        const accessToken = (credentials as any)?.accessToken as string | undefined
         const isCompletingTwofa = Boolean(tempToken && twofaCode)
+
+        // Token-only flow: validate token and build a NextAuth session.
+        if (accessToken && !isCompletingTwofa) {
+          try {
+            const resp = await apiClient.get('/auth/me', {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            })
+
+            const payload = resp.data?.data ?? resp.data
+            const userId = payload?.userId
+            const publisherId = payload?.publisherId
+            const resolvedEmail = payload?.email
+            const role = payload?.role
+
+            if (userId && publisherId && resolvedEmail) {
+              return {
+                id: userId,
+                email: resolvedEmail,
+                name: resolvedEmail,
+                role,
+                publisherId,
+                accessToken,
+              }
+            }
+
+            return null
+          } catch (error) {
+            if (axios.isAxiosError(error) && error.response?.status === 401) {
+              return null
+            }
+            console.error('Token session bootstrap failed:', error)
+            return null
+          }
+        }
 
         if (!isCompletingTwofa && (!email || !password)) {
           return null
@@ -67,7 +106,7 @@ export const authOptions: NextAuthOptions = {
           }
 
           if (isCompletingTwofa) {
-            const response = await apiClient.post('/auth/login2fa', {
+            const response = await apiClient.post('/auth/login/2fa', {
               tempToken,
               code: twofaCode,
             })
@@ -97,9 +136,8 @@ export const authOptions: NextAuthOptions = {
           const payload = response.data?.data || response.data
 
           if (payload?.twofaRequired) {
-            throw new Error(
-              JSON.stringify({ code: 'TWOFA_REQUIRED', tempToken: payload.tempToken, email })
-            )
+            // Multi-step auth is handled by the /login page directly.
+            return null
           }
 
           const { user, token } = payload || {}
@@ -117,6 +155,25 @@ export const authOptions: NextAuthOptions = {
 
           return null
         } catch (error) {
+          // Surface 2FA requirement to the client login flow.
+          if (error instanceof Error) {
+            try {
+              const parsed = JSON.parse(error.message)
+              if (parsed?.code === 'TWOFA_REQUIRED') {
+                throw error
+              }
+            } catch {
+              // not JSON
+            }
+          }
+
+          // If backend is temporarily unavailable, let the UI show a specific message.
+          if (axios.isAxiosError(error) && error.response?.status === 503) {
+            throw new Error('AUTH_UNAVAILABLE')
+          }
+
+          // For invalid credentials or other auth failures, return null to keep behavior consistent.
+          // NextAuth will map this to a CredentialsSignin error.
           console.error('Authentication error:', error)
           return null
         }

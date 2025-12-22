@@ -182,7 +182,20 @@ export const login = async (
 
     // If 2FA is enabled OR enforced by feature flag, return step-up requirement with temp token
     const flags = getFeatureFlags();
-  if ((await twofaService.isEnabled(user.id)) || flags.enforce2fa) {
+
+    let twofaEnabled = false;
+    try {
+      twofaEnabled = await twofaService.isEnabled(user.id);
+    } catch (e) {
+      logger.error('2FA status check failed during login', {
+        userId: user.id,
+        error: e instanceof Error ? e.message : 'Unknown error',
+      });
+      next(new AppError('Authentication temporarily unavailable', 503));
+      return;
+    }
+
+    if (twofaEnabled || flags.enforce2fa) {
       const temp = issueTemp2faToken({ userId: user.id, email, publisherId: user.publisher_id });
       logger.info('2FA step-up required', { userId: user.id, email });
       try { authAttemptsTotal.labels('twofa_required').inc(); } catch (e) { void e; }

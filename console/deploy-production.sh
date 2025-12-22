@@ -61,11 +61,16 @@ echo -e "${GREEN}✓ Build successful: $BUILD_ID${NC}"
 
 # Step 3: Verify API URL is baked into bundle
 echo ""
-echo -e "${YELLOW}Step 2: Verifying API URL in bundle...${NC}"
-if grep -r "api.apexmediation.ee" .next/static/chunks/ > /dev/null 2>&1; then
-    echo -e "${GREEN}✓ API URL correctly baked into JS bundle${NC}"
+echo -e "${YELLOW}Step 2: Verifying API routing in bundle...${NC}"
+# The Console now forces same-origin '/api/v1' in production browsers to avoid
+# cross-origin auth/CORS/SameSite cookie failures. Older builds baked an absolute
+# api.* host into client bundles.
+if grep -r "'/api/v1'\|\"/api/v1\"" .next/static/chunks/ > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Same-origin API routing detected in JS bundle (/api/v1)${NC}"
+elif grep -r "api.apexmediation.ee" .next/static/chunks/ > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Absolute API host detected in JS bundle${NC}"
 else
-    echo -e "${RED}ERROR: API URL not found in bundle! NEXT_PUBLIC_API_URL not baked in.${NC}"
+    echo -e "${RED}ERROR: Could not detect API routing in bundle (expected /api/v1 or api.apexmediation.ee).${NC}"
     exit 1
 fi
 
@@ -82,6 +87,13 @@ echo "  Deploying standalone build..."
 rsync -avz --delete -e "ssh -i $SSH_KEY" \
     .next/standalone/ \
     "$SERVER:$RELEASE_DIR/"
+
+# Next.js standalone output in this repo does NOT include node_modules.
+# We ship package-lock.json and install production deps on the server.
+echo "  Deploying package-lock.json (for deterministic prod deps)..."
+rsync -avz -e "ssh -i $SSH_KEY" \
+    package-lock.json \
+    "$SERVER:$RELEASE_DIR/package-lock.json"
 
 # Deploy static files (not included in standalone)
 echo "  Deploying static assets..."
@@ -107,6 +119,12 @@ NEXT_PUBLIC_FRAUD_API_URL=https://api.apexmediation.ee/api/v1
 NEXT_PUBLIC_ANALYTICS_API_URL=https://api.apexmediation.ee/api/v1
 EOF"
 echo -e "${GREEN}✓ .env file created${NC}"
+
+# Step 4.5: Ensure production dependencies are installed
+echo ""
+echo -e "${YELLOW}Step 4.5: Installing production dependencies (node_modules)...${NC}"
+ssh -i "$SSH_KEY" "$SERVER" "cd $RELEASE_DIR && npm ci --omit=dev --ignore-scripts"
+echo -e "${GREEN}✓ Production dependencies installed${NC}"
 
 # Step 6: Verify build ID matches on server
 echo ""

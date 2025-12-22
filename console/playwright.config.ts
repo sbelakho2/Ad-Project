@@ -23,6 +23,7 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      NEXT_PUBLIC_USE_MOCK_API: 'true',
       NEXT_PUBLIC_E2E_SESSION: JSON.stringify({
         userId: 'usr-playwright',
         publisherId: 'pub-test-123',

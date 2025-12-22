@@ -4,6 +4,7 @@ import { useMemo, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 import Navigation from '@/components/Navigation'
 import { AppShellV2 } from './AppShellV2'
+import { IdleLogoutGuard } from '@/components/IdleLogoutGuard'
 
 const STATIC_PUBLIC_ROUTES = new Set(['/', '/login'])
 const PUBLIC_ROUTE_PREFIXES = ['/auth', '/public']
@@ -47,12 +48,22 @@ export function AppShell({ children }: { children: ReactNode }) {
     process.env.NEXT_PUBLIC_UI_V2 === '1' || process.env.NEXT_PUBLIC_UI_V2 === 'true'
 
   if (uiV2Enabled) {
-    return <AppShellV2>{children}</AppShellV2>
+    return (
+      <>
+        <IdleLogoutGuard enabled={!hideNavigation} />
+        <AppShellV2>{children}</AppShellV2>
+      </>
+    )
   }
 
   if (hideNavigation) {
     return <>{children}</>
   }
 
-  return <Navigation>{children}</Navigation>
+  return (
+    <>
+      <IdleLogoutGuard enabled />
+      <Navigation>{children}</Navigation>
+    </>
+  )
 }

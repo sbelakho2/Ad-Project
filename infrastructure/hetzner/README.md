@@ -11,20 +11,25 @@ This directory contains scripts and configuration for deploying the Ad-Project t
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         APP SERVER (77.42.44.35)                             │
+│                         APP SERVER (46.62.252.96)                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
-│  │    Nginx     │  │   Backend    │  │   Console    │  │    Redis     │    │
-│  │  (80/443)    │  │   (3001)     │  │   (3000)     │  │   (6379)     │    │
+│  │    Caddy     │  │   Backend    │  │   Console    │  │    Redis     │    │
+│  │  (80/443)    │  │   (8080)     │  │   (3000)     │  │   (6379)     │    │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘    │
 │         │                 │                 │                 │              │
 │         └─────────────────┴─────────────────┴─────────────────┘              │
+│                                                                              │
+│  ┌──────────────┐  ┌──────────────┐                                           │
+│  │   Website    │  │ Control Plane │                                           │
+│  │   (3002)     │  │    (4000)     │                                           │
+│  └──────────────┘  └──────────────┘                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                            Private Network
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         DB SERVER (46.62.252.96)                             │
+│                         DB SERVER (77.42.44.35)                             │
 │              ⚠️ PRIVATE ONLY - NO INTERNET ACCESS ⚠️                        │
 │  ┌──────────────────────────────────┐  ┌──────────────────────────────┐    │
 │  │         PostgreSQL 16            │  │       Autopilot Service      │    │
@@ -43,8 +48,28 @@ This directory contains scripts and configuration for deploying the Ad-Project t
 
 | Server | IP Address | Role | Ports |
 |--------|------------|------|-------|
-| App Server | 46.62.252.96 | Backend, Console, Website, Redis, Caddy | 22, 80, 443 |
-| DB Server | 77.42.44.35 | PostgreSQL | 22, 5432 |
+| App Server | 46.62.252.96 | Caddy (TLS), Backend, Console, Website, Redis, Control Plane | 22, 80, 443 |
+| DB Server | 77.42.44.35 | PostgreSQL 16 (+ optional Autopilot) | 22, 5432 (private) |
+
+### Port Allocation (CRITICAL)
+
+All application services MUST bind to their assigned localhost ports on the App Server:
+
+| Service | Hostname | Local Port | Notes |
+|---------|----------|------------|-------|
+| Website | `apexmediation.ee` / `www.apexmediation.ee` | 3002 | Customer marketing site |
+| Console | `console.apexmediation.ee` | 3000 | Customer dashboard (Next.js) |
+| Backend API | `api.apexmediation.ee` | 8080 | Customer API (Express) |
+| Control Plane (Admin) | `admin.apexmediation.ee` | 4000 | Operator-only; MUST NOT proxy to Console |
+
+Supporting services:
+
+| Service | Host | Port | Access |
+|---------|------|------|--------|
+| Redis | App Server | 6379 | Local/private only |
+| PostgreSQL | DB Server | 5432 | Private network only |
+| Prometheus | App Server | 9090 | Internal |
+| Grafana | App Server | 3001 | Internal |
 
 ## Security Model
 
@@ -57,7 +82,7 @@ This directory contains scripts and configuration for deploying the Ad-Project t
   - Autopilot API (port 8090) - from App Server only
 
 ### App Server
-- Public-facing (80/443 via Nginx)
+- Public-facing (80/443 via Caddy)
 - SSH access (port 22)
 - All backend services run on localhost
 - Connects to DB Server via private network
@@ -82,31 +107,30 @@ ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 #### DB Server First
 ```bash
 # SSH to DB server via jump host
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 
 # Upload setup script
-scp -i ~/.ssh/hetzner-db-mac infrastructure/hetzner/setup-db-server.sh root@77.42.44.35:/tmp/
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "scp /tmp/setup-db-server.sh root@46.62.252.96:/root/"
+scp -i ~/.ssh/hetzner-db-mac -o ProxyJump=root@46.62.252.96 infrastructure/hetzner/setup-db-server.sh root@77.42.44.35:/root/
 
 # Run setup
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@46.62.252.96 "chmod +x /root/setup-db-server.sh && /root/setup-db-server.sh"
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35 "chmod +x /root/setup-db-server.sh && /root/setup-db-server.sh"
 ```
 
 #### App Server Second
 ```bash
 # SSH to App server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 # Upload and run setup
-scp -i ~/.ssh/hetzner-db-mac infrastructure/hetzner/setup-app-server.sh root@77.42.44.35:/root/
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "chmod +x /root/setup-app-server.sh && /root/setup-app-server.sh"
+scp -i ~/.ssh/hetzner-db-mac infrastructure/hetzner/setup-app-server.sh root@46.62.252.96:/root/
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "chmod +x /root/setup-app-server.sh && /root/setup-app-server.sh"
 ```
 
 ### 2. Run Database Migrations
 
 ```bash
 # SSH to DB server
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 
 # Run migrations
 sudo -u postgres psql -d adproject -f /opt/autopilot/migrations/034_hetzner_schema_reorganization.sql
@@ -122,11 +146,10 @@ pnpm build
 
 # Upload to DB server (via App server)
 tar -czf autopilot.tar.gz dist package.json .env.example
-scp -i ~/.ssh/hetzner-db-mac autopilot.tar.gz root@77.42.44.35:/tmp/
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "scp /tmp/autopilot.tar.gz root@46.62.252.96:/opt/autopilot/"
+scp -i ~/.ssh/hetzner-db-mac -o ProxyJump=root@46.62.252.96 autopilot.tar.gz root@77.42.44.35:/opt/autopilot/
 
 # Extract and start
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@46.62.252.96 << 'EOF'
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35 << 'EOF'
 cd /opt/autopilot
 tar -xzf autopilot.tar.gz
 npm install --production
@@ -140,30 +163,24 @@ EOF
 
 ```bash
 # SSH to App server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
-# Deploy backend
-cd /opt/adproject/backend
-git clone <repo-url> . # or upload built code
-pnpm install --frozen-lockfile
-pnpm build
-systemctl start adproject-backend
-systemctl enable adproject-backend
+# Deploy backend + console via Docker Compose
+cd /opt/adproject
+docker compose -f infrastructure/docker/docker-compose.hetzner.yml up -d --build backend console
 
-# Deploy console
-cd /opt/adproject/console
-git clone <repo-url> . # or upload built code
-pnpm install --frozen-lockfile
-pnpm build
-systemctl start adproject-console
-systemctl enable adproject-console
+# Control Plane runs separately (systemd) on port 4000
+systemctl status adproject-control-plane || true
+
+# Caddy is the edge router (TLS termination)
+sudo caddy reload --config /etc/caddy/Caddyfile
 ```
 
 ### 5. Setup SSL Certificates
 
 ```bash
-# On App server
-certbot --nginx -d api.yourapp.com -d console.yourapp.com
+# TLS is handled by Caddy automatically (Let's Encrypt)
+sudo caddy reload --config /etc/caddy/Caddyfile
 ```
 
 ## Database Schemas
@@ -207,26 +224,32 @@ The Autopilot service runs on the DB server and provides:
 ### Health Checks
 
 ```bash
-# On App server
-curl http://localhost:3001/health
+# Backend health (App server)
+curl http://127.0.0.1:8080/health
+
+# Console (App server)
+curl -I http://127.0.0.1:3000
+
+# Control Plane (App server)
+curl -I http://127.0.0.1:4000/health
 
 # DB server status (from App server)
-curl http://46.62.252.96:8090/status
+curl http://77.42.44.35:8090/status
 ```
 
 ### Logs
 
 - **Backend**: `/var/log/adproject/backend.log`
 - **Console**: `/var/log/adproject/console.log`
-- **Nginx**: `/var/log/nginx/access.log`, `/var/log/nginx/error.log`
+- **Caddy**: `/var/log/caddy/access.log` (or `journalctl -u caddy -f`)
 - **Autopilot**: `/var/log/autopilot/stdout.log`
 - **PostgreSQL**: `/var/log/postgresql/postgresql-16-main.log`
 
 ### Admin Control Panel
 
-Access the Infrastructure Control Panel at:
+Access the operator Control Plane at:
 ```
-https://console.yourapp.com/admin/infrastructure
+https://admin.apexmediation.ee/admin
 ```
 
 Features:
@@ -257,19 +280,19 @@ Features:
 ### DB Connection Issues
 ```bash
 # Check DB server firewall
-ssh -J root@77.42.44.35 root@46.62.252.96 "ufw status"
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "ufw status"
 
 # Test PostgreSQL connection from App server
-ssh root@77.42.44.35 "psql -h 46.62.252.96 -U app_service -d adproject -c 'SELECT 1'"
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "psql -h 77.42.44.35 -U adproject -d adproject -c 'SELECT 1'"
 ```
 
 ### Autopilot Not Running
 ```bash
 # Check service status
-ssh -J root@77.42.44.35 root@46.62.252.96 "systemctl status autopilot"
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35 "systemctl status autopilot"
 
 # View logs
-ssh -J root@77.42.44.35 root@46.62.252.96 "tail -100 /var/log/autopilot/stdout.log"
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35 "tail -100 /var/log/autopilot/stdout.log"
 ```
 
 ### High Connection Usage
@@ -278,7 +301,7 @@ ssh -J root@77.42.44.35 root@46.62.252.96 "tail -100 /var/log/autopilot/stdout.l
 sudo -u postgres psql -c "SELECT count(*), state FROM pg_stat_activity GROUP BY state"
 
 # Kill idle connections (via Autopilot)
-curl -X POST http://46.62.252.96:8090/actions/kill_idle_connections
+curl -X POST http://77.42.44.35:8090/actions/kill_idle_connections
 ```
 
 ## Rollback Procedure

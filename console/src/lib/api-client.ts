@@ -17,35 +17,77 @@ const appendApiVersion = (value: string, defaultSuffix = '/api/v1') => {
   return `${normalized}${defaultSuffix}`
 }
 
+const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '')
+
+const getServerOriginFallback = () => {
+  const nextAuthUrl = process.env.NEXTAUTH_URL || ''
+  if (nextAuthUrl) return normalizeOrigin(nextAuthUrl)
+
+  const vercelUrl = process.env.VERCEL_URL || ''
+  if (vercelUrl) return `https://${normalizeOrigin(vercelUrl)}`
+
+  const port = process.env.PORT || '3000'
+  return `http://localhost:${port}`
+}
+
 const normalizeBase = (candidate: string | undefined, fallbackHost: string) => {
   const base = (candidate && candidate.trim().length > 0 ? candidate.trim() : fallbackHost)
   return appendApiVersion(base)
 }
 
-// In production, use relative URLs to avoid CORS and localhost issues
-// The Next.js API routes proxy to the backend
-const isServer = typeof window === 'undefined'
-const CORE_HOST = process.env.NEXT_PUBLIC_API_URL || ''
+// In production browsers, always use same-origin relative URLs to avoid CORS and
+// cross-site cookie/SameSite issues. The Next.js API routes proxy to the backend.
+//
+// IMPORTANT: Do not rely on NEXT_PUBLIC_API_URL in the browser in production.
+// If it is set to an absolute api.* host, requests become cross-origin and will
+// frequently fail (preflight/CORS, SameSite cookies), which breaks nav + analytics.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production'
+const IS_BROWSER = typeof window !== 'undefined'
 
-// Use relative paths when no explicit host is set - Next.js will proxy these
+// NOTE: On the server (NextAuth callbacks, server actions), we may need an absolute
+// backend URL. Prefer API_URL (server-only) but fall back to NEXT_PUBLIC_API_URL.
+const CORE_HOST_SERVER = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL || ''
+const CORE_HOST_BROWSER = process.env.NEXT_PUBLIC_API_URL || ''
+
 const getDefaultBase = () => {
   if (USE_MOCK_API) return '/api/mock'
-  if (CORE_HOST) return normalizeBase(CORE_HOST, '')
-  // In browser, use relative URL; on server during SSR, skip external calls
+
+  // Production browser must go through the same-origin proxy.
+  if (IS_PRODUCTION && IS_BROWSER) return '/api/v1'
+
+  // Server-side code can call the backend directly.
+  if (!IS_BROWSER && CORE_HOST_SERVER) return normalizeBase(CORE_HOST_SERVER, '')
+
+  // Server-side code must have an absolute URL for axios. If no backend host is configured,
+  // use the Next.js same-origin proxy via NEXTAUTH_URL/VERCEL_URL/localhost.
+  if (!IS_BROWSER) {
+    return `${getServerOriginFallback()}/api/v1`
+  }
+
+  // Non-production browser can use an explicit host if configured.
+  if (IS_BROWSER && CORE_HOST_BROWSER) return normalizeBase(CORE_HOST_BROWSER, '')
+
   return '/api/v1'
 }
 
 const BASE_URL = getDefaultBase()
+
+// Keep analytics/fraud on the same origin in production browsers as well.
 const FRAUD_API_URL = USE_MOCK_API
   ? '/api/mock'
-  : process.env.NEXT_PUBLIC_FRAUD_API_URL
-    ? normalizeBase(process.env.NEXT_PUBLIC_FRAUD_API_URL, '')
-    : BASE_URL
+  : IS_PRODUCTION && IS_BROWSER
+    ? BASE_URL
+    : process.env.NEXT_PUBLIC_FRAUD_API_URL
+      ? normalizeBase(process.env.NEXT_PUBLIC_FRAUD_API_URL, '')
+      : BASE_URL
+
 const ANALYTICS_API_URL = USE_MOCK_API
   ? '/api/mock'
-  : process.env.NEXT_PUBLIC_ANALYTICS_API_URL
-    ? normalizeBase(process.env.NEXT_PUBLIC_ANALYTICS_API_URL, '')
-    : BASE_URL
+  : IS_PRODUCTION && IS_BROWSER
+    ? BASE_URL
+    : process.env.NEXT_PUBLIC_ANALYTICS_API_URL
+      ? normalizeBase(process.env.NEXT_PUBLIC_ANALYTICS_API_URL, '')
+      : BASE_URL
 
 // Create axios instances
 export const apiClient: AxiosInstance = axios.create({

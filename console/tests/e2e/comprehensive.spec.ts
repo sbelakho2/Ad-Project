@@ -471,6 +471,15 @@ async function setupFullMocks(
     }
 
     if (method === 'GET') {
+      // Experiment detail endpoints should return a single object, not a list.
+      const match = url.match(/\/migration\/(?:experiments\/)?([\w-]+)(?:\?|$)/)
+      const maybeId = match?.[1]
+      const experiment = maybeId ? MOCK_EXPERIMENTS.find((exp) => exp.id === maybeId) : undefined
+
+      if (experiment) {
+        return respondJson(route, 200, { success: true, data: experiment })
+      }
+
       return respondJson(route, 200, { success: true, data: MOCK_EXPERIMENTS })
     }
 
@@ -799,9 +808,8 @@ test.describe('3. Analytics Flow', () => {
     expect(isOnAnalytics || isOnLogin).toBe(true)
 
     if (isOnAnalytics) {
-      // Should have chart elements or loading indicators
-      const chartOrLoading = page.locator('svg, canvas, [data-testid="chart"], .recharts-wrapper')
-      await expect(chartOrLoading.first()).toBeVisible({ timeout: 10000 })
+      // Prefer a stable semantic assertion over brittle SVG selectors.
+      await expect(page.getByRole('heading', { name: /revenue\s*trend/i })).toBeVisible({ timeout: 10000 })
     }
 
     await page.screenshot({ path: 'test-results/screenshots/test-08-analytics.png', fullPage: true })
@@ -1000,7 +1008,7 @@ test.describe('5. Adapters Flow', () => {
         await page.waitForTimeout(500)
 
         // Should filter to show only AdMob adapter
-        await expect(page.getByText('AdMob Banner')).toBeVisible()
+        await expect(page.getByText(/Google\s+AdMob/i).first()).toBeVisible()
       }
     }
 

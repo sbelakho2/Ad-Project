@@ -3,6 +3,7 @@ import request from 'supertest';
 import { Pool } from 'pg';
 import { Application } from 'express';
 import { createTestApp } from '../helpers/testApp';
+import twofaService from '../../services/twofa.service';
 import {
   setupTestDatabase,
   teardownTestDatabase,
@@ -27,6 +28,10 @@ const describeIfDb = (process.env.SKIP_DB_SETUP === 'true'
 describeIfDb('Auth Integration Tests', () => {
   let pool: Pool;
   let app: Application;
+  const twofa = twofaService as unknown as {
+    isEnabled: jest.Mock;
+    verifyTokenOrBackupCode: jest.Mock;
+  };
 
   beforeAll(async () => {
     pool = await setupTestDatabase();
@@ -39,9 +44,22 @@ describeIfDb('Auth Integration Tests', () => {
 
   beforeEach(async () => {
     await cleanDatabase(pool);
+    twofa.isEnabled.mockImplementation(async () => false);
+    twofa.verifyTokenOrBackupCode.mockImplementation(async () => true);
   });
 
   describe('POST /api/v1/auth/login', () => {
+    it('should return 400 with invalid JSON body', async () => {
+      const response = await request(app)
+        .post('/api/v1/auth/login')
+        .set('Content-Type', 'application/json')
+        .send('{"email":')
+        .expect(400);
+
+      expect(response.body.success).toBe(false);
+      expect(response.body.error).toContain('Invalid JSON');
+    });
+
     it('should login successfully with valid credentials', async () => {
       // Setup
       const publisher = await createTestPublisher(pool);
@@ -110,6 +128,28 @@ describeIfDb('Auth Integration Tests', () => {
         .expect(400);
 
       expect(response.body.success).toBe(false);
+    });
+
+    it('should return 503 when 2FA status lookup fails', async () => {
+      const publisher = await createTestPublisher(pool);
+      const user = await createTestUser(pool, publisher.id, {
+        password: 'password123',
+      });
+
+      twofa.isEnabled.mockImplementation(async () => {
+        throw new Error('2FA store unavailable');
+      });
+
+      const response = await request(app)
+        .post('/api/v1/auth/login')
+        .send({
+          email: user.email,
+          password: user.password,
+        })
+        .expect(503);
+
+      expect(response.body.success).toBe(false);
+      expect(response.body.error).toContain('Authentication temporarily unavailable');
     });
   });
 
