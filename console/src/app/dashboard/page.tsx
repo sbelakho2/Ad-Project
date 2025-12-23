@@ -1,11 +1,11 @@
 'use client'
 
 import Link from 'next/link'
-import { useSession } from 'next-auth/react'
 import DashboardGate from './DashboardGate'
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useMemo, useState, type ChangeEvent } from 'react'
 import { revenueApi } from '@/lib/api'
+import { useSession } from '@/lib/useSession'
 import { formatCurrency, formatNumber, formatPercentage } from '@/lib/utils'
 import { MetricCard, MetricCardSkeleton } from '@/components/dashboard/MetricCard'
 import { DashboardCharts } from '@/components/dashboard/DashboardCharts'
@@ -25,7 +25,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 
 export default function DashboardPage() {
-  const { data: session } = useSession()
+  const { user } = useSession()
   const defaultStart = useMemo(
     () => new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
     []
@@ -147,12 +147,12 @@ export default function DashboardPage() {
       ? revenueSummaryError.message
       : 'Unable to load revenue summary.'
 
-  const publisherId = session?.user?.publisherId
+  const publisherId = user?.publisherId
   const canRenderOperationalWidgets = Boolean(publisherId)
 
   return (
     <DashboardGate>
-    <div className="min-h-screen bg-[#f9fafb]">
+      <div className="min-h-screen bg-[#f9fafb]">
       <header className="bg-white/90 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -290,7 +290,7 @@ export default function DashboardPage() {
           </div>
         </section>
       </main>
-    </div>
+      </div>
     </DashboardGate>
   )
 }

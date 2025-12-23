@@ -66,7 +66,17 @@ test.describe('Page Loading - All Pages Load Successfully', () => {
       });
 
       const response = await browserPage.goto(page.path);
-      
+
+      // /signin is an intentional cross-origin redirect to the Console login.
+      // Treat a redirect response as success and avoid asserting on console errors for the redirected page.
+      if (page.path === '/signin') {
+        expect(response?.status()).toBeGreaterThanOrEqual(200);
+        expect(response?.status()).toBeLessThan(400);
+        await browserPage.waitForLoadState('domcontentloaded');
+        expect(browserPage.url()).toContain('console.apexmediation.ee');
+        return;
+      }
+
       // Page should return 200
       expect(response?.status()).toBe(200);
       

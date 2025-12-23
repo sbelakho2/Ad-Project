@@ -1,11 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { useSession } from 'next-auth/react'
-import { useRouter } from 'next/navigation'
 import Image from 'next/image'
 import { Shield, ShieldCheck, ShieldOff, Copy, Check, AlertTriangle, Loader2 } from 'lucide-react'
 import { apiClient } from '@/lib/api-client'
+import { useSession } from '@/lib/useSession'
 
 type TwofaStatus = {
   enabled: boolean
@@ -19,8 +18,7 @@ type EnrollmentData = {
 }
 
 export default function SecuritySettingsPage() {
-  const { data: session, status: sessionStatus } = useSession()
-  const router = useRouter()
+  const { user, isLoading: sessionLoading } = useSession({ redirectOnUnauthorized: true })
 
   const [twofaStatus, setTwofaStatus] = useState<TwofaStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -46,13 +44,6 @@ export default function SecuritySettingsPage() {
   const [regenLoading, setRegenLoading] = useState(false)
   const [regenError, setRegenError] = useState('')
 
-  // Redirect if not authenticated
-  useEffect(() => {
-    if (sessionStatus === 'unauthenticated') {
-      router.push('/login?next=/settings/security')
-    }
-  }, [sessionStatus, router])
-
   // Fetch 2FA status
   const fetchStatus = useCallback(async () => {
     try {
@@ -73,10 +64,10 @@ export default function SecuritySettingsPage() {
   }, [])
 
   useEffect(() => {
-    if (sessionStatus === 'authenticated') {
+    if (!sessionLoading && user) {
       fetchStatus()
     }
-  }, [sessionStatus, fetchStatus])
+  }, [fetchStatus, sessionLoading, user])
 
   // Start enrollment
   const handleEnroll = async () => {
@@ -183,7 +174,7 @@ export default function SecuritySettingsPage() {
     }
   }
 
-  if (sessionStatus === 'loading' || loading) {
+  if (sessionLoading || loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-primary-600" />
@@ -387,7 +378,7 @@ export default function SecuritySettingsPage() {
             Sessions expire after 24 hours of inactivity.
           </p>
           <p className="text-sm text-gray-500 mt-2">
-            Signed in as: <span className="font-medium">{session?.user?.email}</span>
+            Signed in as: <span className="font-medium">{user?.email}</span>
           </p>
         </section>
       </main>

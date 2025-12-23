@@ -83,10 +83,55 @@ const sections = [
 const SETTINGS_ROUTE = '/settings'
 const ALLOWED_ROLES: Role[] = ['admin', 'publisher']
 
+const IS_E2E_MOCK_MODE =
+  process.env.NODE_ENV !== 'production' &&
+  process.env.NEXT_PUBLIC_USE_MOCK_API === 'true' &&
+  Boolean(process.env.NEXT_PUBLIC_E2E_SESSION)
+
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 export default async function SettingsPage() {
+  if (IS_E2E_MOCK_MODE) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <header className="bg-white/90 backdrop-blur border-b">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            <p className="text-sm font-medium text-primary-600">Control Center</p>
+            <h1 className="text-3xl font-semibold text-gray-900 tracking-tight">Settings</h1>
+            <p className="text-sm text-gray-600 mt-1 max-w-3xl">
+              Configure fraud defenses, billing preferences, notifications, and compliance policies to tailor the platform to your organization.
+            </p>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {sections.map((section) => (
+              <Link key={section.href} href={section.href} className="card group h-full">
+                <div className="flex items-start gap-4">
+                  <div className="h-12 w-12 rounded-lg bg-primary-50 text-primary-600 flex items-center justify-center">
+                    <section.icon className="h-6 w-6" aria-hidden={true} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+                      {section.title}
+                      <ArrowRight
+                        className="h-4 w-4 text-primary-400 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                        aria-hidden={true}
+                      />
+                    </h2>
+                    <p className="text-sm text-gray-600 mt-2">{section.description}</p>
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </main>
+      </div>
+    )
+  }
+
   const session = await getServerSession(authOptions)
 
   if (!session?.user) {

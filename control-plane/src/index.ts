@@ -137,7 +137,7 @@ app.get('/admin/login', (req: Request, res: Response) => {
       </div>
     </div>
 
-    <script src="/static/admin-login.js" defer></script>
+    <script src="/static/admin-login.js"></script>
   </body>
 </html>`
   );
@@ -203,7 +203,7 @@ app.get('/admin', (req: Request, res: Response) => {
         <div id="devices"></div>
       </div>
     </div>
-    <script src="/static/admin-dashboard.js" defer></script>
+    <script src="/static/admin-dashboard.js"></script>
   </body>
 </html>`
   );
@@ -220,7 +220,7 @@ app.get('/admin/logout', (req: Request, res: Response) => {
     <title>Signed out</title>
   </head>
   <body>
-    <script src="/static/admin-logout.js" defer></script>
+    <script src="/static/admin-logout.js"></script>
   </body>
 </html>`
   );
@@ -245,7 +245,9 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
     var bin = '';
     for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
     var b64 = btoa(bin);
-    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    // Avoid regex escapes inside a server-side template string (\+ and \// can be mangled).
+    // Use replaceAll for the base64url alphabet conversion.
+    return b64.replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/g, '');
   }
 
   function getOrCreateDeviceId() {
@@ -633,16 +635,22 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 async function startServer() {
   try {
-    // Initialize database pools
-    logger.info('Initializing database connections...');
-    await initializePools();
-    
-    // Verify read-only connection
-    const pool = getReadOnlyPool();
-    const result = await pool.query('SELECT NOW() as time');
-    logger.info('Database connection verified', { 
-      serverTime: result.rows[0].time 
-    });
+    const skipDbInit = process.env.CONTROL_PLANE_SKIP_DB === 'true'
+
+    if (skipDbInit) {
+      logger.warn('Skipping database initialization (CONTROL_PLANE_SKIP_DB=true)');
+    } else {
+      // Initialize database pools
+      logger.info('Initializing database connections...');
+      await initializePools();
+
+      // Verify read-only connection
+      const pool = getReadOnlyPool();
+      const result = await pool.query('SELECT NOW() as time');
+      logger.info('Database connection verified', {
+        serverTime: result.rows[0].time,
+      });
+    }
     
     // Start HTTP server
     const server = app.listen(config.PORT, () => {
@@ -670,9 +678,11 @@ async function startServer() {
       
       server.close(async () => {
         logger.info('HTTP server closed');
-        
-        await closePools();
-        logger.info('Database pools closed');
+
+        if (!skipDbInit) {
+          await closePools();
+          logger.info('Database pools closed');
+        }
         
         process.exit(0);
       });

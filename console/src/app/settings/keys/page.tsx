@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useSession } from 'next-auth/react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Key,
@@ -21,6 +20,7 @@ import {
   Package,
 } from 'lucide-react'
 import { appsApi, appKeysApi, meApi } from '@/lib/api'
+import { useSession } from '@/lib/useSession'
 import type { App, AppApiKey, AppApiKeyWithSecret } from '@/types'
 
 const PLATFORM_ICONS: Record<string, React.FC<{ className?: string }>> = {
@@ -44,11 +44,11 @@ const PLATFORMS = [
 ]
 
 export default function AppKeysPage() {
-  const { data: session } = useSession()
+  const { user } = useSession()
   const { data: me } = useQuery({
     queryKey: ['me'],
     queryFn: meApi.get,
-    enabled: !!session,
+    enabled: !!user,
   })
   const queryClient = useQueryClient()
   const [selectedApp, setSelectedApp] = useState<string | null>(null)
@@ -67,7 +67,7 @@ export default function AppKeysPage() {
   const { data: apps, isLoading: appsLoading } = useQuery({
     queryKey: ['apps'],
     queryFn: appsApi.list,
-    enabled: !!session,
+    enabled: !!user,
   })
 
   const { data: keys, isLoading: keysLoading, refetch: refetchKeys } = useQuery({

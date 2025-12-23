@@ -1,7 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const PLAYWRIGHT_PORT = Number(process.env.PLAYWRIGHT_PORT || 4310)
-const PLAYWRIGHT_BASE_URL = process.env.CONSOLE_BASE_URL || `http://localhost:${PLAYWRIGHT_PORT}`
+const LOCAL_BASE_URL = `http://localhost:${PLAYWRIGHT_PORT}`
+const REMOTE_BASE_URL = process.env.CONSOLE_BASE_URL
+const PLAYWRIGHT_BASE_URL = REMOTE_BASE_URL || LOCAL_BASE_URL
+const USE_REMOTE_TARGET = Boolean(REMOTE_BASE_URL)
 
 export default defineConfig({
   testDir: './tests',
@@ -16,20 +19,23 @@ export default defineConfig({
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
     { name: 'webkit', use: { ...devices['Desktop Safari'] } },
   ],
-  // Auto-start the Console app during tests to avoid connection errors
-  webServer: {
-    command: `npm run dev -- -p ${PLAYWRIGHT_PORT}`,
-    url: PLAYWRIGHT_BASE_URL,
-    reuseExistingServer: false,
-    timeout: 120_000,
-    env: {
-      NEXT_PUBLIC_USE_MOCK_API: 'true',
-      NEXT_PUBLIC_E2E_SESSION: JSON.stringify({
-        userId: 'usr-playwright',
-        publisherId: 'pub-test-123',
-        email: 'playwright@example.com',
-        role: 'admin',
-      }),
-    },
-  },
+  // Auto-start the Console app during local tests. If CONSOLE_BASE_URL is set, assume
+  // you are targeting a remote instance and do not try to start (or wait on) localhost.
+  webServer: USE_REMOTE_TARGET
+    ? undefined
+    : {
+        command: `npm run dev -- -p ${PLAYWRIGHT_PORT}`,
+        url: LOCAL_BASE_URL,
+        reuseExistingServer: false,
+        timeout: 120_000,
+        env: {
+          NEXT_PUBLIC_USE_MOCK_API: 'true',
+          NEXT_PUBLIC_E2E_SESSION: JSON.stringify({
+            userId: 'usr-playwright',
+            publisherId: 'pub-test-123',
+            email: 'playwright@example.com',
+            role: 'admin',
+          }),
+        },
+      },
 });

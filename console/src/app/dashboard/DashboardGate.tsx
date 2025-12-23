@@ -1,20 +1,20 @@
 'use client'
 
-import { useSession } from 'next-auth/react'
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { useSession } from '@/lib/useSession'
 
 /**
  * Lightweight client gate to avoid showing a blank page if server session check ever fails open.
  * Redirects unauthenticated users to /login.
  */
 export default function DashboardGate({ children }: { children: React.ReactNode }) {
-  const { status } = useSession()
+  const { user, isLoading } = useSession()
   const router = useRouter()
   useEffect(() => {
-    if (status === 'unauthenticated') {
+    if (!isLoading && !user) {
       router.replace('/login')
     }
-  }, [status, router])
+  }, [isLoading, router, user])
   return <>{children}</>
 }

@@ -13,14 +13,23 @@
 
 import { test, expect, request } from '@playwright/test';
 
-const API_URL = 'https://api.apexmediation.ee';
-const CONSOLE_URL = 'https://console.apexmediation.ee';
+// These tests are intentionally aggressive and target production.
+// Keep them opt-in to avoid accidental load or requiring real credentials.
+const PRODUCTION_STRESS_ENABLED = process.env.RUN_PRODUCTION_STRESS === 'true';
+test.skip(!PRODUCTION_STRESS_ENABLED, 'Set RUN_PRODUCTION_STRESS=true (and PROD_E2E_EMAIL/PROD_E2E_PASSWORD) to run production stress tests.');
 
-// Test credentials
+const API_URL = process.env.PROD_E2E_API_URL || 'https://api.apexmediation.ee';
+const CONSOLE_URL = process.env.PROD_E2E_CONSOLE_URL || 'https://console.apexmediation.ee';
+
+// Test credentials (required when RUN_PRODUCTION_STRESS=true)
 const TEST_USER = {
-  email: 'sales@apexmediation.ee',
-  password: '&&Pw20354491'
+  email: process.env.PROD_E2E_EMAIL || '',
+  password: process.env.PROD_E2E_PASSWORD || '',
 };
+
+if (PRODUCTION_STRESS_ENABLED && (!TEST_USER.email || !TEST_USER.password)) {
+  throw new Error('RUN_PRODUCTION_STRESS=true requires PROD_E2E_EMAIL and PROD_E2E_PASSWORD to be set.');
+}
 
 // Helper to make API calls
 async function apiCall(token: string, endpoint: string, options: any = {}) {

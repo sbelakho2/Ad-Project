@@ -1,7 +1,6 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useSession } from 'next-auth/react'
 import {
   Hash,
   RefreshCw,
@@ -65,7 +64,6 @@ const SDK_PLATFORMS = [
 ] as const
 
 export default function SDKConfigPage() {
-  const { data: session } = useSession()
   const [appId, setAppId] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
