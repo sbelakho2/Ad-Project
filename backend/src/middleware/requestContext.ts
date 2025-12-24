@@ -32,14 +32,7 @@ export function requestContextMiddleware(req: Request, res: Response, next: Next
   
   // Run the request within this context
   asyncLocalStorage.run(context, () => {
-    // Log request with context
-    logger.info(`${req.method} ${req.path}`, {
-      method: req.method,
-      path: req.path,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-    });
-    
+    // Log only errors and warnings (not every request)
     next();
   });
 }

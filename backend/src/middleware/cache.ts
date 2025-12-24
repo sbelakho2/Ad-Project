@@ -161,9 +161,7 @@ export function invalidateCache(pattern: string | ((req: Request) => string)): (
           : pattern;
         
         redis.delPattern(invalidationPattern).then((count) => {
-          if (count > 0) {
-            logger.info('Cache invalidated', { pattern: invalidationPattern, count });
-          }
+          // Cache invalidated silently
         }).catch((err) => {
           logger.error('Cache invalidation error', { error: err, pattern: invalidationPattern });
         });

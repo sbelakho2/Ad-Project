@@ -35,7 +35,8 @@ const pool = new Pool({
   min: poolMin, // Minimum pool size (default: 2)
   idleTimeoutMillis: idleTimeout, // How long idle clients stay in pool (default: 30s)
   connectionTimeoutMillis: connectionTimeout, // How long to wait for connection (default: 5s)
-  statement_timeout: statementTimeout, // Query timeout in ms (default: 30s)
+  // Do not set statement_timeout here when using PgBouncer
+  // statement_timeout: statementTimeout, // Query timeout in ms (default: 30s)
 });
 
 pool.on('error', (error: Error) => {
@@ -67,7 +68,8 @@ const buildReplicaPool = (): Pool | null => {
     min: parseInt(process.env.REPLICA_DATABASE_POOL_MIN || '1', 10),
     idleTimeoutMillis: idleTimeout,
     connectionTimeoutMillis: connectionTimeout,
-    statement_timeout: statementTimeout,
+    // Do not set statement_timeout when using PgBouncer
+    // statement_timeout: statementTimeout,
   });
 };
 

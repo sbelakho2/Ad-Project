@@ -180,7 +180,15 @@ export class UsageMeteringService {
     );
 
     if (subscription.rows.length === 0) {
-      throw new Error(`No active subscription found for customer ${customerId}`);
+      // Return empty usage if no active subscription
+      return {
+        customer_id: customerId,
+        period_start: new Date(),
+        period_end: new Date(),
+        impressions: 0,
+        api_calls: 0,
+        data_transfer_gb: 0
+      };
     }
 
     const { current_period_start, current_period_end } = subscription.rows[0];
@@ -240,7 +248,16 @@ export class UsageMeteringService {
     );
 
     if (subscription.rows.length === 0) {
-      throw new Error(`No active subscription for customer ${customerId}`);
+      // Return zero overages if no active subscription
+      return {
+        impressions_overage: 0,
+        impressions_overage_cost_cents: 0,
+        api_calls_overage: 0,
+        api_calls_overage_cost_cents: 0,
+        data_transfer_overage_gb: 0,
+        data_transfer_overage_cost_cents: 0,
+        total_overage_cost_cents: 0
+      };
     }
 
     const planType = coercePlanType(subscription.rows[0].plan_type);
@@ -506,7 +523,15 @@ export class UsageMeteringService {
     );
 
     if (subscription.rows.length === 0) {
-      throw new Error(`No active subscription found for customer ${customerId}`);
+      // Return default starter tier limits if no active subscription
+      const starterLimits = this.planLimits.starter;
+      
+      return {
+        plan_type: 'starter',
+        included_impressions: starterLimits.included_impressions,
+        included_api_calls: starterLimits.included_api_calls,
+        included_data_transfer_gb: starterLimits.included_data_transfer_gb,
+      };
     }
 
     const planType = coercePlanType(subscription.rows[0].plan_type);

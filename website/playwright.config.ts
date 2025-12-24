@@ -33,9 +33,10 @@ export default defineConfig({
     { name: 'ipad-pro', use: { ...devices['iPad Pro 11'] } },
   ],
   webServer: {
-    // Ensure we don't reuse a possibly stale/corrupted Next dev build between runs.
-    // The "Unexpected end of JSON input" manifest error is usually caused by a truncated .next manifest.
-    command: `rm -rf .next && npm run dev -- -p ${PLAYWRIGHT_PORT}`,
+    // Use a production build for stability.
+    // Next dev server can occasionally serve truncated manifest JSON under heavy parallel navigation.
+    // This repo uses `output: 'standalone'`, so we must start the standalone server.
+    command: `rm -rf .next && npm run build && PORT=${PLAYWRIGHT_PORT} node .next/standalone/server.js`,
     url: PLAYWRIGHT_BASE_URL,
     reuseExistingServer: false,
     timeout: 120_000,

@@ -23,11 +23,18 @@ test.skip(!CONTROL_PLANE_E2E_ENABLED, 'Set RUN_CONTROL_PLANE_E2E=true to run con
 
 const ADMIN_API = 'https://admin.apexmediation.ee';
 
-// Operator credentials
+// Operator credentials must be provided via environment variables.
+// This spec is intended for explicit opt-in runs only.
 const OPERATOR = {
-  username: 'contact@apexmediation.com',
-  password: '&&Pw20354491'
+  username: process.env.CONTROL_PLANE_E2E_USERNAME || '',
+  password: process.env.CONTROL_PLANE_E2E_PASSWORD || '',
 };
+
+if (CONTROL_PLANE_E2E_ENABLED && (!OPERATOR.username || !OPERATOR.password)) {
+  throw new Error(
+    'RUN_CONTROL_PLANE_E2E=true requires CONTROL_PLANE_E2E_USERNAME and CONTROL_PLANE_E2E_PASSWORD to be set.'
+  );
+}
 
 // Helper to make API calls
 async function apiCall(token: string, endpoint: string, options: any = {}) {

@@ -1,3 +1,8 @@
+// Load environment variables first, before any other imports
+import dotenv from 'dotenv';
+import path from 'path';
+dotenv.config({ path: path.join(__dirname, '../../../.env') });
+
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -21,6 +26,7 @@ import { createHealthCheckRoutes } from './routes/healthCheck';
 import pool from './utils/postgres';
 import { initVraConnectionRoutes } from './routes/vraConnections.routes';
 import { issueCsrfToken } from './middleware/csrf';
+import { SchemaGate } from './utils/schemaGate';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';
@@ -268,6 +274,11 @@ const startServer = async (): Promise<void> => {
   try {
     // Initialize PostgreSQL
     await initializeDatabase();
+
+    // Validate schema requirements (fail fast on missing tables/extensions)
+    logger.info('Validating database schema...');
+    await SchemaGate.validateOrExit();
+    logger.info('Schema validation passed');
 
     // Initialize VRA services
     initVraConnectionRoutes(pool);

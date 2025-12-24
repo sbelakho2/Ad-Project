@@ -35,6 +35,11 @@ function isProbablyDestructive(label: string) {
   return s.includes('delete') || s.includes('remove') || s.includes('revoke') || s.includes('terminate') || s.includes('drop')
 }
 
+function isAuthRedirect(label: string) {
+  const s = label.toLowerCase()
+  return s.includes('sign in') || s.includes('log in') || s.includes('login')
+}
+
 async function closeAnyModal(page: Page) {
   if (page.isClosed()) return
   await page.getByRole('button', { name: /close|dismiss|cancel|back/i }).first().click({ timeout: 750 }).catch(() => {})
@@ -68,6 +73,7 @@ async function clickVisibleButtons(page: Page, options?: ClickOptions) {
     const label = (text || ariaLabel || '').trim()
 
     if (label && isProbablyDestructive(label)) continue
+    if (label && isAuthRedirect(label)) continue
 
     const typeAttr = (await btn.getAttribute('type').catch(() => null))
     if (typeAttr === 'submit') {

@@ -45,8 +45,8 @@
     "ops:evidence-zip": "bash scripts/ops/zip_evidence.sh",
     "ops:ssh": "bash scripts/ops/do_ssh.sh",
 
-    "test:ui:chromium": "npm --prefix console run e2e -- --project=chromium tests/e2e/clickthrough.spec.ts tests/e2e/deep-clickthrough.spec.ts && cd control-plane && npx playwright test --project=chromium tests/e2e/admin.clickthrough.spec.ts && cd ../website && npx playwright test --project=chromium tests/clickthrough.spec.ts",
-    "test:ui:live": "LIVE_E2E=1 cd console && npx playwright test --project=chromium tests/e2e/live-login.spec.ts && LIVE_E2E=1 cd ../control-plane && npx playwright test --project=chromium tests/e2e/live-login.spec.ts"
+    "test:ui": "npm run test:ui:live",
+    "test:ui:live": "(cd console && CONSOLE_BASE_URL=${CONSOLE_BASE_URL:-https://console.apexmediation.ee} LIVE_E2E=1 npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts) && (cd control-plane && CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-https://admin.apexmediation.ee} LIVE_E2E=1 npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts)"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",

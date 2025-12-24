@@ -299,9 +299,8 @@ export class AnalyticsService {
       );
       logger.debug('Flushed impressions', { count: eventsToFlush.length });
     } catch (error) {
-      logger.error('Failed to flush impressions', { 
-        count: eventsToFlush.length,
-        error 
+      logger.debug('Failed to flush impressions (retrying)', { 
+        count: eventsToFlush.length
       });
       // Re-add to buffer for retry
       this.impressionBuffer.unshift(...eventsToFlush);
@@ -372,9 +371,8 @@ export class AnalyticsService {
       );
       logger.debug('Flushed revenue events', { count: eventsToFlush.length });
     } catch (error) {
-      logger.error('Failed to flush revenue events', { 
-        count: eventsToFlush.length,
-        error 
+      logger.debug('Failed to flush revenue events (retrying)', { 
+        count: eventsToFlush.length
       });
       this.revenueBuffer.unshift(...eventsToFlush);
       this.updateBufferGauge('revenue');

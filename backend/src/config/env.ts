@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
+import path from 'path';
 
-// Load .env before validation
-dotenv.config();
+// Load .env before validation - use absolute path from compiled location
+dotenv.config({ path: path.join(__dirname, '../../../../.env') });
 
 /**
  * Environment variable schema with comprehensive validation

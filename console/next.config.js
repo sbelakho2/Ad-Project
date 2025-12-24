@@ -8,6 +8,7 @@ const nextConfig = {
     domains: ['localhost', 'apexmediation.ee', 'console.apexmediation.ee'],
   },
   output: 'standalone',
+  compress: false, // Disable compression to fix Playwright ERR_CONTENT_DECODING_FAILED
   // Allow gating typechecking/ESLint during container builds for infra verification (Phase 8)
   typescript: {
     ignoreBuildErrors,
