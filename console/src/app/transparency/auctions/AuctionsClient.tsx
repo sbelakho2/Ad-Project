@@ -115,6 +115,10 @@ export function AuctionsClient({ initialPage, initialFilters, initialData, initi
     queryFn: ({ signal }) => transparencyApi.list(params, { signal }),
     placeholderData: keepPreviousData,
     enabled: queryEnabled,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
+    retryDelay: 500,
     initialData: allowed && isInitialState && initialData ? initialData : undefined,
   })
 

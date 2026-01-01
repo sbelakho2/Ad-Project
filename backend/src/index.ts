@@ -27,6 +27,9 @@ import pool from './utils/postgres';
 import { initVraConnectionRoutes } from './routes/vraConnections.routes';
 import { issueCsrfToken } from './middleware/csrf';
 import { SchemaGate } from './utils/schemaGate';
+import { initAnalyticsRollupScheduler } from './services/analyticsRollupScheduler';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';
@@ -279,6 +282,56 @@ const startServer = async (): Promise<void> => {
     logger.info('Validating database schema...');
     await SchemaGate.validateOrExit();
     logger.info('Schema validation passed');
+
+    const runNodeScript = async (scriptPath: string, timeoutMs: number): Promise<void> => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [scriptPath], {
+        stdio: 'inherit',
+        env: process.env,
+      });
+
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // noop
+        }
+        reject(new Error(`Timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        if (code === 0) return resolve();
+        reject(new Error(`Exited with code ${code ?? 'unknown'}`));
+      });
+    });
+
+    // Zero-manual rollup rollout: if rollups are enabled, ensure the rollup tables exist.
+    // Best-effort: log failures and continue (reporting/export already has safe fallbacks).
+    if (env.ANALYTICS_ROLLUP_ENABLED) {
+      const ensureScriptPath = path.join(__dirname, '../scripts/ensureRollupTables.js');
+      try {
+        await fs.access(ensureScriptPath);
+        logger.info('Analytics rollups: ensuring rollup tables exist');
+        await runNodeScript(ensureScriptPath, 2 * 60_000);
+      } catch (error) {
+        logger.warn('Analytics rollups: could not ensure rollup tables (continuing)', {
+          scriptPath: ensureScriptPath,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+
+    // Analytics rollups (storage optimization + faster reporting)
+    initAnalyticsRollupScheduler({
+      enabled: env.ANALYTICS_ROLLUP_ENABLED,
+      cronSpec: env.ANALYTICS_ROLLUP_CRON,
+      lookbackDays: env.ANALYTICS_ROLLUP_LOOKBACK_DAYS,
+    });
 
     // Initialize VRA services
     initVraConnectionRoutes(pool);

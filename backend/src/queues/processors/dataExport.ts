@@ -28,6 +28,20 @@ type AnalyticsExportRow = {
   ecpm: number;
 };
 
+async function tableExists(tableName: string): Promise<boolean> {
+  const sql = `
+    SELECT EXISTS(
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name = $1
+    ) AS exists
+  `;
+
+  const { rows } = await query<{ exists: boolean }>(sql, [tableName], { label: 'data_export_schema_check', replica: true });
+  return Boolean(rows?.[0]?.exists);
+}
+
 /**
  * Process data export job
  */
@@ -86,30 +100,108 @@ async function fetchExportData(
   endDate: string,
   _filters?: Record<string, unknown>
 ): Promise<AnalyticsExportRow[]> {
-  const sql = `
-    SELECT
-      bucket_date::text AS date,
-      publisher_id,
-      NULLIF(app_id, '') AS app_id,
-      NULLIF(ad_unit_id, '') AS ad_unit_id,
-      NULLIF(adapter_id, '') AS adapter_id,
-      country_code AS country,
-      impression_count::double precision AS impressions,
-      filled_count::double precision AS filled_impressions,
-      click_count::double precision AS clicks,
-      total_revenue::double precision AS revenue,
-      ctr::double precision AS ctr,
-      fill_rate::double precision AS fill_rate,
-      ecpm::double precision AS ecpm
-    FROM analytics_metrics_rollups
-    WHERE publisher_id = $1
-      AND bucket_date >= $2::date
-      AND bucket_date < $3::date
-    ORDER BY bucket_date DESC, impression_count DESC
-  `;
+  const hasRollups = await tableExists('analytics_metrics_rollups');
+
+  const sql = hasRollups
+    ? `
+      SELECT
+        bucket_date::text AS date,
+        publisher_id,
+        NULLIF(app_id, '') AS app_id,
+        NULLIF(ad_unit_id, '') AS ad_unit_id,
+        NULLIF(adapter_id, '') AS adapter_id,
+        country_code AS country,
+        impression_count::double precision AS impressions,
+        filled_count::double precision AS filled_impressions,
+        click_count::double precision AS clicks,
+        total_revenue::double precision AS revenue,
+        ctr::double precision AS ctr,
+        fill_rate::double precision AS fill_rate,
+        ecpm::double precision AS ecpm
+      FROM analytics_metrics_rollups
+      WHERE publisher_id = $1
+        AND bucket_date >= $2::date
+        AND bucket_date < $3::date
+      ORDER BY bucket_date DESC, impression_count DESC
+    `
+    : `
+      WITH imp AS (
+        SELECT
+          (i.observed_at AT TIME ZONE 'UTC')::date AS bucket_date,
+          i.publisher_id,
+          COALESCE(i.app_id::text, '') AS app_id,
+          COALESCE(NULLIF(i.ad_unit_id::text, ''), NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
+          COALESCE(i.adapter_id::text, '') AS adapter_id,
+          LEFT(COALESCE(NULLIF(i.country_code::text, ''), NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
+          COUNT(*)::double precision AS impressions,
+          COUNT(*) FILTER (WHERE i.filled IS TRUE)::double precision AS filled_impressions
+        FROM analytics_impressions i
+        WHERE i.publisher_id = $1
+          AND i.is_test_mode = false
+          AND i.observed_at >= $2::date
+          AND i.observed_at < $3::date
+        GROUP BY 1,2,3,4,5,6
+      ),
+      rev AS (
+        SELECT
+          (r.observed_at AT TIME ZONE 'UTC')::date AS bucket_date,
+          r.publisher_id,
+          COALESCE(r.app_id::text, '') AS app_id,
+          COALESCE(NULLIF(r.metadata->>'ad_unit_id', ''), COALESCE(r.placement_id::text, '')) AS ad_unit_id,
+          COALESCE(r.adapter_id::text, '') AS adapter_id,
+          LEFT(COALESCE(NULLIF(r.country_code::text, ''), 'ZZ'), 2)::char(2) AS country_code,
+          COUNT(*) FILTER (WHERE r.revenue_type = 'click')::double precision AS clicks,
+          COALESCE(SUM(r.revenue_usd), 0)::double precision AS revenue
+        FROM analytics_revenue_events r
+        WHERE r.publisher_id = $1
+          AND r.is_test_mode = false
+          AND r.observed_at >= $2::date
+          AND r.observed_at < $3::date
+        GROUP BY 1,2,3,4,5,6
+      ),
+      dims AS (
+        SELECT bucket_date, publisher_id, app_id, ad_unit_id, adapter_id, country_code FROM imp
+        UNION
+        SELECT bucket_date, publisher_id, app_id, ad_unit_id, adapter_id, country_code FROM rev
+      )
+      SELECT
+        d.bucket_date::text AS date,
+        d.publisher_id,
+        NULLIF(d.app_id, '') AS app_id,
+        NULLIF(d.ad_unit_id, '') AS ad_unit_id,
+        NULLIF(d.adapter_id, '') AS adapter_id,
+        d.country_code AS country,
+        COALESCE(imp.impressions, 0) AS impressions,
+        COALESCE(imp.filled_impressions, 0) AS filled_impressions,
+        COALESCE(rev.clicks, 0) AS clicks,
+        COALESCE(rev.revenue, 0) AS revenue,
+        CASE WHEN COALESCE(imp.impressions, 0) = 0 THEN 0
+             ELSE (COALESCE(rev.clicks, 0) / imp.impressions) * 100
+        END AS ctr,
+        CASE WHEN COALESCE(imp.impressions, 0) = 0 THEN 0
+             ELSE (COALESCE(imp.filled_impressions, 0) / imp.impressions) * 100
+        END AS fill_rate,
+        CASE WHEN COALESCE(imp.impressions, 0) = 0 THEN 0
+             ELSE (COALESCE(rev.revenue, 0) / imp.impressions) * 1000
+        END AS ecpm
+      FROM dims d
+      LEFT JOIN imp ON imp.bucket_date = d.bucket_date
+        AND imp.publisher_id = d.publisher_id
+        AND imp.app_id = d.app_id
+        AND imp.ad_unit_id = d.ad_unit_id
+        AND imp.adapter_id = d.adapter_id
+        AND imp.country_code = d.country_code
+      LEFT JOIN rev ON rev.bucket_date = d.bucket_date
+        AND rev.publisher_id = d.publisher_id
+        AND rev.app_id = d.app_id
+        AND rev.ad_unit_id = d.ad_unit_id
+        AND rev.adapter_id = d.adapter_id
+        AND rev.country_code = d.country_code
+      ORDER BY d.bucket_date DESC, COALESCE(imp.impressions, 0) DESC
+    `;
 
   const { rows } = await query<AnalyticsExportRow>(sql, [publisherId, startDate, endDate], {
-    label: 'analytics_export_rollup',
+    label: hasRollups ? 'analytics_export_rollup' : 'analytics_export_fallback',
     replica: true,
   });
 

@@ -420,23 +420,33 @@ All targets should show UP status at `/targets`:
 ### 7.1 Running Migrations
 
 ```bash
-# SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+# Production policy: no interactive/manual psql migrations.
+#
+# - Routine DB operations are automated (backups, WAL cleanup, health, disk checks).
+# - Rollup-table rollout is automated by the backend at startup when analytics rollups are enabled.
+# - For exceptional one-off schema changes, use a scripted, explicit migration runner ("--only")
+#   rather than executing SQL manually.
 
-# Run migrations
-cd /opt/adproject && docker compose -f docker-compose.hetzner.yml exec backend npm run migrate
+# (Optional verification) Check backend logs for:
+# - "Analytics rollups: ensuring rollup tables exist"
 ```
 
 ### 7.2 Backups
 
-PostgreSQL backups are configured on the DB server:
+PostgreSQL backups and PITR hygiene are configured on the DB server via cron.
+
+One-time (idempotent) install on DB server:
 
 ```bash
-# Manual backup
-sudo -u postgres pg_dump adproject > /var/backups/postgres/adproject_$(date +%Y%m%d_%H%M%S).sql
+# SSH to DB server
+ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# List backups
-ls -la /var/backups/postgres/
+# Install automation (installs /usr/local/bin scripts + /etc/cron.d/apex-postgres)
+/opt/adproject/infrastructure/database/install_db_automation.sh
+
+# Verify backups are being produced
+ls -la /var/backups/postgresql/daily/
+tail -n 50 /var/log/postgresql/backup.log
 ```
 
 ### 7.3 Table Counts
@@ -745,8 +755,15 @@ curl https://api.apexmediation.ee/health
 # SSH to DB server
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
-# Restore from backup
-sudo -u postgres psql adproject < /var/backups/postgres/<backup_file>.sql
+# Backups are in pg_dump custom format (.dump)
+ls -la /var/backups/postgresql/daily/
+
+# Recommended: restore into a new database first
+sudo -u postgres createdb adproject_restore
+sudo -u postgres pg_restore -d adproject_restore /var/backups/postgresql/daily/<backup_file>.dump
+
+# PITR restore procedure (when required) is documented here:
+# docs/Internal/Architecture/PITR_RECOVERY.md
 ```
 
 ---

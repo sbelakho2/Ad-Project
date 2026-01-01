@@ -11,6 +11,28 @@ import logger from '../utils/logger';
 const REPORTING_SLOW_QUERY_MS = parseInt(process.env.REPORTING_SLOW_QUERY_MS || '200', 10);
 const REPORTING_CAPTURE_EXPLAIN = process.env.REPORTING_CAPTURE_EXPLAIN !== '0';
 
+const formatUtcDate = (d: Date): string => d.toISOString().slice(0, 10);
+
+const rollupTableExists = async (tableName: string): Promise<boolean> => {
+  try {
+    const res = await pgQuery<{ exists: boolean }>(
+      `
+        SELECT EXISTS(
+          SELECT 1
+          FROM information_schema.tables
+          WHERE table_schema = 'public'
+            AND table_name = $1
+        ) AS exists
+      `,
+      [tableName],
+      { replica: true, label: 'REPORTING_SCHEMA_CHECK' }
+    );
+    return Boolean(res.rows?.[0]?.exists);
+  } catch {
+    return false;
+  }
+};
+
 const runQuery = async <T extends QueryResultRow = QueryResultRow>(
   sql: string,
   params: ReadonlyArray<unknown>,
@@ -179,6 +201,46 @@ class ReportingServiceImpl implements ReportingService {
     endDate: Date
   ): Promise<RevenueStats> {
     try {
+      // Prefer rollups when present (faster + allows raw fact retention to be reduced safely).
+      if (await rollupTableExists('analytics_metrics_rollups')) {
+        const sql = `
+          SELECT
+            COALESCE(SUM(total_revenue), 0) AS total_revenue,
+            COALESCE(SUM(impression_count), 0) AS total_impressions,
+            COALESCE(SUM(click_count), 0) AS total_clicks,
+            COALESCE(SUM(filled_count), 0) AS total_filled
+          FROM analytics_metrics_rollups
+          WHERE publisher_id = $1
+            AND bucket_date >= $2::date
+            AND bucket_date < $3::date
+        `;
+
+        const result = await runQuery<{
+          total_revenue: string;
+          total_impressions: string;
+          total_clicks: string;
+          total_filled: string;
+        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate)], 'REPORTING_OVERVIEW_ROLLUPS');
+
+        const row = result[0] ?? { total_revenue: '0', total_impressions: '0', total_clicks: '0', total_filled: '0' };
+        const totalImpressions = Number.parseInt(row.total_impressions);
+        const totalClicks = Number.parseInt(row.total_clicks);
+        const totalFilled = Number.parseInt(row.total_filled);
+        const totalRevenue = Number.parseFloat(row.total_revenue);
+        const ecpm = totalImpressions > 0 ? (totalRevenue / totalImpressions) * 1000 : 0;
+        const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
+        const fillRate = totalImpressions > 0 ? (totalFilled / totalImpressions) * 100 : 0;
+
+        return {
+          totalRevenue: Number.isFinite(totalRevenue) ? totalRevenue : 0,
+          totalImpressions: Number.isFinite(totalImpressions) ? totalImpressions : 0,
+          totalClicks: Number.isFinite(totalClicks) ? totalClicks : 0,
+          ecpm,
+          ctr,
+          fillRate,
+        };
+      }
+
       const sql = `
         SELECT
           COALESCE(SUM(r.revenue_usd), 0) AS total_revenue,
@@ -240,6 +302,42 @@ class ReportingServiceImpl implements ReportingService {
     granularity: 'hour' | 'day' = 'day'
   ): Promise<TimeSeriesDataPoint[]> {
     try {
+      if (granularity === 'day' && (await rollupTableExists('analytics_metrics_rollups'))) {
+        const sql = `
+          SELECT
+            bucket_date AS bucket,
+            COALESCE(SUM(total_revenue), 0) AS revenue,
+            COALESCE(SUM(impression_count), 0) AS impressions,
+            COALESCE(SUM(click_count), 0) AS clicks
+          FROM analytics_metrics_rollups
+          WHERE publisher_id = $1
+            AND bucket_date >= $2::date
+            AND bucket_date < $3::date
+          GROUP BY bucket
+          ORDER BY bucket ASC
+        `;
+
+        const result = await runQuery<{
+          bucket: string;
+          revenue: string;
+          impressions: string;
+          clicks: string;
+        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate)], 'REPORTING_TIMESERIES_ROLLUPS');
+
+        return result.map(row => {
+          const impressions = Number.parseInt(row.impressions);
+          const revenue = Number.parseFloat(row.revenue);
+          const clicks = Number.parseInt(row.clicks);
+          return {
+            timestamp: new Date(`${row.bucket}T00:00:00.000Z`).toISOString(),
+            revenue,
+            impressions,
+            clicks,
+            ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+          };
+        });
+      }
+
       const bucket = granularity === 'hour' ? 'hour' : 'day';
       const sql = `
         SELECT
@@ -344,6 +442,39 @@ class ReportingServiceImpl implements ReportingService {
     limit: number = 10
   ): Promise<CountryBreakdown[]> {
     try {
+      if (await rollupTableExists('analytics_metrics_rollups')) {
+        const sql = `
+          SELECT
+            country_code,
+            COALESCE(SUM(total_revenue), 0) AS revenue,
+            COALESCE(SUM(impression_count), 0) AS impressions
+          FROM analytics_metrics_rollups
+          WHERE publisher_id = $1
+            AND bucket_date >= $2::date
+            AND bucket_date < $3::date
+          GROUP BY country_code
+          ORDER BY revenue DESC
+          LIMIT $4
+        `;
+
+        const result = await runQuery<{
+          country_code: string;
+          revenue: string;
+          impressions: string;
+        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate), limit], 'REPORTING_COUNTRY_ROLLUPS');
+
+        return result.map(row => {
+          const impressions = parseInt(row.impressions);
+          const revenue = parseFloat(row.revenue);
+          return {
+            countryCode: row.country_code,
+            revenue,
+            impressions,
+            ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+          };
+        });
+      }
+
       const sql = `
         SELECT
           r.country_code,
@@ -394,6 +525,40 @@ class ReportingServiceImpl implements ReportingService {
     ecpm: number;
   }>> {
     try {
+      if (await rollupTableExists('analytics_metrics_rollups')) {
+        const sql = `
+          SELECT
+            app_id,
+            COALESCE(SUM(total_revenue), 0) AS revenue,
+            COALESCE(SUM(impression_count), 0) AS impressions
+          FROM analytics_metrics_rollups
+          WHERE publisher_id = $1
+            AND bucket_date >= $2::date
+            AND bucket_date < $3::date
+            AND app_id <> ''
+          GROUP BY app_id
+          ORDER BY revenue DESC
+          LIMIT $4
+        `;
+
+        const result = await runQuery<{
+          app_id: string;
+          revenue: string;
+          impressions: string;
+        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate), limit], 'REPORTING_TOP_APPS_ROLLUPS');
+
+        return result.map(row => {
+          const impressions = parseInt(row.impressions);
+          const revenue = parseFloat(row.revenue);
+          return {
+            appId: row.app_id,
+            revenue,
+            impressions,
+            ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+          };
+        });
+      }
+
       const sql = `
         SELECT
           r.app_id,
@@ -795,23 +960,41 @@ class ReportingServiceImpl implements ReportingService {
       const startDate = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
       const endDate = new Date();
 
-      const sql = `
-        SELECT
-          date_trunc('day', observed_at) AS bucket,
-          SUM(revenue_usd) AS revenue
-        FROM analytics_revenue_events
-        WHERE publisher_id = $1
-          AND observed_at >= $2
-          AND observed_at < $3
-          AND is_test_mode = false
-        GROUP BY bucket
-        ORDER BY bucket ASC
-      `;
+      const result = await (async () => {
+        if (await rollupTableExists('analytics_metrics_rollups')) {
+          const sql = `
+            SELECT
+              bucket_date AS bucket,
+              COALESCE(SUM(total_revenue), 0) AS revenue
+            FROM analytics_metrics_rollups
+            WHERE publisher_id = $1
+              AND bucket_date >= $2::date
+              AND bucket_date < $3::date
+            GROUP BY bucket
+            ORDER BY bucket ASC
+          `;
+          return runQuery<{ bucket: string; revenue: string }>(
+            sql,
+            [publisherId, formatUtcDate(startDate), formatUtcDate(endDate)],
+            'REPORTING_PROJECTIONS_ROLLUPS'
+          );
+        }
 
-      const result = await runQuery<{
-        bucket: Date;
-        revenue: string;
-      }>(sql, [publisherId, startDate, endDate]);
+        const sql = `
+          SELECT
+            date_trunc('day', observed_at) AS bucket,
+            SUM(revenue_usd) AS revenue
+          FROM analytics_revenue_events
+          WHERE publisher_id = $1
+            AND observed_at >= $2
+            AND observed_at < $3
+            AND is_test_mode = false
+          GROUP BY bucket
+          ORDER BY bucket ASC
+        `;
+
+        return runQuery<{ bucket: Date; revenue: string }>(sql, [publisherId, startDate, endDate]);
+      })();
 
       if (result.length < 7) {
         // Not enough data for projection
@@ -819,7 +1002,7 @@ class ReportingServiceImpl implements ReportingService {
       }
 
       // Simple linear regression
-      const dataPoints = result.map((r, i) => ({
+      const dataPoints = result.map((r: any, i) => ({
         x: i,
         y: parseFloat(r.revenue),
       }));

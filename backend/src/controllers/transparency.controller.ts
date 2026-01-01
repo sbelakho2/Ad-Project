@@ -89,7 +89,9 @@ const toIsoString = (value: unknown): string => {
 };
 
 const ensureTransparencyEnabled = () => {
-  if (process.env.TRANSPARENCY_API_ENABLED !== 'true') {
+  // Default to enabled. Only disable when explicitly set to false.
+  // This avoids surprising 503s in production when the env var is unset.
+  if ((process.env.TRANSPARENCY_API_ENABLED || '').toLowerCase() === 'false') {
     throw new AppError('Transparency API is disabled', 503);
   }
 };

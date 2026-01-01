@@ -120,8 +120,65 @@ export const analyticsApiClient: AxiosInstance = axios.create({
 
 const MUTATING_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+  }
+}
+
+// NextAuth session fetch is relatively expensive and can be noisy in the console if
+// requests are aborted during rapid navigation. Cache and de-dupe to keep the UI
+// stable and avoid repeated /api/auth/session fetches on every API call.
+let cachedSession: unknown | null | undefined = undefined
+let cachedSessionAt = 0
+let inflightSessionRequest: Promise<unknown | null> | null = null
+
+const SESSION_CACHE_TTL_MS = 30_000
+const NULL_SESSION_CACHE_TTL_MS = 750
+const SESSION_FETCH_TIMEOUT_MS = 5_000
+
+async function getCachedSession(): Promise<unknown | null> {
+  if (typeof window === 'undefined') return null
+  if (USE_MOCK_API || HAS_E2E_SESSION) return null
+
+  const now = Date.now()
+  if (cachedSession !== undefined) {
+    const ttl = cachedSession ? SESSION_CACHE_TTL_MS : NULL_SESSION_CACHE_TTL_MS
+    if (now - cachedSessionAt < ttl) {
+      return cachedSession
+    }
+  }
+
+  if (!inflightSessionRequest) {
+    inflightSessionRequest = withTimeout(
+      getSession().then((s) => s as unknown),
+      SESSION_FETCH_TIMEOUT_MS,
+      'NextAuth session fetch'
+    )
+      .catch(() => null)
+      .finally(() => {
+        inflightSessionRequest = null
+      })
+  }
+
+  const session = await inflightSessionRequest
+  cachedSession = session
+  cachedSessionAt = Date.now()
+  return session
+}
+
 let inflightCsrfRequest: Promise<string | null> | null = null
 let activeTenantId: string | null = null
+
+const CSRF_FETCH_TIMEOUT_MS = 5_000
 
 export function setActiveTenantId(nextTenantId: string | null) {
   activeTenantId = typeof nextTenantId === 'string' && nextTenantId.trim().length > 0 ? nextTenantId : null
@@ -133,9 +190,11 @@ async function ensureBrowserCsrfToken(): Promise<string | null> {
   if (existing) return existing
 
   if (!inflightCsrfRequest) {
-    inflightCsrfRequest = getCsrfToken().catch(() => null).finally(() => {
-      inflightCsrfRequest = null
-    })
+    inflightCsrfRequest = withTimeout(getCsrfToken(), CSRF_FETCH_TIMEOUT_MS, 'CSRF token fetch')
+      .catch(() => null)
+      .finally(() => {
+        inflightCsrfRequest = null
+      })
   }
 
   return inflightCsrfRequest
@@ -148,7 +207,7 @@ const requestInterceptor = async (config: InternalAxiosRequestConfig) => {
   if (typeof window !== 'undefined') {
     if (!USE_MOCK_API && !HAS_E2E_SESSION) {
       try {
-        const session = await getSession()
+        const session = await getCachedSession()
         const accessToken = (session as any)?.accessToken
         if (accessToken) {
           const headers = AxiosHeaders.from(config.headers || {})

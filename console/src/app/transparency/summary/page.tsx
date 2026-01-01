@@ -3,7 +3,7 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { RefreshCcw } from 'lucide-react'
-import { transparencyApi, type TransparencySummary } from '@/lib/transparency'
+import { TransparencyApiError, transparencyApi, type TransparencySummary } from '@/lib/transparency'
 import { isFeatureEnabled } from '@/lib/featureFlags'
 
 export default function TransparencySummaryPage() {
@@ -19,6 +19,8 @@ export default function TransparencySummaryPage() {
     queryKey: ['transparency-summary'],
     queryFn: ({ signal }) => transparencyApi.summary({ signal }),
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 0,
     staleTime: 60_000,
   })
 
@@ -28,6 +30,10 @@ export default function TransparencySummaryPage() {
   }, [dataUpdatedAt])
 
   const winnerList = data?.winners_by_source ?? []
+  const isDisabled =
+    error instanceof TransparencyApiError &&
+    error.status === 503 &&
+    /disabled/i.test(error.message)
 
   return (
     <div className="p-6 space-y-4">
@@ -60,7 +66,16 @@ export default function TransparencySummaryPage() {
 
       {isLoading && <SummarySkeleton />}
 
-      {!isLoading && error && (
+      {!isLoading && isDisabled && (
+        <div className="border border-gray-200 rounded-lg bg-gray-50 px-4 py-3" role="status" aria-live="polite">
+          <p className="text-sm text-gray-900 font-semibold">Transparency is currently disabled</p>
+          <p className="text-xs text-gray-700 mt-1">
+            This environment has the Transparency API turned off. Other console features should continue to work normally.
+          </p>
+        </div>
+      )}
+
+      {!isLoading && error && !isDisabled && (
         <div className="border border-red-200 rounded-lg bg-red-50 px-4 py-3" role="alert" aria-live="assertive">
           <p className="text-sm text-red-900 font-semibold">Unable to load transparency summary</p>
           <p className="text-xs text-red-800 mt-1">{error.message}</p>

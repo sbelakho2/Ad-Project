@@ -71,16 +71,15 @@ This document describes the autonomous PostgreSQL configuration designed for **h
 
 ## Autonomous Maintenance Schedule
 
-All jobs are configured via `/etc/cron.d/apex-*`:
+All jobs are configured via `/etc/cron.d/apex-postgres`:
 
 | Job | Schedule | Script | Purpose |
 |-----|----------|--------|---------|
-| **Health Check** | Every 5 min | `pg_autonomous_health.sh` | Self-healing, connection monitoring |
-| **Daily Backup** | 3:00 AM | `pg_backup_apex.sh` | Compressed backups, 7-day retention |
-| **Query Monitor** | 6:00 AM | `pg_query_monitor.sh` | Slow query reports |
-| **Index Maintenance** | Sunday 4:00 AM | `pg_index_maintenance.sh` | ANALYZE, unused index detection |
-| **Monthly Maintenance** | 1st 1:00 AM | `pg_monthly_maintenance.sh` | VACUUM, stats reset |
-| **Partition Maintenance** | 1st 2:00 AM | `pg_partition_maintenance.sh` | Create future partitions |
+| **Health Check** | Every 5 min | `/usr/local/bin/pg_autonomous_health.sh` | Self-healing + archive health + connection pressure |
+| **Disk Space Check** | Hourly | `/usr/local/bin/check-disk-space.sh` | Warn/critical thresholds + logging |
+| **WAL Cleanup** | Daily 04:00 | `/usr/local/bin/pg_wal_cleanup.sh` | Retention-based cleanup of archived WAL |
+| **Logical Backup** | Daily 03:00 | `/usr/local/bin/pg_backup_apex.sh` | Compressed backups with retention |
+| **Base Backup** | Sunday 01:00 | `/usr/local/bin/pg_basebackup_apex.sh` | Physical base backup for PITR readiness |
 
 ## Backup System
 
@@ -89,7 +88,8 @@ All jobs are configured via `/etc/cron.d/apex-*`:
 /var/backups/postgresql/
 ├── daily/      # 7-day retention
 ├── weekly/     # 4-week retention (Sunday copies)
-└── wal/        # Reserved for WAL archiving
+├── wal/        # WAL archiving target (PITR)
+└── base/       # Physical base backups (PITR)
 ```
 
 ### Backup Format
@@ -147,7 +147,7 @@ The `pg_partition_maintenance.sh` script creates partitions 3 months in advance:
 | Feature | DO Managed | ApexMediation Setup |
 |---------|------------|---------------------|
 | Automated Backups | ✅ Daily | ✅ Daily + Weekly |
-| Point-in-Time Recovery | ✅ | ⚠️ Not yet (requires WAL archiving) |
+| Point-in-Time Recovery | ✅ | ✅ WAL archiving + base backups |
 | Automatic Failover | ✅ | ❌ (single node) |
 | Connection Pooling | ✅ (PgBouncer) | ⚠️ Ready to add |
 | Query Stats | ✅ | ✅ pg_stat_statements |

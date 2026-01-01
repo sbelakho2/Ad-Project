@@ -41,6 +41,19 @@ module.exports = {
   },
   overrides: [
     {
+      files: ['scripts/**/*.js'],
+      // These are plain Node.js scripts; don't run typed TS linting on them.
+      parser: 'espree',
+      parserOptions: {
+        ecmaVersion: 2021,
+        sourceType: 'script',
+      },
+      rules: {
+        '@typescript-eslint/no-unused-vars': 'off',
+        '@typescript-eslint/no-var-requires': 'off',
+      },
+    },
+    {
       files: ['src/controllers/auth.controller.ts'],
       rules: {
         '@typescript-eslint/no-unsafe-assignment': 'off',

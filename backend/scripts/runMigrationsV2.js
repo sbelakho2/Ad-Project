@@ -78,10 +78,16 @@ async function applySql(client, sql) {
 async function run() {
   const args = process.argv.slice(2);
   const toVersion = args.includes('--to') ? args[args.indexOf('--to')+1] : null;
+  const onlyVersion = args.includes('--only') ? args[args.indexOf('--only') + 1] : null;
   const down = args.includes('--down');
   const allowDown = process.env.ALLOW_MIGRATION_DOWN === '1' || process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
   if (down && !allowDown) {
     console.error('Down migrations are disabled. Set ALLOW_MIGRATION_DOWN=1 to enable in this environment.');
+    process.exit(2);
+  }
+
+  if (onlyVersion && toVersion) {
+    console.error('Use either --only <version> or --to <version>, not both.');
     process.exit(2);
   }
 
@@ -105,6 +111,49 @@ async function run() {
 
     const groups = await listPairedMigrations(PG_DIR);
     const applied = await getApplied(client);
+
+    if (onlyVersion) {
+      const group = groups.find(g => g.base === onlyVersion);
+      if (!group) {
+        console.error(`Migration not found: ${onlyVersion}`);
+        process.exit(2);
+      }
+
+      if (down) {
+        if (!group.down) {
+          console.log(`No down migration file for ${onlyVersion}`);
+          return;
+        }
+        if (!applied.has(onlyVersion)) {
+          console.log(`Migration not applied (nothing to revert): ${onlyVersion}`);
+          return;
+        }
+        const sql = await fsp.readFile(path.join(PG_DIR, group.down), 'utf8');
+        const checksum = sha256(sql);
+        console.log(`Reverting ${onlyVersion}...`);
+        await applySql(client, sql);
+        await client.query(`DELETE FROM ${MIGRATIONS_TABLE} WHERE version = $1`, [onlyVersion]);
+        await client.query(`INSERT INTO ${MIGRATIONS_TABLE}(version, checksum, direction) VALUES ($1,$2,'down')`, [onlyVersion, checksum]);
+        console.log(`Reverted ${onlyVersion}`);
+        return;
+      }
+
+      if (!group.up) {
+        console.log(`No up migration file for ${onlyVersion}`);
+        return;
+      }
+      if (applied.has(onlyVersion)) {
+        console.log(`Already applied: ${onlyVersion}`);
+        return;
+      }
+      const sql = await fsp.readFile(path.join(PG_DIR, group.up), 'utf8');
+      const checksum = sha256(sql);
+      console.log(`Applying ${onlyVersion}...`);
+      await applySql(client, sql);
+      await client.query(`INSERT INTO ${MIGRATIONS_TABLE}(version, checksum, direction) VALUES ($1,$2,'up')`, [onlyVersion, checksum]);
+      console.log(`Applied ${onlyVersion}`);
+      return;
+    }
 
     if (down) {
       // revert last applied up migration that has a down file

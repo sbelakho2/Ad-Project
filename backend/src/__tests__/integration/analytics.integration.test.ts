@@ -200,6 +200,7 @@ describe('Analytics Event Ingestion API', () => {
     it('should require authentication', async () => {
       await request(app)
         .get('/api/v1/analytics/buffer-stats')
+        .set('noauth', '1')
         .expect(401);
     });
   });

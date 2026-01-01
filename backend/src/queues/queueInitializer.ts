@@ -513,19 +513,6 @@ function registerWorkers(): void {
  * Schedule recurring jobs
  */
 function scheduleRecurringJobs(): void {
-  // Daily analytics aggregation at 1 AM
-  queueManager.scheduleRecurringJob(
-    QueueName.ANALYTICS_AGGREGATION,
-    'daily-aggregation',
-    {
-      publisherId: 'all', // Special value to aggregate all publishers
-      startDate: 'yesterday',
-      endDate: 'today',
-      granularity: 'day',
-    },
-    '0 1 * * *' // Every day at 1 AM
-  );
-
   // Hourly metrics calculation
   queueManager.scheduleRecurringJob(
     QueueName.METRICS_CALCULATION,

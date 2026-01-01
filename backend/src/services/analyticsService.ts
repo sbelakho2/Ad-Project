@@ -35,6 +35,8 @@ const IMPRESSION_COLUMNS = [
   'session_id',
   'user_id',
   'request_id',
+  'status',
+  'filled',
   'latency_ms',
   'meta',
   'is_test_mode',
@@ -110,6 +112,8 @@ const toImpressionRow = (event: ImpressionEventDTO): unknown[] => [
   event.session_id,
   event.user_id,
   event.request_id,
+  'success',
+  true,
   event.latency_ms,
   {
     app_version: event.app_version,

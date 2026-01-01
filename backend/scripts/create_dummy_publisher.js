@@ -56,17 +56,18 @@ async function upsertApp(client, id, publisherId, name, platform, bundleId) {
 }
 
 function generateKeySecret() {
-  return 'ak_test_' + randomBytes(32).toString('hex');
+  return 'ak_live_' + randomBytes(24).toString('hex');
 }
 
-async function insertAppApiKey(client, id, appId, publisherId, secret, env = 'sandbox') {
+async function insertAppApiKey(client, id, appId, publisherId, secret, env = 'production') {
   const digest = createHash('sha256').update(secret).digest('hex');
   const last4 = secret.slice(-4);
+  const secretHash = await bcrypt.hash(secret, 10);
   await client.query(
     `INSERT INTO app_api_keys (id, app_id, publisher_id, environment, secret, secret_digest, prefix, last4, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
      ON CONFLICT (id) DO NOTHING`,
-    [id, appId, publisherId, env, secret, digest, 'ak_test_', last4]
+    [id, appId, publisherId, env, secretHash, digest, 'ak_live', last4]
   );
 }
 
@@ -109,7 +110,20 @@ async function main() {
       const existingKey = await client.query('SELECT id FROM app_api_keys WHERE app_id = $1 LIMIT 1', [appId]);
       if (existingKey.rows.length === 0) {
         const secret = generateKeySecret();
-        await insertAppApiKey(client, randomUUID(), appId, publisherId, secret, 'sandbox');
+        await insertAppApiKey(client, randomUUID(), appId, publisherId, secret, 'production');
+      } else {
+        // Ensure the latest key is usable by appApiKeyAuth (bcrypt hash stored in secret)
+        const keyRow = await client.query(
+          'SELECT id, secret FROM app_api_keys WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1',
+          [appId]
+        );
+        const stored = keyRow.rows[0]?.secret || '';
+        const looksBcrypt = typeof stored === 'string' && stored.startsWith('$2');
+        if (!looksBcrypt) {
+          // Replace with a fresh valid key (leave old rows intact)
+          const secret = generateKeySecret();
+          await insertAppApiKey(client, randomUUID(), appId, publisherId, secret, 'production');
+        }
       }
       // Fetch latest secret for this app (prints for operator to place into .env.slo)
       const keyRow = await client.query('SELECT secret FROM app_api_keys WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1', [appId]);

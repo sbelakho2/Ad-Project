@@ -251,9 +251,20 @@ export const recordImpressions = async (
     }
 
     // Validate all events
-    const validatedEvents = events.map((event: unknown) =>
-      impressionEventSchema.parse(event)
-    );
+    const validatedEvents = events.map((event: unknown) => impressionEventSchema.parse(event));
+
+    const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
+    if (sdk) {
+      for (const ev of validatedEvents) {
+        if (ev.publisher_id !== sdk.publisherId || ev.app_id !== sdk.appId) {
+          res.status(403).json({
+            success: false,
+            error: 'publisher_id/app_id do not match SDK key scope',
+          });
+          return;
+        }
+      }
+    }
 
     // Record events
     await analyticsService.recordImpressions(validatedEvents);
@@ -301,9 +312,20 @@ export const recordClicks = async (
       return;
     }
 
-    const validatedEvents = events.map((event: unknown) =>
-      clickEventSchema.parse(event)
-    );
+    const validatedEvents = events.map((event: unknown) => clickEventSchema.parse(event));
+
+    const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
+    if (sdk) {
+      for (const ev of validatedEvents) {
+        if (ev.publisher_id !== sdk.publisherId || ev.app_id !== sdk.appId) {
+          res.status(403).json({
+            success: false,
+            error: 'publisher_id/app_id do not match SDK key scope',
+          });
+          return;
+        }
+      }
+    }
 
     await analyticsService.recordClicks(validatedEvents);
 
@@ -350,9 +372,20 @@ export const recordRevenue = async (
       return;
     }
 
-    const validatedEvents = events.map((event: unknown) =>
-      revenueEventSchema.parse(event)
-    );
+    const validatedEvents = events.map((event: unknown) => revenueEventSchema.parse(event));
+
+    const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
+    if (sdk) {
+      for (const ev of validatedEvents) {
+        if (ev.publisher_id !== sdk.publisherId || ev.app_id !== sdk.appId) {
+          res.status(403).json({
+            success: false,
+            error: 'publisher_id/app_id do not match SDK key scope',
+          });
+          return;
+        }
+      }
+    }
 
     await analyticsService.recordRevenueEvents(validatedEvents);
 

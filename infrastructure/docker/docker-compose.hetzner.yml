@@ -40,6 +40,7 @@ services:
       - AB_TESTING_ENABLED=true
       - MIGRATION_STUDIO_ENABLED=true
       - TRANSPARENCY_ENABLED=true
+      - TRANSPARENCY_API_ENABLED=true
       # Monitoring (internal network)
       - PROMETHEUS_URL=http://prometheus:9090
       - GRAFANA_URL=http://grafana:3000

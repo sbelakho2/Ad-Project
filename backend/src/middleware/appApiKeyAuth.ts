@@ -21,6 +21,10 @@ export async function appApiKeyAuth(req: Request, res: Response, next: NextFunct
     if (!key) {
       key = (req.header('x-api-key') || req.header('X-Api-Key') || '').trim()
     }
+    // Backwards-compat header used by some SDK/test tooling
+    if (!key) {
+      key = (req.header('x-sdk-key') || req.header('X-Sdk-Key') || '').trim()
+    }
 
     if (!key) {
       void appKeysRepo.recordUsage(null, req as any, '401')

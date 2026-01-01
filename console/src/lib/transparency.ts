@@ -94,9 +94,13 @@ function logTransparencyError(context: string, error: TransparencyApiError) {
 function normalizeTransparencyError(context: string, error: unknown): TransparencyApiError {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status
-    const message = typeof error.response?.data?.message === 'string'
-      ? error.response.data.message
-      : error.message || 'Transparency API request failed'
+    const data: any = error.response?.data
+    const message =
+      (typeof data?.message === 'string' && data.message) ||
+      (typeof data?.error === 'string' && data.error) ||
+      (typeof data === 'string' && data) ||
+      error.message ||
+      'Transparency API request failed'
     return new TransparencyApiError(message, { cause: error, status, details: error.response?.data })
   }
 

@@ -21,6 +21,9 @@ export function usePlanAccess(allowedTiers: PlatformTierId[] = DEFAULT_ALLOWED):
     },
     staleTime: 5 * 60 * 1000,
     retry: 1,
+    retryDelay: 500,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   })
 
   const plan = data ?? null

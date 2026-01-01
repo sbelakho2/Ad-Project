@@ -29,8 +29,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     key="${line%%=*}"
     val="${line#*=}"
     # Remove possible quotes around values
-    val="${val%\r}"
-    val="${val%\n}"
+    val="${val%$'\r'}"
+    val="${val%$'\n'}"
     val="${val%\"}"
     val="${val#\"}"
     val="${val%\'}"

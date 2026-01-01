@@ -13,6 +13,10 @@ import {
 
 // Mock prom-client to avoid metric registration conflicts
 jest.mock('prom-client', () => ({
+  collectDefaultMetrics: jest.fn(),
+  register: {
+    metrics: jest.fn().mockResolvedValue(''),
+  },
   Histogram: jest.fn().mockImplementation(() => ({
     observe: jest.fn(),
     startTimer: jest.fn(() => jest.fn()),

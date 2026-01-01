@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { Client } from 'pg';
+import { jest } from '@jest/globals';
 
 // Default: skip real DB setup to keep CI lightweight. Set FORCE_DB_SETUP=true to enable.
 const skipDbSetup = process.env.FORCE_DB_SETUP !== 'true';
@@ -61,18 +62,19 @@ beforeAll(async () => {
   await ensureDatabaseExists(resolvedDbUrl);
   process.env.TEST_DATABASE_URL = resolvedDbUrl;
 
-  const postgres = await import('../utils/postgres');
+  // Some test suites mock ../utils/postgres; DB-backed setup must always use the real module.
+  const postgres = jest.requireActual('../utils/postgres') as typeof import('../utils/postgres');
 
   // Initialize the database connection pool
   await postgres.initializeDatabase();
   dbPool = postgres.default;
-  const projectRoot = path.resolve(__dirname, '..', '..');
+  const backendRoot = path.resolve(__dirname, '..', '..');
   // Only run migrations when explicitly enabled; default is off for CI speed and portability.
   const runMigrations = process.env.RUN_MIGRATIONS_IN_TEST === 'true';
   if (runMigrations) {
-    execFileSync('node', ['scripts/runMigrations.js'], {
+    execFileSync(process.execPath, ['scripts/runMigrationsV2.js'], {
       stdio: 'inherit',
-      cwd: projectRoot,
+      cwd: backendRoot,
       env: process.env,
     });
   }

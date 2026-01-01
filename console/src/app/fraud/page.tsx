@@ -53,6 +53,8 @@ export default function FraudPage() {
     gcTime: 300_000,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+    retry: 1,
+    retryDelay: 500,
   })
 
   const {
@@ -70,6 +72,10 @@ export default function FraudPage() {
     enabled: Boolean(publisherId) && allowed,
     staleTime: 30_000,
     gcTime: 300_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: 1,
+    retryDelay: 500,
   })
 
   const alerts = useMemo(() => alertsData?.alerts ?? [], [alertsData?.alerts])

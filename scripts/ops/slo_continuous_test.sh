@@ -10,8 +10,8 @@
 #
 # Environment:
 #   API_URL  - Base API URL (default: https://api.apexmediation.ee)
-#   TOKEN    - Bearer token for protected endpoints (required for analytics)
-#   SDK_KEY  - Test SDK key header for analytics (required)
+#   TOKEN    - Bearer token for protected endpoints (optional)
+#   SDK_KEY  - Default SDK key header for analytics (optional if per-app SDK_KEY_* provided)
 #   CYCLE_MINUTES - Minutes per synthetic cycle (default: 30)
 #   RATE_EPM      - Target events per minute for synthetic load (default: 20)
 #   SLEEP_BETWEEN - Pause between cycles in seconds (default: 60)
@@ -97,8 +97,6 @@ main_cycle() {
   warm_public_endpoints
 
   # Generate synthetic analytics activity for VRA and SLO rollups
-  require_env TOKEN "$TOKEN"
-  require_env SDK_KEY "$SDK_KEY"
   require_env PUBLISHER_ID "$PUBLISHER_ID"
   require_env APP_ID_ANDROID "$APP_ID_ANDROID"
   # Secondary app IDs are optional; if provided they will receive traffic

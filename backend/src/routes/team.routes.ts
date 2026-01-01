@@ -12,6 +12,36 @@ import logger from '../utils/logger';
 
 const router = Router();
 
+const isMissingRelationError = (err: any, relation: string) => {
+  const code = typeof err?.code === 'string' ? err.code : '';
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return code === '42P01' && message.toLowerCase().includes(relation.toLowerCase());
+};
+
+const isMissingColumnError = (err: any, columnFragment: string) => {
+  const code = typeof err?.code === 'string' ? err.code : '';
+  const message = typeof err?.message === 'string' ? err.message : '';
+  return code === '42703' && message.toLowerCase().includes(columnFragment.toLowerCase());
+};
+
+const findExistingUserIdByEmail = async (email: string): Promise<string | null> => {
+  const normalized = email.toLowerCase();
+
+  try {
+    const r = await query('SELECT id FROM users WHERE email = $1', [normalized]);
+    return r.rows[0]?.id ?? null;
+  } catch (err) {
+    if (!isMissingRelationError(err, 'users')) throw err;
+  }
+
+  try {
+    const r = await query('SELECT id FROM core.users WHERE email = $1', [normalized]);
+    return r.rows[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+};
+
 // Stub email service - TODO: implement proper email sending
 const sendEmail = async (options: { to: string; subject: string; template: string; data: any }): Promise<void> => {
   logger.info('Email send stub:', { to: options.to, subject: options.subject });
@@ -82,33 +112,114 @@ router.get('/members', async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
 
-    // Get all team members including invitations
-    const result = await query(
-      `SELECT 
-        tm.id,
-        tm.user_id,
-        tm.email,
-        tm.role,
-        tm.status,
-        tm.created_at as invited_at,
-        u.email as user_email,
-        u.created_at as joined_at
-      FROM team_members tm
-      LEFT JOIN users u ON tm.user_id = u.id
-      WHERE tm.publisher_id = $1
-      ORDER BY tm.created_at DESC`,
-      [publisherId]
-    );
+    // Get all team members including invitations.
+    // Production has seen at least two table shapes:
+    //  1) "new" schema: team_members.user_id + invite_token (+ join to users/core.users)
+    //  2) "old" schema: no user_id/invite_token; has name + invited_at/joined_at
+    // Prefer richer schema when available; fall back safely.
+    let result;
+
+    const runLegacyMembersQuery = async () => {
+      return query(
+        `SELECT
+          tm.id,
+          tm.email,
+          tm.name,
+          tm.role,
+          tm.status,
+          tm.permissions,
+          tm.invited_at,
+          tm.joined_at,
+          tm.last_active_at,
+          tm.created_at,
+          tm.updated_at
+        FROM team_members tm
+        WHERE tm.publisher_id = $1
+        ORDER BY COALESCE(tm.invited_at, tm.created_at) DESC`,
+        [publisherId]
+      );
+    };
+
+    try {
+      result = await query(
+        `SELECT 
+          tm.id,
+          tm.user_id,
+          tm.email,
+          tm.role,
+          tm.status,
+          tm.created_at as invited_at,
+          tm.permissions,
+          u.email as user_email,
+          u.created_at as joined_at
+        FROM team_members tm
+        LEFT JOIN users u ON tm.user_id = u.id
+        WHERE tm.publisher_id = $1
+        ORDER BY tm.created_at DESC`,
+        [publisherId]
+      );
+    } catch (err) {
+      if (isMissingColumnError(err, 'tm.user_id') || isMissingColumnError(err, 'team_members.user_id')) {
+        result = await runLegacyMembersQuery();
+      } else if (isMissingRelationError(err, 'users')) {
+        try {
+          result = await query(
+            `SELECT 
+              tm.id,
+              tm.user_id,
+              tm.email,
+              tm.role,
+              tm.status,
+              tm.created_at as invited_at,
+              tm.permissions,
+              u.email as user_email,
+              u.created_at as joined_at
+            FROM team_members tm
+            LEFT JOIN core.users u ON tm.user_id = u.id
+            WHERE tm.publisher_id = $1
+            ORDER BY tm.created_at DESC`,
+            [publisherId]
+          );
+        } catch (err2) {
+          if (isMissingColumnError(err2, 'tm.user_id') || isMissingColumnError(err2, 'team_members.user_id')) {
+            result = await runLegacyMembersQuery();
+          } else {
+            // Fall back to no user join.
+            result = await query(
+              `SELECT 
+                tm.id,
+                tm.user_id,
+                tm.email,
+                tm.role,
+                tm.status,
+                tm.created_at as invited_at,
+                tm.permissions,
+                NULL::text as user_email,
+                NULL::timestamptz as joined_at
+              FROM team_members tm
+              WHERE tm.publisher_id = $1
+              ORDER BY tm.created_at DESC`,
+              [publisherId]
+            );
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
 
     const members = result.rows.map((row: any) => ({
       id: row.id,
       email: row.user_email || row.email,
-      name: row.user_email?.split('@')[0] || row.email?.split('@')[0],
+      name: row.name || row.user_email?.split('@')[0] || row.email?.split('@')[0],
       role: row.role,
       status: row.status,
       invitedAt: row.invited_at,
       joinedAt: row.joined_at,
-      permissions: ROLE_DEFINITIONS.find((r) => r.id === row.role)?.permissions || [],
+      permissions:
+        (Array.isArray(row.permissions) ? row.permissions : undefined) ||
+        ROLE_DEFINITIONS.find((r) => r.id === row.role)?.permissions ||
+        [],
     }));
 
     // Add current user if not in the list (as owner)
@@ -128,6 +239,29 @@ router.get('/members', async (req: Request, res: Response) => {
 
     res.json({ success: true, data: members });
   } catch (error) {
+    const err = error as any;
+    const code = typeof err?.code === 'string' ? err.code : '';
+    const message = typeof err?.message === 'string' ? err.message : '';
+
+    // Production safety: if the table isn't migrated yet, don't break the console.
+    // Return the current user as the sole "owner" member.
+    if (code === '42P01' && message.includes('team_members')) {
+      const fallback = [
+        {
+          id: req.user?.userId,
+          email: req.user?.email,
+          name: req.user?.email?.split('@')[0],
+          role: 'owner',
+          status: 'active',
+          invitedAt: undefined,
+          joinedAt: undefined,
+          permissions: ['*'],
+        },
+      ].filter((m) => Boolean(m.email));
+
+      return res.json({ success: true, data: fallback });
+    }
+
     logger.error('Error listing team members:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch team members' });
   }
@@ -166,25 +300,53 @@ router.post('/invite', authorize(['admin']), async (req: Request, res: Response)
       return res.status(409).json({ success: false, error: 'Team member already exists' });
     }
 
-    // Check if user already has an account
-    const existingUser = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+    // Check if user already has an account (public.users or core.users).
+    const existingUserId = await findExistingUserIdByEmail(email);
 
     const memberId = uuid();
     const inviteToken = uuid();
 
-    await query(
-      `INSERT INTO team_members (id, publisher_id, email, role, status, invite_token, user_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-      [
-        memberId,
-        publisherId,
-        email.toLowerCase(),
-        role,
-        existingUser.rows.length > 0 ? 'active' : 'invited',
-        inviteToken,
-        existingUser.rows[0]?.id || null,
-      ]
-    );
+    const normalizedEmail = email.toLowerCase();
+    const status = existingUserId ? 'active' : 'invited';
+
+    try {
+      await query(
+        `INSERT INTO team_members (id, publisher_id, email, role, status, invite_token, user_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [memberId, publisherId, normalizedEmail, role, status, inviteToken, existingUserId]
+      );
+    } catch (err) {
+      if (isMissingColumnError(err, 'invite_token') || isMissingColumnError(err, 'user_id')) {
+        // Legacy schema: no invite_token/user_id; store name + invited_at/joined_at instead.
+        await query(
+          `INSERT INTO team_members (
+            id,
+            publisher_id,
+            email,
+            name,
+            role,
+            status,
+            permissions,
+            invited_at,
+            joined_at,
+            created_at,
+            updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),$8,NOW(),NOW())`,
+          [
+            memberId,
+            publisherId,
+            normalizedEmail,
+            normalizedEmail.split('@')[0],
+            role,
+            status,
+            JSON.stringify(roleDefinition.permissions),
+            status === 'active' ? new Date().toISOString() : null,
+          ]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     // Send invitation email (async, don't block)
     sendEmail({
@@ -203,7 +365,7 @@ router.post('/invite', authorize(['admin']), async (req: Request, res: Response)
       email: email.toLowerCase(),
       name: email.split('@')[0],
       role,
-      status: existingUser.rows.length > 0 ? 'active' : 'invited',
+      status,
       invitedAt: new Date().toISOString(),
       permissions: roleDefinition.permissions,
     };
@@ -280,10 +442,22 @@ router.delete('/members/:id', authorize(['admin']), async (req: Request, res: Re
     }
 
     // Check if member exists and belongs to this publisher
-    const existing = await query(
-      'SELECT id, role, user_id FROM team_members WHERE id = $1 AND publisher_id = $2',
-      [id, publisherId]
-    );
+    let existing;
+    try {
+      existing = await query('SELECT id, role, user_id, email FROM team_members WHERE id = $1 AND publisher_id = $2', [
+        id,
+        publisherId,
+      ]);
+    } catch (err) {
+      if (isMissingColumnError(err, 'user_id')) {
+        existing = await query('SELECT id, role, email FROM team_members WHERE id = $1 AND publisher_id = $2', [
+          id,
+          publisherId,
+        ]);
+      } else {
+        throw err;
+      }
+    }
 
     if (existing.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Team member not found' });
@@ -295,8 +469,13 @@ router.delete('/members/:id', authorize(['admin']), async (req: Request, res: Re
     }
 
     // Cannot remove yourself
-    if (existing.rows[0].user_id === req.user?.userId) {
+    if (existing.rows[0].user_id && existing.rows[0].user_id === req.user?.userId) {
       return res.status(403).json({ success: false, error: 'Cannot remove yourself' });
+    }
+    if (!existing.rows[0].user_id && existing.rows[0].email && req.user?.email) {
+      if (String(existing.rows[0].email).toLowerCase() === String(req.user.email).toLowerCase()) {
+        return res.status(403).json({ success: false, error: 'Cannot remove yourself' });
+      }
     }
 
     await query('DELETE FROM team_members WHERE id = $1', [id]);
@@ -325,12 +504,26 @@ router.post(
       }
 
       // Check if member exists and is in invited status
-      const existing = await query(
-        `SELECT id, email, role, status, invite_token 
-         FROM team_members 
-         WHERE id = $1 AND publisher_id = $2`,
-        [id, publisherId]
-      );
+      let existing;
+      try {
+        existing = await query(
+          `SELECT id, email, role, status, invite_token 
+           FROM team_members 
+           WHERE id = $1 AND publisher_id = $2`,
+          [id, publisherId]
+        );
+      } catch (err) {
+        if (isMissingColumnError(err, 'invite_token')) {
+          existing = await query(
+            `SELECT id, email, role, status
+             FROM team_members
+             WHERE id = $1 AND publisher_id = $2`,
+            [id, publisherId]
+          );
+        } else {
+          throw err;
+        }
+      }
 
       if (existing.rows.length === 0) {
         return res.status(404).json({ success: false, error: 'Team member not found' });
@@ -343,12 +536,13 @@ router.post(
       const member = existing.rows[0];
       const roleDefinition = ROLE_DEFINITIONS.find((r) => r.id === member.role);
 
-      // Regenerate invite token
-      const newToken = uuid();
-      await query('UPDATE team_members SET invite_token = $1, updated_at = NOW() WHERE id = $2', [
-        newToken,
-        id,
-      ]);
+      // If invite_token exists, regenerate it. Otherwise, best-effort resend without a token.
+      let inviteUrl = `${process.env.FRONTEND_URL || 'https://console.apexmediation.ee'}/signup`;
+      if ('invite_token' in member) {
+        const newToken = uuid();
+        await query('UPDATE team_members SET invite_token = $1, updated_at = NOW() WHERE id = $2', [newToken, id]);
+        inviteUrl = `${process.env.FRONTEND_URL || 'https://console.apexmediation.ee'}/invite/${newToken}`;
+      }
 
       // Resend email
       await sendEmail({
@@ -358,7 +552,7 @@ router.post(
         data: {
           inviterEmail: req.user?.email,
           role: roleDefinition?.label || member.role,
-          inviteUrl: `${process.env.FRONTEND_URL || 'https://console.apexmediation.ee'}/invite/${newToken}`,
+          inviteUrl,
         },
       });
 

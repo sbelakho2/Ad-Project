@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth';
 import { authenticateOrApiKey } from '../middleware/authEither';
+import { appApiKeyAuth } from '../middleware/appApiKeyAuth';
 import { cache, invalidatePublisherCache } from '../middleware/cache';
 import { cacheTTL } from '../utils/redis';
 import * as analyticsController from '../controllers/analytics.controller';
@@ -40,13 +41,13 @@ router.get('/buffer-stats', authenticateOrApiKey, cache({
 // ========================================
 // POST /api/v1/analytics/events/impressions - Record impression events
 // SDK ingestion endpoints can be abused; apply rate limit and cache invalidation
-router.post('/events/impressions', authRateLimiter, invalidatePublisherCache(), analyticsController.recordImpressions);
+router.post('/events/impressions', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordImpressions);
 
 // POST /api/v1/analytics/events/clicks - Record click events
-router.post('/events/clicks', authRateLimiter, invalidatePublisherCache(), analyticsController.recordClicks);
+router.post('/events/clicks', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordClicks);
 
 // POST /api/v1/analytics/events/revenue - Record revenue events
-router.post('/events/revenue', authRateLimiter, invalidatePublisherCache(), analyticsController.recordRevenue);
+router.post('/events/revenue', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordRevenue);
 
 // POST /api/v1/analytics/events/viewability - Record OMSDK/viewability events (SDK_CHECKS 7.3)
 router.post('/events/viewability', authRateLimiter, analyticsController.recordViewability);

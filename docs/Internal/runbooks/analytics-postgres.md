@@ -7,6 +7,11 @@ Purpose
 - Provide a lightweight response checklist when analytics ingestion alerts fire.  
 - Ensure the Postgres-only analytics stack (staging tables + rollups) stays within the Post-Migration 12-Step guardrails.
 
+Rollups
+- Rollup tables: `analytics_impression_rollups`, `analytics_click_rollups`, `analytics_revenue_rollups`, `analytics_metrics_rollups`.
+- Rollup computation is performed by the backend process on a schedule (env vars `ANALYTICS_ROLLUP_*`).
+- Exports and most day-granularity reporting prefer rollups; if rollups are missing, exports fall back to an on-the-fly aggregation query.
+
 ## Key Dashboards & Metrics
 - **Grafana › Tracking & Ingest (`tracking-ingest.json`)**
   - `analytics_events_enqueued_total` vs `analytics_events_written_total`
@@ -53,6 +58,11 @@ Purpose
    ```
 4. If lag > 60s, redirect analytics reads to the primary temporarily and scale the read replica.
 5. Resume pipeline and monitor `analytics_events_written_total` returning to parity with enqueued rate. Leave an incident note in `docs/runbooks/OPERATOR_CHECKLIST.md` (Weekly section).
+
+## When Rollups Are Missing / Stale
+1. Confirm the rollup tables exist in Postgres (migration `20251201_150500_analytics_rollup_tables`).
+2. Confirm the backend rollup scheduler is enabled and running (check backend logs for `Analytics rollups:`).
+3. If the rollup window is too small for your reporting range, increase `ANALYTICS_ROLLUP_LOOKBACK_DAYS` and restart the backend.
 
 ## Escalation
 - If alerts remain firing after 30 minutes, page Platform Engineering via PagerDuty (Analytics channel).

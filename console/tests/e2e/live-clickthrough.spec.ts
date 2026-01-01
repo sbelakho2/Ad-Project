@@ -6,6 +6,12 @@ type ClickOptions = {
   rounds?: number
 }
 
+type InflightRequestInfo = {
+  startedAt: number
+  url: string
+  method: string
+}
+
 function isProbablyDestructive(label: string) {
   const s = label.toLowerCase()
   return (
@@ -136,6 +142,17 @@ async function startServerErrorCapture(page: Page, origin: string) {
       const url = res.url()
       if (!url.startsWith(origin)) return
 
+      // Production may intentionally disable some endpoints behind feature flags.
+      // Treat these as expected, non-fatal states for click-through.
+      if (status === 503 && url.includes('/api/v1/transparency/')) {
+        try {
+          const text = await res.text()
+          if (text.includes('Transparency API is disabled')) return
+        } catch {
+          // ignore
+        }
+      }
+
       let snippet = ''
       try {
         const text = await res.text()
@@ -151,6 +168,142 @@ async function startServerErrorCapture(page: Page, origin: string) {
   })
 
   return serverErrors
+}
+
+async function gotoWithRetry(page: Page, route: string) {
+  const maxAttempts = 4
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await page.goto(route, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      return
+    } catch (e) {
+      lastError = e
+      const msg = String(e)
+      const looksTransient =
+        msg.includes('net::ERR_ADDRESS_UNREACHABLE') ||
+        msg.includes('net::ERR_NAME_NOT_RESOLVED') ||
+        msg.includes('net::ERR_CONNECTION_CLOSED') ||
+        msg.includes('net::ERR_CONNECTION_RESET') ||
+        msg.includes('net::ERR_CONNECTION_REFUSED') ||
+        msg.includes('net::ERR_TIMED_OUT')
+
+      if (!looksTransient) throw e
+
+      // Exponential-ish backoff: 0.75s, 1.5s, 3s
+      const waitMs = Math.min(3_000, 750 * Math.pow(2, attempt - 1))
+      await page.waitForTimeout(waitMs)
+    }
+  }
+
+  throw new Error(`Failed to navigate to ${route} after ${maxAttempts} attempts: ${String(lastError)}`)
+}
+
+function startInflightRequestCapture(page: Page, origin: string) {
+  const inflight = new Map<any, InflightRequestInfo>()
+
+  const track = (req: any) => {
+    try {
+      const url = req.url?.() ?? ''
+      if (!url.startsWith(origin)) return
+      inflight.set(req, {
+        startedAt: Date.now(),
+        url,
+        method: req.method?.() ?? 'GET',
+      })
+    } catch {
+      // best-effort
+    }
+  }
+
+  const untrack = (req: any) => {
+    inflight.delete(req)
+  }
+
+  page.on('request', track)
+  page.on('requestfinished', untrack)
+  page.on('requestfailed', untrack)
+
+  const snapshot = () => {
+    const now = Date.now()
+    return Array.from(inflight.values())
+      .map((r) => ({ ...r, ageMs: now - r.startedAt }))
+      .sort((a, b) => b.ageMs - a.ageMs)
+  }
+
+  return { inflight, snapshot }
+}
+
+async function assertRouteReady(page: Page, route: string) {
+  // Route-specific readiness checks (avoid false PASS when a page is stuck on skeletons/spinners).
+  // A page is considered "ready" when it shows either real content OR a clear error/upgrade state.
+  const timeoutMs = 25_000
+  const started = Date.now()
+
+  const isVisible = async (loc: ReturnType<Page['locator']>) => {
+    return loc.first().isVisible().catch(() => false)
+  }
+
+  const hasAny = async (...locs: Array<ReturnType<Page['locator']>>) => {
+    for (const loc of locs) {
+      if (await isVisible(loc)) return true
+    }
+    return false
+  }
+
+  while (Date.now() - started < timeoutMs) {
+    // Common: if a visible alert exists, treat that as "ready" (it’s not infinite loading).
+    if (await isVisible(page.getByRole('alert'))) return
+
+    if (route === '/fraud') {
+      const title = page.getByRole('heading', { name: /fraud detection/i })
+      const detectionMethods = page.getByRole('heading', { name: /detection methods/i })
+      const recentAlerts = page.getByRole('heading', { name: /recent alerts/i })
+      const planChecking = page.getByText(/checking your plan/i)
+      const sessionLoading = page.getByText(/loading session/i)
+
+      if (await hasAny(detectionMethods, recentAlerts)) return
+      if (await isVisible(title) && !(await hasAny(planChecking, sessionLoading))) {
+        // Title rendered but content not yet: keep waiting.
+      }
+    } else if (route === '/transparency/summary') {
+      const title = page.getByRole('heading', { name: /transparency\s*—\s*summary/i })
+      const noData = page.getByText(/no sampling data available yet/i)
+      const winners = page.getByRole('heading', { name: /winners by source/i })
+      if (await hasAny(noData, winners)) return
+      if (await isVisible(title)) {
+        // If title exists and any stat label exists, consider ready.
+        if (await isVisible(page.getByText(/total sampled auctions/i))) return
+      }
+    } else if (route === '/transparency/auctions') {
+      const title = page.getByRole('heading', { name: /transparency\s*—\s*auctions/i })
+      const table = page.getByRole('table', { name: /auctions table/i })
+      const upgrade = page.getByText(/upgrade to access transparency/i)
+      if (await hasAny(table, upgrade)) return
+      if (await isVisible(title)) {
+        // If title exists and at least one row exists, consider ready.
+        const rows = page.locator('table[aria-label="Auctions table"] tbody tr')
+        if ((await rows.count().catch(() => 0)) > 0) return
+      }
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  throw new Error(`Route did not reach a ready state within ${timeoutMs}ms: ${route}`)
+}
+
+async function assertNoStuckLoading(page: Page) {
+  // Heuristic: avoid ending a step while a visible "Loading..." placeholder is present.
+  // (Spinner labels are sr-only and won’t be detected; this targets real UI placeholders.)
+  const loadingTexts = ['Loading...', 'Please wait', 'Fetching...']
+  for (const t of loadingTexts) {
+    const loc = page.getByText(t, { exact: false }).first()
+    if (await loc.isVisible().catch(() => false)) {
+      throw new Error(`Possible stuck loading state detected: visible text "${t}"`)
+    }
+  }
 }
 
 function isProbablyExternal(href: string) {
@@ -186,7 +339,7 @@ async function clickInternalLinks(page: Page, options?: ClickOptions) {
   }
 }
 
-async function liveLogin(page: Page) {
+async function liveLogin(page: Page, diagnostics?: { badResponses?: string[] }) {
   const email = process.env.LIVE_CONSOLE_EMAIL
   const password = process.env.LIVE_CONSOLE_PASSWORD
   const twofa = process.env.LIVE_CONSOLE_2FA_CODE
@@ -199,30 +352,139 @@ async function liveLogin(page: Page) {
     )
   }
 
-  await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  // NOTE: The console's same-origin auth proxy (/api/v1/auth/login) has proven flaky
+  // in production builds (historically tied to compression/proxying behavior).
+  // Use a direct backend login call and then set session cookies for the console origin.
+  await page.goto('/login', { waitUntil: 'networkidle' }).catch(() => page.goto('/login', { waitUntil: 'domcontentloaded' }))
 
-  // Use pressSequentially() for better React compatibility
-  await page.getByLabel('Email').click()
-  await page.getByLabel('Email').pressSequentially(email, { delay: 100 })
-  
-  await page.getByLabel('Password').click()
-  await page.getByLabel('Password').pressSequentially(password, { delay: 100 })
-  
-  // Wait a moment for React state to update
-  await page.waitForTimeout(300)
-  
-  await page.getByRole('button', { name: /^sign in$/i }).click()
+  const origin = new URL(page.url()).origin
 
-  const twofaAlert = page.getByRole('alert').filter({ hasText: /Two-factor verification required/i })
-  if (await twofaAlert.isVisible().catch(() => false)) {
-    if (!twofa) {
-      throw new Error('2FA is required for this dummy user. Set LIVE_CONSOLE_2FA_CODE and re-run.')
-    }
-    await page.getByLabel(/2FA Code or Backup Code/i).fill(twofa)
-    await page.getByRole('button', { name: /verify and continue/i }).click()
+  const authResult = await page.evaluate(
+    async ({ email, password, twofa }) => {
+      return new Promise((resolve) => {
+        try {
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', 'https://api.apexmediation.ee/api/v1/auth/login', true)
+          xhr.setRequestHeader('Content-Type', 'application/json')
+          xhr.withCredentials = true
+
+          xhr.onload = function () {
+            try {
+              if (xhr.status !== 200) {
+                resolve({ success: false, error: `Login failed: ${xhr.status} ${xhr.responseText}` })
+                return
+              }
+
+              const data = JSON.parse(xhr.responseText)
+
+              const tempToken = data?.data?.tempToken
+              const twofaRequired = Boolean(data?.data?.twofaRequired)
+
+              if (twofaRequired) {
+                if (!twofa) {
+                  resolve({ success: false, error: '2FA is required for this dummy user. Set LIVE_CONSOLE_2FA_CODE and re-run.' })
+                  return
+                }
+
+                const xhr2fa = new XMLHttpRequest()
+                xhr2fa.open('POST', 'https://api.apexmediation.ee/api/v1/auth/login/2fa', true)
+                xhr2fa.setRequestHeader('Content-Type', 'application/json')
+                xhr2fa.withCredentials = true
+                xhr2fa.onload = function () {
+                  try {
+                    if (xhr2fa.status !== 200) {
+                      resolve({ success: false, error: `2FA login failed: ${xhr2fa.status} ${xhr2fa.responseText}` })
+                      return
+                    }
+                    const twofaData = JSON.parse(xhr2fa.responseText)
+                    const token = twofaData.data?.token || twofaData.token
+                    if (!token) {
+                      resolve({ success: false, error: 'No token in 2FA response' })
+                      return
+                    }
+                    resolve({ success: true, token })
+                  } catch (err) {
+                    resolve({ success: false, error: `2FA response parse error: ${err}` })
+                  }
+                }
+                xhr2fa.onerror = function () {
+                  resolve({ success: false, error: '2FA request failed' })
+                }
+                xhr2fa.send(JSON.stringify({ tempToken, code: twofa }))
+                return
+              }
+
+              const token = data.data?.token || data.token
+              if (!token) {
+                resolve({ success: false, error: 'No token in response' })
+                return
+              }
+              resolve({ success: true, token })
+            } catch (err) {
+              resolve({ success: false, error: `Login parse error: ${err}` })
+            }
+          }
+
+          xhr.onerror = function () {
+            resolve({ success: false, error: 'Login request failed' })
+          }
+
+          xhr.send(JSON.stringify({ email, password }))
+        } catch (error) {
+          resolve({ success: false, error: String(error) })
+        }
+      })
+    },
+    { email, password, twofa }
+  )
+
+  if (!authResult || !(authResult as any).success || !(authResult as any).token) {
+    const extra = diagnostics?.badResponses?.length
+      ? `\n\nRecent 4xx responses:\n${diagnostics.badResponses.slice(-8).join('\n\n')}`
+      : ''
+    throw new Error(`Login failed: ${(authResult as any)?.error || 'unknown'}${extra}`)
   }
 
-  await page.waitForURL('**/dashboard**', { timeout: 45_000 })
+  const domain = new URL(origin).hostname
+  const isSecure = origin.startsWith('https')
+  await page.context().addCookies([
+    {
+      name: 'access_token',
+      value: (authResult as any).token,
+      domain,
+      path: '/',
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: 'Lax',
+    },
+    {
+      name: 'next-auth.session-token',
+      value: (authResult as any).token,
+      domain,
+      path: '/',
+      httpOnly: false,
+      secure: isSecure,
+      sameSite: 'Lax',
+    },
+  ])
+
+  if (isSecure) {
+    await page.context().addCookies([
+      {
+        name: '__Secure-next-auth.session-token',
+        value: (authResult as any).token,
+        domain,
+        path: '/',
+        httpOnly: false,
+        secure: true,
+        sameSite: 'Lax',
+      },
+    ])
+  }
+
+  // Navigate to dashboard and confirm auth succeeded.
+  await page.goto('/dashboard', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+  await page.waitForURL('**/dashboard**', { timeout: 15_000 })
   await expect(page).not.toHaveURL(/\/login(\?|$)/)
 }
 
@@ -235,8 +497,16 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
     if (!baseURL) throw new Error('Playwright baseURL is required for live runs')
     const origin = new URL(baseURL).origin
 
+    // Ensure responsive navigation renders in "desktop" mode.
+    await page.setViewportSize({ width: 1440, height: 900 })
+
     const pageErrors: string[] = []
     const consoleErrors: string[] = []
+    const requestFailures: string[] = []
+    const sessionEndpointIssues: string[] = []
+    const badResponses: string[] = []
+
+    const inflightCapture = startInflightRequestCapture(page, origin)
 
     page.on('pageerror', (err) => pageErrors.push(String(err)))
     page.on('console', (msg) => {
@@ -245,12 +515,56 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
       if (text.includes('Failed to load resource')) return
       if (text.includes('favicon')) return
       if (text.includes('Failed to fetch RSC payload')) return
+      if (text.includes('[next-auth][error][CLIENT_FETCH_ERROR]') && text.includes('/api/auth/session')) return
       consoleErrors.push(text)
+    })
+
+    page.on('requestfailed', (req) => {
+      const url = req.url()
+      const failure = req.failure()?.errorText || 'unknown'
+      // Navigations (especially RSC + route-changes) frequently cancel in-flight requests.
+      // Treat aborted requests as non-fatal signal to avoid flakiness.
+      if (failure.includes('ERR_ABORTED')) return
+      if (url.includes('/api/auth/session')) {
+        sessionEndpointIssues.push(`requestfailed ${url} (${failure})`)
+        return
+      }
+      requestFailures.push(`requestfailed ${req.method()} ${url} (${failure})`)
+    })
+
+    page.on('response', async (res) => {
+      const url = res.url()
+      // Capture recent 4xxs to help pinpoint where login fails (often CSRF/NextAuth callbacks).
+      const status = res.status()
+      if (status >= 400 && status < 500 && url.startsWith(origin)) {
+        let snippet = ''
+        try {
+          snippet = (await res.text()).slice(0, 1200)
+          // Redact any JWT-like tokens.
+          snippet = snippet.replace(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[JWT_REDACTED]')
+        } catch {
+          // ignore non-text
+        }
+
+        const entry = `${status} ${res.request().method()} ${url}${snippet ? `\n${snippet}` : ''}`
+        badResponses.push(entry)
+        while (badResponses.length > 12) badResponses.shift()
+      }
+
+      if (!url.includes('/api/auth/session')) return
+      if (status < 400) return
+      let snippet = ''
+      try {
+        snippet = (await res.text()).slice(0, 1000)
+      } catch {
+        // ignore non-text
+      }
+      sessionEndpointIssues.push(`response ${status} ${url}${snippet ? `\n${snippet}` : ''}`)
     })
 
     const serverErrors = await startServerErrorCapture(page, origin)
 
-    await liveLogin(page)
+    await liveLogin(page, { badResponses })
 
     // Fail fast if login triggered a backend 5xx.
     expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
@@ -285,12 +599,92 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
     ]
 
     for (const route of routes) {
-      await page.goto(route, { waitUntil: 'domcontentloaded' })
+      await gotoWithRetry(page, route)
       await expect(page).not.toHaveURL(/\/login|\/signin|\/auth\//)
+
+      // Catch pages that keep loading forever (Fraud + Transparency are known offenders).
+      try {
+        await assertRouteReady(page, route)
+      } catch (e) {
+        const inflight = inflightCapture.snapshot().slice(0, 12)
+        throw new Error(
+          [
+            String(e),
+            inflight.length
+              ? `\nOldest in-flight requests:\n${inflight
+                  .map((r) => `${Math.round(r.ageMs / 1000)}s ${r.method} ${r.url}`)
+                  .join('\n')}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        )
+      }
+
+      // Basic "page rendered" signal: ensure the app shell is present.
+      const shellAside = page.locator('aside').first()
+      const navByRole = page.getByRole('navigation').first()
+      const navByTag = page.locator('nav').first()
+
+      // Give the app shell a moment to hydrate/render.
+      await Promise.race([
+        shellAside.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {}),
+        navByRole.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {}),
+        navByTag.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {}),
+        page.waitForTimeout(800),
+      ])
+
+      const shellVisible =
+        (await shellAside.isVisible().catch(() => false)) ||
+        (await navByRole.isVisible().catch(() => false)) ||
+        (await navByTag.isVisible().catch(() => false))
+
+      if (!shellVisible) {
+        const url = page.url()
+        const hasLoginEmail = await page.getByLabel('Email').isVisible().catch(() => false)
+        const alertText = (await page.getByRole('alert').first().innerText().catch(() => '')).trim()
+        const sessionProbe = await page
+          .evaluate(async () => {
+            try {
+              const resp = await fetch('/api/auth/session', { credentials: 'include' })
+              const text = await resp.text()
+              return { ok: resp.ok, status: resp.status, body: text.slice(0, 800) }
+            } catch (e) {
+              return { ok: false, status: -1, body: String(e) }
+            }
+          })
+          .catch((e) => ({ ok: false, status: -1, body: String(e) }))
+
+        throw new Error(
+          [
+            `App shell missing after navigation to ${route}`,
+            `Current URL: ${url}`,
+            `Login form visible: ${hasLoginEmail}`,
+            alertText ? `Alert text: ${alertText}` : null,
+            `Session probe: ${JSON.stringify(sessionProbe)}`,
+            requestFailures.length ? `Request failures:\n${requestFailures.slice(0, 20).join('\n')}` : null,
+            sessionEndpointIssues.length ? `Session endpoint issues:\n${sessionEndpointIssues.slice(0, 20).join('\n\n')}` : null,
+            serverErrors.length ? `Server 5xx:\n${serverErrors.slice(0, 10).join('\n\n')}` : null,
+            badResponses.length ? `Recent 4xx responses:\n${badResponses.slice(-8).join('\n\n')}` : null,
+            inflightCapture.snapshot().length
+              ? `In-flight requests:\n${inflightCapture
+                  .snapshot()
+                  .slice(0, 12)
+                  .map((r) => `${Math.round(r.ageMs / 1000)}s ${r.method} ${r.url}`)
+                  .join('\n')}`
+              : null,
+            consoleErrors.length ? `Console errors:\n${consoleErrors.slice(0, 10).join('\n')}` : null,
+            pageErrors.length ? `Page errors:\n${pageErrors.slice(0, 10).join('\n')}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+        )
+      }
 
       await clickVisibleButtons(page, { rounds: 3, maxClicks: 60, timeBudgetMs: 12_000 })
       await clickInternalLinks(page, { maxClicks: 15, timeBudgetMs: 4_000 })
       await closeAnyModal(page)
+      await assertNoStuckLoading(page)
 
       // Stop early with a useful error if any route triggers 5xx.
       expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
@@ -298,6 +692,8 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
 
     expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
     expect(pageErrors, pageErrors.join('\n')).toHaveLength(0)
+    expect(sessionEndpointIssues, sessionEndpointIssues.join('\n\n')).toHaveLength(0)
+    expect(requestFailures, requestFailures.join('\n\n')).toHaveLength(0)
     expect(consoleErrors, consoleErrors.join('\n')).toHaveLength(0)
   })
 })

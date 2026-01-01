@@ -75,9 +75,9 @@ export class SchemaGate {
           const query = `
             SELECT table_name FROM information_schema.tables 
             WHERE table_schema = 'public' 
-            AND table_name = 'migrations'
+            AND table_name = ANY($1::text[])
           `;
-          const result = await pool.query(query);
+          const result = await pool.query(query, [['migrations', 'schema_migrations', 'schema_migrations_v2']]);
           return result.rows.length > 0;
         } catch (error) {
           logger.error('Migration table check error', { error });

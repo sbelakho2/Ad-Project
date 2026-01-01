@@ -53,6 +53,12 @@ function filterRequestHeaders(headers: Headers): Headers {
     const lower = key.toLowerCase()
     if (HOP_BY_HOP_HEADERS.has(lower)) continue
 
+    // If we forward a body, fetch must compute framing headers.
+    // Keeping an incoming Content-Length can cause the upstream to see an empty body.
+    if (lower === 'content-length') continue
+    // Let fetch negotiate encoding for the upstream.
+    if (lower === 'accept-encoding') continue
+
     // Let fetch set this automatically based on the new URL
     if (lower === 'host') continue
 
