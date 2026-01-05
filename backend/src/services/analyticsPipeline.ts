@@ -1,6 +1,17 @@
 import { subDays, addDays, addMonths } from 'date-fns';
+import type { QueryResultRow } from 'pg';
 import reportingService from './reportingService';
-import { runQuery } from '../utils/postgres';
+import { query as pgQuery } from '../utils/postgres';
+
+const runQuery = async <T extends QueryResultRow = QueryResultRow>(
+  sql: string,
+  params: ReadonlyArray<unknown>,
+  label?: string
+): Promise<T[]> => {
+  const queryLabel = label ?? 'ANALYTICS_PIPELINE';
+  const { rows } = await pgQuery<T>(sql, params, { replica: true, label: queryLabel });
+  return rows;
+};
 
 type AnalyticsOverview = {
   revenue: {
