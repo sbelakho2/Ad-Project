@@ -46,6 +46,21 @@ async function setupCorpus(opts?: {
 }
 
 describe('getSupplyChainStatus', () => {
+  test('does not throw when corpus manifest is missing', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'supply-chain-status-missing-'))
+    const baseDir = path.join(tempRoot, 'data', 'weak-supervision')
+    await fs.mkdir(baseDir, { recursive: true })
+
+    try {
+      const status = await getSupplyChainStatus({ domain: 'example.com', sellerId: 'pub-1' }, { baseDir })
+
+      expect(status.authorized).toBe(false)
+      expect(status.reason).toMatch(/corpus is not available|could not be loaded/i)
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   test('returns authorized status with seller info and entries', async () => {
     const { baseDir, cleanup } = await setupCorpus()
     try {

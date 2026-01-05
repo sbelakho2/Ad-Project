@@ -24,12 +24,31 @@ APP_ID_CTV=${APP_ID_CTV:-}
 DURATION_MINUTES=${1:-0}
 EVENTS_PER_MINUTE=${2:-8}
 
-require_env() { local n=$1 v=${2:-}; [[ -z "$v" ]] && { echo "[err] Missing env: $n" >&2; exit 2; }; }
-require_env TOKEN "$TOKEN"
+require_env() {
+  local name=$1 value=${2:-}
+  if [[ -z "$value" ]]; then
+    echo "[err] Missing env: $name" >&2
+    exit 2
+  fi
+}
 require_env SDK_KEY "$SDK_KEY"
 require_env PUBLISHER_ID "$PUBLISHER_ID"
 require_env APP_ID_IOS "$APP_ID_IOS"
 require_env APP_ID_CTV "$APP_ID_CTV"
+
+# Avoid leaking secrets via process args (ps/systemctl). Use a curl config file
+# for headers instead of passing -H "Authorization: Bearer ..." on the command line.
+CURL_CFG_FILE="$(mktemp)"
+chmod 600 "$CURL_CFG_FILE" || true
+cat >"$CURL_CFG_FILE" <<EOF
+header = "Content-Type: application/json"
+header = "X-SDK-Key: $SDK_KEY"
+EOF
+if [[ -n "$TOKEN" ]]; then
+  echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_FILE"
+fi
+cleanup() { rm -f "$CURL_CFG_FILE" 2>/dev/null || true; }
+trap cleanup EXIT
 
 EVID_DIR="evidence-$(date +%F)/ios_tvos"
 LOG="$EVID_DIR/ios_tv_api_harness.log"
@@ -46,28 +65,61 @@ uuid() {
 }
 
 revenue() { echo "0.0$(printf '%02d' $((RANDOM % 80 + 20)))"; }
+latency() { echo "$((RANDOM % 200 + 50))"; }
+
+send_click() {
+  local app_id=$1 os=$2 device=$3
+  local now=$4
+  local impression_id=$5
+  local placement_id=$6
+  local adapter_id=$7
+  local request_id=$8
+  local session_id=$9
+  local user_id=${10}
+  local events="[{\"event_id\":\"$(uuid)\",\"timestamp\":\"$now\",\"impression_id\":\"$impression_id\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$app_id\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"ios_tv_test\",\"click_url\":\"https://example.com/click?iid=$impression_id\",\"country_code\":\"US\",\"device_type\":\"$device\",\"os\":\"$os\",\"session_id\":\"$session_id\",\"user_id\":\"$user_id\",\"request_id\":\"$request_id\",\"time_to_click_ms\":$((RANDOM % 4000 + 120)),\"is_verified\":true,\"is_test_mode\":false}]"
+  curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$API_URL/api/v1/analytics/events/clicks" \
+    --config "$CURL_CFG_FILE" \
+    -d "{\"events\": $events}"
+}
 
 send_imp() {
   local app_id=$1 os=$2 device=$3 fmt=$4
   local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local events="[{\"event_id\":\"$(uuid)\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$app_id\",\"adapter_name\":\"ios_tv_test\",\"ad_format\":\"$fmt\",\"country_code\":\"US\",\"device_type\":\"$device\",\"os\":\"$os\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$(uuid)\",\"request_id\":\"$(uuid)\",\"ecpm_usd\": $(revenue),\"timestamp\":\"$now\"}]"
-  curl -s -o /dev/null -w "%{http_code}" \
+  local session_id=$(uuid)
+  local request_id=$(uuid)
+  local placement_id=$(uuid)
+  local adapter_id=$(uuid)
+  local user_id=$(uuid)
+  local impression_id=$(uuid)
+  local os_ver="16.0"
+  [[ "$os" == "tvos" ]] && os_ver="17.0"
+  local events="[{\"event_id\":\"$impression_id\",\"timestamp\":\"$now\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$app_id\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"ios_tv_test\",\"ad_unit_id\":\"${os}_${fmt}_unit\",\"ad_format\":\"$fmt\",\"country_code\":\"US\",\"device_type\":\"$device\",\"os\":\"$os\",\"os_version\":\"$os_ver\",\"app_version\":\"1.0.0\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$session_id\",\"user_id\":\"$user_id\",\"request_id\":\"$request_id\",\"bid_price_usd\":$(revenue),\"ecpm_usd\":$(revenue),\"latency_ms\":$(latency),\"is_test_mode\":false}]"
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$API_URL/api/v1/analytics/events/impressions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "X-SDK-Key: $SDK_KEY" \
-    -d "{\"events\": $events}"
+    --config "$CURL_CFG_FILE" \
+    -d "{\"events\": $events}")
+
+  # Occasionally emit a click for the same impression.
+  if [[ "$code" == "202" ]] && [[ $((RANDOM % 6)) -eq 0 ]]; then
+    : "$(send_click "$app_id" "$os" "$device" "$now" "$impression_id" "$placement_id" "$adapter_id" "$request_id" "$session_id" "$user_id")"
+  fi
+
+  echo "$code"
 }
 
 send_rev() {
   local app_id=$1 os=$2 device=$3 fmt=$4
   local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local events="[{\"event_id\":\"$(uuid)\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$app_id\",\"adapter_name\":\"ios_tv_test\",\"revenue_type\":\"impression\",\"revenue_usd\": $(revenue),\"ad_format\":\"$fmt\",\"country_code\":\"US\",\"device_type\":\"$device\",\"os\":\"$os\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$(uuid)\",\"request_id\":\"$(uuid)\",\"timestamp\":\"$now\"}]"
+  local placement_id=$(uuid)
+  local adapter_id=$(uuid)
+  local impression_id=$(uuid)
+  local rev=$(revenue)
+  local events="[{\"event_id\":\"$(uuid)\",\"timestamp\":\"$now\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$app_id\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"ios_tv_test\",\"impression_id\":\"$impression_id\",\"revenue_type\":\"impression\",\"revenue_usd\":$rev,\"revenue_currency\":\"USD\",\"revenue_original\":$rev,\"exchange_rate\":1.0,\"ecpm_usd\":$(revenue),\"country_code\":\"US\",\"ad_format\":\"$fmt\",\"os\":\"$os\",\"is_test_mode\":false,\"reconciliation_status\":\"pending\"}]"
   curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$API_URL/api/v1/analytics/events/revenue" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "X-SDK-Key: $SDK_KEY" \
+    --config "$CURL_CFG_FILE" \
     -d "{\"events\": $events}"
 }
 

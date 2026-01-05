@@ -25,6 +25,12 @@ router.get('/timeseries', authenticateOrApiKey, cache({
   varyBy: ['query.startDate', 'query.endDate', 'query.granularity']
 }), analyticsController.getTimeSeries);
 
+// GET /api/v1/analytics/impressions - Get impressions breakdown
+router.get('/impressions', authenticateOrApiKey, cache({
+  ttl: cacheTTL.medium,
+  varyBy: ['query.startDate', 'query.endDate', 'query.groupBy']
+}), analyticsController.getImpressions);
+
 // GET /api/v1/analytics/performance - Get performance metrics
 router.get('/performance', authenticateOrApiKey, cache({ 
   ttl: cacheTTL.long, // Cache for 30 minutes - more stable data

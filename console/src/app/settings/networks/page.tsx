@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { usePlanAccess } from '@/lib/usePlanAccess';
 
@@ -22,8 +22,32 @@ interface Connection {
   statusMessage?: string;
 }
 
-export default function NetworkSettingsPage() {
+function OAuthCallbackBridge({
+  setSuccess,
+  setError,
+}: {
+  setSuccess: (msg: string) => void;
+  setError: (msg: string) => void;
+}) {
   const searchParams = useSearchParams();
+
+  useEffect(() => {
+    // Check for OAuth callback results
+    const connected = searchParams.get('connected');
+    const errorParam = searchParams.get('error');
+
+    if (connected) {
+      setSuccess(`Successfully connected ${connected}!`);
+    }
+    if (errorParam) {
+      setError(`Connection failed: ${errorParam}`);
+    }
+  }, [searchParams, setError, setSuccess]);
+
+  return null;
+}
+
+export default function NetworkSettingsPage() {
   const { allowed, isLoading: planLoading, plan } = usePlanAccess(['growth', 'scale', 'enterprise']);
   const [networks, setNetworks] = useState<NetworkConfig[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -34,19 +58,6 @@ export default function NetworkSettingsPage() {
   const [syncing, setSyncing] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Check for OAuth callback results
-    const connected = searchParams.get('connected');
-    const errorParam = searchParams.get('error');
-    
-    if (connected) {
-      setSuccess(`Successfully connected ${connected}!`);
-    }
-    if (errorParam) {
-      setError(`Connection failed: ${errorParam}`);
-    }
-  }, [searchParams]);
 
   useEffect(() => {
     if (planLoading || !allowed) {
@@ -200,6 +211,13 @@ export default function NetworkSettingsPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-4xl">
+      <Suspense fallback={null}>
+        <OAuthCallbackBridge
+          setSuccess={(msg) => setSuccess(msg)}
+          setError={(msg) => setError(msg)}
+        />
+      </Suspense>
+
       <div>
         <h1 className="text-xl font-semibold">Network Connections</h1>
         <p className="text-sm text-gray-600">

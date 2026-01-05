@@ -45,6 +45,25 @@ function parseCurrencyAndLocale(req: Request): { currency: string; locale: strin
 
 const DEFAULT_WINDOW_DAYS = 30;
 
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseDateParam(raw: string, kind: 'start' | 'end'): Date | undefined {
+  const trimmed = raw.trim();
+  if (YMD_RE.test(trimmed)) {
+    const [y, m, d] = trimmed.split('-').map((s) => Number.parseInt(s, 10));
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return undefined;
+    const utcStart = new Date(Date.UTC(y, m - 1, d));
+    if (Number.isNaN(utcStart.getTime())) return undefined;
+    // End dates supplied as YYYY-MM-DD are interpreted as inclusive days.
+    // Our DB queries use an exclusive end boundary (observed_at < end), so shift to next-day midnight.
+    return kind === 'end' ? new Date(utcStart.getTime() + 24 * 60 * 60 * 1000) : utcStart;
+  }
+
+  const dt = new Date(trimmed);
+  if (Number.isNaN(dt.getTime())) return undefined;
+  return dt;
+}
+
 function resolveDateRange(req: Request): { ok: true; start: Date; end: Date } | { ok: false; error: string } {
   const startDateRaw = getStringFromQueryValue((req.query as Record<string, QueryValue>).startDate);
   const endDateRaw = getStringFromQueryValue((req.query as Record<string, QueryValue>).endDate);
@@ -52,13 +71,13 @@ function resolveDateRange(req: Request): { ok: true; start: Date; end: Date } | 
   const defaultStart = new Date(now);
   defaultStart.setDate(now.getDate() - DEFAULT_WINDOW_DAYS);
 
-  const start = startDateRaw ? new Date(startDateRaw) : defaultStart;
-  const end = endDateRaw ? new Date(endDateRaw) : now;
+  const start = startDateRaw ? parseDateParam(startDateRaw, 'start') : defaultStart;
+  const end = endDateRaw ? parseDateParam(endDateRaw, 'end') : now;
 
-  if (Number.isNaN(start.getTime())) {
+  if (!start) {
     return { ok: false, error: 'Invalid startDate' };
   }
-  if (Number.isNaN(end.getTime())) {
+  if (!end) {
     return { ok: false, error: 'Invalid endDate' };
   }
   if (start > end) {

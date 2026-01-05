@@ -40,14 +40,16 @@ function resolveCsrfUrl(baseUrl?: string): string {
     return `/api/mock?endpoint=csrf`
   }
 
+  if (typeof window !== 'undefined') {
+    // In the browser, ALWAYS use same-origin (proxied via Next.js).
+    // Using NEXT_PUBLIC_API_URL here breaks CSRF on prod because the CSRF cookie gets
+    // set on the API domain, but the mutating requests go to the console domain.
+    return `${DEFAULT_BACKEND_PREFIX}${AUTH_CSRF_PATH}`
+  }
+
   const envBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '')
   if (envBase) {
     return `${envBase}${AUTH_CSRF_PATH}`
-  }
-
-  if (typeof window !== 'undefined') {
-    // In the browser, prefer the backend CSRF endpoint (proxied via Next.js)
-    return `${DEFAULT_BACKEND_PREFIX}${AUTH_CSRF_PATH}`
   }
 
   throw new CsrfFetchError('Unable to resolve CSRF endpoint URL. Set NEXT_PUBLIC_API_URL for server-side calls.')

@@ -69,8 +69,12 @@ test.describe('Console LIVE — login with dummy user', () => {
     // The compression issue is blocking us. Let's use a simpler approach:
     // Make the API call directly to backend to bypass Next.js compression
     console.log('Authenticating via backend API directly...')
-    
-    const authResult = await page.evaluate(async ({ email, password }) => {
+
+    type AuthResult =
+      | { success: true; token: string; userId: string; publisherId: string; email: string }
+      | { success: false; error: string }
+
+    const authResult = await page.evaluate<AuthResult, { email: string; password: string }>(async ({ email, password }) => {
       return new Promise((resolve) => {
         try {
           const xhr = new XMLHttpRequest()

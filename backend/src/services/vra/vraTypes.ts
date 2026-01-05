@@ -1,6 +1,6 @@
 export interface ReconOverviewParams {
   appId?: string;
-  publisherId?: string;
+  publisherId: string;
   from?: string; // ISO date
   to?: string;   // ISO date
 }
@@ -47,6 +47,7 @@ export interface ReconDeltaItem {
 }
 
 export interface ReconDeltaQuery {
+  publisherId: string;
   appId?: string;
   from?: string;
   to?: string;

@@ -157,6 +157,14 @@ export default function ReconDashboardPage() {
           </p>
         </div>
 
+        <div className="rounded-md border bg-white p-4 mb-6" data-testid="recon-setup-expected">
+          <div className="text-xs text-gray-500 uppercase">Expected Revenue</div>
+          <div className="text-2xl font-semibold mt-1">
+            ${(overview?.totals?.expected || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">From SDK events (last 7 days)</p>
+        </div>
+
         <div className="rounded-md border bg-white p-6 mb-6">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

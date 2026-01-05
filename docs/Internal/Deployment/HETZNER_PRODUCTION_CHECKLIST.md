@@ -19,22 +19,23 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 >
 > | Service | Production Path | Process Manager |
 > |---------|-----------------|-----------------|
-> | Backend | `/opt/adproject/backend` | Docker |
-> | Console | `/opt/adproject/console` | Docker |
+> | Backend | `/opt/adproject/backend` | PM2 |
+> | Console | `/opt/adproject/console` | PM2 |
 > | Website | `/opt/adproject/website` | PM2 |
 > | Control Plane | `/opt/adproject/control-plane` | systemd |
 >
 > **Deployment commands MUST use `/opt/adproject` as the target.**
 
-## Current Production Status (2025-12-17)
+## Current Production Status (2026-01-03)
 
 | Component | Status | Port | Details |
 |-----------|--------|------|---------|
-| Backend API | ✅ Running | 8080 | PostgreSQL/Redis/Queues UP |
-| Console Frontend | ✅ Running | 3000 | Next.js standalone |
+| Backend API | ✅ Running | 8080 | PM2 (Node) |
+| Console Frontend | ✅ Running | 3000 | PM2 (Next.js standalone) |
 | Website | ✅ Running | 3002 | Marketing site (Grafana uses 3001) |
 | **Control Plane** | ✅ Running | 4000 | Systemd service, IP-restricted |
 | PostgreSQL 16 | ✅ Running | 5432 | DB Server (system service, not Docker) |
+| PgBouncer | ✅ Running | 6432 | App Server (system service) |
 | Redis | ✅ Running | 6379 | App Server (system service, not Docker) |
 | Caddy | ✅ Running | 80/443 | Auto Let's Encrypt for all domains |
 | Prometheus | ✅ Running | 9090 | Monitoring |
@@ -45,8 +46,8 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Hostname | Service | Local Port | Process |
 |----------|---------|------------|---------|
 | `admin.apexmediation.ee` | Control Plane (Admin) | 4000 | systemd |
-| `api.apexmediation.ee` | Backend API | 8080 | Docker/PM2 (deployment-dependent) |
-| `console.apexmediation.ee` | Console (Customer) | 3000 | Docker/PM2 (deployment-dependent) |
+| `api.apexmediation.ee` | Backend API | 8080 | PM2 |
+| `console.apexmediation.ee` | Console (Customer) | 3000 | PM2 |
 | `apexmediation.ee` / `www.apexmediation.ee` | Website | 3002 | PM2 |
 
 > **Rule:** `admin.*` MUST route ONLY to port 4000. Never proxy admin UI paths to the customer console.
@@ -64,18 +65,20 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 
 The following user is configured with `admin` role for production verification:
 
-| Role | Email | Password |
-|------|-------|----------|
-| Admin | `sales@apexmediation.ee` | `&&Pw20354491` |
+| Role | Email |
+|------|-------|
+| Admin | `sales@apexmediation.ee` |
 
-> **Note:** This user is linked to "Apex Dummy Publisher" and has full access to the console.
+> **Credentials:** Stored in the team password manager / secret store (do not hard-code passwords in this runbook).
 
 
 > **⚠️ Important Notes:**
 > - **PostgreSQL runs on DB Server (77.42.44.35)** as a system service - NOT on App Server, NOT in Docker
 > - **Redis runs on App Server** as a system service - NOT in Docker
+> - **PgBouncer runs on App Server** as a system service (port 6432)
 > - Backend queries PostgreSQL remotely via `DATABASE_URL` pointing to DB Server
-> - Use `infrastructure/docker/docker-compose.hetzner.yml` to avoid port conflicts
+> - Monitoring stack runs in Docker; product services run via PM2/systemd
+> - Use `infrastructure/docker/docker-compose.hetzner.yml` (and/or `/opt/adproject/docker-compose.hetzner.yml` on-server) for monitoring containers
 > - Website runs on port **3002** (Grafana uses 3001)
 > - Control Plane runs as **systemd service** on port **4000**
 > - **admin.apexmediation.ee → Control Plane (port 4000)** - completely separate from Console
@@ -84,6 +87,125 @@ The following user is configured with `admin` role for production verification:
 > **Operator Access:** The Control Plane at `https://admin.apexmediation.ee` provides operator telemetry and actions.
 > Access requires IP allowlisting and separate operator authentication.
 > See [Control Plane Architecture](../../Architecture/CONTROL_PLANE.md) for details.
+
+---
+
+## Pipeline Sanity Checks (Analytics + Billing)
+
+Use these whenever “data looks stale” or after deploying ingestion/billing changes.
+
+### A) Synthetic traffic sources (test server)
+
+```bash
+# Confirm synthetic harness services are running
+./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; \
+  systemctl is-active web-sdk-harness.service ios-tv-api-harness.service slo-continuous.service; \
+  echo; \
+  systemctl status web-sdk-harness.service --no-pager -n 8; \
+  echo; \
+  systemctl status ios-tv-api-harness.service --no-pager -n 8; \
+  echo; \
+  systemctl status slo-continuous.service --no-pager -n 8"
+```
+
+### B) Analytics ingestion (DB facts + stage drain)
+
+```bash
+# Facts should have a fresh max(observed_at), and stage should be ~0 (draining)
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; sudo -u postgres psql -d adproject -At -c \
+\"SELECT 'impressions_fact' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_impressions
+  WHERE observed_at > now() - interval '30 minutes'
+UNION ALL
+SELECT 'impressions_stage' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_impressions_stage
+  WHERE observed_at > now() - interval '30 minutes'
+UNION ALL
+SELECT 'clicks_fact' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_clicks
+  WHERE observed_at > now() - interval '30 minutes'
+UNION ALL
+SELECT 'clicks_stage' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_clicks_stage
+  WHERE observed_at > now() - interval '30 minutes'
+UNION ALL
+SELECT 'revenue_events' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_revenue_events
+  WHERE observed_at > now() - interval '30 minutes'
+UNION ALL
+SELECT 'revenue_stage' AS k, count(*) AS n, max(observed_at) AS max_ts
+  FROM analytics_revenue_events_stage
+  WHERE observed_at > now() - interval '30 minutes';\""
+```
+
+Optional attribution sanity check:
+
+```bash
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; sudo -u postgres psql -d adproject -At -c \
+\"SELECT publisher_id, count(*) AS clicks_20m
+  FROM analytics_clicks
+  WHERE observed_at > now() - interval '20 minutes'
+  GROUP BY publisher_id
+  ORDER BY clicks_20m DESC;\""
+```
+
+Optional backend liveness/status probe (from app server):
+
+```bash
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; \
+  for path in /health /api/v1/status.json /api/v1/status; do \
+    code=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080\$path || true); \
+    echo \"\$path -> \$code\"; \
+  done"
+```
+
+### C) Billing pipeline (tables + config smoke)
+
+Billing tables may legitimately be empty until the first customer subscription/payment activity occurs.
+
+Confirm billing routes exist (expect 401/403 without auth; 404 would indicate missing routes):
+
+```bash
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; \
+  for path in /api/v1/billing/usage/current /api/v1/billing/invoices /api/v1/billing/subscription; do \
+    code=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080\$path || true); \
+    echo \"\$path -> \$code\"; \
+  done"
+```
+
+```bash
+# Presence + latest timestamps (should be non-error; may still be empty)
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; sudo -u postgres psql -d adproject -At -c \
+\"SELECT 'invoices' AS t, count(*)::bigint AS n, max(created_at) AS max_created, max(updated_at) AS max_updated, max(paid_at) AS max_paid FROM invoices
+UNION ALL
+SELECT 'payment_reconciliations' AS t, count(*)::bigint AS n, max(created_at) AS max_created, max(resolved_at) AS max_updated, NULL::timestamptz AS max_paid FROM payment_reconciliations
+UNION ALL
+SELECT 'payment_failures' AS t, count(*)::bigint AS n, max(created_at) AS max_created, max(resolved_at) AS max_updated, max(next_retry_at) AS max_paid FROM payment_failures
+UNION ALL
+SELECT 'billing_audit_trail' AS t, count(*)::bigint AS n, max(created_at) AS max_created, max(timestamp) AS max_updated, NULL::timestamptz AS max_paid FROM billing_audit_trail
+UNION ALL
+SELECT 'billing_idempotency' AS t, count(*)::bigint AS n, max(created_at) AS max_created, NULL::timestamptz AS max_updated, NULL::timestamptz AS max_paid FROM billing_idempotency;\""
+```
+
+Optional Stripe connectivity check (read-only, no secrets printed):
+
+```bash
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; \
+  node -e \"require('dotenv').config({ path: '/opt/adproject/.env' }); \
+    const key=process.env.STRIPE_SECRET_KEY||''; \
+    const mode=key.startsWith('sk_live_')?'live':(key.startsWith('sk_test_')?'test':(key.length?'unknown':'missing')); \
+    console.log('stripe_key_mode='+mode); \
+    if (key.length===0) process.exit(0); \
+    const Stripe=require('stripe'); \
+    (async()=>{ const stripe=new Stripe(key,{apiVersion:'2023-10-16'}); const acct=await stripe.accounts.retrieve(); console.log('stripe_ok=true'); console.log('stripe_account_id='+acct.id); })().catch(e=>{ console.log('stripe_ok=false'); console.log('stripe_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
+```
+
+If you suspect billing is misconfigured, check backend logs for Stripe config errors (no secrets printed):
+
+```bash
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; (pm2 logs backend --lines 2000 --nostream --raw 2>/dev/null || true) | \
+  grep -F 'Stripe secret key not configured' | tail -n 20 || true"
+```
 
 ---
 
@@ -179,7 +301,7 @@ The following user is configured with `admin` role for production verification:
 ### 2.1 App Server (46.62.252.96)
 
 Prerequisites:
-- [x] Ubuntu 22.04 LTS
+- [x] Ubuntu 24.04 LTS
 - [x] Non-root user disabled (using root with SSH key)
 - [x] Docker & Docker Compose installed
 - [x] UFW configured: 22, 80, 443
@@ -195,7 +317,7 @@ Services running:
 ### 2.2 DB Server (77.42.44.35)
 
 Prerequisites:
-- [x] Ubuntu 22.04 LTS
+- [x] Ubuntu 24.04 LTS
 - [x] PostgreSQL 16 installed as system service
 - [x] Firewall: Allow PostgreSQL from App Server only
 
@@ -233,39 +355,76 @@ Database:
 ./scripts/ops/hetzner_ssh.sh test -- "hostname && uptime"
 ```
 
-### 3.2 Direct SSH
+### 3.2 Ops Scripts (Recommended)
+
+These scripts live under `scripts/ops/` in this repo and are designed to be idempotent and production-safe.
+
+- `scripts/ops/hetzner_ssh.sh`
+  - SSH wrapper for Hetzner app/db/test servers.
+  - DB access always goes through the app server (ProxyJump) by design.
+- `scripts/ops/hetzner_enable_pitr.sh`
+  - Ensures PITR-quality backups on the DB server:
+    - Daily physical base backups under `/var/backups/postgresql/base/`
+    - Enforces archived WAL retention to ~30 hours (>=24h)
+    - WAL growth minimized (UNLOGGED high-churn staging tables + `wal_compression=lz4`)
+    - Also reconciles common legacy WAL-prune cron jobs so they do not shorten the PITR window; always verify effective retention.
+- `scripts/ops/hetzner_measure_wal_rate.sh`
+  - Measures the *true* current WAL generation rate via `pg_stat_wal` delta and shows recent archive churn.
+- `scripts/ops/hetzner_enable_transparency.sh`
+  - Enables Transparency API and ensures required tables exist (team + transparency) on production.
+  - Restarts backend safely (PM2 if present; docker-compose fallback).
+
+### 3.3 Direct SSH
 
 ```bash
 # App server
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
-# Database server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+# Database server (via app server jump host)
+ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 ```
 
 ---
 
 ## 4. Service Management
 
-### 4.1 Docker Services (App Server)
+### 4.1 PM2 Services (App Server)
+
+The product services (backend/console/website) run under PM2 on the app server.
+
+```bash
+pm2 ls
+
+pm2 logs backend --lines 200
+pm2 logs console --lines 200
+pm2 logs website --lines 200
+
+pm2 restart backend
+pm2 restart console
+pm2 restart website
+```
+
+### 4.2 Docker Services (App Server)
+
+Docker is primarily used for the monitoring stack (Grafana/Prometheus/Alertmanager/exporters).
 
 ```bash
 # View running containers
 docker ps
 
 # View logs
-docker logs backend -f --tail 100
-docker logs console -f --tail 100
+docker logs grafana -f --tail 100
+docker logs prometheus -f --tail 100
 
-# Restart services
-docker compose restart backend
-docker compose restart console
+# Restart monitoring services
+docker compose -f /opt/adproject/infrastructure/docker/docker-compose.hetzner.yml restart
 
 # Full stack restart
-docker compose down && docker compose up -d
+docker compose -f /opt/adproject/infrastructure/docker/docker-compose.hetzner.yml down && \
+  docker compose -f /opt/adproject/infrastructure/docker/docker-compose.hetzner.yml up -d
 ```
 
-### 4.2 PostgreSQL (DB Server)
+### 4.3 PostgreSQL (DB Server)
 
 ```bash
 # Check status
@@ -279,11 +438,11 @@ sudo -u postgres psql -d adproject -c "SELECT COUNT(*) FROM users;"
 sudo -u postgres psql -d adproject -c "SELECT name, enabled FROM adapter_configs ORDER BY name;"
 ```
 
-### 4.3 Redis (App Server)
+### 4.4 Redis (App Server)
 
 ```bash
 # Check status
-systemctl status redis
+systemctl status redis-server
 
 # Connect (with password)
 redis-cli -a <password>
@@ -427,6 +586,25 @@ All targets should show UP status at `/targets`:
 # - For exceptional one-off schema changes, use a scripted, explicit migration runner ("--only")
 #   rather than executing SQL manually.
 
+# Analytics ingestion drift check (read-only):
+#
+# These relations must exist for production ingestion to persist events:
+# - analytics_impressions / analytics_clicks / analytics_revenue_events
+# - analytics_impressions_stage / analytics_clicks_stage / analytics_revenue_events_stage
+#
+# Safe check (read-only):
+./scripts/ops/hetzner_ssh.sh db -- "sudo -u postgres psql -d adproject -P pager=off -At -c \"\
+  SELECT 'analytics_impressions=' || COALESCE(to_regclass('analytics_impressions')::text,'MISSING');\
+  SELECT 'analytics_clicks=' || COALESCE(to_regclass('analytics_clicks')::text,'MISSING');\
+  SELECT 'analytics_revenue_events=' || COALESCE(to_regclass('analytics_revenue_events')::text,'MISSING');\
+  SELECT 'analytics_impressions_stage=' || COALESCE(to_regclass('analytics_impressions_stage')::text,'MISSING');\
+  SELECT 'analytics_clicks_stage=' || COALESCE(to_regclass('analytics_clicks_stage')::text,'MISSING');\
+  SELECT 'analytics_revenue_events_stage=' || COALESCE(to_regclass('analytics_revenue_events_stage')::text,'MISSING');\
+\""
+
+# If drift is detected, apply the explicit migration from the backend repo:
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; npm ci --silent; npm run migrate -- --only 20260105_000100_analytics_drift_repair"
+
 # (Optional verification) Check backend logs for:
 # - "Analytics rollups: ensuring rollup tables exist"
 ```
@@ -435,24 +613,84 @@ All targets should show UP status at `/targets`:
 
 PostgreSQL backups and PITR hygiene are configured on the DB server via cron.
 
-One-time (idempotent) install on DB server:
+There are two layers of backup automation in production:
+
+1) **Legacy logical dumps** (pg_dump custom format)
+- Script: `/usr/local/bin/pg_backup_apex.sh`
+- Cron: `/etc/cron.d/apex-pg-backup` (daily)
+- Output:
+  - `/var/backups/postgresql/daily/*.dump`
+  - `/var/backups/postgresql/weekly/*.dump` (Sundays)
+
+2) **PITR (physical base backups + WAL archives)**
+- Ensured by running `scripts/ops/hetzner_enable_pitr.sh` from this repo (idempotent).
+- Output:
+  - Base backups: `/var/backups/postgresql/base/base_YYYY-MM-DD.tar.gz` (daily)
+  - Archived WAL: `/var/backups/postgresql/wal/` (target: kept ~30h)
+
+> **Important:** Existing cron jobs (e.g. `apex-postgres-backup-retention`) can override WAL retention.
+> Always verify the effective prune window after any changes.
+
+Run/verify (recommended):
 
 ```bash
-# SSH to DB server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+# Enforce PITR-quality setup (idempotent)
+./scripts/ops/hetzner_enable_pitr.sh
 
-# Install automation (installs /usr/local/bin scripts + /etc/cron.d/apex-postgres)
-/opt/adproject/infrastructure/database/install_db_automation.sh
-
-# Verify backups are being produced
-ls -la /var/backups/postgresql/daily/
-tail -n 50 /var/log/postgresql/backup.log
+# Verify (no secrets)
+./scripts/ops/hetzner_ssh.sh db -- "du -sh /var/backups/postgresql/base /var/backups/postgresql/wal /var/backups/postgresql/daily /var/backups/postgresql/weekly || true"
+./scripts/ops/hetzner_ssh.sh db -- "sudo -u postgres psql -d adproject -P pager=off -At -c \"select pg_size_pretty(pg_database_size('adproject'));\""
+./scripts/ops/hetzner_measure_wal_rate.sh 300
 ```
+
+PITR restore procedure: [docs/PITR_RECOVERY.md](../../PITR_RECOVERY.md)
+
+#### PITR Drill / Verification Checklist (Recommended)
+
+Goal: ensure PITR is *actually* possible for >=24h (effective retention), and that the restore procedure is still valid.
+
+1) Verify backups exist (on DB server):
+
+```bash
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; \
+  echo '== base backups =='; \
+  ls -1t /var/backups/postgresql/base/base_*.tar.gz 2>/dev/null | head -n 5 || true; \
+  echo; \
+  echo '== WAL archive size =='; \
+  du -sh /var/backups/postgresql/wal 2>/dev/null || true"
+```
+
+2) Verify the *effective* WAL retention window (watch out for multiple cron jobs):
+
+```bash
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; \
+  echo '== cron (adproject) =='; \
+  ls -la /etc/cron.d/adproject-pitr /etc/cron.d/adproject-wal-retention 2>/dev/null || true; \
+  echo; \
+  echo '== cron (legacy, if present) =='; \
+  ls -la /etc/cron.d/apex-postgres-backup-retention 2>/dev/null || true; \
+  echo; \
+  echo '== WAL oldest/newest timestamps =='; \
+  if [[ -d /var/backups/postgresql/wal ]]; then \
+    find /var/backups/postgresql/wal -type f -name '0000*' -printf '%TY-%Tm-%TdT%TH:%TM:%TSZ %p\\n' 2>/dev/null | sort | { head -n 1; tail -n 1; } || true; \
+  fi"
+```
+
+3) Sanity-check current WAL generation rate (authoritative):
+
+```bash
+./scripts/ops/hetzner_measure_wal_rate.sh 300
+```
+
+4) Perform a restore drill in a *non-production* environment using the documented procedure:
+
+- Follow: [docs/PITR_RECOVERY.md](../../PITR_RECOVERY.md)
+- Record the drill outcome (RPO/RTO, any deviations) in the ops evidence folder.
 
 ### 7.3 Table Counts
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adproject -c \"
+./scripts/ops/hetzner_ssh.sh db -- "sudo -u postgres psql -d adproject -c \"
   SELECT schemaname, COUNT(*) as tables
   FROM pg_tables
   WHERE schemaname = 'public'
@@ -469,8 +707,8 @@ ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35 "sudo -u postgres psql -d adprojec
 > 2. **Rsync** - Good for pre-built artifacts
 > 3. **Tarball** - Fallback method
 >
-> Use `docker-compose.hetzner.yml` (not `docker-compose.yml`) as it excludes Postgres/Redis containers
-> (they run as system services).
+> Note: Docker compose on the app server is primarily used for the monitoring stack.
+> The product services (backend/console/website) run via PM2/systemd.
 
 ### 8.0 Git-Based Deployment (Recommended)
 
@@ -539,8 +777,16 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 cd /opt/adproject
 tar -xzvf deploy.tar.gz
-docker compose -f docker-compose.hetzner.yml build backend console
-docker compose -f docker-compose.hetzner.yml up -d backend console
+
+cd /opt/adproject/backend
+npm ci
+npm run build
+pm2 restart backend
+
+cd /opt/adproject/console
+npm ci
+npm run build
+pm2 restart console
 
 cd /opt/adproject/website
 npm ci
@@ -571,8 +817,10 @@ scp -i ~/.ssh/hetzner-db-mac /tmp/backend-deploy.tar.gz root@46.62.252.96:/opt/a
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd /opt/adproject
 tar -xzvf backend-deploy.tar.gz
-docker compose -f docker-compose.hetzner.yml build backend
-docker compose -f docker-compose.hetzner.yml up -d backend
+cd /opt/adproject/backend
+npm ci
+npm run build
+pm2 restart backend
 
 # Verify health
 curl http://localhost:8080/health
@@ -590,8 +838,10 @@ scp -i ~/.ssh/hetzner-db-mac /tmp/console-deploy.tar.gz root@46.62.252.96:/opt/a
 ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 cd /opt/adproject
 tar -xzvf console-deploy.tar.gz
-docker compose -f docker-compose.hetzner.yml build console
-docker compose -f docker-compose.hetzner.yml up -d console
+cd /opt/adproject/console
+npm ci
+npm run build
+pm2 restart console
 
 curl -I http://localhost:3000
 ```
@@ -723,8 +973,11 @@ systemctl status control-plane
 | File | Purpose | Use When |
 |------|---------|----------|
 | `docker-compose.yml` | Local development | Running locally with Docker Postgres/Redis |
-| `docker-compose.hetzner.yml` | Production | Hetzner server (excludes Postgres/Redis) |
+| `docker-compose.hetzner.yml` | Production (legacy) | Present on-server; not used for product services in current setup |
 | `docker-compose.dev.yml` | Dev overlay | Local development with volume mounts |
+
+Monitoring stack (Grafana/Prometheus/exporters) uses:
+- `infrastructure/docker/docker-compose.hetzner.yml`
 
 ---
 
@@ -742,7 +995,7 @@ cd /opt/adproject
 # Rollback uses a previously known-good tarball (production server has no git).
 # Re-upload the older tarball and repeat the relevant deploy steps in Section 8.
 # Then restart only the affected service:
-# - backend/console: docker compose -f docker-compose.hetzner.yml up -d --build <svc>
+# - backend/console/website: pm2 restart <svc>
 # - website: pm2 restart website
 
 # Verify
@@ -752,19 +1005,21 @@ curl https://api.apexmediation.ee/health
 ### 9.2 Database Rollback
 
 ```bash
-# SSH to DB server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+# SSH to DB server (via app server)
+./scripts/ops/hetzner_ssh.sh db
 
-# Backups are in pg_dump custom format (.dump)
+# Logical backups are in pg_dump custom format (.dump)
 ls -la /var/backups/postgresql/daily/
+
+# Physical base backups (for PITR) are in:
+# /var/backups/postgresql/base/
 
 # Recommended: restore into a new database first
 sudo -u postgres createdb adproject_restore
 sudo -u postgres pg_restore -d adproject_restore /var/backups/postgresql/daily/<backup_file>.dump
-
-# PITR restore procedure (when required) is documented here:
-# docs/Internal/Architecture/PITR_RECOVERY.md
 ```
+
+PITR restore procedure (when required): [docs/PITR_RECOVERY.md](../../PITR_RECOVERY.md)
 
 ---
 
@@ -971,6 +1226,7 @@ Key points:
 - Runs from a separate test server: 157.90.126.205
 - Managed operationally the same way as the App Server (same SSH key/process conventions)
 - Exercises: analytics ingestion, status/slo endpoints, and a minimal SSAI session path
+- NO test harness code runs on the App Server. The App Server only runs the normal product services.
 - Data is ingested and treated as REAL production data (tied to a designated dummy publisher and its apps)
 - MUST be disabled once sufficient customer data is present (see 13.5)
 
@@ -1017,6 +1273,12 @@ The runner performs cycles of:
 - Warming public endpoints: `/api/v1/status.json`, `/api/v1/slo.json`
 - Synthetic analytics load via `scripts/ops/vra_synthetic_load.sh`
 - Minimal SSAI smoke: creates an SSAI session and attempts to fetch a manifest (non-fatal)
+
+Important constraints (do not violate):
+- The synthetic generator MUST run only on the Test Server. Do not run these scripts on the App Server.
+- The generator MUST use the same public ingestion routes used by real SDKs: `/api/v1/analytics/events/*`.
+- Events MUST be sent with `is_test_mode=false` so they are included in production analytics rollups and reporting.
+- The App Server must keep analytics rollups enabled (default) so synthetic events appear in Console and power VRA inputs.
 
 ### 13.4 Systemd (Recommended) or Cron Setup
 
@@ -1087,6 +1349,7 @@ Prerequisites for the dummy publisher account (must be completed once):
 Monitoring and checks:
 - Grafana SLO dashboards should show steady, non-zero activity during synthetic runs.
 - Website SLO page (`/slo`) must render populated metrics; `/status` should show an UP state.
+- Console (dummy publisher) should show non-zero data in dashboard/analytics, sourced from normal `/api/v1/revenue/*` APIs.
 
 ### 13.7 Operational Notes – Recording Test App Downtime
 

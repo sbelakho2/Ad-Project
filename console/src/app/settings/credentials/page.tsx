@@ -80,7 +80,7 @@ export default function CredentialsPage() {
       setLoading(true)
       setError(null)
       const response = await byoApi.listCredentials()
-      setCredentials(response.data.credentials)
+      setCredentials(Array.isArray(response.data?.credentials) ? response.data.credentials : [])
     } catch (err: any) {
       setError(err.message || 'Failed to load credentials')
     } finally {

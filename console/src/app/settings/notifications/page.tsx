@@ -141,19 +141,24 @@ export default function NotificationsSettingsPage() {
 
   useEffect(() => {
     if (data) {
+      const emailAlerts = data.emailAlerts ?? { enabled: false, recipients: [], events: [] }
+      const slackIntegration = data.slackIntegration ?? { enabled: false, webhookUrl: undefined, channel: undefined, events: [] }
+      const webhooks = data.webhooks ?? { enabled: false, endpoints: [] }
+      const digest = data.digest ?? { enabled: false, frequency: 'weekly' as const, recipients: [] }
+
       form.reset({
-        emailEnabled: data.emailAlerts.enabled,
-        emailRecipients: data.emailAlerts.recipients.join(', '),
-        emailEvents: data.emailAlerts.events,
-        slackEnabled: data.slackIntegration.enabled,
-        slackWebhook: data.slackIntegration.webhookUrl ?? '',
-        slackChannel: data.slackIntegration.channel ?? '',
-        slackEvents: data.slackIntegration.events,
-        webhooksEnabled: data.webhooks.enabled,
-        webhookEndpoints: data.webhooks.endpoints || [],
-        digestEnabled: data.digest.enabled,
-        digestFrequency: data.digest.frequency,
-        digestRecipients: data.digest.recipients.join(', '),
+        emailEnabled: Boolean(emailAlerts.enabled),
+        emailRecipients: (Array.isArray(emailAlerts.recipients) ? emailAlerts.recipients : []).join(', '),
+        emailEvents: Array.isArray(emailAlerts.events) ? emailAlerts.events : [],
+        slackEnabled: Boolean(slackIntegration.enabled),
+        slackWebhook: slackIntegration.webhookUrl ?? '',
+        slackChannel: slackIntegration.channel ?? '',
+        slackEvents: Array.isArray(slackIntegration.events) ? slackIntegration.events : [],
+        webhooksEnabled: Boolean(webhooks.enabled),
+        webhookEndpoints: Array.isArray(webhooks.endpoints) ? webhooks.endpoints : [],
+        digestEnabled: Boolean(digest.enabled),
+        digestFrequency: digest.frequency ?? 'weekly',
+        digestRecipients: (Array.isArray(digest.recipients) ? digest.recipients : []).join(', '),
       })
     }
   }, [data, form])

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { placementApi, adapterApi } from '@/lib/api'
 import { formatNumber } from '@/lib/utils'
+import type { Adapter } from '@/types'
 import {
   ArrowLeft,
   Edit,
@@ -38,7 +39,10 @@ export default function PlacementDetailPage({ params }: PageProps) {
     },
   })
 
-  const { data: adapters, isLoading: adaptersLoading, isError: adaptersError, error: adaptersErrorObj } = useQuery({
+  const { data: adapters, isLoading: adaptersLoading, isError: adaptersError, error: adaptersErrorObj } = useQuery<
+    Adapter[],
+    Error
+  >({
     queryKey: ['adapters', id],
     queryFn: async () => {
       const { data } = await adapterApi.list(id)

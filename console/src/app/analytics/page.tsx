@@ -29,7 +29,7 @@ export default function AnalyticsPage() {
     startDate: defaultStart,
     endDate: today,
   })
-  const [granularity, setGranularity] = useState<'hour' | 'day' | 'week' | 'month'>('day')
+  const [granularity, setGranularity] = useState<'hour' | 'day'>('day')
   const locale = useMemo(() => getLocale(), [])
   const chartDateFormatter = useMemo(
     () =>
@@ -110,7 +110,7 @@ export default function AnalyticsPage() {
   }
 
   const chartData = useMemo(() => {
-    if (!timeSeries) return []
+    if (!Array.isArray(timeSeries) || timeSeries.length === 0) return []
     return timeSeries.map((item) => {
       const parsedDate = new Date(item.date)
       return {
@@ -130,7 +130,7 @@ export default function AnalyticsPage() {
   }
 
   const handleExportReport = () => {
-    if (!timeSeries?.length || !summary) return
+    if (!Array.isArray(timeSeries) || timeSeries.length === 0 || !summary) return
 
     const rows = [
       ['Date', 'Revenue', 'Impressions', 'Clicks', 'eCPM', 'Fill Rate'],
@@ -365,7 +365,7 @@ export default function AnalyticsPage() {
               Revenue Trend
             </h2>
             <div className="flex gap-2">
-              {(['day', 'week', 'month'] as const).map((g) => (
+              {(['hour', 'day'] as const).map((g) => (
                 <button
                   key={g}
                   onClick={() => setGranularity(g)}

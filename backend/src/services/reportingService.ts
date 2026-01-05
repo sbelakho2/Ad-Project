@@ -11,7 +11,16 @@ import logger from '../utils/logger';
 const REPORTING_SLOW_QUERY_MS = parseInt(process.env.REPORTING_SLOW_QUERY_MS || '200', 10);
 const REPORTING_CAPTURE_EXPLAIN = process.env.REPORTING_CAPTURE_EXPLAIN !== '0';
 
+// Prefer rollups for history, but compute the most recent window from raw fact tables
+// to avoid dashboards appearing stale when rollups run infrequently.
+const REPORTING_RECENT_RAW_DAYS = Math.max(0, parseInt(process.env.REPORTING_RECENT_RAW_DAYS || '2', 10));
+
 const formatUtcDate = (d: Date): string => d.toISOString().slice(0, 10);
+
+const startOfUtcDayFromYmd = (ymd: string): Date => new Date(`${ymd}T00:00:00.000Z`);
+
+const maxDate = (a: Date, b: Date): Date => (a.getTime() >= b.getTime() ? a : b);
+const minDate = (a: Date, b: Date): Date => (a.getTime() <= b.getTime() ? a : b);
 
 const rollupTableExists = async (tableName: string): Promise<boolean> => {
   try {
@@ -203,30 +212,116 @@ class ReportingServiceImpl implements ReportingService {
     try {
       // Prefer rollups when present (faster + allows raw fact retention to be reduced safely).
       if (await rollupTableExists('analytics_metrics_rollups')) {
-        const sql = `
-          SELECT
-            COALESCE(SUM(total_revenue), 0) AS total_revenue,
-            COALESCE(SUM(impression_count), 0) AS total_impressions,
-            COALESCE(SUM(click_count), 0) AS total_clicks,
-            COALESCE(SUM(filled_count), 0) AS total_filled
-          FROM analytics_metrics_rollups
-          WHERE publisher_id = $1
-            AND bucket_date >= $2::date
-            AND bucket_date < $3::date
-        `;
+        const splitDay = formatUtcDate(
+          new Date(endDate.getTime() - REPORTING_RECENT_RAW_DAYS * 24 * 60 * 60 * 1000)
+        );
+        const splitTs = startOfUtcDayFromYmd(splitDay);
 
-        const result = await runQuery<{
-          total_revenue: string;
-          total_impressions: string;
-          total_clicks: string;
-          total_filled: string;
-        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate)], 'REPORTING_OVERVIEW_ROLLUPS');
+        const rollupEndExclusive = minDate(endDate, splitTs);
+        const rollupStartDay = formatUtcDate(startDate);
+        const rollupEndDay = formatUtcDate(rollupEndExclusive);
 
-        const row = result[0] ?? { total_revenue: '0', total_impressions: '0', total_clicks: '0', total_filled: '0' };
-        const totalImpressions = Number.parseInt(row.total_impressions);
-        const totalClicks = Number.parseInt(row.total_clicks);
-        const totalFilled = Number.parseInt(row.total_filled);
-        const totalRevenue = Number.parseFloat(row.total_revenue);
+        let rollupRevenue = 0;
+        let rollupImpressions = 0;
+        let rollupClicks = 0;
+        let rollupFilled = 0;
+
+        if (rollupStartDay < rollupEndDay) {
+          const rollupSql = `
+            SELECT
+              COALESCE(SUM(total_revenue), 0) AS total_revenue,
+              COALESCE(SUM(impression_count), 0) AS total_impressions,
+              COALESCE(SUM(click_count), 0) AS total_clicks,
+              COALESCE(SUM(filled_count), 0) AS total_filled
+            FROM analytics_metrics_rollups
+            WHERE publisher_id = $1
+              AND bucket_date >= $2::date
+              AND bucket_date < $3::date
+          `;
+
+          const rollupResult = await runQuery<{
+            total_revenue: string;
+            total_impressions: string;
+            total_clicks: string;
+            total_filled: string;
+          }>(rollupSql, [publisherId, rollupStartDay, rollupEndDay], 'REPORTING_OVERVIEW_ROLLUPS');
+
+          const rollupRow = rollupResult[0] ?? {
+            total_revenue: '0',
+            total_impressions: '0',
+            total_clicks: '0',
+            total_filled: '0',
+          };
+
+          rollupRevenue = Number.parseFloat(rollupRow.total_revenue);
+          rollupImpressions = Number.parseInt(rollupRow.total_impressions);
+          rollupClicks = Number.parseInt(rollupRow.total_clicks);
+          rollupFilled = Number.parseInt(rollupRow.total_filled);
+        }
+
+        const rawStart = maxDate(startDate, splitTs);
+        let rawRevenue = 0;
+        let rawImpressions = 0;
+        let rawClicks = 0;
+        let rawFilled = 0;
+
+        if (rawStart.getTime() < endDate.getTime()) {
+          const rawSql = `
+            WITH
+              imp AS (
+                SELECT
+                  COUNT(*)::bigint AS impressions,
+                  COUNT(*) FILTER (WHERE filled IS TRUE)::bigint AS filled
+                FROM analytics_impressions
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+              ),
+              clk AS (
+                SELECT COUNT(*)::bigint AS clicks
+                FROM analytics_clicks
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+              ),
+              rev AS (
+                SELECT COALESCE(SUM(revenue_usd), 0) AS revenue
+                FROM analytics_revenue_events
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+              )
+            SELECT
+              rev.revenue::text AS revenue,
+              imp.impressions::text AS impressions,
+              clk.clicks::text AS clicks,
+              imp.filled::text AS filled
+            FROM imp
+            CROSS JOIN clk
+            CROSS JOIN rev
+          `;
+
+          const rawResult = await runQuery<{
+            revenue: string;
+            impressions: string;
+            clicks: string;
+            filled: string;
+          }>(rawSql, [publisherId, rawStart, endDate], 'REPORTING_OVERVIEW_RAW_RECENT');
+
+          const rawRow = rawResult[0] ?? { revenue: '0', impressions: '0', clicks: '0', filled: '0' };
+          rawRevenue = Number.parseFloat(rawRow.revenue);
+          rawImpressions = Number.parseInt(rawRow.impressions);
+          rawClicks = Number.parseInt(rawRow.clicks);
+          rawFilled = Number.parseInt(rawRow.filled);
+        }
+
+        const totalRevenue = (Number.isFinite(rollupRevenue) ? rollupRevenue : 0) + (Number.isFinite(rawRevenue) ? rawRevenue : 0);
+        const totalImpressions = (Number.isFinite(rollupImpressions) ? rollupImpressions : 0) + (Number.isFinite(rawImpressions) ? rawImpressions : 0);
+        const totalClicks = (Number.isFinite(rollupClicks) ? rollupClicks : 0) + (Number.isFinite(rawClicks) ? rawClicks : 0);
+        const totalFilled = (Number.isFinite(rollupFilled) ? rollupFilled : 0) + (Number.isFinite(rawFilled) ? rawFilled : 0);
         const ecpm = totalImpressions > 0 ? (totalRevenue / totalImpressions) * 1000 : 0;
         const ctr = totalImpressions > 0 ? (totalClicks / totalImpressions) * 100 : 0;
         const fillRate = totalImpressions > 0 ? (totalFilled / totalImpressions) * 100 : 0;
@@ -303,39 +398,136 @@ class ReportingServiceImpl implements ReportingService {
   ): Promise<TimeSeriesDataPoint[]> {
     try {
       if (granularity === 'day' && (await rollupTableExists('analytics_metrics_rollups'))) {
-        const sql = `
-          SELECT
-            bucket_date AS bucket,
-            COALESCE(SUM(total_revenue), 0) AS revenue,
-            COALESCE(SUM(impression_count), 0) AS impressions,
-            COALESCE(SUM(click_count), 0) AS clicks
-          FROM analytics_metrics_rollups
-          WHERE publisher_id = $1
-            AND bucket_date >= $2::date
-            AND bucket_date < $3::date
-          GROUP BY bucket
-          ORDER BY bucket ASC
-        `;
+        const splitDay = formatUtcDate(
+          new Date(endDate.getTime() - REPORTING_RECENT_RAW_DAYS * 24 * 60 * 60 * 1000)
+        );
+        const splitTs = startOfUtcDayFromYmd(splitDay);
 
-        const result = await runQuery<{
-          bucket: string;
-          revenue: string;
-          impressions: string;
-          clicks: string;
-        }>(sql, [publisherId, formatUtcDate(startDate), formatUtcDate(endDate)], 'REPORTING_TIMESERIES_ROLLUPS');
+        const rollupEndExclusive = minDate(endDate, splitTs);
+        const rollupStartDay = formatUtcDate(startDate);
+        const rollupEndDay = formatUtcDate(rollupEndExclusive);
 
-        return result.map(row => {
-          const impressions = Number.parseInt(row.impressions);
-          const revenue = Number.parseFloat(row.revenue);
-          const clicks = Number.parseInt(row.clicks);
-          return {
-            timestamp: new Date(`${row.bucket}T00:00:00.000Z`).toISOString(),
-            revenue,
-            impressions,
-            clicks,
-            ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
-          };
-        });
+        const points: TimeSeriesDataPoint[] = [];
+
+        if (rollupStartDay < rollupEndDay) {
+          const rollupSql = `
+            SELECT
+              bucket_date AS bucket,
+              COALESCE(SUM(total_revenue), 0) AS revenue,
+              COALESCE(SUM(impression_count), 0) AS impressions,
+              COALESCE(SUM(click_count), 0) AS clicks
+            FROM analytics_metrics_rollups
+            WHERE publisher_id = $1
+              AND bucket_date >= $2::date
+              AND bucket_date < $3::date
+            GROUP BY bucket
+            ORDER BY bucket ASC
+          `;
+
+          const rollupResult = await runQuery<{
+            bucket: string;
+            revenue: string;
+            impressions: string;
+            clicks: string;
+          }>(rollupSql, [publisherId, rollupStartDay, rollupEndDay], 'REPORTING_TIMESERIES_ROLLUPS');
+
+          points.push(
+            ...rollupResult.map(row => {
+              const impressions = Number.parseInt(row.impressions);
+              const revenue = Number.parseFloat(row.revenue);
+              const clicks = Number.parseInt(row.clicks);
+              return {
+                timestamp: new Date(`${row.bucket}T00:00:00.000Z`).toISOString(),
+                revenue,
+                impressions,
+                clicks,
+                ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+              };
+            })
+          );
+        }
+
+        const rawStart = maxDate(startDate, splitTs);
+        if (rawStart.getTime() < endDate.getTime()) {
+          const rawSql = `
+            WITH
+              imp AS (
+                SELECT
+                  date_trunc('day', observed_at) AS bucket,
+                  COUNT(*)::bigint AS impressions
+                FROM analytics_impressions
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+                GROUP BY 1
+              ),
+              clk AS (
+                SELECT
+                  date_trunc('day', observed_at) AS bucket,
+                  COUNT(*)::bigint AS clicks
+                FROM analytics_clicks
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+                GROUP BY 1
+              ),
+              rev AS (
+                SELECT
+                  date_trunc('day', observed_at) AS bucket,
+                  COALESCE(SUM(revenue_usd), 0) AS revenue
+                FROM analytics_revenue_events
+                WHERE publisher_id = $1
+                  AND observed_at >= $2
+                  AND observed_at < $3
+                  AND is_test_mode = false
+                GROUP BY 1
+              ),
+              ic AS (
+                SELECT
+                  COALESCE(imp.bucket, clk.bucket) AS bucket,
+                  COALESCE(imp.impressions, 0)::bigint AS impressions,
+                  COALESCE(clk.clicks, 0)::bigint AS clicks
+                FROM imp
+                FULL OUTER JOIN clk
+                  ON clk.bucket = imp.bucket
+              )
+            SELECT
+              COALESCE(ic.bucket, rev.bucket) AS bucket,
+              COALESCE(rev.revenue, 0) AS revenue,
+              COALESCE(ic.impressions, 0) AS impressions,
+              COALESCE(ic.clicks, 0) AS clicks
+            FROM ic
+            FULL OUTER JOIN rev
+              ON rev.bucket = ic.bucket
+            ORDER BY bucket ASC
+          `;
+
+          const rawResult = await runQuery<{
+            bucket: Date;
+            revenue: string;
+            impressions: string;
+            clicks: string;
+          }>(rawSql, [publisherId, rawStart, endDate], 'REPORTING_TIMESERIES_RAW_RECENT');
+
+          points.push(
+            ...rawResult.map(row => {
+              const impressions = Number.parseInt(row.impressions);
+              const revenue = Number.parseFloat(row.revenue);
+              const clicks = Number.parseInt(row.clicks);
+              return {
+                timestamp: new Date(row.bucket).toISOString(),
+                revenue,
+                impressions,
+                clicks,
+                ecpm: impressions > 0 ? (revenue / impressions) * 1000 : 0,
+              };
+            })
+          );
+        }
+
+        return points.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
       }
 
       const bucket = granularity === 'hour' ? 'hour' : 'day';

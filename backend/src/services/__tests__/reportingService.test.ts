@@ -27,6 +27,103 @@ describe('ReportingService - Advanced Analytics', () => {
     jest.clearAllMocks();
   });
 
+  describe('Rollup + raw recent window', () => {
+    let previousRecentRawDays: string | undefined;
+
+    beforeEach(() => {
+      previousRecentRawDays = process.env.REPORTING_RECENT_RAW_DAYS;
+      process.env.REPORTING_RECENT_RAW_DAYS = '2';
+    });
+
+    afterEach(() => {
+      if (previousRecentRawDays === undefined) {
+        delete process.env.REPORTING_RECENT_RAW_DAYS;
+      } else {
+        process.env.REPORTING_RECENT_RAW_DAYS = previousRecentRawDays;
+      }
+    });
+
+    it('getRevenueStats should combine rollups and raw for recent days', async () => {
+      // 1) rollup table exists
+      mockPgQuery.mockResolvedValueOnce(mockRows([{ exists: true } as never]));
+      // 2) rollup totals for older part
+      mockPgQuery.mockResolvedValueOnce(
+        mockRows([
+          {
+            total_revenue: '10.5',
+            total_impressions: '1000',
+            total_clicks: '20',
+            total_filled: '800',
+          } as never,
+        ])
+      );
+      // 3) raw totals for recent part
+      mockPgQuery.mockResolvedValueOnce(
+        mockRows([
+          {
+            revenue: '1.25',
+            impressions: '100',
+            clicks: '5',
+            filled: '90',
+          } as never,
+        ])
+      );
+
+      const result = await reportingService.getRevenueStats(
+        publisherId,
+        new Date('2024-01-01T00:00:00.000Z'),
+        new Date('2024-01-31T12:00:00.000Z')
+      );
+
+      expect(result.totalRevenue).toBeCloseTo(11.75, 6);
+      expect(result.totalImpressions).toBe(1100);
+      expect(result.totalClicks).toBe(25);
+      expect(result.fillRate).toBeCloseTo((890 / 1100) * 100, 6);
+      expect(result.ecpm).toBeCloseTo((11.75 / 1100) * 1000, 6);
+      expect(result.ctr).toBeCloseTo((25 / 1100) * 100, 6);
+
+      expect(mockPgQuery).toHaveBeenCalledTimes(3);
+    });
+
+    it('getTimeSeriesData(day) should return rollup buckets plus raw buckets for recent days', async () => {
+      // 1) rollup table exists
+      mockPgQuery.mockResolvedValueOnce(mockRows([{ exists: true } as never]));
+      // 2) rollup time series (older)
+      mockPgQuery.mockResolvedValueOnce(
+        mockRows([
+          { bucket: '2024-01-10', revenue: '2.0', impressions: '200', clicks: '4' } as never,
+          { bucket: '2024-01-11', revenue: '3.0', impressions: '300', clicks: '6' } as never,
+        ])
+      );
+      // 3) raw time series (recent)
+      mockPgQuery.mockResolvedValueOnce(
+        mockRows([
+          {
+            bucket: new Date('2024-01-30T00:00:00.000Z'),
+            revenue: '1.0',
+            impressions: '100',
+            clicks: '2',
+          } as never,
+        ])
+      );
+
+      const points = await reportingService.getTimeSeriesData(
+        publisherId,
+        new Date('2024-01-01T00:00:00.000Z'),
+        new Date('2024-01-31T12:00:00.000Z'),
+        'day'
+      );
+
+      expect(points).toHaveLength(3);
+      expect(points[0].timestamp).toBe('2024-01-10T00:00:00.000Z');
+      expect(points[1].timestamp).toBe('2024-01-11T00:00:00.000Z');
+      expect(points[2].timestamp).toBe('2024-01-30T00:00:00.000Z');
+
+      expect(points[2]).toMatchObject({ revenue: 1.0, impressions: 100, clicks: 2 });
+      expect(mockPgQuery).toHaveBeenCalledTimes(3);
+    });
+  });
+
   describe('getAdapterHealthScores', () => {
     it('should calculate adapter health scores correctly', async () => {
       mockPgQuery.mockResolvedValueOnce(mockRows([
@@ -254,7 +351,9 @@ describe('ReportingService - Advanced Analytics', () => {
         revenue: String(1000 + i * 50 + Math.random() * 100), // Upward trend with noise
       }));
 
-      mockPgQuery.mockResolvedValueOnce(mockRows(mockData));
+      mockPgQuery
+        .mockResolvedValueOnce(mockRows([{ exists: false } as never]))
+        .mockResolvedValueOnce(mockRows(mockData as never));
 
       const result = await reportingService.getRevenueProjections(publisherId, 7);
 
@@ -280,10 +379,14 @@ describe('ReportingService - Advanced Analytics', () => {
     });
 
     it('should return empty array with insufficient data', async () => {
-      mockPgQuery.mockResolvedValueOnce(mockRows([
-        { date: '2024-01-01', revenue: '1000' },
-        { date: '2024-01-02', revenue: '1100' },
-      ]));
+      mockPgQuery
+        .mockResolvedValueOnce(mockRows([{ exists: false } as never]))
+        .mockResolvedValueOnce(
+          mockRows([
+            { date: '2024-01-01', revenue: '1000' } as never,
+            { date: '2024-01-02', revenue: '1100' } as never,
+          ])
+        );
 
       const result = await reportingService.getRevenueProjections(publisherId, 7);
 
@@ -296,7 +399,9 @@ describe('ReportingService - Advanced Analytics', () => {
         revenue: String(3000 - i * 50), // Declining trend
       }));
 
-      mockPgQuery.mockResolvedValueOnce(mockRows(mockData));
+      mockPgQuery
+        .mockResolvedValueOnce(mockRows([{ exists: false } as never]))
+        .mockResolvedValueOnce(mockRows(mockData as never));
 
       const result = await reportingService.getRevenueProjections(publisherId, 7);
 

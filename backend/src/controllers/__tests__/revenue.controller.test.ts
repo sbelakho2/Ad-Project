@@ -62,4 +62,18 @@ describe('Revenue Controller', () => {
     expect(res.status).toBe(400);
     expect(res.body?.error || res.body?.message).toBeTruthy();
   });
+
+  test('date-only endDate is treated as inclusive day (exclusive boundary shifted)', async () => {
+    const res = await request(app)
+      .get('/api/v1/revenue/summary?startDate=2026-01-05&endDate=2026-01-05');
+
+    expect(res.status).toBe(200);
+    expect(mockedReporting.getRevenueStats).toHaveBeenCalledTimes(1);
+
+    const [_publisherId, start, end] = mockedReporting.getRevenueStats.mock.calls[0];
+    expect(start).toBeInstanceOf(Date);
+    expect(end).toBeInstanceOf(Date);
+    expect((start as Date).toISOString()).toBe('2026-01-05T00:00:00.000Z');
+    expect((end as Date).toISOString()).toBe('2026-01-06T00:00:00.000Z');
+  });
 });

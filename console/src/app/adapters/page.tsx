@@ -81,7 +81,7 @@ export default function AdaptersPage() {
   )
 
   const filteredAdapters = useMemo(() => {
-    if (!adapters) return []
+    if (!Array.isArray(adapters)) return []
 
     return adapters.filter((adapter) => {
       const matchesSearch = search
@@ -98,7 +98,7 @@ export default function AdaptersPage() {
   }, [adapters, networkFilter, search, statusFilter])
 
   const networks = useMemo(() => {
-    if (!adapters) return []
+    if (!Array.isArray(adapters)) return []
     return Array.from(new Set(adapters.map((adapter) => adapter.network))).sort()
   }, [adapters])
 

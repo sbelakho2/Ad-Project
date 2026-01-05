@@ -362,27 +362,44 @@ export default function ComplianceSettingsPage() {
 
   useEffect(() => {
     if (data) {
+      const consentManagement = data.consentManagement ?? {
+        provider: undefined,
+        autoBlock: true,
+        consentString: undefined,
+        encryptedConsent: undefined,
+      }
+      const dataRetention = data.dataRetention ?? {
+        rawEventsDays: 30,
+        aggregatedDataDays: 365,
+        userDataDays: 30,
+      }
+      const regionalSettings = data.regionalSettings ?? {
+        euTrafficOnly: false,
+        blockedCountries: [],
+        sensitiveCategories: [],
+      }
+
       form.reset({
-        gdprEnabled: data.gdprEnabled,
-        ccpaEnabled: data.ccpaEnabled,
-        coppaMode: data.coppaMode,
-        consentProvider: data.consentManagement.provider ?? '',
-        autoBlock: data.consentManagement.autoBlock,
+        gdprEnabled: Boolean(data.gdprEnabled),
+        ccpaEnabled: Boolean(data.ccpaEnabled),
+        coppaMode: Boolean(data.coppaMode),
+        consentProvider: consentManagement.provider ?? '',
+        autoBlock: Boolean(consentManagement.autoBlock),
         // Do NOT pre-fill the consent string to avoid exposing it in the DOM/history
         consentString: '',
-        rawEventsDays: data.dataRetention.rawEventsDays,
-        aggregatedDataDays: data.dataRetention.aggregatedDataDays,
-        userDataDays: data.dataRetention.userDataDays,
-        euTrafficOnly: data.regionalSettings.euTrafficOnly,
-        blockedCountries: data.regionalSettings.blockedCountries,
-        sensitiveCategories: data.regionalSettings.sensitiveCategories,
+        rawEventsDays: dataRetention.rawEventsDays,
+        aggregatedDataDays: dataRetention.aggregatedDataDays,
+        userDataDays: dataRetention.userDataDays,
+        euTrafficOnly: Boolean(regionalSettings.euTrafficOnly),
+        blockedCountries: Array.isArray(regionalSettings.blockedCountries) ? regionalSettings.blockedCountries : [],
+        sensitiveCategories: Array.isArray(regionalSettings.sensitiveCategories) ? regionalSettings.sensitiveCategories : [],
       })
       toggleBaselineRef.current = JSON.stringify([
-        data.gdprEnabled,
-        data.ccpaEnabled,
-        data.coppaMode,
-        data.consentManagement.autoBlock,
-        data.regionalSettings.euTrafficOnly,
+        Boolean(data.gdprEnabled),
+        Boolean(data.ccpaEnabled),
+        Boolean(data.coppaMode),
+        Boolean(consentManagement.autoBlock),
+        Boolean(regionalSettings.euTrafficOnly),
       ])
     }
   }, [data, form])

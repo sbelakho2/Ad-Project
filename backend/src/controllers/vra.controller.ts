@@ -63,15 +63,22 @@ function validateDeltasQuery(q: Record<string, string | undefined>): { ok: true 
 export async function getReconOverview(req: Request, res: Response) {
   try {
     const { app_id: appId, from, to } = req.query as Record<string, string | undefined>;
-    // Validate ISO-like dates for from/to (parity with deltas endpoints)
-    if (!isIsoLike(from) || !isIsoLike(to)) {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    // from/to are optional; if either is provided require both and validate
+    if ((from && !to) || (!from && to)) {
+      return res.status(400).json({ success: false, error: 'Both from and to are required' });
+    }
+    if ((from && !isIsoLike(from)) || (to && !isIsoLike(to))) {
       return res.status(400).json({ success: false, error: 'Invalid from/to timestamp' });
     }
     // Enforce window ordering when both are present
     if (!isWindowOrdered(from, to)) {
       return res.status(400).json({ success: false, error: 'from must be <= to' });
     }
-    const data = await vraService.getOverview({ appId, from, to });
+    const data = await vraService.getOverview({ publisherId, appId, from, to });
     return res.json({ success: true, data });
   } catch (err) {
     logger.error('VRA getReconOverview failed', { error: (err as Error)?.message });
@@ -82,11 +89,16 @@ export async function getReconOverview(req: Request, res: Response) {
 export async function getReconDeltas(req: Request, res: Response) {
   try {
     const q = req.query as Record<string, string | undefined>;
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
     const v = validateDeltasQuery(q);
     if (!v.ok) {
       return res.status(400).json({ success: false, error: v.error });
     }
     const data = await vraService.getDeltas({
+      publisherId,
       appId: q.app_id,
       from: q.from,
       to: q.to,
@@ -105,11 +117,16 @@ export async function getReconDeltas(req: Request, res: Response) {
 export async function getReconDeltasCsv(req: Request, res: Response) {
   try {
     const q = req.query as Record<string, string | undefined>;
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
     const v = validateDeltasQuery(q);
     if (!v.ok) {
       return res.status(400).json({ success: false, error: v.error });
     }
     const data = await vraService.getDeltas({
+      publisherId,
       appId: q.app_id,
       from: q.from,
       to: q.to,

@@ -24,11 +24,30 @@ APP_ID_WEB=${APP_ID_WEB:-}
 DURATION_MINUTES=${1:-0}   # 0 = run indefinitely
 EVENTS_PER_MINUTE=${2:-12}
 
-require_env() { local n=$1 v=${2:-}; [[ -z "$v" ]] && { echo "[err] Missing env: $n" >&2; exit 2; }; }
-require_env TOKEN "$TOKEN"
+require_env() {
+  local name=$1 value=${2:-}
+  if [[ -z "$value" ]]; then
+    echo "[err] Missing env: $name" >&2
+    exit 2
+  fi
+}
 require_env SDK_KEY "$SDK_KEY"
 require_env PUBLISHER_ID "$PUBLISHER_ID"
 require_env APP_ID_WEB "$APP_ID_WEB"
+
+# Avoid leaking secrets via process args (ps/systemctl). Use a curl config file
+# for headers instead of passing -H "Authorization: Bearer ..." on the command line.
+CURL_CFG_FILE="$(mktemp)"
+chmod 600 "$CURL_CFG_FILE" || true
+cat >"$CURL_CFG_FILE" <<EOF
+header = "Content-Type: application/json"
+header = "X-SDK-Key: $SDK_KEY"
+EOF
+if [[ -n "$TOKEN" ]]; then
+  echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_FILE"
+fi
+cleanup() { rm -f "$CURL_CFG_FILE" 2>/dev/null || true; }
+trap cleanup EXIT
 
 EVID_DIR="evidence-$(date +%F)/web"
 LOG="$EVID_DIR/web_sdk_harness.log"
@@ -45,26 +64,57 @@ random_uuid() {
 }
 
 random_revenue() { echo "0.0$(printf '%02d' $((RANDOM % 90 + 10)))"; }
+random_latency() { echo "$((RANDOM % 200 + 50))"; }
+
+send_web_click() {
+  local now="$1"
+  local impression_id="$2"
+  local placement_id="$3"
+  local adapter_id="$4"
+  local request_id="$5"
+  local session_id="$6"
+  local user_id="$7"
+  local events="[{\"event_id\":\"$(random_uuid)\",\"timestamp\":\"$now\",\"impression_id\":\"$impression_id\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$APP_ID_WEB\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"web_test\",\"click_url\":\"https://example.com/click?iid=$impression_id\",\"country_code\":\"US\",\"device_type\":\"desktop\",\"os\":\"web\",\"session_id\":\"$session_id\",\"user_id\":\"$user_id\",\"request_id\":\"$request_id\",\"time_to_click_ms\":$((RANDOM % 3000 + 120)),\"is_verified\":true,\"is_test_mode\":false}]"
+  curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$API_URL/api/v1/analytics/events/clicks" \
+    --config "$CURL_CFG_FILE" \
+    -d "{\"events\": $events}"
+}
 
 send_web_impressions() {
   local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local events="[{\"event_id\":\"$(random_uuid)\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$APP_ID_WEB\",\"adapter_name\":\"web_test\",\"ad_format\":\"banner\",\"country_code\":\"US\",\"device_type\":\"desktop\",\"os\":\"web\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$(random_uuid)\",\"request_id\":\"$(random_uuid)\",\"ecpm_usd\": $(random_revenue),\"timestamp\":\"$now\"}]"
-  curl -s -o /dev/null -w "%{http_code}" \
+  local session_id=$(random_uuid)
+  local request_id=$(random_uuid)
+  local placement_id=$(random_uuid)
+  local adapter_id=$(random_uuid)
+  local user_id=$(random_uuid)
+  local impression_id=$(random_uuid)
+  local ad_unit_id="web_banner_unit_$(($RANDOM % 5 + 1))"
+  local events="[{\"event_id\":\"$impression_id\",\"timestamp\":\"$now\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$APP_ID_WEB\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"web_test\",\"ad_unit_id\":\"$ad_unit_id\",\"ad_format\":\"banner\",\"country_code\":\"US\",\"device_type\":\"desktop\",\"os\":\"web\",\"os_version\":\"Chrome 120\",\"app_version\":\"1.0.0\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$session_id\",\"user_id\":\"$user_id\",\"request_id\":\"$request_id\",\"bid_price_usd\":$(random_revenue),\"ecpm_usd\":$(random_revenue),\"latency_ms\":$(random_latency),\"is_test_mode\":false}]"
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$API_URL/api/v1/analytics/events/impressions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "X-SDK-Key: $SDK_KEY" \
-    -d "{\"events\": $events}"
+    --config "$CURL_CFG_FILE" \
+    -d "{\"events\": $events}")
+
+  # Occasionally emit a click for the same impression.
+  if [[ "$code" == "202" ]] && [[ $((RANDOM % 5)) -eq 0 ]]; then
+    : "$(send_web_click "$now" "$impression_id" "$placement_id" "$adapter_id" "$request_id" "$session_id" "$user_id")"
+  fi
+
+  echo "$code"
 }
 
 send_web_revenue() {
   local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local events="[{\"event_id\":\"$(random_uuid)\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$APP_ID_WEB\",\"adapter_name\":\"web_test\",\"revenue_type\":\"impression\",\"revenue_usd\": $(random_revenue),\"ad_format\":\"banner\",\"country_code\":\"US\",\"device_type\":\"desktop\",\"os\":\"web\",\"sdk_version\":\"1.0.0\",\"session_id\":\"$(random_uuid)\",\"request_id\":\"$(random_uuid)\",\"timestamp\":\"$now\"}]"
+  local placement_id=$(random_uuid)
+  local adapter_id=$(random_uuid)
+  local impression_id=$(random_uuid)
+  local rev=$(random_revenue)
+  local events="[{\"event_id\":\"$(random_uuid)\",\"timestamp\":\"$now\",\"publisher_id\":\"$PUBLISHER_ID\",\"app_id\":\"$APP_ID_WEB\",\"placement_id\":\"$placement_id\",\"adapter_id\":\"$adapter_id\",\"adapter_name\":\"web_test\",\"impression_id\":\"$impression_id\",\"revenue_type\":\"impression\",\"revenue_usd\":$rev,\"revenue_currency\":\"USD\",\"revenue_original\":$rev,\"exchange_rate\":1.0,\"ecpm_usd\":$(random_revenue),\"country_code\":\"US\",\"ad_format\":\"banner\",\"os\":\"web\",\"is_test_mode\":false,\"reconciliation_status\":\"pending\"}]"
   curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$API_URL/api/v1/analytics/events/revenue" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "X-SDK-Key: $SDK_KEY" \
+    --config "$CURL_CFG_FILE" \
     -d "{\"events\": $events}"
 }
 

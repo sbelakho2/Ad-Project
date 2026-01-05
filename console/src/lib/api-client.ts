@@ -268,7 +268,13 @@ function emitUnauthorized(error: AxiosError) {
 // Response interceptor - handle errors
 const responseErrorInterceptor = async (error: AxiosError) => {
   if (error.response?.status === 401) {
-    emitUnauthorized(error)
+    const url = String(error.config?.url || '')
+    // Never treat NextAuth internal endpoints as a global auth failure.
+    // These can return 401/null session depending on configuration and should not
+    // force the app to clear the user session and redirect to /login.
+    if (!url.includes('/api/auth/')) {
+      emitUnauthorized(error)
+    }
   }
   return Promise.reject(error)
 }

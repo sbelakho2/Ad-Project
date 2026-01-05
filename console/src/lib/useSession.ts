@@ -53,8 +53,9 @@ MOCK_SESSION = readMockSession()
 
 function resolveSessionScope(): string {
   if (typeof window === 'undefined') return 'ssr'
-  const cookie = readXsrfCookie()
-  if (cookie) return `client:${cookie.slice(-12)}`
+  // Session cache key must be stable for the lifetime of the tab.
+  // Using the XSRF cookie here can cause the key to churn when the token rotates,
+  // which makes Navigation appear to "keep loading".
   return `client:${window.location.host}`
 }
 

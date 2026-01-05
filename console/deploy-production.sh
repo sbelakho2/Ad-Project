@@ -110,15 +110,15 @@ rsync -avz -e "ssh -i $SSH_KEY" \
 # Step 5: Ensure .env file exists on server
 echo ""
 echo -e "${YELLOW}Step 4: Ensuring .env file exists...${NC}"
-ssh -i "$SSH_KEY" "$SERVER" "cat > $RELEASE_DIR/.env << 'EOF'
-NEXTAUTH_SECRET=apex-mediation-super-secret-jwt-key-2024
+ssh -i "$SSH_KEY" "$SERVER" "if [[ -f '$RELEASE_DIR/.env' ]]; then echo '  .env already exists (leaving as-is)'; else cat > '$RELEASE_DIR/.env' << 'EOF'
 NEXTAUTH_URL=https://console.apexmediation.ee
 AUTH_TRUST_HOST=true
-NEXT_PUBLIC_API_URL=https://api.apexmediation.ee/api/v1
-NEXT_PUBLIC_FRAUD_API_URL=https://api.apexmediation.ee/api/v1
-NEXT_PUBLIC_ANALYTICS_API_URL=https://api.apexmediation.ee/api/v1
-EOF"
-echo -e "${GREEN}✓ .env file created${NC}"
+
+# NOTE: Secrets and feature flags should be managed server-side.
+# This file is only created on first deploy; subsequent deploys do not overwrite it.
+EOF
+fi"
+echo -e "${GREEN}✓ .env present${NC}"
 
 # Step 4.5: Ensure production dependencies are installed
 echo ""

@@ -8,7 +8,7 @@ export class TwoFactorAuth {
   id!: string;
 
   @ManyToOne(() => User, (user: User) => user.twoFactorAuth, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'user_id' })
+  @JoinColumn()
   user!: User;
 
   // Deprecated: plaintext secret (kept nullable for backward compatibility)
@@ -17,12 +17,12 @@ export class TwoFactorAuth {
   secret!: string | null;
 
   // Encrypted TOTP secret (AES-GCM base64 payload as JSON string)
-  @Column({ name: 'secret_ciphertext', type: 'text', nullable: true })
+  @Column({ type: 'text', nullable: true })
   secretCiphertext!: string | null;
 
   @Column({ default: false })
   enabled!: boolean;
 
-  @Column({ name: 'backup_codes', type: 'simple-array', nullable: true })
+  @Column({ type: 'simple-array', nullable: true })
   backupCodes!: string[]; // Store hashed backup codes
 }

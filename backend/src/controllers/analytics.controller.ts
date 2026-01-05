@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import {
   getAnalyticsOverview,
   getAnalyticsTimeSeries,
+  getImpressionsBreakdown,
   getPerformanceBreakdown,
 } from '../services/analyticsPipeline';
 import analyticsService from '../services/analyticsService';
@@ -76,12 +77,15 @@ export const getTimeSeries = async (
 
     const startDateParam = parseQueryParam(req.query.startDate);
     const endDateParam = parseQueryParam(req.query.endDate);
+    const granularityParam = parseQueryParam(req.query.granularity);
+    const granularity = granularityParam === 'hour' ? 'hour' : 'day';
 
     const timeSeries = await getAnalyticsTimeSeries(
       publisherId,
       metric,
       startDateParam,
-      endDateParam
+      endDateParam,
+      granularity
     );
 
     res.json({
@@ -111,11 +115,45 @@ export const getPerformance = async (
     const groupByParam = parseQueryParam(req.query.groupBy);
     const groupBy = groupByParam === 'adapter' ? 'adapter' : 'placement';
 
-    const performance = await getPerformanceBreakdown(publisherId, groupBy);
+    const startDateParam = parseQueryParam(req.query.startDate);
+    const endDateParam = parseQueryParam(req.query.endDate);
+
+    const performance = await getPerformanceBreakdown(publisherId, groupBy, startDateParam, endDateParam);
 
     res.json({
       success: true,
       data: performance,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get impressions breakdown
+ */
+export const getImpressions = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+
+    if (!publisherId) {
+      throw new AppError('Missing publisher context', 401);
+    }
+
+    const startDateParam = parseQueryParam(req.query.startDate);
+    const endDateParam = parseQueryParam(req.query.endDate);
+    const groupByParam = parseQueryParam(req.query.groupBy);
+    const groupBy = groupByParam === 'adapter' || groupByParam === 'placement' ? groupByParam : 'date';
+
+    const data = await getImpressionsBreakdown(publisherId, groupBy, startDateParam, endDateParam);
+
+    res.json({
+      success: true,
+      data,
     });
   } catch (error) {
     next(error);

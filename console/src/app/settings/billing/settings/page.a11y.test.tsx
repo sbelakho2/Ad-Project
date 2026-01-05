@@ -5,63 +5,49 @@ import BillingSettingsPage from './page'
 
 const ORIGINAL_ENV = process.env
 
-function mockGetBillingSettings() {
-  const globalKey = '__billingSettingsMock'
+function mockGetBillingPolicy() {
+  const globalKey = '__billingPolicyMock'
   const existing = (globalThis as Record<string, unknown>)[globalKey]
-  if (existing) {
-    return existing as {
-      plan: {
-        name: string
-        type: 'starter'
-        platform_fee_rate: number
-        platform_fee_label: string
-        revenue_band: string
-        sample_fee_note?: string
-        currency: string
-        included_impressions: number
-        included_api_calls: number
-        included_data_transfer_gb: number
-      }
-      billing_email: string
-      receipt_preferences: {
-        send_receipts: boolean
-        send_invoices: boolean
-        send_usage_alerts: boolean
-      }
-      stripe_customer_id: string
-    }
-  }
+  if (existing) return existing
 
-  const settings = Object.freeze({
-    plan: {
-      name: 'Tier 0 — Starter',
-      type: 'starter' as const,
-      platform_fee_rate: 0,
-      platform_fee_label: '0% platform fee',
-      revenue_band: 'Covers up to $10k mediated revenue per app per month',
-      sample_fee_note: 'Upgrade automatically once you exceed $10k/mo for any app',
-      currency: 'usd',
-      included_impressions: 1000000,
-      included_api_calls: 100000,
-      included_data_transfer_gb: 50,
+  const policy = Object.freeze({
+    summary: 'Stripe-first billing with transparent platform fees.',
+    starterExperience: {
+      paymentMethodRequired: false,
+      revenueCapUsd: 10000,
+      capabilities: ['Basic dashboards', 'SDKs', 'Migration Studio'],
+      messaging: 'Upgrade once you exceed the revenue cap.',
     },
-    billing_email: 'billing@example.com',
-    receipt_preferences: Object.freeze({
-      send_receipts: true,
-      send_invoices: true,
-      send_usage_alerts: true,
-    }),
-    stripe_customer_id: 'cus_123',
+    upgradePath: {
+      triggers: ['Exceed Starter revenue cap'],
+      acceptedPaymentMethods: [],
+      autopay: {
+        defaultBehavior: 'Stripe auto-charges the primary method.',
+        encouragement: 'Enable autopay to avoid downtime.',
+        enterpriseOverride: 'Enterprise may request invoices.',
+      },
+    },
+    billingCycle: {
+      cadence: 'monthly',
+      notifications: [],
+    },
+    transparencyCommitments: {
+      weDontTouchPayouts: 'We do not touch payouts.',
+      platformFeeOnly: 'Platform fee only.',
+    },
   })
 
-  ;(globalThis as Record<string, unknown>)[globalKey] = settings
-  return settings
+  ;(globalThis as Record<string, unknown>)[globalKey] = policy
+  return policy
 }
 
 jest.mock('@/lib/api-client', () => ({
   apiClient: {
-    get: jest.fn().mockResolvedValue({
-      data: mockGetBillingSettings(),
+    get: jest.fn(async (url: string) => {
+      if (url === '/billing/policy') {
+        return { data: mockGetBillingPolicy() }
+      }
+      return { data: {} }
     }),
     put: jest.fn().mockResolvedValue({ data: {} }),
     post: jest.fn().mockResolvedValue({ data: { url: 'https://portal.stripe.com' } }),
@@ -83,7 +69,7 @@ jest.mock('@/lib/useSession', () => ({
 
 jest.mock('@tanstack/react-query', () => ({
   useQuery: jest.fn(() => ({
-    data: mockGetBillingSettings(),
+    data: mockGetBillingPolicy(),
     isLoading: false,
   })),
   useMutation: jest.fn(() => ({
@@ -115,46 +101,22 @@ describe('BillingSettingsPage Accessibility', () => {
     const { container } = render(<BillingSettingsPage />)
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 1, name: /billing settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { level: 1, name: /billing/i })).toBeInTheDocument()
     })
 
     const results = await axe(container, { resultTypes: ['violations'] })
     expect(results).toHaveNoViolations()
   })
 
-  it('should have proper form labels', () => {
-    const { container } = render(<BillingSettingsPage />)
-    
-    const inputs = container.querySelectorAll('input[type="email"], input[type="checkbox"]')
-    inputs.forEach(input => {
-      const id = input.getAttribute('id')
-      if (id) {
-        const label = container.querySelector(`label[for="${id}"]`)
-        expect(label).toBeInTheDocument()
-      }
-    })
-  })
+  it('should have accessible primary actions', async () => {
+    render(<BillingSettingsPage />)
 
-  it('should have accessible checkboxes with descriptions', () => {
-    const { container } = render(<BillingSettingsPage />)
-    
-    const checkboxes = container.querySelectorAll('input[type="checkbox"]')
-    expect(checkboxes.length).toBeGreaterThan(0)
-    
-    checkboxes.forEach(checkbox => {
-      const label = checkbox.closest('label')
-      expect(label).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /open stripe portal/i })).toBeInTheDocument()
     })
-  })
 
-  it('should have accessible buttons', () => {
-    const { getAllByRole } = render(<BillingSettingsPage />)
-    
-    const buttons = getAllByRole('button')
-    buttons.forEach(button => {
-      expect(button).toHaveAttribute('type')
-      expect(button.textContent).toBeTruthy()
-    })
+    expect(screen.getByRole('link', { name: /view usage/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /view invoices/i })).toBeInTheDocument()
   })
 
   it('should have proper heading hierarchy', () => {
@@ -167,25 +129,6 @@ describe('BillingSettingsPage Accessibility', () => {
     expect(h2s.length).toBeGreaterThan(0)
   })
 
-  it('should have accessible external link to Stripe Portal', async () => {
-    render(<BillingSettingsPage />)
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /manage via stripe portal/i })).toBeInTheDocument()
-    })
-  })
-
-  it('should surface contextual help with accessible messaging', async () => {
-    render(<BillingSettingsPage />)
-
-    await waitFor(() => {
-      expect(screen.getByText(/Need to upgrade or change your plan/i)).toBeInTheDocument()
-    })
-
-    const salesLink = screen.getByRole('link', { name: /contact sales/i })
-    expect(salesLink).toHaveAttribute('href', 'mailto:billing@apexmediation.ee')
-  })
-
   it('supports keyboard navigation for primary actions', async () => {
     render(<BillingSettingsPage />)
 
@@ -196,25 +139,13 @@ describe('BillingSettingsPage Accessibility', () => {
     const user = userEvent.setup()
 
     await user.tab()
-    expect(screen.getByRole('link', { name: /contact sales/i })).toHaveFocus()
+    expect(screen.getByRole('button', { name: /open stripe portal/i })).toHaveFocus()
 
     await user.tab()
     expect(screen.getByRole('link', { name: /view usage/i })).toHaveFocus()
 
     await user.tab()
-    expect(screen.getByRole('button', { name: /manage via stripe portal/i })).toHaveFocus()
-
-    await user.tab()
-    const emailInput = screen.getByLabelText(/email address/i)
-    expect(emailInput).toHaveFocus()
-
-    await user.clear(emailInput)
-    await user.type(emailInput, 'new-billing@example.com')
-
-    await user.tab()
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /update/i, hidden: false })).toHaveFocus()
-    })
+    expect(screen.getByRole('link', { name: /view invoices/i })).toHaveFocus()
   })
 
   it('reveals the migration assistant when the feature flag is enabled', async () => {
@@ -223,7 +154,11 @@ describe('BillingSettingsPage Accessibility', () => {
     render(<BillingSettingsPage />)
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /migration assistant/i })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /billing migration assistant/i })).toBeInTheDocument()
     })
+
+    expect(screen.getByLabelText(/target channel/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/notes/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /submit request/i })).toBeInTheDocument()
   })
 })

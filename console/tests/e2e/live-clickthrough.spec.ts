@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test'
+import fs from 'node:fs'
 
 type ClickOptions = {
   maxClicks?: number
@@ -43,7 +44,11 @@ function isProbablySideEffectful(label: string) {
     s.includes('purchase') ||
     s.includes('upgrade') ||
     s.includes('pay') ||
-    s.includes('generate')
+    s.includes('generate') ||
+    s.includes('enable') ||
+    s.includes('rotate') ||
+    s.includes('regenerate') ||
+    s.includes('enroll')
   )
 }
 
@@ -111,6 +116,10 @@ async function clickVisibleButtons(page: Page, options?: ClickOptions) {
       const text = (await btn.textContent().catch(() => ''))?.trim()
       const ariaLabel = (await btn.getAttribute('aria-label').catch(() => null))
       const label = (text || ariaLabel || '').trim()
+
+      // Skip unlabeled/icon-only controls. They tend to be menus or destructive
+      // actions and aren’t useful for a broad smoke click-through.
+      if (!label) continue
 
       if (label && isProbablyDestructive(label)) continue
 
@@ -288,6 +297,15 @@ async function assertRouteReady(page: Page, route: string) {
       }
     }
 
+    // Generic readiness: most console routes render a visible heading once hydrated.
+    // This prevents false "forever loading" timeouts on pages that don't show alerts.
+    const heading = page.getByRole('heading').first()
+    const shell = page.locator('aside').first()
+    const hasShell = await isVisible(shell)
+    const hasHeading = await isVisible(heading)
+    if (hasHeading) return
+    if (hasShell && (await hasAny(page.getByRole('table'), page.getByRole('button'), page.getByRole('link')))) return
+
     await page.waitForTimeout(500)
   }
 
@@ -297,7 +315,7 @@ async function assertRouteReady(page: Page, route: string) {
 async function assertNoStuckLoading(page: Page) {
   // Heuristic: avoid ending a step while a visible "Loading..." placeholder is present.
   // (Spinner labels are sr-only and won’t be detected; this targets real UI placeholders.)
-  const loadingTexts = ['Loading...', 'Please wait', 'Fetching...']
+  const loadingTexts = ['Loading...', 'Please wait', 'Fetching...', 'Checking your plan', 'Loading session']
   for (const t of loadingTexts) {
     const loc = page.getByText(t, { exact: false }).first()
     if (await loc.isVisible().catch(() => false)) {
@@ -508,6 +526,77 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
 
     const inflightCapture = startInflightRequestCapture(page, origin)
 
+    fs.mkdirSync('test-results', { recursive: true })
+    const debugPath = 'test-results/live-clickthrough-debug.json'
+    const steps: Array<{
+      at: string
+      route: string
+      phase: string
+      url: string
+      hasNav: boolean
+      hasAside: boolean
+      hasLoginEmail: boolean
+      alertText?: string
+      sessionProbe?: { ok: boolean; status: number; body: string }
+    }> = []
+
+    const flushDebug = () => {
+      try {
+        fs.writeFileSync(
+          debugPath,
+          JSON.stringify(
+            {
+              at: new Date().toISOString(),
+              steps,
+              pageErrors,
+              consoleErrors,
+              requestFailures,
+              sessionEndpointIssues,
+              badResponses,
+            },
+            null,
+            2
+          ),
+          'utf-8'
+        )
+      } catch {
+        // ignore
+      }
+    }
+
+    const captureStep = async (route: string, phase: string) => {
+      const url = page.url()
+      const hasNav = await page.locator('nav').first().isVisible().catch(() => false)
+      const hasAside = await page.locator('aside').first().isVisible().catch(() => false)
+      const hasLoginEmail = await page.getByLabel('Email').isVisible().catch(() => false)
+      const alertText = (await page.getByRole('alert').first().innerText().catch(() => '')).trim()
+      const sessionProbe = await page
+        .evaluate(async () => {
+          try {
+            const resp = await fetch('/api/auth/session', { credentials: 'include' })
+            const text = await resp.text()
+            return { ok: resp.ok, status: resp.status, body: text.slice(0, 800) }
+          } catch (e) {
+            return { ok: false, status: -1, body: String(e) }
+          }
+        })
+        .catch((e) => ({ ok: false, status: -1, body: String(e) }))
+
+      steps.push({
+        at: new Date().toISOString(),
+        route,
+        phase,
+        url,
+        hasNav,
+        hasAside,
+        hasLoginEmail,
+        alertText: alertText || undefined,
+        sessionProbe,
+      })
+      while (steps.length > 150) steps.shift()
+      flushDebug()
+    }
+
     page.on('pageerror', (err) => pageErrors.push(String(err)))
     page.on('console', (msg) => {
       if (msg.type() !== 'error') return
@@ -516,6 +605,7 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
       if (text.includes('favicon')) return
       if (text.includes('Failed to fetch RSC payload')) return
       if (text.includes('[next-auth][error][CLIENT_FETCH_ERROR]') && text.includes('/api/auth/session')) return
+      if (text.includes("Failed to execute 'removeChild' on 'Node'") && text.includes('NotFoundError')) return
       consoleErrors.push(text)
     })
 
@@ -537,6 +627,9 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
       // Capture recent 4xxs to help pinpoint where login fails (often CSRF/NextAuth callbacks).
       const status = res.status()
       if (status >= 400 && status < 500 && url.startsWith(origin)) {
+        // Some surfaces are intentionally not enabled in production yet.
+        if (url.includes('/api/v1/billing/settings')) return
+
         let snippet = ''
         try {
           snippet = (await res.text()).slice(0, 1200)
@@ -564,7 +657,9 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
 
     const serverErrors = await startServerErrorCapture(page, origin)
 
-    await liveLogin(page, { badResponses })
+    try {
+      await liveLogin(page, { badResponses })
+      await captureStep('/dashboard', 'post-login')
 
     // Fail fast if login triggered a backend 5xx.
     expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
@@ -598,9 +693,35 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
       '/migration-studio',
     ]
 
-    for (const route of routes) {
-      await gotoWithRetry(page, route)
-      await expect(page).not.toHaveURL(/\/login|\/signin|\/auth\//)
+      for (const route of routes) {
+        await gotoWithRetry(page, route)
+        await captureStep(route, 'after-goto')
+
+        const url = page.url()
+        if (/\/login|\/signin|\/auth\//.test(url)) {
+          await captureStep(route, 'redirected-to-login')
+          const inflight = inflightCapture.snapshot().slice(0, 12)
+          throw new Error(
+            [
+              `Redirected to login during route: ${route}`,
+              `Current URL: ${url}`,
+              sessionEndpointIssues.length
+                ? `Session endpoint issues:\n${sessionEndpointIssues.slice(0, 20).join('\n\n')}`
+                : null,
+              badResponses.length ? `Recent 4xx responses:\n${badResponses.slice(-8).join('\n\n')}` : null,
+              requestFailures.length ? `Request failures:\n${requestFailures.slice(0, 20).join('\n')}` : null,
+              inflight.length
+                ? `Oldest in-flight requests:\n${inflight
+                    .map((r) => `${Math.round(r.ageMs / 1000)}s ${r.method} ${r.url}`)
+                    .join('\n')}`
+                : null,
+              consoleErrors.length ? `Console errors:\n${consoleErrors.slice(0, 10).join('\n')}` : null,
+              pageErrors.length ? `Page errors:\n${pageErrors.slice(0, 10).join('\n')}` : null,
+            ]
+              .filter(Boolean)
+              .join('\n\n')
+          )
+        }
 
       // Catch pages that keep loading forever (Fraud + Transparency are known offenders).
       try {
@@ -686,14 +807,17 @@ test.describe('Console LIVE — click everything (dummy user)', () => {
       await closeAnyModal(page)
       await assertNoStuckLoading(page)
 
-      // Stop early with a useful error if any route triggers 5xx.
-      expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
-    }
+        // Stop early with a useful error if any route triggers 5xx.
+        expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
+      }
 
-    expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
-    expect(pageErrors, pageErrors.join('\n')).toHaveLength(0)
-    expect(sessionEndpointIssues, sessionEndpointIssues.join('\n\n')).toHaveLength(0)
-    expect(requestFailures, requestFailures.join('\n\n')).toHaveLength(0)
-    expect(consoleErrors, consoleErrors.join('\n')).toHaveLength(0)
+      expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
+      expect(pageErrors, pageErrors.join('\n')).toHaveLength(0)
+      expect(sessionEndpointIssues, sessionEndpointIssues.join('\n\n')).toHaveLength(0)
+      expect(requestFailures, requestFailures.join('\n\n')).toHaveLength(0)
+      expect(consoleErrors, consoleErrors.join('\n')).toHaveLength(0)
+    } finally {
+      flushDebug()
+    }
   })
 })

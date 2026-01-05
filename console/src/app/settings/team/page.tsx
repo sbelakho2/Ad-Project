@@ -58,7 +58,8 @@ export default function TeamSettingsPage() {
   })
 
   const inviteableRoles = useMemo(() => {
-    return (roleCatalog ?? FALLBACK_ROLES).filter((definition) => definition.invitable !== false)
+    const roles = Array.isArray(roleCatalog) ? roleCatalog : FALLBACK_ROLES
+    return roles.filter((definition) => definition.invitable !== false)
   }, [roleCatalog])
 
   useEffect(() => {

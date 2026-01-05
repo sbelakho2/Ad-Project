@@ -123,6 +123,41 @@ export interface UsageData {
   items?: UsageItem[]
 }
 
+type CurrentUsageEnvelope = {
+  success: boolean
+  data: {
+    period?: { start: string; end: string }
+    plan?: PlatformTierId
+    usage?: { impressions: number; api_calls: number; data_transfer_gb: number }
+    limits?: { impressions: number; api_calls: number; data_transfer_gb: number }
+    overages?: {
+      impressions: number
+      impressions_cost_cents: number
+      api_calls: number
+      api_calls_cost_cents: number
+      data_transfer_gb: number
+      data_transfer_cost_cents: number
+      total_cost_cents: number
+    }
+  }
+}
+
+function isCurrentUsageEnvelope(value: unknown): value is CurrentUsageEnvelope {
+  if (!value || typeof value !== 'object') return false
+  return 'success' in (value as any) && 'data' in (value as any)
+}
+
+function centsToCurrency(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value / 100
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed / 100 : 0
+  }
+  return 0
+}
+
 export interface Invoice {
   id: string
   invoice_number: string
@@ -186,10 +221,55 @@ export interface ReconciliationResult {
  */
 export async function getCurrentUsage(options: { signal?: AbortSignal } = {}): Promise<UsageData> {
   try {
-    const response: AxiosResponse<UsageData> = await apiClient.get('/billing/usage/current', {
+    const response: AxiosResponse<UsageData | CurrentUsageEnvelope> = await apiClient.get('/billing/usage/current', {
       signal: options.signal,
     })
-    return response.data
+
+    const payload = response.data
+    if (isCurrentUsageEnvelope(payload)) {
+      const data: any = payload.data || {}
+      return {
+        current_period: {
+          start: data.period?.start ?? data.current_period?.start ?? '',
+          end: data.period?.end ?? data.current_period?.end ?? '',
+          impressions: Number(data.usage?.impressions ?? data.current_period?.impressions ?? 0),
+          api_calls: Number(data.usage?.api_calls ?? data.current_period?.api_calls ?? 0),
+          data_transfer_gb: Number(data.usage?.data_transfer_gb ?? data.current_period?.data_transfer_gb ?? 0),
+        },
+        subscription: {
+          plan_type: (data.plan ?? data.subscription?.plan_type ?? 'starter') as PlatformTierId,
+          included_impressions: Number(data.limits?.impressions ?? data.subscription?.included_impressions ?? 0),
+          included_api_calls: Number(data.limits?.api_calls ?? data.subscription?.included_api_calls ?? 0),
+          included_data_transfer_gb: Number(data.limits?.data_transfer_gb ?? data.subscription?.included_data_transfer_gb ?? 0),
+        },
+        overages: {
+          impressions: {
+            amount: Number(data.overages?.impressions ?? data.overages?.impressions?.amount ?? 0),
+            cost: data.overages?.impressions_cost_cents !== undefined
+              ? centsToCurrency(data.overages?.impressions_cost_cents)
+              : Number(data.overages?.impressions?.cost ?? 0),
+          },
+          api_calls: {
+            amount: Number(data.overages?.api_calls ?? data.overages?.api_calls?.amount ?? 0),
+            cost: data.overages?.api_calls_cost_cents !== undefined
+              ? centsToCurrency(data.overages?.api_calls_cost_cents)
+              : Number(data.overages?.api_calls?.cost ?? 0),
+          },
+          data_transfer: {
+            amount: Number(data.overages?.data_transfer_gb ?? data.overages?.data_transfer?.amount ?? 0),
+            cost: data.overages?.data_transfer_cost_cents !== undefined
+              ? centsToCurrency(data.overages?.data_transfer_cost_cents)
+              : Number(data.overages?.data_transfer?.cost ?? 0),
+          },
+          total_overage_cost: data.overages?.total_cost_cents !== undefined
+            ? centsToCurrency(data.overages?.total_cost_cents)
+            : Number(data.overages?.total_overage_cost ?? 0),
+        },
+        items: Array.isArray((data as any).items) ? (data as any).items : undefined,
+      }
+    }
+
+    return payload
   } catch (error) {
     throw new Error(handleApiError(error))
   }
@@ -203,14 +283,39 @@ export async function listInvoices(
   options: { signal?: AbortSignal } = {}
 ): Promise<InvoicesListResponse> {
   try {
-    const response: AxiosResponse<InvoicesListResponse> = await apiClient.get('/billing/invoices', {
+    const response: AxiosResponse<any> = await apiClient.get('/billing/invoices', {
       params: {
         limit: 20,
         ...params,
       },
       signal: options.signal,
     })
-    return response.data
+
+    const payload = response.data
+    const unwrapped = (payload && typeof payload === 'object' && 'success' in payload && 'data' in payload)
+      ? (payload as any).data
+      : (payload && typeof payload === 'object' && 'data' in payload)
+        ? (payload as any).data
+        : payload
+
+    const invoices = Array.isArray(unwrapped?.invoices) ? unwrapped.invoices : []
+    const paginationRaw = unwrapped?.pagination ?? {}
+    const page = typeof paginationRaw.page === 'number' ? paginationRaw.page : (params.page ?? 1)
+    const limit = typeof paginationRaw.limit === 'number' ? paginationRaw.limit : (params.limit ?? 20)
+    const total = typeof paginationRaw.total === 'number' ? paginationRaw.total : invoices.length
+    const totalPages = typeof paginationRaw.total_pages === 'number'
+      ? paginationRaw.total_pages
+      : Math.max(1, Math.ceil(total / Math.max(1, limit)))
+
+    return {
+      invoices,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: totalPages,
+      },
+    }
   } catch (error) {
     throw new Error(handleApiError(error))
   }

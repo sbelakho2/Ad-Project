@@ -1,0 +1,1 @@
+[run] ssh -i /Users/sabelakhoua/.ssh/hetzner-db-mac -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new root@46.62.252.96 (app) -- /bin/bash --noprofile --norc -c <cmd>

@@ -100,6 +100,14 @@ const unwrapSuccessEnvelope = <T>(payload: T | SuccessEnvelope<T>): T => {
   return payload as T
 }
 
+const unwrapResponseData = <T>(payload: unknown): T => {
+  const unwrapped = unwrapSuccessEnvelope(payload as any)
+  if (isRecord(unwrapped) && 'data' in unwrapped) {
+    return (unwrapped as any).data as T
+  }
+  return unwrapped as T
+}
+
 const coerceNumber = (value: unknown): number => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : 0
   if (typeof value === 'string') {
@@ -202,14 +210,28 @@ export const toolsApi = {
 export const adapterApi = {
   list: async (placementId?: string) => {
     if (USE_MOCK_API) return mockApiCall<Adapter[]>('adapters')
-    return apiClient.get<Adapter[]>('/adapters', {
+    const resp = await apiClient.get<unknown>('/adapters', {
       params: placementId ? { placement_id: placementId } : undefined,
     })
+
+    ;(resp as any).data = unwrapResponseData<Adapter[]>(resp.data)
+    return resp as any
   },
-  get: (id: string) => apiClient.get<Adapter>(`/adapters/${id}`),
-  update: (id: string, data: Partial<Adapter>) =>
-    apiClient.put<Adapter>(`/adapters/${id}`, data),
-  create: (data: Partial<Adapter>) => apiClient.post<Adapter>('/adapters', data),
+  get: async (id: string) => {
+    const resp = await apiClient.get<unknown>(`/adapters/${id}`)
+    ;(resp as any).data = unwrapResponseData<Adapter>(resp.data)
+    return resp as any
+  },
+  update: async (id: string, data: Partial<Adapter>) => {
+    const resp = await apiClient.put<unknown>(`/adapters/${id}`, data)
+    ;(resp as any).data = unwrapResponseData<Adapter>(resp.data)
+    return resp as any
+  },
+  create: async (data: Partial<Adapter>) => {
+    const resp = await apiClient.post<unknown>('/adapters', data)
+    ;(resp as any).data = unwrapResponseData<Adapter>(resp.data)
+    return resp as any
+  },
   delete: (id: string) => apiClient.delete(`/adapters/${id}`),
 }
 
@@ -230,17 +252,23 @@ type RevenueSummaryRequest = {
 export const revenueApi = {
   getTimeSeries: async ({ signal, ...params }: RevenueTimeSeriesRequest) => {
     if (USE_MOCK_API) return mockApiCall<RevenueData[]>('revenue-timeseries')
-    return apiClient.get<RevenueData[]>('/revenue/timeseries', {
+    const resp = await apiClient.get<unknown>('/revenue/timeseries', {
       params,
       signal,
     })
+
+    ;(resp as any).data = unwrapResponseData<RevenueData[]>(resp.data)
+    return resp as any
   },
   getSummary: async ({ signal, ...params }: RevenueSummaryRequest) => {
     if (USE_MOCK_API) return mockApiCall<AnalyticsSummary>('revenue-summary')
-    return apiClient.get<AnalyticsSummary>('/revenue/summary', {
+    const resp = await apiClient.get<unknown>('/revenue/summary', {
       params,
       signal,
     })
+
+    ;(resp as any).data = unwrapResponseData<AnalyticsSummary>(resp.data)
+    return resp as any
   },
 }
 
@@ -800,26 +828,62 @@ export const migrationApi = {
 
 // Settings API
 export const settingsApi = {
-  getFraudSettings: () => apiClient.get<FraudSettings>('/settings/fraud'),
-  updateFraudSettings: (data: FraudSettings) => apiClient.put('/settings/fraud', data),
-  getNotificationSettings: () => apiClient.get<NotificationSettings>('/settings/notifications'),
+  getFraudSettings: () =>
+    apiClient.get<FraudSettings>('/settings/fraud').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<FraudSettings>(resp.data)
+      return resp
+    }),
+  updateFraudSettings: (data: FraudSettings) =>
+    apiClient.put('/settings/fraud', data).then((resp) => {
+      ;(resp as any).data = unwrapResponseData<FraudSettings>(resp.data)
+      return resp
+    }),
+  getNotificationSettings: () =>
+    apiClient.get<NotificationSettings>('/settings/notifications').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<NotificationSettings>(resp.data)
+      return resp
+    }),
   updateNotificationSettings: (data: Partial<NotificationSettings>) =>
-    apiClient.put<NotificationSettings>('/settings/notifications', data),
-  getComplianceSettings: () => apiClient.get<ComplianceSettings>('/settings/compliance'),
+    apiClient.put<NotificationSettings>('/settings/notifications', data).then((resp) => {
+      ;(resp as any).data = unwrapResponseData<NotificationSettings>(resp.data)
+      return resp
+    }),
+  getComplianceSettings: () =>
+    apiClient.get<ComplianceSettings>('/settings/compliance').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<ComplianceSettings>(resp.data)
+      return resp
+    }),
   updateComplianceSettings: (data: Partial<ComplianceSettings>) =>
-    apiClient.put<ComplianceSettings>('/settings/compliance', data),
+    apiClient.put<ComplianceSettings>('/settings/compliance', data).then((resp) => {
+      ;(resp as any).data = unwrapResponseData<ComplianceSettings>(resp.data)
+      return resp
+    }),
 }
 
 // Team API
 export const teamApi = {
-  listMembers: () => apiClient.get<TeamMember[]>('/team/members'),
+  listMembers: () =>
+    apiClient.get<TeamMember[]>('/team/members').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<TeamMember[]>(resp.data)
+      return resp
+    }),
   inviteMember: (invitation: TeamInvitation) =>
-    apiClient.post<TeamMember>('/team/invite', invitation),
+    apiClient.post<TeamMember>('/team/invite', invitation).then((resp) => {
+      ;(resp as any).data = unwrapResponseData<TeamMember>(resp.data)
+      return resp
+    }),
   updateMember: (id: string, data: Partial<TeamMember>) =>
-    apiClient.put<TeamMember>(`/team/members/${id}`, data),
+    apiClient.put<TeamMember>(`/team/members/${id}`, data).then((resp) => {
+      ;(resp as any).data = unwrapResponseData<TeamMember>(resp.data)
+      return resp
+    }),
   removeMember: (id: string) => apiClient.delete(`/team/members/${id}`),
   resendInvite: (id: string) => apiClient.post(`/team/members/${id}/resend`),
-  listRoles: () => apiClient.get<TeamRoleDefinition[]>('/team/roles'),
+  listRoles: () =>
+    apiClient.get<TeamRoleDefinition[]>('/team/roles').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<TeamRoleDefinition[]>(resp.data)
+      return resp
+    }),
 }
 
 // BYO (Bring Your Own) Network Credentials API
@@ -828,7 +892,10 @@ export const byoApi = {
    * List all stored network credentials for the publisher
    */
   listCredentials: () =>
-    apiClient.get<NetworkCredentialsList>('/byo/credentials'),
+    apiClient.get<NetworkCredentialsList>('/byo/credentials').then((resp) => {
+      ;(resp as any).data = unwrapResponseData<NetworkCredentialsList>(resp.data)
+      return resp
+    }),
 
   /**
    * Store or update network credentials

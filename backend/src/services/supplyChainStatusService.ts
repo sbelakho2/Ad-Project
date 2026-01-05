@@ -51,9 +51,46 @@ export async function getSupplyChainStatus(
   }
 
   const baseDir = options?.baseDir ?? DEFAULT_BASE_DIR
-  const { appAdsPath, sellersPath } = resolvePaths(baseDir)
+  let appAdsPath: string
+  let sellersPath: string
+  try {
+    ;({ appAdsPath, sellersPath } = resolvePaths(baseDir))
+  } catch (err: any) {
+    const code = err?.code
+    logger.error('[SupplyChain] Corpus manifest unavailable', {
+      baseDir,
+      code,
+      message: err?.message,
+    })
+    return {
+      domain,
+      sellerId: req.sellerId,
+      appStoreId: req.appStoreId,
+      siteId: req.siteId,
+      authorized: false,
+      reason: 'Supply chain corpus is not available on this server',
+    }
+  }
+
   const corpus = new SupplyChainCorpus(appAdsPath, sellersPath)
-  await corpus.load()
+  try {
+    await corpus.load()
+  } catch (err: any) {
+    logger.error('[SupplyChain] Failed to load corpus', {
+      appAdsPath,
+      sellersPath,
+      code: err?.code,
+      message: err?.message,
+    })
+    return {
+      domain,
+      sellerId: req.sellerId,
+      appStoreId: req.appStoreId,
+      siteId: req.siteId,
+      authorized: false,
+      reason: 'Supply chain corpus could not be loaded',
+    }
+  }
 
   const entries = corpus.listDomainEntries(domain)
   const result = corpus.evaluateAuthorization({

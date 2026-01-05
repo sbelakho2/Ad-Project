@@ -48,7 +48,7 @@
 - [ ] **Users:** Application user with least-privilege grants
 - [ ] **Read Replica:** Configured for analytics queries
 - [ ] **Connection Pooling:** PgBouncer or RDS Proxy enabled
-- [ ] **Backup Retention:** 30-day point-in-time recovery enabled
+- [ ] **Backup Retention:** Point-in-time recovery enabled; retention meets the environment requirement (e.g. >=24h on Hetzner production)
 - [ ] **Performance Tuning:**
   ```sql
   -- Verify settings

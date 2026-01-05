@@ -46,22 +46,57 @@ const requireRepositories = (): TwofaRepositories => {
 type TwofaRow = {
   enabled: boolean;
   secret: string | null;
-  secret_ciphertext: string | null;
-  backup_codes: string | null;
+  secretCiphertext: string | null;
+  backupCodes: string | null;
+};
+
+type TwofaSchemaStyle = 'camel' | 'snake';
+let cachedTwofaSchemaStyle: TwofaSchemaStyle | null = null;
+
+const detectTwofaSchemaStyle = async (): Promise<TwofaSchemaStyle> => {
+  if (cachedTwofaSchemaStyle) return cachedTwofaSchemaStyle;
+  if (!AppDataSource.isInitialized) return 'camel';
+
+  try {
+    const rows = (await AppDataSource.query(
+      `SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'two_factor_auth'
+         AND column_name = 'userId'
+       LIMIT 1`
+    )) as unknown[];
+    cachedTwofaSchemaStyle = rows?.length ? 'camel' : 'snake';
+  } catch {
+    cachedTwofaSchemaStyle = 'camel';
+  }
+
+  return cachedTwofaSchemaStyle;
 };
 
 const getTwofaRow = async (userId: string): Promise<TwofaRow | null> => {
   if (!AppDataSource.isInitialized) return null;
 
+  const style = await detectTwofaSchemaStyle();
+
+  const sql = style === 'camel'
+    ? `SELECT enabled,
+             secret,
+             "secretCiphertext" AS "secretCiphertext",
+             "backupCodes" AS "backupCodes"
+       FROM two_factor_auth
+       WHERE "userId" = $1
+       LIMIT 1`
+    : `SELECT enabled,
+             secret,
+             secret_ciphertext AS "secretCiphertext",
+             backup_codes AS "backupCodes"
+       FROM two_factor_auth
+       WHERE user_id = $1
+       LIMIT 1`;
+
   // Use raw SQL here to avoid any runtime entity/metadata mismatch issues.
-  // This is intentionally resilient: it only relies on actual table/column names.
-  const rows = (await AppDataSource.query(
-    `SELECT enabled, secret, secret_ciphertext, backup_codes
-     FROM two_factor_auth
-     WHERE user_id = $1
-     LIMIT 1`,
-    [userId]
-  )) as Array<TwofaRow>;
+  const rows = (await AppDataSource.query(sql, [userId])) as Array<TwofaRow>;
 
   return rows?.[0] ?? null;
 };
@@ -104,7 +139,7 @@ export const twofaService = {
 
   async getBackupCodesCount(userId: string): Promise<number> {
     const row = await getTwofaRow(userId);
-    return parseBackupCodes(row?.backup_codes ?? null).length;
+    return parseBackupCodes(row?.backupCodes ?? null).length;
   },
 
   async enroll(userId: string, email: string, issuer = 'ApexMediation', auditCtx?: AuditCtx) {
@@ -194,8 +229,8 @@ export const twofaService = {
 
     let secret: string;
     try {
-      secret = row.secret_ciphertext
-        ? aesGcmDecrypt(JSON.parse(row.secret_ciphertext))
+      secret = row.secretCiphertext
+        ? aesGcmDecrypt(JSON.parse(row.secretCiphertext))
         : (row.secret as string);
     } catch (e) {
       secret = (row.secret as string);

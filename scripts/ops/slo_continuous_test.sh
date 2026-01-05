@@ -106,10 +106,11 @@ main_cycle() {
   APP_ID_IOS_2="$APP_ID_IOS_2"
   require_env APP_ID_WEB "$APP_ID_WEB"
   # Pass env explicitly to child
-  bash -c "API_URL='$API_URL' TOKEN='$TOKEN' SDK_KEY='$SDK_KEY' PUBLISHER_ID='$PUBLISHER_ID' \
-           APP_ID_ANDROID='$APP_ID_ANDROID' APP_ID_ANDROID_2='$APP_ID_ANDROID_2' \
-           APP_ID_IOS='$APP_ID_IOS' APP_ID_IOS_2='$APP_ID_IOS_2' APP_ID_WEB='$APP_ID_WEB' \
-           \"$ROOT_DIR/scripts/ops/vra_synthetic_load.sh\" $CYCLE_MINUTES $RATE_EPM" || log "[warn] synthetic load returned non-zero"
+  (
+    export API_URL TOKEN SDK_KEY PUBLISHER_ID
+    export APP_ID_ANDROID APP_ID_ANDROID_2 APP_ID_IOS APP_ID_IOS_2 APP_ID_WEB
+    "$ROOT_DIR/scripts/ops/vra_synthetic_load.sh" "$CYCLE_MINUTES" "$RATE_EPM"
+  ) || log "[warn] synthetic load returned non-zero"
 
   # SSAI smoke (non-fatal)
   ssai_smoke || true

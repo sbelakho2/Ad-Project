@@ -76,7 +76,10 @@ check_vra_status() {
     return 0
   fi
   local overview
-  overview=$(curl -s "$API_URL/api/v1/recon/overview" -H "Authorization: Bearer $TOKEN" 2>/dev/null || true)
+  overview=$(curl -s "$API_URL/api/v1/recon/overview" --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $TOKEN"
+EOF
+  || true)
   local variance
   variance=$(echo "$overview" | grep -o '"variancePercent":[0-9.]*' | cut -d: -f2 || echo "N/A")
   local coverage
@@ -106,10 +109,12 @@ for b in data.get(kind, []):
   print(k+'\t'+json.dumps(ev,separators=(',',':')))
 PY "$json_file" "$kind" | while IFS=$'\t' read -r sdk_key events_json; do
     local resp
-    resp=$(curl -s -w "\n%{http_code}" -X POST "$endpoint" \
-      -H "Content-Type: application/json" \
-      -H "X-SDK-Key: $sdk_key" \
-      -d "{\"events\": $events_json}" 2>/dev/null)
+    resp=$(curl -s -w "\n%{http_code}" -X POST "$endpoint" --config - \
+      -d "{\"events\": $events_json}" 2>/dev/null <<EOF
+header = "Content-Type: application/json"
+header = "X-SDK-Key: $sdk_key"
+EOF
+    )
     local code
     code=$(echo "$resp" | tail -n1)
     if [[ "$code" != "202" ]]; then
@@ -211,7 +216,10 @@ sleep 30
 log "Final VRA status: $(check_vra_status)"
 
 if [[ -n "$TOKEN" ]]; then
-  DELTAS=$(curl -s "$API_URL/api/v1/recon/deltas" -H "Authorization: Bearer $TOKEN" 2>/dev/null || true)
+  DELTAS=$(curl -s "$API_URL/api/v1/recon/deltas" --config - 2>/dev/null <<EOF
+header = "Authorization: Bearer $TOKEN"
+EOF
+  || true)
   DELTA_COUNT=$(echo "$DELTAS" | grep -o '"total":[0-9]*' | cut -d: -f2 || echo "0")
   log "Delta count: $DELTA_COUNT"
 

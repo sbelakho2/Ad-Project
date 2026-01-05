@@ -148,8 +148,10 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
   // Don't show navigation on login page
   if (!pathname || pathname === '/login' || pathname === '/') return <>{children}</>
 
-  if (!bypassLoadingGuards && (sessionLoading || featuresLoading || planLoading)) {
-    return <NavigationSkeleton />
+  // Avoid locking the UI behind long/failed optional calls (features/plan).
+  // We only guard on the core session bootstrap.
+  if (!bypassLoadingGuards && sessionLoading) {
+    return <NavigationSkeleton>{children}</NavigationSkeleton>
   }
 
   // If session missing (logging out / unauthorized), defer to page-level redirects without flashing nav
@@ -301,14 +303,14 @@ function resolveNavLabel(item: NavBlueprint): string {
   return item.label
 }
 
-function NavigationSkeleton() {
+function NavigationSkeleton({ children }: { children?: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-[#f9fafb] animate-pulse" role="status" aria-live="polite">
+    <div className="min-h-screen bg-[#f9fafb]" role="status" aria-live="polite">
       <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-white border-b px-4 py-3 flex items-center justify-between">
-        <div className="h-8 w-32 bg-gray-200 rounded" />
-        <div className="h-8 w-8 bg-gray-200 rounded-full" />
+        <div className="h-8 w-32 bg-gray-200 rounded animate-pulse" />
+        <div className="h-8 w-8 bg-gray-200 rounded-full animate-pulse" />
       </div>
-      <aside className="fixed top-0 left-0 bottom-0 w-[240px] bg-white border-r z-40 p-6 space-y-4 hidden lg:flex lg:flex-col">
+      <aside className="fixed top-0 left-0 bottom-0 w-[240px] bg-white border-r z-40 p-6 space-y-4 hidden lg:flex lg:flex-col animate-pulse">
         <div className="h-10 w-full bg-gray-200 rounded" />
         <div className="space-y-2">
           {NAV_SKELETON_KEYS.map((key) => (
@@ -320,6 +322,11 @@ function NavigationSkeleton() {
           <div className="h-10 bg-gray-100 rounded" />
         </div>
       </aside>
+
+      {/* Main content: never block route rendering behind nav skeleton */}
+      <div className="lg:pl-[240px]">
+        <div className="pt-16 lg:pt-0 min-h-screen bg-[#f9fafb]">{children}</div>
+      </div>
     </div>
   )
 }

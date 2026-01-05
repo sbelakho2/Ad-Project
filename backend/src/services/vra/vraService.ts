@@ -45,9 +45,10 @@ async function safeQuery<T extends QueryResultRow = QueryResultRow>(
 export class VraService {
   // Overview aggregates derived from revenue_events (expected) and recon_statements_norm (paid)
   async getOverview(params: ReconOverviewParams): Promise<ReconOverviewResult> {
+    const publisherId = params.publisherId;
+    const appId = params.appId;
     const from = params.from ?? new Date(Date.now() - 7 * 86400000).toISOString();
     const to = params.to ?? new Date().toISOString();
-    const publisherId = params.publisherId;
 
     // Get expected revenue from SDK events
     const expectedRows = await safeQuery<{
@@ -68,11 +69,11 @@ export class VraService {
       FROM revenue_events
       WHERE timestamp >= $1::timestamptz
         AND timestamp <  $2::timestamptz
-        ${publisherId ? 'AND publisher_id = $3' : ''}
+        AND publisher_id = $3
       GROUP BY adapter_name, ad_format, country_code
       ORDER BY expected DESC
       `,
-      publisherId ? [from, to, publisherId] : [from, to]
+      [from, to, publisherId]
     );
 
     // Get paid revenue from network statements
@@ -94,11 +95,12 @@ export class VraService {
       FROM recon_statements_norm
       WHERE event_date >= $1::date
         AND event_date <  $2::date
-        ${publisherId ? 'AND publisher_id = $3' : ''}
+        AND publisher_id = $3
+        ${appId ? 'AND app_id = $4' : ''}
       GROUP BY network_type, format, country
       ORDER BY paid DESC
       `,
-      publisherId ? [from, to, publisherId] : [from, to]
+      appId ? [from, to, publisherId, appId] : [from, to, publisherId]
     );
 
     // Build lookup map for paid amounts
@@ -194,6 +196,8 @@ export class VraService {
     };
     pushClause('window_start >= ?::timestamptz', from);
     pushClause('window_end < ?::timestamptz', to);
+    pushClause('publisher_id = ?', query.publisherId);
+    if (query.appId) pushClause('app_id = ?', query.appId);
     if (query.kind) pushClause('kind = ?', query.kind);
     if (query.minConf != null) pushClause('confidence >= ?', query.minConf);
 
