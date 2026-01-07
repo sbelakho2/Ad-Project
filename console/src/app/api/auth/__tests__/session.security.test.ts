@@ -198,7 +198,7 @@ describe('api client session protections', () => {
     mockedReadXsrfCookie.mockReset()
   })
 
-  it('attaches CSRF tokens to mutating requests and reuses cached cookies', async () => {
+  it('attaches CSRF tokens to mutating requests and caches API-fetched token', async () => {
     const originalAdapter = apiClient.defaults.adapter
     const capturedConfigs: any[] = []
     const adapter = jest.fn(async (config) => {
@@ -215,16 +215,18 @@ describe('api client session protections', () => {
 
     apiClient.defaults.adapter = adapter as any
 
-    mockedReadXsrfCookie.mockReturnValueOnce(null).mockReturnValue('persisted-token')
+    // The new implementation always fetches from API and caches the token
+    // (not the cookie value). Both requests should use the same fetched token.
     mockedGetCsrfToken.mockResolvedValue('fetched-token')
 
     await apiClient.post('/secure/action', { foo: 'bar' })
     await apiClient.post('/secure/again', { fizz: 'buzz' })
 
+    // Token is fetched once and cached for both requests
     expect(mockedGetCsrfToken).toHaveBeenCalledTimes(1)
     expect(adapter).toHaveBeenCalledTimes(2)
     expect(capturedConfigs[0].headers?.['X-CSRF-Token']).toBe('fetched-token')
-    expect(capturedConfigs[1].headers?.['X-CSRF-Token']).toBe('persisted-token')
+    expect(capturedConfigs[1].headers?.['X-CSRF-Token']).toBe('fetched-token')
 
     apiClient.defaults.adapter = originalAdapter
   })
