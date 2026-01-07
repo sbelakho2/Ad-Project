@@ -29,7 +29,6 @@ public final class NetworkWarmer: @unchecked Sendable {
         let config = URLSessionConfiguration.default
         // tvOS typically runs on powerful hardware, use more connections
         config.httpMaximumConnectionsPerHost = 4
-        config.timeoutIntervalForConnect = 2.0
         config.timeoutIntervalForRequest = 5.0
         config.waitsForConnectivity = false
         config.urlCache = nil

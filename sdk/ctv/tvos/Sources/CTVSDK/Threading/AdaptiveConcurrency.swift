@@ -7,6 +7,7 @@ import os.log
 /// - Single-socket CPU with fewer cores than mobile devices
 /// - Consistent performance without thermal throttling concerns
 /// - Larger memory budget for buffering
+@available(tvOS 13.0, macOS 10.15, *)
 public final class AdaptiveConcurrency {
     
     /// Shared singleton instance
@@ -62,7 +63,7 @@ public final class AdaptiveConcurrency {
     /// Dispatch queue for compute-intensive work
     public let computeDispatchQueue: DispatchQueue
     
-    private let logger = Logger(subsystem: "com.rivalapexmediation.ctv", category: "AdaptiveConcurrency")
+    private var logger: Any?
     
     // MARK: - Metrics
     
@@ -73,35 +74,48 @@ public final class AdaptiveConcurrency {
     // MARK: - Initialization
     
     private init() {
-        self.cpuInfo = AdaptiveConcurrency.detectCpuInfo()
+        if #available(tvOS 14.0, macOS 11.0, *) {
+            self.logger = Logger(subsystem: "com.rivalapexmediation.ctv", category: "AdaptiveConcurrency")
+        } else {
+            self.logger = nil
+        }
+        
+        // Detect CPU info first - used for config calculations
+        let detectedCpuInfo = AdaptiveConcurrency.detectCpuInfo()
+        self.cpuInfo = detectedCpuInfo
+        let cores = detectedCpuInfo.totalCores
         
         // Create background queue - conservative for tvOS
-        let backgroundConfig = getBackgroundPoolConfig()
+        // Inline config: max(min, min(cores-1, maxBackground))
+        let backgroundMaxOps = max(Self.minConcurrentOperations, min(cores - 1, Self.maxBackgroundOperations))
         self.backgroundQueue = OperationQueue()
         backgroundQueue.name = "com.rivalapexmediation.ctv.background"
-        backgroundQueue.maxConcurrentOperationCount = backgroundConfig.maxConcurrentOperations
-        backgroundQueue.qualityOfService = backgroundConfig.qualityOfService
+        backgroundQueue.maxConcurrentOperationCount = backgroundMaxOps
+        backgroundQueue.qualityOfService = .utility
         
         // Create network queue - can be more aggressive
-        let networkConfig = getNetworkPoolConfig()
+        // Inline config: max(min, min(cores*2, maxNetwork))
+        let networkMaxOps = max(Self.minConcurrentOperations, min(cores * 2, Self.maxNetworkOperations))
         self.networkQueue = OperationQueue()
         networkQueue.name = "com.rivalapexmediation.ctv.network"
-        networkQueue.maxConcurrentOperationCount = networkConfig.maxConcurrentOperations
-        networkQueue.qualityOfService = networkConfig.qualityOfService
+        networkQueue.maxConcurrentOperationCount = networkMaxOps
+        networkQueue.qualityOfService = .userInitiated
         
         // Create compute queue - limited on tvOS
-        let computeConfig = getComputePoolConfig()
+        // Inline config: max(1, min(perfCores, maxCompute))
+        let computeCores = detectedCpuInfo.isHeterogeneous ? detectedCpuInfo.performanceCores : detectedCpuInfo.totalCores
+        let computeMaxOps = max(1, min(computeCores, Self.maxComputeOperations))
         self.computeQueue = OperationQueue()
         computeQueue.name = "com.rivalapexmediation.ctv.compute"
-        computeQueue.maxConcurrentOperationCount = computeConfig.maxConcurrentOperations
-        computeQueue.qualityOfService = computeConfig.qualityOfService
+        computeQueue.maxConcurrentOperationCount = computeMaxOps
+        computeQueue.qualityOfService = .userInteractive
         
         // Create media queue - optimized for video processing
-        let mediaConfig = getMediaPoolConfig()
+        // Hardware decoding handles most work, so limit to 2 ops
         self.mediaQueue = OperationQueue()
         mediaQueue.name = "com.rivalapexmediation.ctv.media"
-        mediaQueue.maxConcurrentOperationCount = mediaConfig.maxConcurrentOperations
-        mediaQueue.qualityOfService = mediaConfig.qualityOfService
+        mediaQueue.maxConcurrentOperationCount = 2
+        mediaQueue.qualityOfService = .userInteractive
         
         // Create dispatch queues
         self.backgroundDispatchQueue = DispatchQueue(
@@ -122,7 +136,11 @@ public final class AdaptiveConcurrency {
             attributes: .concurrent
         )
         
-        logger.info("CTV AdaptiveConcurrency initialized: \(self.cpuInfo.totalCores) cores, model: \(self.cpuInfo.deviceModel)")
+        if #available(tvOS 14.0, macOS 11.0, *) {
+            if let log = logger as? Logger {
+                log.info("CTV AdaptiveConcurrency initialized: \(self.cpuInfo.totalCores) cores, model: \(self.cpuInfo.deviceModel)")
+            }
+        }
     }
     
     // MARK: - Pool Configuration

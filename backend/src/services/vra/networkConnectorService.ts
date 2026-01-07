@@ -117,12 +117,24 @@ interface CreateConnectionInput {
   networkAppIds?: string[];
 }
 
-// Encryption key from environment (should be 32 bytes for AES-256)
-const ENCRYPTION_KEY = process.env.VRA_ENCRYPTION_KEY || 'default-dev-key-change-in-prod!!';
+// Encryption key from environment (must be set for production)
+const ENCRYPTION_KEY = process.env.VRA_ENCRYPTION_KEY;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+function getEncryptionKey(): string {
+  if (!ENCRYPTION_KEY) {
+    if (IS_PRODUCTION) {
+      throw new Error('VRA_ENCRYPTION_KEY environment variable is required in production');
+    }
+    // Only allow fallback in development/test environments
+    return 'default-dev-key-for-testing-only';
+  }
+  return ENCRYPTION_KEY;
+}
 
 function encrypt(text: string): { encrypted: Buffer; iv: Buffer } {
   const iv = crypto.randomBytes(16);
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
+  const key = crypto.scryptSync(getEncryptionKey(), 'salt', 32);
   const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
   let encrypted = cipher.update(text, 'utf8');
   encrypted = Buffer.concat([encrypted, cipher.final()]);
@@ -130,7 +142,7 @@ function encrypt(text: string): { encrypted: Buffer; iv: Buffer } {
 }
 
 function decrypt(encrypted: Buffer, iv: Buffer): string {
-  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
+  const key = crypto.scryptSync(getEncryptionKey(), 'salt', 32);
   const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
   let decrypted = decipher.update(encrypted);
   decrypted = Buffer.concat([decrypted, decipher.final()]);

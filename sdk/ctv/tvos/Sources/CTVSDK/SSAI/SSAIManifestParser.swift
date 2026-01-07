@@ -105,6 +105,8 @@ public final class SSAIManifestParser {
                     }
                 } catch let error as ParseError {
                     errors.append(error)
+                } catch {
+                    errors.append(ParseError(line: 0, message: "Unknown parse error: \(error.localizedDescription)"))
                 }
             }
             
@@ -146,7 +148,7 @@ public final class SSAIManifestParser {
     }
     
     /// Parse HLS manifest from URL (async)
-    @available(tvOS 13.0, *)
+    @available(tvOS 15.0, macOS 12.0, *)
     public func parseHLS(url: URL) async throws -> ParseResult {
         let (data, _) = try await URLSession.shared.data(from: url)
         guard let manifest = String(data: data, encoding: .utf8) else {

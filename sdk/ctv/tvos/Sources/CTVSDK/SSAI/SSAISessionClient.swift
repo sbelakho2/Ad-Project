@@ -140,7 +140,7 @@ public final class SSAISessionClient {
     }
     
     /// Create a new SSAI session (async)
-    @available(tvOS 13.0, *)
+    @available(tvOS 13.0, macOS 10.15, *)
     public func createSession(config: SSAIConfig) async throws -> SSAISession {
         try await withCheckedThrowingContinuation { continuation in
             createSession(config: config) { result in

@@ -31,6 +31,7 @@ import {
 } from './migrationImportConnectors';
 import { generateSignedComparison, generateSignedReportComparison } from './migrationComparisonSigner';
 import { migrationGuardrailPausesTotal, migrationKillsTotal } from '../utils/prometheus';
+import { MigrationNotificationService } from './migrationNotificationService';
 
 const DEFAULT_GUARDRAILS: Guardrails = {
   latency_budget_ms: 500,
@@ -1269,6 +1270,22 @@ export class MigrationStudioService {
               violations,
             });
           }
+
+          // Send guardrail violation notification (non-blocking)
+          const notificationService = new MigrationNotificationService(this.pool);
+          notificationService.sendGuardrailViolationAlert({
+            experimentId,
+            experimentName: experimentRow.name,
+            publisherId,
+            violations,
+            action: shouldKill ? 'killed' : 'paused',
+            timestamp: new Date().toISOString(),
+          }).catch(err => {
+            logger.warn('Failed to send guardrail violation notification', {
+              experimentId,
+              error: err.message,
+            });
+          });
         } else {
           await client.query(
             `UPDATE migration_experiments

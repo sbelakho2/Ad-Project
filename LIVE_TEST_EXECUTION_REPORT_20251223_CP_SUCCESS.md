@@ -15,7 +15,7 @@ Successfully completed Control Plane live E2E tests on production server (46.62.
 
 ### Environment
 - **Base URL:** `https://admin.apexmediation.ee`
-- **Credentials:** operator / &&Pw20354491
+- **Credentials:** operator / <REDACTED>
 - **Backend:** PM2 process 231075, port 4000
 - **Test Framework:** Playwright 1.49.0
 
@@ -159,7 +159,7 @@ Response: 200 https://admin.apexmediation.ee/api/v1/dashboard
 - textbox "Email" [ref=e14]:
   - text: sales@apexmediation.ee
 - textbox "Password" [ref=e17]:
-  - text: "&&Pw20354491"
+- text: "<REDACTED>"
 ```
 
 **Backend Logs (Console Auth Success):**
@@ -239,7 +239,7 @@ cd control-plane && \
 LIVE_E2E=1 \
 CONTROL_PLANE_BASE_URL=https://admin.apexmediation.ee \
 LIVE_CONTROL_PLANE_USERNAME="operator" \
-LIVE_CONTROL_PLANE_PASSWORD="&&Pw20354491" \
+LIVE_CONTROL_PLANE_PASSWORD="<REDACTED>" \
 npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts
 ```
 
@@ -250,7 +250,7 @@ LIVE_E2E=1 \
 NEXT_PUBLIC_API_URL=https://apexmediation.ee \
 CONSOLE_BASE_URL=https://console.apexmediation.ee \
 LIVE_CONSOLE_EMAIL="sales@apexmediation.ee" \
-LIVE_CONSOLE_PASSWORD="&&Pw20354491" \
+LIVE_CONSOLE_PASSWORD="<REDACTED>" \
 npx playwright test --project=chromium tests/e2e/live-login.spec.ts
 ```
 

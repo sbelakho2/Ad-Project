@@ -5,7 +5,7 @@ import Combine
 /// SSAI Player Observer for tvOS SDK
 ///
 /// Monitors AVPlayer for SSAI ad playback and automatically tracks events.
-@available(tvOS 13.0, *)
+@available(tvOS 13.0, macOS 10.15, *)
 public final class SSAIPlayerObserver: NSObject {
     
     // MARK: - Types
@@ -137,6 +137,7 @@ public final class SSAIPlayerObserver: NSObject {
     }
     
     /// Load ad cues from manifest URL
+    @available(tvOS 15.0, macOS 12.0, *)
     public func loadAdCues(from manifestUrl: URL) async throws {
         let result = try await manifestParser.parseHLS(url: manifestUrl)
         adCues = result.adCues
@@ -180,7 +181,7 @@ public final class SSAIPlayerObserver: NSObject {
 
         let event: [String: Any] = [
             "timestamp": formatter.string(from: Date()),
-            "protocol": protocol,
+            "streamProtocol": `protocol`,
             "sdk_platform": "tvos",
             "error_code": "MANIFEST_PARSE_ERROR",
             "error_message": String((first?.message ?? "Parse error").prefix(500)),
@@ -218,7 +219,7 @@ public final class SSAIPlayerObserver: NSObject {
                     duration: ad.duration,
                     podId: adBreak.podId,
                     slotIndex: slotIndex,
-                    cueType: adBreak.type == "preroll" ? .preroll : (adBreak.type == "postroll" ? .postroll : .midroll),
+                    cueType: adBreak.type == .preroll ? .preroll : (adBreak.type == .postroll ? .postroll : .midroll),
                     metadata: [:]
                 )
                 slotIndex += 1
@@ -411,10 +412,17 @@ public final class SSAIPlayerObserver: NSObject {
         
         let totalDuration = podAds.reduce(0) { $0 + $1.duration }
         
+        let adBreakType: SSAIAdBreakType
+        switch cue.cueType {
+        case .preroll: adBreakType = .preroll
+        case .postroll: adBreakType = .postroll
+        case .midroll: adBreakType = .midroll
+        }
+        
         let adBreak = SSAIAdBreak(
             podId: cue.podId,
-            type: cue.cueType.rawValue,
-            position: Int(cue.startTime),
+            type: adBreakType,
+            position: cue.startTime,
             startTime: cue.startTime,
             duration: totalDuration,
             plannedSlots: ads.count,
@@ -530,7 +538,7 @@ public final class SSAIPlayerObserver: NSObject {
 
 // MARK: - SSAIPlayerObserverDelegate Default Implementation
 
-@available(tvOS 13.0, *)
+@available(tvOS 13.0, macOS 10.15, *)
 public extension SSAIPlayerObserver.SSAIPlayerObserverDelegate {
     func ssaiObserver(_ observer: SSAIPlayerObserver, didEnterAdBreak adBreak: SSAIAdBreak) {}
     func ssaiObserver(_ observer: SSAIPlayerObserver, didExitAdBreak adBreak: SSAIAdBreak) {}

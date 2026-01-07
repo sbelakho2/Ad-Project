@@ -4,6 +4,8 @@
 
 This document analyzes the complete user journey through the Apex Mediation platform, identifying all console features, their backend wiring status, and critical gaps that affect the user experience.
 
+> Note: this document contains historical findings from Dec 2025. Several items originally marked "missing" (notably `/api/v1/team/*` and `/api/v1/settings/*`) are now implemented and mounted in the backend router. If you are auditing current sell-readiness, treat this as an archive and cross-check against the current backend route inventory and console integration docs.
+
 **Analysis Date**: December 18, 2025  
 **Server**: 46.62.252.96 (production)  
 **Last Test Run**: December 18, 2025 18:36 UTC
@@ -93,30 +95,17 @@ This document analyzes the complete user journey through the Apex Mediation plat
 
 ---
 
-## ❌ Critical Gaps - Missing Backend Routes
+## Historical Notes (Dec 2025)
 
-### Team Management (BROKEN)
+### Team + Settings
 
-**Console Location**: `/settings/team`
+Earlier iterations of this analysis flagged Team Management and Settings pages as broken due to missing backend routes. Those routes are now present under `/api/v1/team/*` and `/api/v1/settings/*`.
 
-The console has a fully-built Team Management UI but **no backend routes exist**:
-
-| Console API Call | Expected Backend | Status |
-|------------------|------------------|--------|
-| `teamApi.listMembers()` | `GET /team/members` | ❌ NO ROUTE |
-| `teamApi.inviteMember()` | `POST /team/invite` | ❌ NO ROUTE |
-| `teamApi.updateMember()` | `PUT /team/members/:id` | ❌ NO ROUTE |
-| `teamApi.removeMember()` | `DELETE /team/members/:id` | ❌ NO ROUTE |
-| `teamApi.resendInvite()` | `POST /team/members/:id/resend` | ❌ NO ROUTE |
-| `teamApi.listRoles()` | `GET /team/roles` | ❌ NO ROUTE |
-
-**User Impact**: 
-- Cannot invite team members
-- Cannot assign roles
-- Cannot remove team access
-- **Severity: HIGH** - Multi-user organizations cannot function
-
-### Settings - Fraud Protection (BROKEN)
+If you see failures here today, they are more likely to be:
+- auth/RBAC (role or publisher context)
+- env/config drift
+- DB migrations missing in an environment
+- UI wiring issues (client endpoints, caching)
 
 **Console Location**: `/settings/fraud`
 

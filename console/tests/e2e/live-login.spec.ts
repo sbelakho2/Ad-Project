@@ -60,9 +60,10 @@ test.describe('Console LIVE — login with dummy user', () => {
       consoleLogs.push(text)
     })
 
-    // Navigate to login page first
-    await page.goto('/login', { waitUntil: 'networkidle' })
-    await page.waitForTimeout(2000)
+    // Navigate to login page first. Avoid `networkidle` here: prod pages can keep
+    // connections open (analytics, font/CDN, etc) and make LIVE tests flaky.
+    await page.goto('/login', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: /ApexMediation/i })).toBeVisible({ timeout: 15_000 })
 
     console.log('Current URL:', page.url())
 

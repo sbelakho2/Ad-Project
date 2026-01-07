@@ -88,8 +88,33 @@ FRAUD_DRIFT_GAUGE = Gauge(
     ["tenant"],
 )
 
+# Bias/Fairness Metrics
+FRAUD_SCORE_BY_CONSENT_HISTOGRAM = Histogram(
+    "fraud_score_by_consent",
+    "Distribution of fraud scores segmented by consent status",
+    ["tenant", "consent_type", "consent_value"],
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+)
+
+BIAS_DISPARITY_GAUGE = Gauge(
+    "fraud_bias_disparity",
+    "Demographic parity disparity between consent groups (abs diff in mean scores)",
+    ["tenant", "consent_type"],
+)
+
+FAIRNESS_RATIO_GAUGE = Gauge(
+    "fraud_fairness_ratio",
+    "Fairness ratio (min/max mean score) across consent groups - closer to 1.0 is better",
+    ["tenant", "consent_type"],
+)
+
 SCORE_WINDOWS: Dict[str, deque] = defaultdict(lambda: deque(maxlen=400))
 GLOBAL_SCORE_WINDOW: deque = deque(maxlen=4000)
+
+# Bias tracking windows (consent_type -> consent_value -> scores)
+CONSENT_SCORE_WINDOWS: Dict[str, Dict[str, deque]] = defaultdict(
+    lambda: defaultdict(lambda: deque(maxlen=200))
+)
 
 
 class FraudFeatures(BaseModel):
@@ -515,12 +540,16 @@ def transform_features(sample: FraudFeatures) -> Dict[str, np.ndarray]:
     return {"x_num": x_num.astype(np.float32), "x_cat": x_cat}
 
 
-def _record_score_metrics(tenant: str, score: float) -> None:
+def _record_score_metrics(tenant: str, score: float, payload: Optional["FraudDetectionRequest"] = None) -> None:
     FRAUD_SCORE_HISTOGRAM.labels(tenant=tenant, model_version=state.model_version).observe(score)
     tenant_window = SCORE_WINDOWS[tenant]
     tenant_window.append(score)
     GLOBAL_SCORE_WINDOW.append(score)
     _update_drift_metric(tenant)
+    
+    # Record bias metrics if payload available
+    if payload is not None:
+        _record_bias_metrics(tenant, score, payload)
 
 
 def _update_drift_metric(tenant: str) -> None:
@@ -552,6 +581,66 @@ def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
         return float(np.sum(a[mask] * np.log2(a[mask] / b[mask])))
 
     return 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
+
+
+def _record_bias_metrics(tenant: str, score: float, payload: "FraudDetectionRequest") -> None:
+    """Record bias/fairness metrics segmented by consent attributes."""
+    # Track scores by GDPR consent
+    gdpr_value = "true" if payload.consent_gdpr is True else ("false" if payload.consent_gdpr is False else "unknown")
+    FRAUD_SCORE_BY_CONSENT_HISTOGRAM.labels(
+        tenant=tenant, consent_type="gdpr", consent_value=gdpr_value
+    ).observe(score)
+    CONSENT_SCORE_WINDOWS[f"{tenant}:gdpr"][gdpr_value].append(score)
+    
+    # Track scores by COPPA
+    coppa_value = "true" if payload.coppa is True else ("false" if payload.coppa is False else "unknown")
+    FRAUD_SCORE_BY_CONSENT_HISTOGRAM.labels(
+        tenant=tenant, consent_type="coppa", consent_value=coppa_value
+    ).observe(score)
+    CONSENT_SCORE_WINDOWS[f"{tenant}:coppa"][coppa_value].append(score)
+    
+    # Track scores by TCF presence
+    tcf_value = "present" if payload.consent_tcf else "absent"
+    FRAUD_SCORE_BY_CONSENT_HISTOGRAM.labels(
+        tenant=tenant, consent_type="tcf", consent_value=tcf_value
+    ).observe(score)
+    CONSENT_SCORE_WINDOWS[f"{tenant}:tcf"][tcf_value].append(score)
+    
+    # Track scores by US Privacy presence
+    us_privacy_value = "present" if payload.us_privacy else "absent"
+    FRAUD_SCORE_BY_CONSENT_HISTOGRAM.labels(
+        tenant=tenant, consent_type="us_privacy", consent_value=us_privacy_value
+    ).observe(score)
+    CONSENT_SCORE_WINDOWS[f"{tenant}:us_privacy"][us_privacy_value].append(score)
+    
+    # Update bias disparity metrics periodically
+    _update_bias_metrics(tenant)
+
+
+def _update_bias_metrics(tenant: str) -> None:
+    """Calculate and update demographic parity metrics."""
+    for consent_type in ["gdpr", "coppa", "tcf", "us_privacy"]:
+        key = f"{tenant}:{consent_type}"
+        windows = CONSENT_SCORE_WINDOWS.get(key, {})
+        
+        # Need at least 2 groups with enough samples
+        group_means = {}
+        for group_value, scores in windows.items():
+            if len(scores) >= 10:
+                group_means[group_value] = np.mean(list(scores))
+        
+        if len(group_means) < 2:
+            continue
+        
+        # Calculate demographic parity disparity (max - min mean)
+        mean_values = list(group_means.values())
+        disparity = max(mean_values) - min(mean_values)
+        BIAS_DISPARITY_GAUGE.labels(tenant=tenant, consent_type=consent_type).set(disparity)
+        
+        # Calculate fairness ratio (min/max - closer to 1.0 is better)
+        if max(mean_values) > 0:
+            ratio = min(mean_values) / max(mean_values)
+            FAIRNESS_RATIO_GAUGE.labels(tenant=tenant, consent_type=consent_type).set(ratio)
 
 
 @asynccontextmanager
@@ -636,6 +725,110 @@ async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+class BiasReportGroup(BaseModel):
+    """Bias statistics for a single group."""
+    group_value: str
+    sample_count: int
+    mean_score: float
+    std_score: float
+    min_score: float
+    max_score: float
+
+
+class BiasReportDimension(BaseModel):
+    """Bias report for a single consent dimension."""
+    consent_type: str
+    groups: List[BiasReportGroup]
+    disparity: Optional[float] = None
+    fairness_ratio: Optional[float] = None
+    bias_alert: bool = False
+
+
+class BiasReport(BaseModel):
+    """Full bias/fairness report for a tenant."""
+    tenant: str
+    timestamp: float
+    total_samples: int
+    dimensions: List[BiasReportDimension]
+    overall_bias_alert: bool = False
+
+
+@app.get("/v1/bias/report", response_model=BiasReport, tags=["Fairness"])
+async def get_bias_report(
+    request: Request,
+    auth: AuthContext = Depends(authorize_request),
+):
+    """
+    Get bias/fairness report for the authenticated tenant.
+    
+    Reports demographic parity metrics across consent dimensions:
+    - GDPR consent (true/false/unknown)
+    - COPPA (true/false/unknown)
+    - TCF presence (present/absent)
+    - US Privacy presence (present/absent)
+    
+    Alerts if disparity > 0.1 or fairness_ratio < 0.8
+    """
+    _ = auth
+    tenant = getattr(request.state, "tenant", _require_tenant(request))
+    
+    dimensions: List[BiasReportDimension] = []
+    overall_alert = False
+    total_samples = 0
+    
+    for consent_type in ["gdpr", "coppa", "tcf", "us_privacy"]:
+        key = f"{tenant}:{consent_type}"
+        windows = CONSENT_SCORE_WINDOWS.get(key, {})
+        
+        groups: List[BiasReportGroup] = []
+        for group_value, scores in windows.items():
+            score_list = list(scores)
+            if not score_list:
+                continue
+            
+            total_samples += len(score_list)
+            groups.append(BiasReportGroup(
+                group_value=group_value,
+                sample_count=len(score_list),
+                mean_score=float(np.mean(score_list)),
+                std_score=float(np.std(score_list)) if len(score_list) > 1 else 0.0,
+                min_score=float(np.min(score_list)),
+                max_score=float(np.max(score_list)),
+            ))
+        
+        # Calculate metrics if we have enough data
+        disparity = None
+        fairness_ratio = None
+        bias_alert = False
+        
+        if len(groups) >= 2:
+            means = [g.mean_score for g in groups if g.sample_count >= 10]
+            if len(means) >= 2:
+                disparity = max(means) - min(means)
+                fairness_ratio = min(means) / max(means) if max(means) > 0 else 1.0
+                
+                # Alert thresholds
+                if disparity > 0.1 or fairness_ratio < 0.8:
+                    bias_alert = True
+                    overall_alert = True
+        
+        dimensions.append(BiasReportDimension(
+            consent_type=consent_type,
+            groups=groups,
+            disparity=disparity,
+            fairness_ratio=fairness_ratio,
+            bias_alert=bias_alert,
+        ))
+    
+    return BiasReport(
+        tenant=tenant,
+        timestamp=time.time(),
+        total_samples=total_samples // 4,  # Approximate unique samples
+        dimensions=dimensions,
+        overall_bias_alert=overall_alert,
+    )
+
+
 @app.post("/v1/score", response_model=FraudScore, tags=["Inference"])
 async def score_fraud(
     payload: FraudDetectionRequest,
@@ -671,7 +864,7 @@ async def score_fraud(
             fraud_score = float(outputs[0][0])
         
         latency_ms = (time.time() - start_time) * 1000
-        _record_score_metrics(tenant, fraud_score)
+        _record_score_metrics(tenant, fraud_score, payload)
         mode = mode_for(tenant)
         shadow_decision = fraud_score >= state.threshold
         is_fraud = shadow_decision and mode == "block"
@@ -749,8 +942,8 @@ async def score_fraud_batch(
             for score, flag in zip(fraud_scores, shadow_flags)
         ]
 
-        for score in fraud_scores:
-            _record_score_metrics(tenant, float(score))
+        for score, item in zip(fraud_scores, features_list):
+            _record_score_metrics(tenant, float(score), item)
 
         return results
     

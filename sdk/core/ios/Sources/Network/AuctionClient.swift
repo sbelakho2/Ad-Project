@@ -186,20 +186,33 @@ public final class AuctionClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
         request.setValue(userAgent(), forHTTPHeaderField: "User-Agent")
+        
+        // Correlation ID for distributed tracing
+        let correlationId = UUID().uuidString
+        request.setValue(correlationId, forHTTPHeaderField: "X-Correlation-ID")
+        request.setValue("ios-sdk/1.0.0", forHTTPHeaderField: "X-SDK-Version")
+        
         request.timeoutInterval = timeout
         
-        let body = buildRequestBody(placementId: placementId, adType: adType)
+        let body = buildRequestBody(placementId: placementId, adType: adType, correlationId: correlationId)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         return request
     }
     
-    private func buildRequestBody(placementId: String, adType: String) -> [String: Any] {
+    private func buildRequestBody(placementId: String, adType: String, correlationId: String) -> [String: Any] {
         var body: [String: Any] = [
             "placementId": placementId,
             "adType": adType,
             "device": deviceInfo(),
-            "app": appInfo()
+            "app": appInfo(),
+            "meta": [
+                "correlationId": correlationId,
+                "sdk": [
+                    "name": "apex-ios-sdk",
+                    "version": "1.0.0"
+                ]
+            ]
         ]
         
         let consentMetadata = MediationSDK.shared.consentMetadata()

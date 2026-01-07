@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { authenticator } from 'otplib';
 import bcrypt from 'bcryptjs';
 import * as qrcode from 'qrcode';
@@ -206,7 +207,7 @@ export const twofaService = {
     if (!ok) throw new Error('Invalid token');
 
     const codes = Array.from({ length: 10 }, () =>
-      Math.random().toString(36).replace(/[^a-z0-9]/gi, '').slice(-10)
+      crypto.randomBytes(8).toString('base64url').slice(0, 10)
     );
     
     const hashedCodes = await Promise.all(codes.map((c) => bcrypt.hash(c, 10)));
@@ -259,7 +260,7 @@ export const twofaService = {
     if (!tfaRecord || !tfaRecord.enabled) throw new Error('2FA not enabled');
 
     const codes = Array.from({ length: 10 }, () =>
-      Math.random().toString(36).replace(/[^a-z0-9]/gi, '').slice(-10)
+      crypto.randomBytes(8).toString('base64url').slice(0, 10)
     );
     
     tfaRecord.backupCodes = await Promise.all(codes.map((c) => bcrypt.hash(c, 10)));

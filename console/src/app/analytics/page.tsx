@@ -30,6 +30,16 @@ export default function AnalyticsPage() {
     endDate: today,
   })
   const [granularity, setGranularity] = useState<'hour' | 'day'>('day')
+
+  const enableLiveRefresh = useMemo(() => {
+    // If the selected range includes "today" (or very recently), keep the view fresh.
+    // We treat endDate as a YYYY-MM-DD day boundary.
+    const end = new Date(`${dateRange.endDate}T00:00:00.000Z`)
+    if (Number.isNaN(end.getTime())) return false
+    return Date.now() - end.getTime() < 48 * 60 * 60 * 1000
+  }, [dateRange.endDate])
+
+  const liveRefreshMs = enableLiveRefresh ? (granularity === 'hour' ? 30_000 : 60_000) : false
   const locale = useMemo(() => getLocale(), [])
   const chartDateFormatter = useMemo(
     () =>
@@ -78,6 +88,7 @@ export default function AnalyticsPage() {
     },
     staleTime: 60_000,
     gcTime: 300_000,
+    refetchInterval: liveRefreshMs,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   })
@@ -100,6 +111,7 @@ export default function AnalyticsPage() {
     },
     staleTime: 60_000,
     gcTime: 300_000,
+    refetchInterval: liveRefreshMs,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   })

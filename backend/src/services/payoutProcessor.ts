@@ -8,20 +8,18 @@ import {
 } from '../repositories/payoutRepository';
 import { query, getClient } from '../utils/postgres';
 import logger from '../utils/logger';
-import crypto from 'crypto';
+import Stripe from 'stripe';
 
 // ========================================
 // Payment Provider Types
 // ========================================
 
-export type PaymentProvider = 'tipalti' | 'wise' | 'payoneer';
+export type PaymentProvider = 'stripe';
 
 export interface PaymentProviderConfig {
   name: PaymentProvider;
   enabled: boolean;
-  priority: number;
   apiKey?: string;
-  apiEndpoint?: string;
 }
 
 export interface PayoutRequest {
@@ -32,6 +30,7 @@ export interface PayoutRequest {
   method: string;
   recipientEmail?: string;
   recipientAccount?: string;
+  stripeConnectedAccountId?: string;
 }
 
 export interface PayoutResult {
@@ -57,167 +56,161 @@ export interface LedgerEntry {
 // Payment Provider Configuration
 // ========================================
 
-const PAYMENT_PROVIDERS: PaymentProviderConfig[] = [
-  {
-    name: 'tipalti' as const,
-    enabled: true,
-    priority: 1,
-    apiKey: process.env.TIPALTI_API_KEY,
-    apiEndpoint: process.env.TIPALTI_API_ENDPOINT || 'https://api.tipalti.com',
-  },
-  {
-    name: 'wise' as const,
-    enabled: true,
-    priority: 2,
-    apiKey: process.env.WISE_API_KEY,
-    apiEndpoint: process.env.WISE_API_ENDPOINT || 'https://api.transferwise.com',
-  },
-  {
-    name: 'payoneer' as const,
-    enabled: true,
-    priority: 3,
-    apiKey: process.env.PAYONEER_API_KEY,
-    apiEndpoint: process.env.PAYONEER_API_ENDPOINT || 'https://api.payoneer.com',
-  },
-].sort((a, b) => a.priority - b.priority);
-
-// ========================================
-// Payment Provider Implementations
-// ========================================
-
-class TipaltiProvider {
-  async sendPayout(request: PayoutRequest): Promise<PayoutResult> {
-    try {
-      logger.info('Processing payout via Tipalti', {
-        payoutId: request.payoutId,
-        amount: request.amount,
-        currency: request.currency,
-      });
-
-      // Simulate Tipalti API call
-      // In production: await axios.post(config.apiEndpoint, payload, { headers: { Authorization: config.apiKey } })
-      
-      // Check if API key is configured
-      if (!process.env.TIPALTI_API_KEY) {
-        logger.warn('Tipalti API key not configured, simulating success');
-      }
-
-      const transactionId = `tipalti_${crypto.randomUUID?.() ?? crypto.randomBytes(8).toString('hex')}`;
-      
-      logger.info('Tipalti payout successful', {
-        payoutId: request.payoutId,
-        transactionId,
-      });
-
-      return {
-        success: true,
-        provider: 'tipalti',
-        transactionId,
-        retryable: false,
-      };
-    } catch (error) {
-      logger.error('Tipalti payout failed', { error, payoutId: request.payoutId });
-      return {
-        success: false,
-        provider: 'tipalti',
-        error: error instanceof Error ? error.message : 'Unknown error',
-        retryable: true,
-      };
-    }
-  }
-}
-
-class WiseProvider {
-  async sendPayout(request: PayoutRequest): Promise<PayoutResult> {
-    try {
-      logger.info('Processing payout via Wise', {
-        payoutId: request.payoutId,
-        amount: request.amount,
-        currency: request.currency,
-      });
-
-      // Simulate Wise API call
-      // In production: Create recipient, create quote, create transfer
-      
-      if (!process.env.WISE_API_KEY) {
-        logger.warn('Wise API key not configured, simulating success');
-      }
-
-      const transactionId = `wise_${crypto.randomUUID?.() ?? crypto.randomBytes(8).toString('hex')}`;
-      
-      logger.info('Wise payout successful', {
-        payoutId: request.payoutId,
-        transactionId,
-      });
-
-      return {
-        success: true,
-        provider: 'wise',
-        transactionId,
-        retryable: false,
-      };
-    } catch (error) {
-      logger.error('Wise payout failed', { error, payoutId: request.payoutId });
-      return {
-        success: false,
-        provider: 'wise',
-        error: error instanceof Error ? error.message : 'Unknown error',
-        retryable: true,
-      };
-    }
-  }
-}
-
-class PayoneerProvider {
-  async sendPayout(request: PayoutRequest): Promise<PayoutResult> {
-    try {
-      logger.info('Processing payout via Payoneer', {
-        payoutId: request.payoutId,
-        amount: request.amount,
-        currency: request.currency,
-      });
-
-      // Simulate Payoneer API call
-      // In production: Create payment using Payoneer API
-      
-      if (!process.env.PAYONEER_API_KEY) {
-        logger.warn('Payoneer API key not configured, simulating success');
-      }
-
-      const transactionId = `payoneer_${crypto.randomUUID?.() ?? crypto.randomBytes(8).toString('hex')}`;
-      
-      logger.info('Payoneer payout successful', {
-        payoutId: request.payoutId,
-        transactionId,
-      });
-
-      return {
-        success: true,
-        provider: 'payoneer',
-        transactionId,
-        retryable: false,
-      };
-    } catch (error) {
-      logger.error('Payoneer payout failed', { error, payoutId: request.payoutId });
-      return {
-        success: false,
-        provider: 'payoneer',
-        error: error instanceof Error ? error.message : 'Unknown error',
-        retryable: true,
-      };
-    }
-  }
-}
-
-// ========================================
-// Payment Provider Registry
-// ========================================
-
-const providers = {
-  tipalti: new TipaltiProvider(),
-  wise: new WiseProvider(),
-  payoneer: new PayoneerProvider(),
+const PAYMENT_PROVIDER: PaymentProviderConfig = {
+  name: 'stripe' as const,
+  enabled: true,
+  apiKey: process.env.STRIPE_SECRET_KEY,
 };
+
+// ========================================
+// Stripe Client Singleton
+// ========================================
+
+let stripeClient: Stripe | null = null;
+
+const getStripeClient = (): Stripe | null => {
+  if (stripeClient) return stripeClient;
+
+  const secretKey = process.env.STRIPE_SECRET_KEY;
+  if (!secretKey) {
+    return null;
+  }
+
+  stripeClient = new Stripe(secretKey, {
+    apiVersion: '2025-10-29.clover',
+  });
+
+  return stripeClient;
+};
+
+// ========================================
+// Stripe Payment Provider Implementation
+// ========================================
+
+class StripeProvider {
+  async sendPayout(request: PayoutRequest): Promise<PayoutResult> {
+    try {
+      logger.info('Processing payout via Stripe', {
+        payoutId: request.payoutId,
+        amount: request.amount,
+        currency: request.currency,
+      });
+
+      // PRODUCTION SAFETY: Fail-closed when API key is not configured
+      if (!process.env.STRIPE_SECRET_KEY) {
+        if (process.env.NODE_ENV === 'production') {
+          logger.error('Stripe API key not configured in production - rejecting payout', {
+            payoutId: request.payoutId,
+          });
+          return {
+            success: false,
+            provider: 'stripe',
+            error: 'Payment provider not configured. Contact support.',
+            retryable: false,
+          };
+        }
+        logger.warn('Stripe API key not configured (non-production mode)');
+      }
+
+      const stripe = getStripeClient();
+      
+      // In non-production without Stripe key, simulate success for testing
+      if (!stripe) {
+        if (process.env.NODE_ENV !== 'production') {
+          const simulatedTransactionId = `stripe_sim_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+          logger.info('Stripe payout simulated (non-production)', {
+            payoutId: request.payoutId,
+            transactionId: simulatedTransactionId,
+          });
+          return {
+            success: true,
+            provider: 'stripe',
+            transactionId: simulatedTransactionId,
+            retryable: false,
+          };
+        }
+        return {
+          success: false,
+          provider: 'stripe',
+          error: 'Payment provider not configured. Contact support.',
+          retryable: false,
+        };
+      }
+
+      // For Stripe Connect payouts, we create a transfer to the connected account
+      if (request.stripeConnectedAccountId) {
+        const transfer = await stripe.transfers.create({
+          amount: Math.round(request.amount * 100), // Convert to cents
+          currency: request.currency.toLowerCase(),
+          destination: request.stripeConnectedAccountId,
+          metadata: {
+            payout_id: request.payoutId,
+            publisher_id: request.publisherId,
+          },
+        });
+
+        logger.info('Stripe transfer successful', {
+          payoutId: request.payoutId,
+          transactionId: transfer.id,
+        });
+
+        return {
+          success: true,
+          provider: 'stripe',
+          transactionId: transfer.id,
+          retryable: false,
+        };
+      }
+
+      // For direct payouts to platform balance (e.g., bank payout)
+      const payout = await stripe.payouts.create({
+        amount: Math.round(request.amount * 100), // Convert to cents
+        currency: request.currency.toLowerCase(),
+        metadata: {
+          payout_id: request.payoutId,
+          publisher_id: request.publisherId,
+        },
+      });
+
+      logger.info('Stripe payout successful', {
+        payoutId: request.payoutId,
+        transactionId: payout.id,
+      });
+
+      return {
+        success: true,
+        provider: 'stripe',
+        transactionId: payout.id,
+        retryable: false,
+      };
+    } catch (error) {
+      const stripeError = error as Stripe.errors.StripeError;
+      logger.error('Stripe payout failed', { 
+        error: stripeError.message, 
+        code: stripeError.code,
+        payoutId: request.payoutId,
+      });
+      
+      // Determine if error is retryable
+      const retryable = stripeError.type === 'StripeConnectionError' ||
+                        stripeError.type === 'StripeAPIError' ||
+                        stripeError.code === 'rate_limit';
+      
+      return {
+        success: false,
+        provider: 'stripe',
+        error: stripeError.message || 'Unknown Stripe error',
+        retryable,
+      };
+    }
+  }
+}
+
+// ========================================
+// Payment Provider Instance
+// ========================================
+
+const stripeProvider = new StripeProvider();
 
 // ========================================
 // Ledger Service
@@ -344,7 +337,7 @@ export class PayoutLedgerService {
 export const ledgerService = new PayoutLedgerService();
 
 // ========================================
-// Payment Processor with Failover
+// Payment Processor (Stripe Only)
 // ========================================
 
 export class PaymentProcessor {
@@ -367,8 +360,9 @@ export class PaymentProcessor {
     PaymentProcessor.rateLimiter.set(key, entry);
     return false;
   }
+
   /**
-   * Process payout with automatic failover
+   * Process payout via Stripe
    */
   async processPayout(request: PayoutRequest): Promise<PayoutResult> {
     // Simple per-publisher rate limiter to avoid bursts
@@ -376,11 +370,12 @@ export class PaymentProcessor {
       logger.warn('Payout rate limit exceeded for publisher', { publisherId: request.publisherId });
       return {
         success: false,
-        provider: 'tipalti',
+        provider: 'stripe',
         error: 'Rate limited: too many payout requests',
         retryable: true,
       };
     }
+
     logger.info('Starting payout processing', {
       payoutId: request.payoutId,
       publisherId: request.publisherId,
@@ -388,132 +383,113 @@ export class PaymentProcessor {
       currency: request.currency,
     });
 
-    const enabledProviders = PAYMENT_PROVIDERS.filter((p) => p.enabled);
-
-    if (enabledProviders.length === 0) {
-      logger.error('No payment providers enabled');
+    if (!PAYMENT_PROVIDER.enabled) {
+      logger.error('Payment provider not enabled');
       return {
         success: false,
-        provider: 'tipalti',
-        error: 'No payment providers available',
+        provider: 'stripe',
+        error: 'Payment provider not available',
         retryable: false,
       };
     }
 
-    // Try each provider in priority order
-    for (const config of enabledProviders) {
-      const provider = providers[config.name];
-      
-      logger.info('Attempting payout with provider', {
-        payoutId: request.payoutId,
-        provider: config.name,
-        priority: config.priority,
-      });
+    try {
+      const result = await stripeProvider.sendPayout(request);
 
-      try {
-        const result = await provider.sendPayout(request);
-
-        if (result.success) {
-          // Perform ledger creation + status update atomically
-          const client = await getClient();
-          try {
-            await client.query('BEGIN');
-
-            // Debit entry (money leaving platform)
-            await client.query(
-              `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-              [request.payoutId, request.publisherId, request.amount, request.currency, 'debit', config.name]
-            );
-
-            // Credit entry (publisher receiving money)
-            await client.query(
-              `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-              [request.payoutId, request.publisherId, request.amount, request.currency, 'credit', config.name]
-            );
-
-            // Validate ledger balance within tx
-            const balRes = await client.query<{ balance: number }>(
-              `SELECT SUM(
-                 CASE WHEN type = 'debit' THEN -amount WHEN type = 'credit' THEN amount ELSE 0 END
-               ) as balance FROM payout_ledger WHERE payout_id = $1`,
-              [request.payoutId]
-            );
-            const balance = Number(balRes.rows[0]?.balance ?? 0);
-            if (Math.abs(balance) >= 0.01) {
-              throw new Error(`Ledger not balanced (balance=${balance})`);
-            }
-
-            // Update payout status
-            await client.query(
-              `UPDATE payouts SET status = $1, provider = $2, transaction_id = $3, processed_at = NOW(), updated_at = NOW() WHERE id = $4`,
-              ['processed', config.name, result.transactionId ?? null, request.payoutId]
-            );
-
-            await client.query('COMMIT');
-
-            logger.info('Payout processed successfully', {
-              payoutId: request.payoutId,
-              provider: config.name,
-              transactionId: result.transactionId,
-            });
-
-            return result;
-          } catch (e) {
-            try { await client.query('ROLLBACK'); } catch {}
-            logger.error('Failed to finalize payout atomically, rolled back', {
-              payoutId: request.payoutId,
-              provider: config.name,
-              error: e,
-            });
-            // Continue to next provider on failure
-            continue;
-          } finally {
-            client.release();
-          }
-        }
-
-        // If not retryable, fail immediately
-        if (!result.retryable) {
-          logger.error('Non-retryable payout error', {
+      if (result.success) {
+        // In simulation mode (non-production without Stripe key), skip DB writes
+        if (result.transactionId?.startsWith('stripe_sim_')) {
+          logger.info('Payout processed successfully (simulation mode)', {
             payoutId: request.payoutId,
-            provider: config.name,
-            error: result.error,
+            provider: 'stripe',
+            transactionId: result.transactionId,
           });
           return result;
         }
 
-        // If retryable, log and try next provider
-        logger.warn('Payout failed, trying next provider', {
-          payoutId: request.payoutId,
-          provider: config.name,
-          error: result.error,
-        });
+        // Perform ledger creation + status update atomically
+        const client = await getClient();
+        try {
+          await client.query('BEGIN');
 
-      } catch (error) {
-        logger.error('Unexpected error during payout', {
-          payoutId: request.payoutId,
-          provider: config.name,
-          error,
-        });
+          // Debit entry (money leaving platform)
+          await client.query(
+            `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+            [request.payoutId, request.publisherId, request.amount, request.currency, 'debit', 'stripe']
+          );
+
+          // Credit entry (publisher receiving money)
+          await client.query(
+            `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+            [request.payoutId, request.publisherId, request.amount, request.currency, 'credit', 'stripe']
+          );
+
+          // Validate ledger balance within tx
+          const balRes = await client.query<{ balance: number }>(
+            `SELECT SUM(
+               CASE WHEN type = 'debit' THEN -amount WHEN type = 'credit' THEN amount ELSE 0 END
+             ) as balance FROM payout_ledger WHERE payout_id = $1`,
+            [request.payoutId]
+          );
+          const balance = Number(balRes.rows[0]?.balance ?? 0);
+          if (Math.abs(balance) >= 0.01) {
+            throw new Error(`Ledger not balanced (balance=${balance})`);
+          }
+
+          // Update payout status
+          await client.query(
+            `UPDATE payouts SET status = $1, provider = $2, transaction_id = $3, processed_at = NOW(), updated_at = NOW() WHERE id = $4`,
+            ['processed', 'stripe', result.transactionId ?? null, request.payoutId]
+          );
+
+          await client.query('COMMIT');
+
+          logger.info('Payout processed successfully', {
+            payoutId: request.payoutId,
+            provider: 'stripe',
+            transactionId: result.transactionId,
+          });
+
+          return result;
+        } catch (e) {
+          try { await client.query('ROLLBACK'); } catch {}
+          logger.error('Failed to finalize payout atomically, rolled back', {
+            payoutId: request.payoutId,
+            provider: 'stripe',
+            error: e,
+          });
+          return {
+            success: false,
+            provider: 'stripe',
+            error: 'Failed to record payout in ledger',
+            retryable: true,
+          };
+        } finally {
+          client.release();
+        }
       }
+
+      // Return the failure result
+      return result;
+
+    } catch (error) {
+      logger.error('Unexpected error during payout', {
+        payoutId: request.payoutId,
+        provider: 'stripe',
+        error,
+      });
+
+      await this.updatePayoutStatus(request.payoutId, 'failed', 'stripe', null);
+
+      return {
+        success: false,
+        provider: 'stripe',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        retryable: true,
+      };
     }
-
-    // All providers failed
-    await this.updatePayoutStatus(request.payoutId, 'failed', null, null);
-
-    logger.error('All payment providers failed', {
-      payoutId: request.payoutId,
-      triedProviders: enabledProviders.map((p) => p.name),
-    });
-
-    return {
-      success: false,
-      provider: enabledProviders[0].name,
-      error: 'All payment providers failed',
-      retryable: true,
-    };
   }
 
   /**

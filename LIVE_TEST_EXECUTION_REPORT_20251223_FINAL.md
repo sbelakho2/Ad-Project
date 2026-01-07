@@ -10,14 +10,14 @@ Live E2E tests for Console and Control Plane have been significantly improved. B
 - **Test Files**: 
   - `console/tests/e2e/live-login.spec.ts`
   - `console/tests/e2e/live-clickthrough.spec.ts`
-- **Credentials**: sales@apexmediation.ee / &&Pw20354491
+- **Credentials**: sales@apexmediation.ee / <REDACTED>
 
 ### Control Plane Tests  
 - **Status**: ⚠️ Ready for testing (form filling fixed, credentials configured)
 - **Test Files**:
   - `control-plane/tests/e2e/live-login.spec.ts`
   - `control-plane/tests/e2e/live-clickthrough.spec.ts`
-- **Credentials**: operator / &&Pw20354491
+- **Credentials**: operator / <REDACTED>
 
 ## Issues Resolved ✅
 
@@ -67,7 +67,7 @@ Live E2E tests for Console and Control Plane have been significantly improved. B
   ```
   [DEBUG] Login request body: {
     "email": "sales@apexmediation.ee",  
-    "password": "&&Pw20354491"
+    "password": "<REDACTED>"
   }
   [DEBUG] Email: sales@apexmediation.ee Type: string
   [DEBUG] Password: &&P*** Length: 12
@@ -121,9 +121,9 @@ Live E2E tests for Console and Control Plane have been significantly improved. B
 - ✅ Test script: `npm run test:ui:live`
 - ✅ Credentials properly passed via environment variables:
   - `LIVE_CONSOLE_EMAIL="sales@apexmediation.ee"`
-  - `LIVE_CONSOLE_PASSWORD="&&Pw20354491"`
+  - `LIVE_CONSOLE_PASSWORD="<REDACTED>"`
   - `LIVE_CONTROL_PLANE_USERNAME="operator"`
-  - `LIVE_CONTROL_PLANE_PASSWORD="&&Pw20354491"`
+  - `LIVE_CONTROL_PLANE_PASSWORD="<REDACTED>"`
 
 ## Files Modified
 
@@ -159,7 +159,7 @@ Once console tests pass (or run independently):
 ```bash
 cd control-plane && LIVE_E2E=1 CONTROL_PLANE_BASE_URL=https://admin.apexmediation.ee \\
   LIVE_CONTROL_PLANE_USERNAME="operator" \\
-  LIVE_CONTROL_PLANE_PASSWORD="&&Pw20354491" \\
+  LIVE_CONTROL_PLANE_PASSWORD="<REDACTED>" \\
   npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts
 ```
 
@@ -213,14 +213,14 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 status console"
 ```bash
 curl -X POST https://api.apexmediation.ee/api/v1/auth/login \\
   -H "Content-Type: application/json" \\
-  -d '{"email":"sales@apexmediation.ee","password":"&&Pw20354491"}'
+  -d '{"email":"sales@apexmediation.ee","password":"<REDACTED>"}'
 ```
 
 ### Test Console API Proxy
 ```bash
 curl -X POST https://console.apexmediation.ee/api/v1/auth/login \\
   -H "Content-Type: application/json" \\
-  -d '{"email":"sales@apexmediation.ee","password":"&&Pw20354491"}'
+  -d '{"email":"sales@apexmediation.ee","password":"<REDACTED>"}'
 ```
 
 ### Check Backend Logs

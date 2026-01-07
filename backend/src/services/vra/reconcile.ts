@@ -5,6 +5,7 @@ import { vraReconcileDurationSeconds, vraReconcileRowsTotal } from '../../utils/
 export interface ReconcileParams {
   from: string; // ISO
   to: string;   // ISO
+  publisherId?: string; // Optional: filter by publisher (required in production for multi-tenant isolation)
   dryRun?: boolean;
 }
 
@@ -36,8 +37,17 @@ function readReconTunables() {
 }
 
 export async function reconcileWindow(params: ReconcileParams): Promise<ReconcileResult> {
-  const { from, to, dryRun } = params;
+  const { from, to, publisherId, dryRun } = params;
   const end = vraReconcileDurationSeconds.startTimer();
+
+  // Log warning if no publisherId provided in production (potential cross-tenant data)
+  if (!publisherId && process.env.NODE_ENV === 'production') {
+    logger.warn('VRA Reconcile: running without publisherId filter in production - data may span multiple tenants');
+  }
+
+  // Build WHERE clause fragment for publisher filtering
+  const publisherFilter = publisherId ? ` AND publisher_id = '${publisherId}'` : '';
+  const publisherFilterAnalytics = publisherId ? ` AND r.publisher_id = '${publisherId}'` : '';
 
   try {
     const { UNDERPAY_TOL, IVT_P95_BAND_PP, FX_BAND_PCT, VIEWABILITY_GAP_PP } = readReconTunables();
@@ -46,7 +56,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       `SELECT COALESCE(SUM(expected_value), 0)::float8 AS expected_usd
          FROM recon_expected
         WHERE ts >= $1::timestamptz
-          AND ts <  $2::timestamptz`,
+          AND ts <  $2::timestamptz${publisherFilter}`,
       [from, to]
     );
     const expectedUsd = Number(expectedRows.rows[0]?.expected_usd || 0);
@@ -56,17 +66,17 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       return { inserted: 0, deltas: 0, amounts: { expectedUsd: 0, paidUsd: 0, unmatchedUsd: 0, underpayUsd: 0, timingLagUsd: 0 } };
     }
 
-    // 2) Aggregate paid USD from revenue_events for only those request_ids referenced by recon_expected within the window
+    // 2) Aggregate paid USD from analytics_revenue_events for only those request_ids referenced by recon_expected within the window
     const paidRows = await query<{ paid_usd: string }>(
       `SELECT COALESCE(SUM(revenue_usd), 0)::float8 AS paid_usd
-         FROM revenue_events
-        WHERE timestamp >= $1::timestamptz
-          AND timestamp <  $2::timestamptz
-          AND request_id IN (
+         FROM analytics_revenue_events r
+        WHERE r.observed_at >= $1::timestamptz
+          AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics}
+          AND r.metadata->>'request_id' IN (
                 SELECT request_id
                   FROM recon_expected
                  WHERE ts >= $1::timestamptz
-                   AND ts <  $2::timestamptz
+                   AND ts <  $2::timestamptz${publisherFilter}
           )`,
       [from, to]
     );
@@ -77,13 +87,13 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       `SELECT COALESCE(SUM(e.expected_value), 0)::float8 AS unmatched_usd
          FROM recon_expected e
         WHERE e.ts >= $1::timestamptz
-          AND e.ts <  $2::timestamptz
+          AND e.ts <  $2::timestamptz${publisherFilter}
           AND NOT EXISTS (
                 SELECT 1
-                  FROM revenue_events r
-                 WHERE r.request_id = e.request_id
-                   AND r.timestamp >= $1::timestamptz
-                   AND r.timestamp <  $2::timestamptz
+                  FROM analytics_revenue_events r
+                 WHERE r.metadata->>'request_id' = e.request_id
+                   AND r.observed_at >= $1::timestamptz
+                   AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics}
           )`,
       [from, to]
     );
@@ -136,6 +146,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     // 5) IVT outlier rule (approximation): compare current window IVT% vs 30-day p95 + band
     try {
       const band = Math.max(0, IVT_P95_BAND_PP) / 100; // convert pp -> fraction
+      const publisherFilterStmt = publisherId ? ` AND publisher_id = '${publisherId}'` : '';
       // Baseline p95 over the 30 days before window start
       const baselineRows = await query<{ p95: string; cnt: string }>(
         `WITH daily AS (
@@ -145,7 +156,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
                     END AS rate
                FROM recon_statements_norm
               WHERE event_date >= (date($1::timestamptz) - INTERVAL '30 days')
-                AND event_date <  date($1::timestamptz)
+                AND event_date <  date($1::timestamptz)${publisherFilterStmt}
               GROUP BY event_date)
          SELECT COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY rate), 0)::float8 AS p95,
                 COUNT(*)::bigint AS cnt
@@ -161,7 +172,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
                   END AS rate
              FROM recon_statements_norm
             WHERE event_date >= date($1::timestamptz)
-              AND event_date <  date($2::timestamptz)`,
+              AND event_date <  date($2::timestamptz)${publisherFilterStmt}`,
           [from, to]
         );
         const currentRate = Number(currentRows.rows[0]?.rate ?? 0);
@@ -189,10 +200,10 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       const fxBaseline = await query<{ cur: string; med_rate: string }>(
         `SELECT revenue_currency AS cur,
                 COALESCE(percentile_disc(0.5) WITHIN GROUP (ORDER BY exchange_rate), 0)::float8 AS med_rate
-           FROM revenue_events
-          WHERE timestamp >= ($1::timestamptz - INTERVAL '30 days')
-            AND timestamp <  $1::timestamptz
-            AND revenue_currency <> 'USD'
+           FROM analytics_revenue_events
+          WHERE observed_at >= ($1::timestamptz - INTERVAL '30 days')
+            AND observed_at <  $1::timestamptz
+            AND revenue_currency <> 'USD'${publisherFilterAnalytics}
           GROUP BY cur`,
         [from]
       );
@@ -203,10 +214,10 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
         const fxCurrent = await query<{ cur: string; avg_rate: string }>(
           `SELECT revenue_currency AS cur,
                   AVG(exchange_rate)::float8 AS avg_rate
-             FROM revenue_events
-            WHERE timestamp >= $1::timestamptz
-              AND timestamp <  $2::timestamptz
-              AND revenue_currency <> 'USD'
+             FROM analytics_revenue_events r
+            WHERE r.observed_at >= $1::timestamptz
+              AND r.observed_at <  $2::timestamptz
+              AND r.revenue_currency <> 'USD'${publisherFilterAnalytics}
             GROUP BY cur`,
           [from, to]
         );
@@ -255,7 +266,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
              ) AS stmt
            FROM recon_expected
           WHERE ts >= $1::timestamptz
-            AND ts <  $2::timestamptz`,
+            AND ts <  $2::timestamptz${publisherFilter}`,
         [from, to]
       );
       const om = Number(rowsView.rows[0]?.om ?? NaN);
@@ -287,19 +298,39 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
 
     if (!dryRun && rows.length > 0) {
       try {
+        // Include publisher_id if provided for multi-tenant isolation
+        const columns = publisherId 
+          ? ['publisher_id', 'kind', 'amount', 'currency', 'reason_code', 'window_start', 'window_end', 'evidence_id', 'confidence']
+          : ['kind', 'amount', 'currency', 'reason_code', 'window_start', 'window_end', 'evidence_id', 'confidence'];
+        
+        const values = rows.map((r) => publisherId
+          ? [
+              publisherId,
+              r.kind,
+              r.amount,
+              r.currency,
+              r.reason_code,
+              r.window_start,
+              r.window_end,
+              r.evidence_id,
+              r.confidence,
+            ]
+          : [
+              r.kind,
+              r.amount,
+              r.currency,
+              r.reason_code,
+              r.window_start,
+              r.window_end,
+              r.evidence_id,
+              r.confidence,
+            ]
+        );
+
         await insertMany(
           'recon_deltas',
-          ['kind', 'amount', 'currency', 'reason_code', 'window_start', 'window_end', 'evidence_id', 'confidence'],
-          rows.map((r) => [
-            r.kind,
-            r.amount,
-            r.currency,
-            r.reason_code,
-            r.window_start,
-            r.window_end,
-            r.evidence_id,
-            r.confidence,
-          ]),
+          columns,
+          values,
           { onConflictColumns: ['evidence_id'], ignoreConflicts: true }
         );
       } catch (e) {

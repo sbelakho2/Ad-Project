@@ -196,11 +196,13 @@ data class SSAITrackingEvent(
 data class SSAIError(
     /** Error code */
     val code: String,
-    /** Human-readable message */
-    val message: String,
+    /** Human-readable error message */
+    val errorMessage: String,
     /** Whether this is a fatal error */
     val fatal: Boolean = false
-) : Exception("[$code] $message")
+) : Exception("[$code] $errorMessage") {
+    override val message: String get() = "[$code] $errorMessage"
+}
 
 /**
  * SSAI Session State

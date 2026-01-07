@@ -8,7 +8,20 @@ export type AuctionClientConfig = Required<
   publisherId?: string;
   appId?: string;
   sdkVersion: string;
+  correlationIdGenerator?: () => string;
 };
+
+/**
+ * Generate a correlation ID for distributed tracing
+ * Uses crypto.randomUUID if available, falls back to timestamp-based ID
+ */
+function generateCorrelationId(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for older browsers
+  return `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 11)}`;
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -40,6 +53,11 @@ export async function requestAuction(
 ): Promise<AdResponse> {
   const endpoint = `${cfg.endpoint.replace(/\/$/, '')}/auction`;
 
+  // Generate correlation ID for distributed tracing
+  const correlationId = cfg.correlationIdGenerator
+    ? cfg.correlationIdGenerator()
+    : generateCorrelationId();
+
   let attempt = 0;
   // Use a local controller per attempt so backoff sleep can also be aborted
   const globalController = new AbortController();
@@ -55,7 +73,11 @@ export async function requestAuction(
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Correlation-ID': correlationId,
+            'X-SDK-Version': cfg.sdkVersion,
+          },
           body: JSON.stringify({
             request: req,
             consent: consent ?? {},
@@ -63,6 +85,7 @@ export async function requestAuction(
               sdk: { name: '@rivalapex/web-sdk', version: cfg.sdkVersion },
               publisherId: cfg.publisherId,
               appId: cfg.appId,
+              correlationId,
             },
           }),
           signal: controller.signal,

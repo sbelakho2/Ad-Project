@@ -16,6 +16,9 @@ export interface FeatureFlags {
   vraEnabled: boolean; // Master flag — when false, all /recon/* and /proofs/* routes are hidden
   vraShadowOnly: boolean; // When true, VRA runs in shadow mode (no side‑effects like dispute submission)
   vraAllowedNetworks: string; // CSV allowlist for networks eligible for VRA processing
+  // Authentication flags
+  enforce2fa: boolean; // When true, all users must complete 2FA
+  requireEmailVerification: boolean; // When true, email must be verified before login
 }
 
 /**
@@ -35,6 +38,9 @@ export const getFeatureFlags = (): FeatureFlags => {
     vraEnabled: process.env.VRA_ENABLED === 'true',
     vraShadowOnly: (process.env.VRA_SHADOW_ONLY || 'true').toLowerCase() === 'true',
     vraAllowedNetworks: process.env.VRA_ALLOWED_NETWORKS || '',
+    // Auth flags
+    enforce2fa: process.env.ENFORCE_2FA === 'true',
+    requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === 'true',
   };
 };
 

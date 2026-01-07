@@ -1,10 +1,19 @@
 // routes/usage.ts
 // API routes for usage tracking and metering
 
-import express from 'express';
+import express, { Request } from 'express';
 import { usageMeteringService } from '../services/billing/UsageMeteringService';
 import { authenticate } from '../middleware/auth';
 import { assertPlatformTierId } from '../src/config/platformTiers';
+
+/** Authenticated request with user context */
+interface AuthenticatedRequest extends Request {
+  user: {
+    id: string;
+    email?: string;
+    role?: string;
+  };
+}
 
 const router = express.Router();
 
@@ -88,7 +97,7 @@ router.post('/track', async (req, res) => {
  */
 router.get('/current', authenticate, async (req, res) => {
   try {
-    const customerId = (req as any).user.id;
+    const customerId = (req as AuthenticatedRequest).user.id;
 
     const usage = await usageMeteringService.getCurrentPeriodUsage(customerId);
     const overages = await usageMeteringService.calculateOverages(customerId);
@@ -109,7 +118,7 @@ router.get('/current', authenticate, async (req, res) => {
  */
 router.get('/analytics', authenticate, async (req, res) => {
   try {
-    const customerId = (req as any).user.id;
+    const customerId = (req as AuthenticatedRequest).user.id;
     const days = parseInt(req.query.days as string) || 30;
 
     if (days < 1 || days > 365) {
@@ -131,7 +140,7 @@ router.get('/analytics', authenticate, async (req, res) => {
  */
 router.get('/limits', authenticate, async (req, res) => {
   try {
-    const customerId = (req as any).user.id;
+    const customerId = (req as AuthenticatedRequest).user.id;
 
     const { Pool } = require('pg');
     const db = new Pool({ connectionString: process.env.DATABASE_URL });

@@ -128,6 +128,9 @@ export const getSummary = async (
       currency,
     };
 
+    // Authenticated, user-specific analytics should never be cached by shared proxies.
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+
     res.json({
       success: true,
       data: summary,
@@ -184,6 +187,9 @@ export const getTimeSeries = async (
       ecpm: point.ecpm,
       fillRate: 0, // placeholder until request volume metric available
     }));
+
+    // Authenticated, user-specific analytics should never be cached by shared proxies.
+    res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
 
     res.json({
       success: true,

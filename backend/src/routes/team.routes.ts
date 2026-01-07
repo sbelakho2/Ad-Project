@@ -49,7 +49,134 @@ const sendEmail = async (options: { to: string; subject: string; template: strin
   return Promise.resolve();
 };
 
-// Require authentication for all team routes
+// Invite token expiration in milliseconds (7 days)
+const INVITE_TOKEN_EXPIRATION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * POST /team/invite/accept
+ * Accept a team invitation (no authentication required)
+ */
+router.post('/invite/accept', async (req: Request, res: Response) => {
+  try {
+    const { token, password, name } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Invite token is required' });
+    }
+
+    // Find the invite by token
+    let invite;
+    try {
+      invite = await query(
+        `SELECT id, publisher_id, email, role, status, created_at
+         FROM team_members
+         WHERE invite_token = $1`,
+        [token]
+      );
+    } catch (err) {
+      if (isMissingColumnError(err, 'invite_token')) {
+        return res.status(400).json({ success: false, error: 'Invite system not available' });
+      }
+      throw err;
+    }
+
+    if (invite.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Invalid or expired invitation' });
+    }
+
+    const inviteRecord = invite.rows[0];
+
+    // Check if already accepted
+    if (inviteRecord.status === 'active') {
+      return res.status(400).json({ success: false, error: 'Invitation already accepted' });
+    }
+
+    // Check token expiration (7 days from creation)
+    const createdAt = new Date(inviteRecord.created_at).getTime();
+    if (Date.now() - createdAt > INVITE_TOKEN_EXPIRATION_MS) {
+      return res.status(410).json({ success: false, error: 'Invitation has expired' });
+    }
+
+    // Check if user already exists
+    const existingUserId = await findExistingUserIdByEmail(inviteRecord.email);
+
+    if (existingUserId) {
+      // User exists - just activate the team membership
+      await query(
+        `UPDATE team_members
+         SET status = 'active', user_id = $1, invite_token = NULL, updated_at = NOW()
+         WHERE id = $2`,
+        [existingUserId, inviteRecord.id]
+      );
+
+      return res.json({
+        success: true,
+        data: {
+          message: 'Invitation accepted. Please log in to access your team.',
+          email: inviteRecord.email,
+          requiresLogin: true,
+        },
+      });
+    }
+
+    // New user - require password
+    if (!password || password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password is required (min 8 characters)' });
+    }
+
+    // Create new user
+    const bcrypt = await import('bcryptjs');
+    const hashedPassword = await bcrypt.hash(password, 12);
+    const newUserId = uuid();
+
+    try {
+      await query(
+        `INSERT INTO users (id, email, password, name, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+        [newUserId, inviteRecord.email.toLowerCase(), hashedPassword, name || inviteRecord.email.split('@')[0]]
+      );
+    } catch (err) {
+      // Try core.users schema
+      try {
+        await query(
+          `INSERT INTO core.users (id, email, password, name, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+          [newUserId, inviteRecord.email.toLowerCase(), hashedPassword, name || inviteRecord.email.split('@')[0]]
+        );
+      } catch {
+        throw err; // Re-throw original error
+      }
+    }
+
+    // Update team member with user_id and activate
+    await query(
+      `UPDATE team_members
+       SET status = 'active', user_id = $1, invite_token = NULL, updated_at = NOW()
+       WHERE id = $2`,
+      [newUserId, inviteRecord.id]
+    );
+
+    logger.info('Team invite accepted', {
+      memberId: inviteRecord.id,
+      userId: newUserId,
+      publisherId: inviteRecord.publisher_id,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        message: 'Account created and invitation accepted. Please log in.',
+        email: inviteRecord.email,
+        requiresLogin: true,
+      },
+    });
+  } catch (error) {
+    logger.error('Error accepting team invite:', error);
+    res.status(500).json({ success: false, error: 'Failed to accept invitation' });
+  }
+});
+
+// Require authentication for remaining team routes
 router.use(authenticate);
 
 // Role definitions

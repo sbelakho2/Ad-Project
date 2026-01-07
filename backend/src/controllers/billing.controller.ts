@@ -294,8 +294,9 @@ export const createPortalSession = async (
     const returnUrl = `${origin.replace(/\/+$/, '')}/billing/settings`;
     const stripe = getStripeClient();
 
+    // Use FOR UPDATE to prevent race condition when creating Stripe customer
     const result = await query<{ stripe_customer_id: string | null }>(
-      'SELECT stripe_customer_id FROM users WHERE id = $1',
+      'SELECT stripe_customer_id FROM users WHERE id = $1 FOR UPDATE',
       [userId]
     );
 
@@ -314,7 +315,10 @@ export const createPortalSession = async (
       });
       stripeCustomerId = customer.id;
 
-      await query('UPDATE users SET stripe_customer_id = $2 WHERE id = $1', [userId, stripeCustomerId]);
+      await query(
+        'UPDATE users SET stripe_customer_id = $2 WHERE id = $1 AND stripe_customer_id IS NULL',
+        [userId, stripeCustomerId]
+      );
     }
 
     const session = await stripe.billingPortal.sessions.create({

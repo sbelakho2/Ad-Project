@@ -74,6 +74,7 @@ const envSchema = z.object({
   AB_TESTING_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('false'),
   FEATURE_KILL_SWITCH: z.string().transform(v => v === 'true' || v === '1').default('false'),
   FEATURE_ENFORCE_2FA: z.string().transform(v => v === 'true' || v === '1').default('false'),
+  FEATURE_REQUIRE_EMAIL_VERIFICATION: z.string().transform(v => v === 'true' || v === '1').default('false'),
   FEATURE_DISABLE_NEW_ADAPTERS: z.string().transform(v => v === 'true' || v === '1').default('false'),
   
   // Monitoring
@@ -85,6 +86,11 @@ const envSchema = z.object({
   ANALYTICS_ROLLUP_CRON: z.string().default('15 */6 * * *'), // every 6 hours at minute 15 (UTC)
   // Default covers the common 30-day dashboard window (plus a small buffer).
   ANALYTICS_ROLLUP_LOOKBACK_DAYS: z.string().regex(/^\d+$/).transform(Number).default('35'),
+
+  // Migration guardrail scheduler (snapshot aggregation + automated evaluation)
+  MIGRATION_GUARDRAIL_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
+  MIGRATION_GUARDRAIL_SNAPSHOT_CRON: z.string().default('*/15 * * * *'), // every 15 minutes
+  MIGRATION_GUARDRAIL_EVALUATION_CRON: z.string().default('5,35 * * * *'), // at 5 and 35 past hour
   
   // Security Headers
   ENABLE_CSP: z.string().transform(v => v === '1').default('0'),

@@ -43,14 +43,14 @@ async function safeQuery<T extends QueryResultRow = QueryResultRow>(
 }
 
 export class VraService {
-  // Overview aggregates derived from revenue_events (expected) and recon_statements_norm (paid)
+  // Overview aggregates derived from analytics_revenue_events (expected) and recon_statements_norm (paid)
   async getOverview(params: ReconOverviewParams): Promise<ReconOverviewResult> {
     const publisherId = params.publisherId;
     const appId = params.appId;
     const from = params.from ?? new Date(Date.now() - 7 * 86400000).toISOString();
     const to = params.to ?? new Date().toISOString();
 
-    // Get expected revenue from SDK events
+    // Get expected revenue from SDK events (analytics_revenue_events is the modern fact table)
     const expectedRows = await safeQuery<{
       network: string;
       format: string;
@@ -66,14 +66,15 @@ export class VraService {
         COALESCE(country_code, 'XX') AS country,
         COUNT(*)::bigint AS impressions,
         ROUND(COALESCE(SUM(revenue_usd), 0)::numeric, 6)::text AS expected
-      FROM revenue_events
-      WHERE timestamp >= $1::timestamptz
-        AND timestamp <  $2::timestamptz
+      FROM analytics_revenue_events
+      WHERE observed_at >= $1::timestamptz
+        AND observed_at <  $2::timestamptz
         AND publisher_id = $3
+        ${appId ? 'AND app_id = $4' : ''}
       GROUP BY adapter_name, ad_format, country_code
       ORDER BY expected DESC
       `,
-      [from, to, publisherId]
+      appId ? [from, to, publisherId, appId] : [from, to, publisherId]
     );
 
     // Get paid revenue from network statements

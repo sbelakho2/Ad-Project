@@ -42,11 +42,13 @@ object NetworkWarmer {
             .followRedirects(false)
             .followSslRedirects(false)
             .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
-            .dns { hostname ->
-                dnsCache[hostname] ?: InetAddress.getAllByName(hostname).toList().also {
-                    dnsCache[hostname] = it
+            .dns(object : okhttp3.Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    return dnsCache[hostname] ?: InetAddress.getAllByName(hostname).toList().also {
+                        dnsCache[hostname] = it
+                    }
                 }
-            }
+            })
             .build()
     }
     

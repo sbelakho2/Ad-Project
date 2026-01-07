@@ -150,7 +150,8 @@ class AuctionClient(
             .writeTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
             .build()
 
-        val requestBody = buildRequestBody(opts, consent)
+        val correlationId = java.util.UUID.randomUUID().toString()
+        val requestBody = buildRequestBody(opts, consent, correlationId)
         val json = gson.toJson(requestBody)
         val req = Request.Builder()
             .url("$base/v1/auction")
@@ -159,6 +160,8 @@ class AuctionClient(
             .addHeader("Accept", "application/json")
             .addHeader("User-Agent", buildUserAgent())
             .addHeader("X-Api-Key", apiKey)
+            .addHeader("X-Correlation-ID", correlationId)
+            .addHeader("X-SDK-Version", try { com.rivalapexmediation.sdk.BuildConfig.SDK_VERSION } catch (_: Throwable) { "0.0.0" })
             .build()
 
         var attempt = 1
@@ -355,7 +358,7 @@ class AuctionClient(
         return meta
     }
 
-    private fun buildRequestBody(opts: InterstitialOptions, consent: ConsentOptions?): Map<String, Any?> {
+    private fun buildRequestBody(opts: InterstitialOptions, consent: ConsentOptions?, correlationId: String): Map<String, Any?> {
         val now = clock.now()
         val rand = (0..999_999).random()
         val reqId = "android-$now-$rand"
@@ -395,6 +398,8 @@ class AuctionClient(
         val adapters = if (opts.adapters != null && opts.adapters.isNotEmpty()) opts.adapters
         else listOf("admob", "meta", "unity", "applovin", "ironsource")
 
+        val sdkVersion = try { com.rivalapexmediation.sdk.BuildConfig.SDK_VERSION } catch (_: Throwable) { "0.0.0" }
+
         return mapOf(
             "request_id" to reqId,
             "app_id" to opts.publisherId,
@@ -407,6 +412,13 @@ class AuctionClient(
             "auction_type" to opts.auctionType,
             "adapters" to adapters,
             "metadata" to baseMeta,
+            "meta" to mapOf(
+                "correlationId" to correlationId,
+                "sdk" to mapOf(
+                    "name" to "apex-android-sdk",
+                    "version" to sdkVersion
+                )
+            ),
         )
     }
 

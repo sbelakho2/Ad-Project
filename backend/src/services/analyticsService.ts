@@ -680,13 +680,31 @@ export class AnalyticsService {
         )`
       : '';
 
-    await query(
-      `INSERT INTO ${quoteIdentifier(targetTable)} (${columnSql})
-       SELECT ${columnSql}
-       FROM ${quoteIdentifier(stageTable)} s
-       ${whereSql}`
-    );
-    await query(`TRUNCATE ${quoteIdentifier(stageTable)}`);
+    // Use ON CONFLICT DO NOTHING to handle race conditions where another
+    // flush inserted the same event_id between the NOT EXISTS check and INSERT.
+    // This silences duplicate key constraint violations without data loss.
+    const onConflictSql = usableConflictCols.includes('event_id')
+      ? 'ON CONFLICT ("event_id") DO NOTHING'
+      : '';
+
+    // Wrap INSERT + TRUNCATE in a transaction to prevent race conditions
+    // where concurrent flushes could lose data if TRUNCATE runs between
+    // another flush's INSERT and its own TRUNCATE.
+    await query('BEGIN');
+    try {
+      await query(
+        `INSERT INTO ${quoteIdentifier(targetTable)} (${columnSql})
+         SELECT ${columnSql}
+         FROM ${quoteIdentifier(stageTable)} s
+         ${whereSql}
+         ${onConflictSql}`
+      );
+      await query(`TRUNCATE ${quoteIdentifier(stageTable)}`);
+      await query('COMMIT');
+    } catch (err) {
+      await query('ROLLBACK');
+      throw err;
+    }
   }
 
   private updateBufferGauge(kind: 'impressions' | 'clicks' | 'revenue'): void {

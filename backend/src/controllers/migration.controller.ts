@@ -476,8 +476,16 @@ export const getAssignment = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    // Optional shared-secret authentication for SDKs (guards unauthenticated endpoint)
+    // SDK authentication via shared secret (required in production)
     const configuredSecret = process.env.MIGRATION_SDK_SHARED_SECRET;
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    if (isProduction && !configuredSecret) {
+      // In production, require SDK secret to be configured
+      logger.error('MIGRATION_SDK_SHARED_SECRET not set in production - rejecting assignment request');
+      throw new AppError('Service unavailable', 503);
+    }
+    
     if (configuredSecret) {
       const provided = (req.headers['x-migration-sdk-secret'] as string | undefined)?.trim();
       if (!provided || provided !== configuredSecret) {

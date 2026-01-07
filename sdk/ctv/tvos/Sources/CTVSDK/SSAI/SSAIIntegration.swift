@@ -6,7 +6,7 @@ import Combine
 ///
 /// Main entry point for SSAI functionality. Provides a unified interface
 /// for session management, manifest parsing, and player observation.
-@available(tvOS 13.0, *)
+@available(tvOS 13.0, macOS 10.15, *)
 public final class SSAIIntegration {
     
     // MARK: - Singleton
@@ -224,6 +224,7 @@ public final class SSAIIntegration {
     }
     
     /// Parse manifest for ad cues (for custom implementations)
+    @available(tvOS 15.0, macOS 12.0, *)
     public func parseManifest(url: URL) async throws -> SSAIManifestParser.ParseResult {
         guard let parser = manifestParser else {
             throw SSAIError(code: "NOT_INITIALIZED", message: "SSAI not initialized", fatal: true)
@@ -234,7 +235,7 @@ public final class SSAIIntegration {
 
 // MARK: - Convenience Factory
 
-@available(tvOS 13.0, *)
+@available(tvOS 13.0, macOS 10.15, *)
 public extension SSAIIntegration {
     
     /// Create a new SSAI integration instance (non-singleton)

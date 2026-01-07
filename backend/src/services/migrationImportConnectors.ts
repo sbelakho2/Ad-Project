@@ -80,23 +80,33 @@ export async function fetchIronSourceSetup(credentials: ConnectorCredentials): P
   checkRateLimit('ironSource')
 
   if (LIVE_MODE && ironSourceBaseUrl) {
-    const res = await withRetry(() => getHttp().get(
-      `${ironSourceBaseUrl}/v1/placements`,
-      {
-        headers: { Authorization: `Bearer ${credentials.api_key}` },
-        params: { account_id: credentials.account_id },
-      }
-    ))
-    // Map minimal fields; unknown fields are ignored
-    const rows = Array.isArray(res.data) ? res.data : []
-    return rows.slice(0, 100).map((r: any, idx: number) => ({
-      network: 'ironSource',
-      instanceId: String(r.instance_id ?? r.id ?? `is-${idx}`),
-      instanceName: String(r.name ?? 'ironSource Instance'),
-      waterfallPosition: Number(r.position ?? idx + 1) || undefined,
-      ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
-      confidence: 'high',
-    }))
+    try {
+      const res = await withRetry(() => getHttp().get(
+        `${ironSourceBaseUrl}/v1/placements`,
+        {
+          headers: { Authorization: `Bearer ${credentials.api_key}` },
+          params: { account_id: credentials.account_id },
+        }
+      ))
+      // Map minimal fields; unknown fields are ignored
+      const rows = Array.isArray(res.data) ? res.data : []
+      return rows.slice(0, 100).map((r: any, idx: number) => ({
+        network: 'ironSource',
+        instanceId: String(r.instance_id ?? r.id ?? `is-${idx}`),
+        instanceName: String(r.name ?? 'ironSource Instance'),
+        waterfallPosition: Number(r.position ?? idx + 1) || undefined,
+        ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
+        confidence: 'high',
+      }))
+    } catch (error: any) {
+      // In live mode, propagate errors instead of falling back to sample data
+      const status = error.response?.status
+      const message = error.response?.data?.message || error.message || 'Unknown error'
+      const connectorError: any = new Error(`ironSource API error: ${message}`)
+      connectorError.status = status || 500
+      connectorError.source = 'ironSource'
+      throw connectorError
+    }
   }
 
   // Return deterministic sample data seeded off account id so tests can assert values
@@ -126,22 +136,32 @@ export async function fetchAppLovinSetup(credentials: ConnectorCredentials): Pro
   checkRateLimit('AppLovin')
 
   if (LIVE_MODE && appLovinBaseUrl) {
-    const res = await withRetry(() => getHttp().get(
-      `${appLovinBaseUrl}/v1/max/placements`,
-      {
-        headers: { 'X-Api-Key': credentials.api_key },
-        params: { account_id: credentials.account_id },
-      }
-    ))
-    const rows = Array.isArray(res.data) ? res.data : []
-    return rows.slice(0, 100).map((r: any, idx: number) => ({
-      network: 'AppLovin',
-      instanceId: String(r.unit_id ?? r.id ?? `max-${idx}`),
-      instanceName: String(r.name ?? 'MAX Unit'),
-      waterfallPosition: Number(r.position ?? idx + 1) || undefined,
-      ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
-      confidence: 'high',
-    }))
+    try {
+      const res = await withRetry(() => getHttp().get(
+        `${appLovinBaseUrl}/v1/max/placements`,
+        {
+          headers: { 'X-Api-Key': credentials.api_key },
+          params: { account_id: credentials.account_id },
+        }
+      ))
+      const rows = Array.isArray(res.data) ? res.data : []
+      return rows.slice(0, 100).map((r: any, idx: number) => ({
+        network: 'AppLovin',
+        instanceId: String(r.unit_id ?? r.id ?? `max-${idx}`),
+        instanceName: String(r.name ?? 'MAX Unit'),
+        waterfallPosition: Number(r.position ?? idx + 1) || undefined,
+        ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
+        confidence: 'high',
+      }))
+    } catch (error: any) {
+      // In live mode, propagate errors instead of falling back to sample data
+      const status = error.response?.status
+      const message = error.response?.data?.message || error.message || 'Unknown error'
+      const connectorError: any = new Error(`AppLovin API error: ${message}`)
+      connectorError.status = status || 500
+      connectorError.source = 'AppLovin'
+      throw connectorError
+    }
   }
 
   const base = credentials.account_id.slice(-3)

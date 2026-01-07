@@ -28,6 +28,7 @@ import { initVraConnectionRoutes } from './routes/vraConnections.routes';
 import { issueCsrfToken } from './middleware/csrf';
 import { SchemaGate } from './utils/schemaGate';
 import { initAnalyticsRollupScheduler } from './services/analyticsRollupScheduler';
+import { initMigrationGuardrailScheduler } from './services/migrationGuardrailScheduler';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 
@@ -333,6 +334,14 @@ const startServer = async (): Promise<void> => {
       lookbackDays: env.ANALYTICS_ROLLUP_LOOKBACK_DAYS,
     });
 
+    // Migration guardrail scheduler (snapshot aggregation + automated evaluation)
+    initMigrationGuardrailScheduler({
+      enabled: env.MIGRATION_GUARDRAIL_ENABLED ?? true,
+      snapshotCronSpec: env.MIGRATION_GUARDRAIL_SNAPSHOT_CRON,
+      evaluationCronSpec: env.MIGRATION_GUARDRAIL_EVALUATION_CRON,
+      pool,
+    });
+
     // Initialize VRA services
     initVraConnectionRoutes(pool);
     logger.info('VRA connection services initialized');
@@ -361,11 +370,14 @@ const startServer = async (): Promise<void> => {
       logger.warn('Redis not available - background jobs disabled');
     }
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       logger.info(`ApexMediation Backend API running on port ${PORT}`);
       logger.info(`Environment: ${process.env.NODE_ENV}`);
       logger.info(`API Version: ${API_VERSION}`);
     });
+
+    // Store server reference for graceful shutdown
+    (global as any).__httpServer = server;
   } catch (error) {
     logger.error('Failed to start server', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -375,32 +387,77 @@ const startServer = async (): Promise<void> => {
   }
 };
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully...');
-  
-  try {
-    await shutdownQueues();
-    await redis.disconnect();
-    process.exit(0);
-  } catch (error) {
-    logger.error('Error during shutdown', { error });
+// ========================================
+// Process Crash Handlers
+// ========================================
+
+process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+  logger.error('Unhandled Promise Rejection', {
+    reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason,
+    promise: String(promise),
+  });
+  // In production, you may want to exit after logging
+  if (process.env.NODE_ENV === 'production') {
+    logger.error('Exiting due to unhandled rejection in production');
     process.exit(1);
   }
 });
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully...');
-  
+process.on('uncaughtException', (error: Error, origin: string) => {
+  logger.error('Uncaught Exception', {
+    message: error.message,
+    stack: error.stack,
+    origin,
+  });
+  // Always exit on uncaught exceptions - the process is in an undefined state
+  process.exit(1);
+});
+
+// ========================================
+// Graceful Shutdown
+// ========================================
+
+const gracefulShutdown = async (signal: string): Promise<void> => {
+  logger.info(`${signal} received, shutting down gracefully...`);
+
+  const shutdownTimeout = setTimeout(() => {
+    logger.error('Graceful shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 30000); // 30 second timeout
+
   try {
+    // 1. Stop accepting new connections
+    const server = (global as any).__httpServer;
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err?: Error) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+      logger.info('HTTP server closed');
+    }
+
+    // 2. Shutdown job queues (waits for in-progress jobs)
     await shutdownQueues();
+    logger.info('Job queues shut down');
+
+    // 3. Disconnect Redis
     await redis.disconnect();
+    logger.info('Redis disconnected');
+
+    clearTimeout(shutdownTimeout);
+    logger.info('Graceful shutdown completed');
     process.exit(0);
   } catch (error) {
-    logger.error('Error during shutdown', { error });
+    clearTimeout(shutdownTimeout);
+    logger.error('Error during graceful shutdown', { error });
     process.exit(1);
   }
-});
+};
+
+process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
 
 void startServer();
 

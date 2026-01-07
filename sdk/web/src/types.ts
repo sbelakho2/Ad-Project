@@ -18,6 +18,8 @@ export type InitOptions = {
   sdkVersion?: string;
   debug?: boolean; // enable verbose SDK logs (no PII)
   telemetryEnabled?: boolean; // allow emitting lightweight telemetry events
+  // Distributed tracing
+  correlationIdGenerator?: () => string; // Custom correlation ID generator
 };
 
 export type AdRequest = {

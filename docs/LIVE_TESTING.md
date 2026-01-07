@@ -17,26 +17,26 @@ These tests perform **real authentication** followed by exhaustive UI interactio
 Requires a **real production user account**:
 ```bash
 export LIVE_CONSOLE_EMAIL="sales@apexmediation.ee"
-export LIVE_CONSOLE_PASSWORD='&&Pw20354491'
+export LIVE_CONSOLE_PASSWORD='<from secret store>'
 # Optional: if 2FA is enabled on the account
 export LIVE_CONSOLE_2FA_CODE="123456"
 ```
 
 **Available Test Account:**
 - Email: `sales@apexmediation.ee`
-- Password: `&&Pw20354491`
+- Password: (stored in the team secret store; never commit to repo)
 - Note: Quote the password in shell due to special characters
 
 ### Control Plane Tests
 Requires **real operator credentials**:
 ```bash
 export LIVE_CONTROL_PLANE_USERNAME="operator"
-export LIVE_CONTROL_PLANE_PASSWORD='&&Pw20354491'
+export LIVE_CONTROL_PLANE_PASSWORD='<from secret store>'
 ```
 
 **Available Operator Account:**
 - Username: `operator`
-- Password: `&&Pw20354491`
+- Password: (stored in the team secret store; never commit to repo)
 
 ## Running LIVE Tests
 
@@ -101,7 +101,7 @@ After successful operator login, the test:
    ```bash
    curl -X POST https://api.apexmediation.ee/api/v1/auth/login \
      -H "Content-Type: application/json" \
-     -d '{"email":"sales@apexmediation.ee","password":"&&Pw20354491"}'
+       -d '{"email":"sales@apexmediation.ee","password":"'"$LIVE_CONSOLE_PASSWORD"'"}'
    ```
 
 ### If Login Fails with 500

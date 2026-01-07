@@ -76,10 +76,7 @@ check_vra_status() {
     return 0
   fi
   local overview
-  overview=$(curl -s "$API_URL/api/v1/recon/overview" --config - 2>/dev/null <<EOF
-header = "Authorization: Bearer $TOKEN"
-EOF
-  || true)
+  overview=$(curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/api/v1/recon/overview" 2>/dev/null || true)
   local variance
   variance=$(echo "$overview" | grep -o '"variancePercent":[0-9.]*' | cut -d: -f2 || echo "N/A")
   local coverage
@@ -96,18 +93,19 @@ post_batches() {
   local endpoint="$API_URL/api/v1/analytics/events/$kind"
   [[ "$kind" == "revenue" ]] && endpoint="$API_URL/api/v1/analytics/events/revenue"
 
-  python3 - <<PY
+  python3 - "$json_file" "$kind" <<'PY' | while IFS=$'\t' read -r sdk_key events_json; do
 import json
 import sys
-data=json.load(open(sys.argv[1],'r'))
-kind=sys.argv[2]
+
+data = json.load(open(sys.argv[1], 'r'))
+kind = sys.argv[2]
 for b in data.get(kind, []):
-  k=b.get('sdk_key','')
-  ev=b.get('events',[])
+  k = b.get('sdk_key', '')
+  ev = b.get('events', [])
   if not k or not ev:
     continue
-  print(k+'\t'+json.dumps(ev,separators=(',',':')))
-PY "$json_file" "$kind" | while IFS=$'\t' read -r sdk_key events_json; do
+  print(k + '\t' + json.dumps(ev, separators=(',', ':')))
+PY
     local resp
     resp=$(curl -s -w "\n%{http_code}" -X POST "$endpoint" --config - \
       -d "{\"events\": $events_json}" 2>/dev/null <<EOF
@@ -142,12 +140,19 @@ send_events_once() {
   post_batches clicks "$out"
   post_batches revenue "$out"
 
-  python3 - <<PY
+  python3 - "$out" <<'PY'
 import json
-data=json.load(open('$out','r'))
-def c(kind):
-  return sum(len(b.get('events',[])) for b in data.get(kind,[]))
-print(f"impressions={c('impressions')} clicks={c('clicks')} revenue={c('revenue')}")
+import sys
+
+data = json.load(open(sys.argv[1], 'r'))
+
+def count(kind: str) -> int:
+    return sum(len(b.get('events', [])) for b in data.get(kind, []))
+
+print(
+    "impressions=%d clicks=%d revenue=%d"
+    % (count('impressions'), count('clicks'), count('revenue'))
+)
 PY
 }
 
@@ -216,10 +221,7 @@ sleep 30
 log "Final VRA status: $(check_vra_status)"
 
 if [[ -n "$TOKEN" ]]; then
-  DELTAS=$(curl -s "$API_URL/api/v1/recon/deltas" --config - 2>/dev/null <<EOF
-header = "Authorization: Bearer $TOKEN"
-EOF
-  || true)
+  DELTAS=$(curl -s -H "Authorization: Bearer $TOKEN" "$API_URL/api/v1/recon/deltas" 2>/dev/null || true)
   DELTA_COUNT=$(echo "$DELTAS" | grep -o '"total":[0-9]*' | cut -d: -f2 || echo "0")
   log "Delta count: $DELTA_COUNT"
 

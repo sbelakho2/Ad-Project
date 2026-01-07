@@ -117,15 +117,15 @@ export async function buildReconExpected(
   let paidEvents: PaidEventRow[] = [];
   try {
     const res = await pgPool.query<PaidEventRow>(
-      `SELECT request_id,
-              to_char(timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts,
+      `SELECT metadata->>'request_id' AS request_id,
+              to_char(observed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts,
               revenue_usd::text AS revenue_usd,
               revenue_original::text AS revenue_original,
               revenue_currency
-         FROM revenue_events
-        WHERE timestamp >= $1::timestamptz
-          AND timestamp <  $2::timestamptz
-          AND request_id = ANY($3::text[])
+         FROM analytics_revenue_events
+        WHERE observed_at >= $1::timestamptz
+          AND observed_at <  $2::timestamptz
+          AND metadata->>'request_id' = ANY($3::text[])
           AND revenue_usd > 0`,
       [from, to, candidates.map((c) => c.request_id)]
     );

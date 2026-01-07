@@ -11,7 +11,25 @@ export enum QueueName {
   METRICS_CALCULATION = 'metrics_calculation',
   CACHE_WARMING = 'cache_warming',
   CLEANUP_TASKS = 'cleanup_tasks',
+  // Dead Letter Queue for failed jobs requiring manual investigation
+  DEAD_LETTER = 'dead_letter',
 }
+
+/**
+ * Dead Letter Queue (DLQ) entry structure
+ * Failed jobs are moved here after exhausting retries for forensic analysis
+ */
+export type DeadLetterJob = {
+  originalQueue: QueueName;
+  originalJobId: string;
+  originalJobName: string;
+  payload: Record<string, unknown>;
+  failureReason: string;
+  failureStack?: string;
+  attemptsMade: number;
+  firstFailedAt: string;
+  lastFailedAt: string;
+};
 
 export type AnalyticsAggregationJob = {
   publisherId: string;
@@ -143,6 +161,13 @@ class QueueManagerImpl {
 
     worker.on('failed', (job, error) => {
       logger.warn('[QueueManager] Job failed', { queueName, jobId: job?.id, error });
+      
+      // Move permanently failed jobs to Dead Letter Queue
+      if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+        this.moveToDeadLetterQueue(queueName, job, error).catch((dlqError) => {
+          logger.error('[QueueManager] Failed to move job to DLQ', { queueName, jobId: job.id, dlqError });
+        });
+      }
     });
 
     worker.on('completed', (job) => {
@@ -376,6 +401,102 @@ class QueueManagerImpl {
         return 'failed';
       default:
         return 'completed';
+    }
+  }
+
+  /**
+   * Move a permanently failed job to the Dead Letter Queue for forensic analysis
+   */
+  private async moveToDeadLetterQueue(originalQueue: QueueName, job: any, error: Error): Promise<void> {
+    if (originalQueue === QueueName.DEAD_LETTER) {
+      // Don't move DLQ jobs to DLQ again
+      return;
+    }
+
+    const dlqPayload: DeadLetterJob = {
+      originalQueue,
+      originalJobId: job.id,
+      originalJobName: job.name,
+      payload: job.data,
+      failureReason: error.message,
+      failureStack: error.stack,
+      attemptsMade: job.attemptsMade,
+      firstFailedAt: new Date(job.processedOn ?? Date.now()).toISOString(),
+      lastFailedAt: new Date().toISOString(),
+    };
+
+    try {
+      const dlq = this.ensureQueue(QueueName.DEAD_LETTER);
+      await dlq.add(`dlq:${originalQueue}:${job.name}`, dlqPayload, {
+        removeOnComplete: false, // Keep DLQ jobs for investigation
+        removeOnFail: false,
+      });
+      logger.warn('[QueueManager] Job moved to Dead Letter Queue', {
+        originalQueue,
+        jobId: job.id,
+        jobName: job.name,
+        failureReason: error.message,
+      });
+    } catch (dlqError) {
+      logger.error('[QueueManager] Failed to add job to DLQ', { originalQueue, jobId: job.id, dlqError });
+    }
+  }
+
+  /**
+   * Get all jobs in the Dead Letter Queue for investigation
+   */
+  async getDeadLetterJobs(limit: number = 100): Promise<any[]> {
+    if (!this.initialized) {
+      return [];
+    }
+
+    try {
+      const dlq = this.ensureQueue(QueueName.DEAD_LETTER);
+      const jobs = await dlq.getJobs(['waiting', 'failed'], 0, limit);
+      return jobs.map((job) => ({
+        id: job.id,
+        name: job.name,
+        data: job.data,
+        timestamp: job.timestamp,
+      }));
+    } catch (error) {
+      logger.error('[QueueManager] Failed to get DLQ jobs', { error });
+      return [];
+    }
+  }
+
+  /**
+   * Retry a job from the Dead Letter Queue
+   */
+  async retryDeadLetterJob(dlqJobId: string): Promise<boolean> {
+    if (!this.initialized) {
+      return false;
+    }
+
+    try {
+      const dlq = this.ensureQueue(QueueName.DEAD_LETTER);
+      const dlqJob = await dlq.getJob(dlqJobId);
+      if (!dlqJob) {
+        logger.warn('[QueueManager] DLQ job not found', { dlqJobId });
+        return false;
+      }
+
+      const dlqData = dlqJob.data as DeadLetterJob;
+      const originalQueue = this.ensureQueue(dlqData.originalQueue);
+      
+      // Re-add to original queue with fresh attempts
+      await originalQueue.add(dlqData.originalJobName, dlqData.payload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 1000 },
+      });
+
+      // Remove from DLQ after successful retry
+      await dlqJob.remove();
+      logger.info('[QueueManager] DLQ job retried', { dlqJobId, originalQueue: dlqData.originalQueue });
+      return true;
+    } catch (error) {
+      logger.error('[QueueManager] Failed to retry DLQ job', { dlqJobId, error });
+      return false;
     }
   }
 }

@@ -317,7 +317,7 @@ WAL archiving is enabled with:
 
 **Through PgBouncer** (recommended when ready):
 ```
-postgresql://adproject:ApexApp2025!@127.0.0.1:6432/adproject
+postgresql://adproject:<DB_PASSWORD>@127.0.0.1:6432/adproject
 ```
 
 **Direct** (current app configuration):

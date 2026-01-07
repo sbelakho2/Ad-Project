@@ -123,6 +123,27 @@ public struct SSAISession: Codable {
     
     /// Original content URL
     public let contentUrl: URL
+    
+    /// Pre-fetched ad breaks (optional)
+    public let adBreaks: [SSAIAdBreak]
+    
+    public init(
+        sessionId: String,
+        manifestUrl: URL,
+        sessionToken: String,
+        trackingUrl: URL,
+        expiresAt: Date,
+        contentUrl: URL,
+        adBreaks: [SSAIAdBreak] = []
+    ) {
+        self.sessionId = sessionId
+        self.manifestUrl = manifestUrl
+        self.sessionToken = sessionToken
+        self.trackingUrl = trackingUrl
+        self.expiresAt = expiresAt
+        self.contentUrl = contentUrl
+        self.adBreaks = adBreaks
+    }
 }
 
 /// SSAI Tracking event types
@@ -191,20 +212,70 @@ public struct SSAIAdBreak: Codable {
     /// Pod ID
     public let podId: String
     
+    /// Break type
+    public let type: SSAIAdBreakType
+    
     /// Break position (seconds from start)
     public let position: TimeInterval
+    
+    /// Start time (seconds)
+    public let startTime: TimeInterval
     
     /// Break duration (seconds)
     public let duration: TimeInterval
     
-    /// Number of ads
-    public let adCount: Int
+    /// Number of planned ad slots
+    public let plannedSlots: Int
     
-    /// Break type
-    public let type: SSAIAdBreakType
+    /// Number of filled ad slots
+    public let filledSlots: Int
     
     /// Individual ads
     public let ads: [SSAIAd]
+    
+    /// Computed ad count
+    public var adCount: Int { ads.count }
+    
+    public init(
+        podId: String,
+        type: SSAIAdBreakType,
+        position: TimeInterval,
+        startTime: TimeInterval,
+        duration: TimeInterval,
+        plannedSlots: Int,
+        filledSlots: Int,
+        ads: [SSAIAd]
+    ) {
+        self.podId = podId
+        self.type = type
+        self.position = position
+        self.startTime = startTime
+        self.duration = duration
+        self.plannedSlots = plannedSlots
+        self.filledSlots = filledSlots
+        self.ads = ads
+    }
+    
+    /// Convenience initializer with string type
+    public init(
+        podId: String,
+        type: String,
+        position: TimeInterval,
+        startTime: TimeInterval,
+        duration: TimeInterval,
+        plannedSlots: Int,
+        filledSlots: Int,
+        ads: [SSAIAd]
+    ) {
+        self.podId = podId
+        self.type = SSAIAdBreakType(rawValue: type) ?? .midroll
+        self.position = position
+        self.startTime = startTime
+        self.duration = duration
+        self.plannedSlots = plannedSlots
+        self.filledSlots = filledSlots
+        self.ads = ads
+    }
 }
 
 /// Ad break type
@@ -225,6 +296,9 @@ public struct SSAIAd: Codable {
     /// Ad duration (seconds)
     public let duration: TimeInterval
     
+    /// Start offset within the ad break (seconds)
+    public let startOffset: TimeInterval
+    
     /// Advertiser name
     public let advertiser: String?
     
@@ -234,8 +308,56 @@ public struct SSAIAd: Codable {
     /// Skip offset (seconds, if skippable)
     public let skipOffset: TimeInterval?
     
+    /// VAST URL
+    public let vastUrl: URL?
+    
     /// Click-through URL
     public let clickThroughUrl: URL?
+    
+    /// OM SDK verification scripts
+    public let verificationScripts: [SSAIVerificationScript]
+    
+    public init(
+        slotId: String,
+        creativeId: String,
+        duration: TimeInterval,
+        startOffset: TimeInterval = 0,
+        advertiser: String? = nil,
+        title: String? = nil,
+        skipOffset: TimeInterval? = nil,
+        vastUrl: URL? = nil,
+        clickThroughUrl: URL? = nil,
+        verificationScripts: [SSAIVerificationScript] = []
+    ) {
+        self.slotId = slotId
+        self.creativeId = creativeId
+        self.duration = duration
+        self.startOffset = startOffset
+        self.advertiser = advertiser
+        self.title = title
+        self.skipOffset = skipOffset
+        self.vastUrl = vastUrl
+        self.clickThroughUrl = clickThroughUrl
+        self.verificationScripts = verificationScripts
+    }
+}
+
+/// OM SDK verification script
+public struct SSAIVerificationScript: Codable {
+    /// Vendor key
+    public let vendor: String
+    
+    /// Script URL
+    public let url: URL
+    
+    /// Verification parameters
+    public let parameters: String?
+    
+    public init(vendor: String, url: URL, parameters: String? = nil) {
+        self.vendor = vendor
+        self.url = url
+        self.parameters = parameters
+    }
 }
 
 /// SSAI Error

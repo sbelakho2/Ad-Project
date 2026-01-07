@@ -248,7 +248,7 @@ class SSAIPlayerObserver(
     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
         val ssaiError = SSAIError(
             code = "PLAYER_ERROR",
-            message = error.message ?: "Unknown player error",
+            errorMessage = error.message ?: "Unknown player error",
             fatal = true
         )
         listener?.onError(ssaiError, currentAd)

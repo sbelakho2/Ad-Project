@@ -101,6 +101,7 @@ public typealias AdLoader = (WeightedAdSource) async throws -> AdLoadResult
 // MARK: - PriorityWeightedMediation
 
 /// Priority-weighted mediation manager for CTV
+@available(tvOS 13.0, macOS 10.15, *)
 public final class PriorityWeightedMediation {
     
     private class SourceStats {

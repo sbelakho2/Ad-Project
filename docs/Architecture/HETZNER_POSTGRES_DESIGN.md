@@ -160,7 +160,7 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 
 # Database connection (from app server or direct)
-PGPASSWORD='ApexApp2025!' psql -h 77.42.44.35 -U adproject -d adproject
+PGPASSWORD='<DB_PASSWORD>' psql -h 77.42.44.35 -U adproject -d adproject
 ```
 
 ---
@@ -240,7 +240,7 @@ Redis runs locally on the app server for minimal latency.
 ```ini
 # /etc/redis/redis.conf
 bind 0.0.0.0
-requirepass ApexRedis2025!
+requirepass <REDIS_PASSWORD>
 maxmemory 2gb
 maxmemory-policy allkeys-lru
 ```
@@ -249,7 +249,7 @@ maxmemory-policy allkeys-lru
 
 ```bash
 # /opt/adproject/backend/.env
-REDIS_URL=redis://:ApexRedis2025!@127.0.0.1:6379/0
+REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6379/0
 ```
 
 ### Usage Patterns
@@ -309,10 +309,10 @@ reserve_pool_size = 5
    ```
 3. **Deploy same code with shared env:**
    ```bash
-   DATABASE_URL=postgresql://adproject:ApexApp2025!@77.42.44.35:5432/adproject
-   REDIS_URL=redis://:ApexRedis2025!@46.62.252.96:6379/0
-   JWT_SECRET=hetzner-prod-jwt-secret-ApexMediation-2025-SecureRandomKey
-   NEXTAUTH_SECRET=hetzner-prod-nextauth-secret-ApexMediation-2025-SecureSession
+    DATABASE_URL=postgresql://adproject:<DB_PASSWORD>@77.42.44.35:5432/adproject
+    REDIS_URL=redis://:<REDIS_PASSWORD>@46.62.252.96:6379/0
+    JWT_SECRET=<JWT_SECRET>
+    NEXTAUTH_SECRET=<NEXTAUTH_SECRET>
    ```
 4. **Add to Caddy upstream** (on primary):
    ```caddyfile

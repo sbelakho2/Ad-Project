@@ -16,7 +16,9 @@ async function loginAsLiveDummy(page: Page, origin: string) {
   }
 
   // Ensure we have a real document origin before doing cross-origin XHR.
-  await page.goto('/login', { waitUntil: 'networkidle' })
+  // Avoid `networkidle`: prod pages can keep long-lived requests open.
+  await page.goto('/login', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByRole('heading', { name: /ApexMediation/i })).toBeVisible({ timeout: 15_000 })
 
   const authResult = await page.evaluate<AuthResult, { email: string; password: string }>(
     async ({ email, password }) => {

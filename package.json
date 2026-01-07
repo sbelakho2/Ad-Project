@@ -46,7 +46,7 @@
     "ops:ssh": "bash scripts/ops/do_ssh.sh",
 
     "test:ui": "npm run test:ui:live",
-    "test:ui:live": "bash -lc 'ROOT=\"$PWD\"; if [[ -f \"$ROOT/.env.live\" ]]; then source \"$ROOT/scripts/ops/source_env.sh\" \"$ROOT/.env.live\" >/dev/null; fi; (cd \"$ROOT/console\" && CONSOLE_BASE_URL=\"${CONSOLE_BASE_URL:-https://console.apexmediation.ee}\" LIVE_E2E=1 npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-dummy-data.spec.ts tests/e2e/live-clickthrough.spec.ts) && (cd \"$ROOT/control-plane\" && CONTROL_PLANE_BASE_URL=\"${CONTROL_PLANE_BASE_URL:-https://admin.apexmediation.ee}\" LIVE_E2E=1 npx playwright test --project=chromium tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts)'"
+    "test:ui:live": "bash -lc 'ROOT=\"$PWD\"; if [[ -f \"$ROOT/.env.live\" ]]; then source \"$ROOT/scripts/ops/source_env.sh\" \"$ROOT/.env.live\" >/dev/null; fi; (cd \"$ROOT/console\" && CONSOLE_BASE_URL=\"${CONSOLE_BASE_URL:-https://console.apexmediation.ee}\" LIVE_E2E=1 npx playwright test --project=chromium --workers=1 tests/e2e/live-login.spec.ts tests/e2e/live-dummy-data.spec.ts tests/e2e/live-clickthrough.spec.ts) && (cd \"$ROOT/control-plane\" && CONTROL_PLANE_BASE_URL=\"${CONTROL_PLANE_BASE_URL:-https://admin.apexmediation.ee}\" LIVE_E2E=1 npx playwright test --project=chromium --workers=1 tests/e2e/live-login.spec.ts tests/e2e/live-clickthrough.spec.ts)'"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",

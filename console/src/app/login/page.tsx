@@ -153,8 +153,15 @@ export default function LoginPage() {
     } catch (err) {
       if (axios.isAxiosError(err)) {
         const status = err.response?.status
+        const message = err.response?.data?.message || err.response?.data?.error || ''
+        
         if (status === 401) {
-          setError('Invalid credentials. Please try again.')
+          // Check for server-side lockout message with remaining attempts
+          if (message.includes('attempts remaining')) {
+            setError(message)
+          } else {
+            setError('Invalid credentials. Please try again.')
+          }
           setFailedAttempts((prev) => {
             const next = prev + 1
             if (next >= MAX_ATTEMPTS_BEFORE_COOLDOWN) {
@@ -163,6 +170,17 @@ export default function LoginPage() {
             }
             return next
           })
+          return
+        }
+        if (status === 403) {
+          // Account locked or email not verified
+          if (message.toLowerCase().includes('locked')) {
+            setError('Your account has been temporarily locked due to too many failed login attempts. Please try again later or reset your password.')
+          } else if (message.toLowerCase().includes('verify')) {
+            setError('Please verify your email address before logging in. Check your inbox for a verification link.')
+          } else {
+            setError(message || 'Access denied. Please contact support if this persists.')
+          }
           return
         }
         if (status === 503) {
@@ -310,9 +328,17 @@ export default function LoginPage() {
               </div>
 
               <div>
-                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
-                  Password
-                </label>
+                <div className="flex items-center justify-between mb-2">
+                  <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+                    Password
+                  </label>
+                  <Link
+                    href="/forgot-password"
+                    className="text-sm text-primary-600 hover:text-primary-700 font-medium"
+                  >
+                    Forgot password?
+                  </Link>
+                </div>
                 <input
                   id="password"
                   type="password"

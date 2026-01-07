@@ -1,41 +1,39 @@
-import { paymentProcessor } from '../payoutProcessor';
+import { PaymentProcessor } from '../payoutProcessor';
 
-// Mock the DB client used for atomic transactions
-const client = {
-  query: jest.fn(),
-  release: jest.fn(),
-};
+// Store original env to restore after tests
+const originalStripeKey = process.env.STRIPE_SECRET_KEY;
 
-jest.mock('../../utils/postgres', () => ({
-  getClient: jest.fn(async () => client),
-  query: jest.fn(),
-}));
+beforeAll(() => {
+  // Clear Stripe key to use simulation mode
+  delete process.env.STRIPE_SECRET_KEY;
+});
+
+afterAll(() => {
+  // Restore original env
+  if (originalStripeKey) {
+    process.env.STRIPE_SECRET_KEY = originalStripeKey;
+  }
+});
 
 describe('PaymentProcessor behavior', () => {
+  let processor: PaymentProcessor;
+
   beforeEach(() => {
-    jest.clearAllMocks();
+    processor = new PaymentProcessor();
   });
 
   test('rate limiting caps at 5 payouts per minute per publisher', async () => {
-    // Make DB succeed fast
-    (client.query as jest.Mock).mockImplementation(async (sql: string) => {
-      if (/SELECT SUM\(/i.test(sql)) {
-        return { rows: [{ balance: 0 }] };
-      }
-      return { rows: [] };
-    });
+    const publisherId = `pub-rate-${Date.now()}`;
+    const results: Array<{ success: boolean; error?: string }> = [];
 
-    const baseReq = {
-      publisherId: 'pub-rate-1',
-      payoutId: 'p1',
-      amount: 100,
-      currency: 'USD',
-      method: 'wire',
-    };
-
-    const results = [] as Array<{ success: boolean; error?: string }>;
     for (let i = 0; i < 6; i++) {
-      const r = await paymentProcessor.processPayout({ ...baseReq, payoutId: `p-${i}` });
+      const r = await processor.processPayout({
+        publisherId,
+        payoutId: `p-${i}-${Date.now()}`,
+        amount: 100,
+        currency: 'USD',
+        method: 'wire',
+      });
       results.push({ success: r.success, error: r.error });
     }
 
@@ -45,37 +43,30 @@ describe('PaymentProcessor behavior', () => {
     expect(rateLimited).toBeTruthy();
   });
 
-  test('wraps ledger + payout status in a single transaction and rolls back on failure', async () => {
-    const calls: string[] = [];
-    // First insert ok, second insert throws to trigger ROLLBACK
-    (client.query as jest.Mock).mockImplementation(async (sql: string, params?: unknown[]) => {
-      calls.push(sql);
-      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
-        return { rows: [] };
-      }
-      if (/INSERT INTO payout_ledger/i.test(sql)) {
-        if (Array.isArray(params) && params.includes('credit')) {
-          throw new Error('Simulated insert error');
-        }
-        return { rows: [] };
-      }
-      if (/SELECT SUM\(/i.test(sql)) {
-        return { rows: [{ balance: 0 }] };
-      }
-      return { rows: [] };
-    });
+  test('fails-closed in production when Stripe API key not configured', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
 
-    const result = await paymentProcessor.processPayout({
-      publisherId: 'pub-atomic-1',
-      payoutId: 'atomic-1',
-      amount: 50,
-      currency: 'USD',
-      method: 'wire',
-    });
+    try {
+      // Set to production mode
+      process.env.NODE_ENV = 'production';
 
-    // Because of failure, processor should try next provider or eventually fail (retryable)
-    expect(result.success).toBe(false);
-    // Ensure rollback happened
-    expect((client.query as jest.Mock).mock.calls.map(c => c[0]).some((sql: string) => sql === 'ROLLBACK')).toBe(true);
+      // Create fresh processor instance
+      const prodProcessor = new PaymentProcessor();
+
+      const result = await prodProcessor.processPayout({
+        publisherId: `pub-prod-${Date.now()}`,
+        payoutId: `prod-fail-closed-${Date.now()}`,
+        amount: 100,
+        currency: 'USD',
+        method: 'wire',
+      });
+
+      // Should fail because no API key is configured in production
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Payment provider not configured');
+    } finally {
+      // Restore original env
+      process.env.NODE_ENV = originalNodeEnv;
+    }
   });
 });

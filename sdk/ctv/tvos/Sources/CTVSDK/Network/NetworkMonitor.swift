@@ -8,7 +8,7 @@ import Network
 /// - Fast-fail for no-network conditions (critical for CTV ad breaks)
 /// - Connection quality assessment optimized for streaming
 /// - Callback-based network state change notifications
-@available(tvOS 12.0, *)
+@available(tvOS 12.0, macOS 10.14, *)
 public final class NetworkMonitor {
     
     /// Shared instance for convenience
@@ -198,11 +198,18 @@ public final class NetworkMonitor {
         
         lastConnectivityChange = Date()
         
+        let isConstrained: Bool
+        if #available(tvOS 13.0, macOS 10.15, *) {
+            isConstrained = path.isConstrained
+        } else {
+            isConstrained = false
+        }
+        
         currentState = NetworkState(
             isConnected: path.status == .satisfied,
             connectionType: connectionType,
             isExpensive: path.isExpensive,
-            isConstrained: path.isConstrained,
+            isConstrained: isConstrained,
             timestamp: Date()
         )
     }
@@ -222,6 +229,7 @@ public final class NetworkMonitor {
 }
 
 /// Error type for fast-fail on no-network conditions
+@available(tvOS 12.0, macOS 10.14, *)
 public struct NoNetworkError: Error {
     public let message: String
     public let networkState: NetworkMonitor.NetworkState

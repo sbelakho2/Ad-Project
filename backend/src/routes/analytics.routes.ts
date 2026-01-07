@@ -56,10 +56,12 @@ router.post('/events/clicks', authRateLimiter, appApiKeyAuth, invalidatePublishe
 router.post('/events/revenue', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordRevenue);
 
 // POST /api/v1/analytics/events/viewability - Record OMSDK/viewability events (SDK_CHECKS 7.3)
-router.post('/events/viewability', authRateLimiter, analyticsController.recordViewability);
+// Requires app API key auth for security - prevents anonymous event injection
+router.post('/events/viewability', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordViewability);
 
 // POST /api/v1/analytics/events/manifest-parse - Record SSAI manifest parse failures (best-effort)
-router.post('/events/manifest-parse', authRateLimiter, analyticsController.recordManifestParseErrors);
+// Requires app API key auth for security - prevents anonymous event injection
+router.post('/events/manifest-parse', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordManifestParseErrors);
 
 // GET /api/v1/analytics/viewability/:placementId - Get viewability summary for a placement
 router.get('/viewability/:placementId', authenticateOrApiKey, cache({ 

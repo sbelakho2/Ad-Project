@@ -34,11 +34,11 @@ describe('VRA Service — getOverview basics', () => {
     // Conservative defaults until recon_expected is populated
     expect(out.variancePercent).toBeGreaterThanOrEqual(0);
     expect(out.coveragePercent).toBeGreaterThanOrEqual(0);
-    // Verify first query received params and contains timestamp filter
+    // Verify first query received params and contains observed_at filter
     const call = (query as jest.Mock).mock.calls[0];
     const q: string = call[0];
     const params: unknown[] = call[1] || [];
-    expect(q).toContain('timestamp >= $1');
+    expect(q).toContain('observed_at >= $1');
     expect(params[0]).toBe(from);
     expect(params[1]).toBe(to);
   });

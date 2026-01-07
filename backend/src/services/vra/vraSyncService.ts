@@ -173,13 +173,13 @@ export class VraSyncService {
     const runId = runResult.rows[0].id;
 
     try {
-      // 1. Get expected revenue from SDK events
+      // 1. Get expected revenue from SDK events (using analytics_revenue_events fact table)
       const expectedResult = await this.pool.query(
         `SELECT COALESCE(SUM(revenue_usd), 0)::float AS expected_usd,
-                COUNT(DISTINCT request_id)::int AS event_count
-         FROM revenue_events
+                COUNT(DISTINCT metadata->>'request_id')::int AS event_count
+         FROM analytics_revenue_events
          WHERE publisher_id = $1
-           AND timestamp >= $2 AND timestamp < $3`,
+           AND observed_at >= $2 AND observed_at < $3`,
         [publisherId, windowStart.toISOString(), windowEnd.toISOString()]
       );
       const expectedUsd = Number(expectedResult.rows[0]?.expected_usd || 0);
@@ -206,8 +206,8 @@ export class VraSyncService {
         `SELECT COUNT(DISTINCT re.adapter_name)::int AS networks_with_events,
                 (SELECT COUNT(DISTINCT network_type) FROM recon_statements_norm 
                  WHERE publisher_id = $1 AND event_date >= $2::date AND event_date < $3::date)::int AS networks_with_statements
-         FROM revenue_events re
-         WHERE re.publisher_id = $1 AND re.timestamp >= $2 AND re.timestamp < $3`,
+         FROM analytics_revenue_events re
+         WHERE re.publisher_id = $1 AND re.observed_at >= $2 AND re.observed_at < $3`,
         [publisherId, windowStart.toISOString(), windowEnd.toISOString()]
       );
       const networksWithEvents = Number(coverageResult.rows[0]?.networks_with_events || 0);

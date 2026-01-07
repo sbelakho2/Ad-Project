@@ -281,3 +281,399 @@ export async function getMonthlyRevenueDigest(req: Request, res: Response) {
     return res.status(500).json({ success: false, error: 'Internal error' });
   }
 }
+
+/**
+ * GET /api/v1/recon/review-queue
+ * Returns mid-confidence matches (fuzzy matches between 0.4 and 0.8 confidence) 
+ * that need manual review before being finalized.
+ */
+export async function getReviewQueue(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const q = req.query as Record<string, string | undefined>;
+    
+    // Validate pagination
+    const page = q.page ? parseInt(q.page, 10) : 1;
+    const pageSize = q.page_size ? parseInt(q.page_size, 10) : 50;
+    
+    if (!Number.isInteger(page) || page < 1) {
+      return res.status(400).json({ success: false, error: 'Invalid page' });
+    }
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 200) {
+      return res.status(400).json({ success: false, error: 'page_size must be between 1 and 200' });
+    }
+
+    // Min/max confidence for review queue (fuzzy match range)
+    const minConf = q.min_conf ? parseFloat(q.min_conf) : 0.4;
+    const maxConf = q.max_conf ? parseFloat(q.max_conf) : 0.8;
+    
+    if (minConf < 0 || minConf > 1 || maxConf < 0 || maxConf > 1 || minConf >= maxConf) {
+      return res.status(400).json({ success: false, error: 'Invalid confidence range' });
+    }
+
+    // Query for review items from recon_match with mid-confidence that haven't been reviewed
+    const offset = (page - 1) * pageSize;
+    
+    const itemsResult = await query<{
+      id: string;
+      expected_id: string;
+      statement_id: string;
+      match_confidence: string;
+      match_type: string;
+      discrepancy_usd: string;
+      created_at: string;
+      expected_amount: string;
+      statement_amount: string;
+      network_type: string;
+      event_date: string;
+    }>(
+      `SELECT 
+         m.id,
+         m.expected_id,
+         m.statement_id,
+         m.match_confidence::text,
+         m.match_type,
+         m.discrepancy_usd::text,
+         m.created_at::text,
+         COALESCE(e.expected_value, 0)::text AS expected_amount,
+         COALESCE(s.paid, 0)::text AS statement_amount,
+         COALESCE(s.network_type, '') AS network_type,
+         COALESCE(s.event_date::text, '') AS event_date
+       FROM recon_match m
+       LEFT JOIN recon_expected e ON e.id = m.expected_id
+       LEFT JOIN recon_statements_norm s ON s.id = m.statement_id
+       WHERE m.publisher_id = $1
+         AND m.match_confidence >= $2
+         AND m.match_confidence <= $3
+         AND m.review_status IS NULL  -- Not yet reviewed
+       ORDER BY m.match_confidence ASC, m.created_at DESC
+       LIMIT $4 OFFSET $5`,
+      [publisherId, minConf, maxConf, pageSize, offset]
+    );
+
+    // Get total count
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM recon_match
+       WHERE publisher_id = $1
+         AND match_confidence >= $2
+         AND match_confidence <= $3
+         AND review_status IS NULL`,
+      [publisherId, minConf, maxConf]
+    );
+    
+    const total = parseInt(countResult.rows[0]?.count || '0', 10);
+    const totalPages = Math.ceil(total / pageSize);
+
+    const items = itemsResult.rows.map(row => ({
+      id: row.id,
+      expectedId: row.expected_id,
+      statementId: row.statement_id,
+      confidence: parseFloat(row.match_confidence),
+      matchType: row.match_type,
+      discrepancyUsd: parseFloat(row.discrepancy_usd || '0'),
+      createdAt: row.created_at,
+      expectedAmount: parseFloat(row.expected_amount),
+      statementAmount: parseFloat(row.statement_amount),
+      networkType: row.network_type,
+      eventDate: row.event_date,
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        items,
+        pagination: {
+          page,
+          pageSize,
+          total,
+          totalPages,
+        },
+        filters: {
+          minConf,
+          maxConf,
+        },
+      },
+    });
+  } catch (err) {
+    logger.error('VRA getReviewQueue failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * POST /api/v1/recon/review-queue/:id/approve
+ * Approves a mid-confidence match, promoting it to confirmed
+ */
+export async function approveReviewItem(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'Missing review item ID' });
+    }
+
+    // Update the match to mark it as approved
+    const result = await query<{ id: string }>(
+      `UPDATE recon_match
+       SET review_status = 'approved',
+           reviewed_at = NOW(),
+           reviewed_by = $3
+       WHERE id = $1 AND publisher_id = $2
+       RETURNING id`,
+      [id, publisherId, req.user?.email || 'api']
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Review item not found' });
+    }
+
+    logger.info('VRA review item approved', { id, publisherId, reviewedBy: req.user?.email });
+
+    return res.json({
+      success: true,
+      data: {
+        id,
+        status: 'approved',
+        reviewedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    logger.error('VRA approveReviewItem failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * POST /api/v1/recon/review-queue/:id/reject
+ * Rejects a mid-confidence match, flagging it for investigation
+ */
+export async function rejectReviewItem(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'Missing review item ID' });
+    }
+
+    const { reason } = req.body || {};
+    const rejectReason = typeof reason === 'string' ? reason.slice(0, 500) : '';
+
+    // Update the match to mark it as rejected
+    const result = await query<{ id: string }>(
+      `UPDATE recon_match
+       SET review_status = 'rejected',
+           reviewed_at = NOW(),
+           reviewed_by = $3,
+           review_notes = $4
+       WHERE id = $1 AND publisher_id = $2
+       RETURNING id`,
+      [id, publisherId, req.user?.email || 'api', rejectReason]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Review item not found' });
+    }
+
+    logger.info('VRA review item rejected', { id, publisherId, reviewedBy: req.user?.email, reason: rejectReason });
+
+    return res.json({
+      success: true,
+      data: {
+        id,
+        status: 'rejected',
+        reason: rejectReason,
+        reviewedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    logger.error('VRA rejectReviewItem failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+// Import dispute lifecycle service
+import disputeLifecycle from '../services/vra/disputeLifecycleService';
+
+/**
+ * GET /api/v1/recon/disputes
+ * List disputes for the authenticated publisher
+ */
+export async function listDisputes(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const q = req.query as Record<string, string | undefined>;
+    const page = q.page ? parseInt(q.page, 10) : 1;
+    const pageSize = q.page_size ? parseInt(q.page_size, 10) : 50;
+
+    if (!Number.isInteger(page) || page < 1) {
+      return res.status(400).json({ success: false, error: 'Invalid page' });
+    }
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      return res.status(400).json({ success: false, error: 'page_size must be between 1 and 100' });
+    }
+
+    const result = await disputeLifecycle.listDisputes({
+      publisherId,
+      network: q.network,
+      status: q.status as any,
+      page,
+      pageSize,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        items: result.items,
+        pagination: {
+          page,
+          pageSize,
+          total: result.total,
+          totalPages: Math.ceil(result.total / pageSize),
+        },
+      },
+    });
+  } catch (err) {
+    logger.error('VRA listDisputes failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * GET /api/v1/recon/disputes/:id
+ * Get a specific dispute by ID
+ */
+export async function getDisputeById(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const dispute = await disputeLifecycle.getDispute(id);
+
+    if (!dispute) {
+      return res.status(404).json({ success: false, error: 'Dispute not found' });
+    }
+
+    // Verify ownership
+    if (dispute.publisherId && dispute.publisherId !== publisherId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    return res.json({ success: true, data: dispute });
+  } catch (err) {
+    logger.error('VRA getDisputeById failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * POST /api/v1/recon/disputes/:id/submit
+ * Submit a draft dispute to the network
+ */
+export async function submitDisputeById(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const { contact, notes } = req.body || {};
+
+    const dispute = await disputeLifecycle.getDispute(id);
+    if (!dispute) {
+      return res.status(404).json({ success: false, error: 'Dispute not found' });
+    }
+
+    // Verify ownership
+    if (dispute.publisherId && dispute.publisherId !== publisherId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const result = await disputeLifecycle.submitDispute(id, { contact, notes });
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    return res.json({ success: true, data: result.dispute });
+  } catch (err) {
+    logger.error('VRA submitDisputeById failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * POST /api/v1/recon/disputes/:id/cancel
+ * Cancel a dispute
+ */
+export async function cancelDisputeById(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const { reason } = req.body || {};
+
+    const dispute = await disputeLifecycle.getDispute(id);
+    if (!dispute) {
+      return res.status(404).json({ success: false, error: 'Dispute not found' });
+    }
+
+    // Verify ownership
+    if (dispute.publisherId && dispute.publisherId !== publisherId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const result = await disputeLifecycle.cancelDispute(id, reason);
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    return res.json({ success: true, data: result.dispute });
+  } catch (err) {
+    logger.error('VRA cancelDisputeById failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
+
+/**
+ * GET /api/v1/recon/disputes/stats
+ * Get dispute statistics for the publisher
+ */
+export async function getDisputeStats(req: Request, res: Response) {
+  try {
+    const publisherId = req.user?.publisherId;
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const stats = await disputeLifecycle.getDisputeStats(publisherId);
+    return res.json({ success: true, data: stats });
+  } catch (err) {
+    logger.error('VRA getDisputeStats failed', { error: (err as Error)?.message });
+    return res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}

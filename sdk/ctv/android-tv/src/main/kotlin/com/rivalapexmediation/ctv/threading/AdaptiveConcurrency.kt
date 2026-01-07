@@ -76,7 +76,7 @@ class AdaptiveConcurrency private constructor() {
         val queueCapacity: Int
     )
     
-    private val cpuInfo: CpuInfo by lazy { detectCpuInfo() }
+    private val _cpuInfo: CpuInfo by lazy { detectCpuInfo() }
     
     // Adaptive thread pools
     private val backgroundPool: ThreadPoolExecutor by lazy { createBackgroundPool() }
@@ -98,14 +98,14 @@ class AdaptiveConcurrency private constructor() {
     /**
      * Gets the detected CPU information.
      */
-    fun getCpuInfo(): CpuInfo = cpuInfo
+    fun getCpuInfo(): CpuInfo = _cpuInfo
     
     /**
      * Gets the recommended pool configuration for background work.
      */
     fun getBackgroundPoolConfig(): PoolConfig {
-        val cores = cpuInfo.totalCores
-        val (coreSize, maxSize) = when (cpuInfo.deviceType) {
+        val cores = _cpuInfo.totalCores
+        val (coreSize, maxSize) = when (_cpuInfo.deviceType) {
             DeviceType.LOW_END -> Pair(1, 2)
             DeviceType.MID_RANGE -> Pair(2, 3)
             DeviceType.HIGH_END -> Pair(2, MAX_BACKGROUND_THREADS)
@@ -122,8 +122,8 @@ class AdaptiveConcurrency private constructor() {
      * Gets the recommended pool configuration for network I/O.
      */
     fun getNetworkPoolConfig(): PoolConfig {
-        val cores = cpuInfo.totalCores
-        val (coreSize, maxSize) = when (cpuInfo.deviceType) {
+        val cores = _cpuInfo.totalCores
+        val (coreSize, maxSize) = when (_cpuInfo.deviceType) {
             DeviceType.LOW_END -> Pair(2, 4)
             DeviceType.MID_RANGE -> Pair(3, 6)
             DeviceType.HIGH_END -> Pair(4, MAX_NETWORK_THREADS)
@@ -140,8 +140,8 @@ class AdaptiveConcurrency private constructor() {
      * Gets the recommended pool configuration for compute-intensive work.
      */
     fun getComputePoolConfig(): PoolConfig {
-        val cores = if (cpuInfo.isBigLittle) cpuInfo.performanceCores else cpuInfo.totalCores
-        val poolSize = when (cpuInfo.deviceType) {
+        val cores = if (_cpuInfo.isBigLittle) _cpuInfo.performanceCores else _cpuInfo.totalCores
+        val poolSize = when (_cpuInfo.deviceType) {
             DeviceType.LOW_END -> 1
             DeviceType.MID_RANGE -> min(2, cores)
             DeviceType.HIGH_END -> min(MAX_COMPUTE_THREADS, cores)
@@ -284,9 +284,9 @@ class AdaptiveConcurrency private constructor() {
      */
     fun getStats(): Map<String, Any> {
         return mapOf(
-            "cpuCores" to cpuInfo.totalCores,
-            "isBigLittle" to cpuInfo.isBigLittle,
-            "deviceType" to cpuInfo.deviceType.name,
+            "cpuCores" to _cpuInfo.totalCores,
+            "isBigLittle" to _cpuInfo.isBigLittle,
+            "deviceType" to _cpuInfo.deviceType.name,
             "backgroundPool" to getPoolStats(backgroundPool),
             "networkPool" to getPoolStats(networkPool),
             "computePool" to getPoolStats(computePool),
