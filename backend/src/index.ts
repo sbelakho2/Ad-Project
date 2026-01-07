@@ -252,7 +252,16 @@ app.get('/metrics', async (_req: Request, res: Response) => {
 
 // API routes
 // Attach stricter rate limiting for auth endpoints (tier-aware)
-app.use(`/api/${API_VERSION}/auth`, authTieredRateLimiter);
+// Exclude session check endpoints (/me, /csrf) which are high-frequency and not security-sensitive
+app.use(`/api/${API_VERSION}/auth`, (req, res, next) => {
+  const path = req.path || '';
+  // Session checks and CSRF tokens can be called frequently from the frontend
+  // They should not be subject to the strict auth rate limiter
+  if (path === '/me' || path === '/csrf') {
+    return next();
+  }
+  return authTieredRateLimiter(req, res, next);
+});
 
 // OpenAPI/Swagger endpoints
 app.get('/openapi.json', (_req, res) => {

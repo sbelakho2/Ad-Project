@@ -226,6 +226,39 @@ router.post('/connections/:id/sync', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/v1/vra/oauth/:network
+ * Direct redirect to OAuth provider (for console network settings page)
+ * This is a convenience endpoint that redirects the browser directly to the OAuth flow
+ */
+router.get('/oauth/:network', async (req: Request, res: Response) => {
+  try {
+    const publisherId = req.user?.publisherId;
+    const networkType = req.params.network as NetworkType;
+
+    if (!publisherId) {
+      return res.status(401).json({ success: false, error: 'Authentication required' });
+    }
+
+    if (!SUPPORTED_NETWORKS[networkType]) {
+      return res.status(400).json({ success: false, error: 'Invalid network type' });
+    }
+
+    const redirectUri = `${process.env.API_BASE_URL || 'https://api.apexmediation.ee'}/api/v1/vra/oauth/${networkType}/callback`;
+    const url = connectorService.getOAuthUrl(networkType, publisherId, redirectUri);
+
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'This network does not use OAuth' });
+    }
+
+    // Redirect browser directly to OAuth provider
+    res.redirect(url);
+  } catch (err) {
+    logger.error('Failed to initiate OAuth', { error: (err as Error).message });
+    res.status(500).json({ success: false, error: 'Failed to initiate OAuth' });
+  }
+});
+
+/**
  * GET /api/v1/vra/oauth/:network/url
  * Get OAuth authorization URL for a network
  */
