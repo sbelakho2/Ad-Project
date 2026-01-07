@@ -184,13 +184,27 @@ export function setActiveTenantId(nextTenantId: string | null) {
   activeTenantId = typeof nextTenantId === 'string' && nextTenantId.trim().length > 0 ? nextTenantId : null
 }
 
+// Cache the CSRF token (not the cookie secret) to avoid repeated API calls
+let cachedCsrfToken: string | null = null
+let cachedCsrfTokenAt = 0
+const CSRF_TOKEN_CACHE_TTL_MS = 30_000 // 30 seconds
+
 async function ensureBrowserCsrfToken(): Promise<string | null> {
   if (typeof window === 'undefined') return null
-  const existing = readXsrfCookie()
-  if (existing) return existing
+  
+  // Return cached token if still valid
+  const now = Date.now()
+  if (cachedCsrfToken && now - cachedCsrfTokenAt < CSRF_TOKEN_CACHE_TTL_MS) {
+    return cachedCsrfToken
+  }
 
   if (!inflightCsrfRequest) {
     inflightCsrfRequest = withTimeout(getCsrfToken(), CSRF_FETCH_TIMEOUT_MS, 'CSRF token fetch')
+      .then(token => {
+        cachedCsrfToken = token
+        cachedCsrfTokenAt = Date.now()
+        return token
+      })
       .catch(() => null)
       .finally(() => {
         inflightCsrfRequest = null
