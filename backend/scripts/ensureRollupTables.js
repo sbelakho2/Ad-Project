@@ -15,7 +15,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Pool } = require('pg');
 
-const ROLLUP_MIGRATION_VERSION = '20251201_150500_analytics_rollup_tables';
+const ROLLUP_MIGRATIONS = [
+  '20251201_150500_analytics_rollup_tables',
+  '20260108_120000_analytics_rollup_revenue_histograms',
+];
 const ROLLUP_TABLES = [
   'analytics_impression_rollups',
   'analytics_click_rollups',
@@ -58,24 +61,35 @@ async function main() {
     const { ok, missing } = await rollupTablesExist(pool);
     if (ok) {
       console.log('[ensureRollupTables] Rollup tables already exist.');
-      return;
+      // Still apply any rollup schema evolutions (idempotent migrations).
     }
 
-    console.log('[ensureRollupTables] Rollup tables missing; applying migration.', {
-      migration: ROLLUP_MIGRATION_VERSION,
-      missing,
-    });
+    if (!ok) {
+      console.log('[ensureRollupTables] Rollup tables missing; applying migrations.', {
+        migrations: ROLLUP_MIGRATIONS,
+        missing,
+      });
+    } else {
+      console.log('[ensureRollupTables] Rollup tables exist; ensuring latest rollup migrations are applied.', {
+        migrations: ROLLUP_MIGRATIONS,
+      });
+    }
   } finally {
     await pool.end();
   }
 
   const runnerPath = path.resolve(__dirname, 'runMigrationsV2.js');
-  const result = spawnSync(process.execPath, [runnerPath, '--only', ROLLUP_MIGRATION_VERSION], {
-    stdio: 'inherit',
-    env: process.env,
-  });
 
-  process.exit(typeof result.status === 'number' ? result.status : 1);
+  for (const migration of ROLLUP_MIGRATIONS) {
+    const result = spawnSync(process.execPath, [runnerPath, '--only', migration], {
+      stdio: 'inherit',
+      env: process.env,
+    });
+    const code = typeof result.status === 'number' ? result.status : 1;
+    if (code !== 0) {
+      process.exit(code);
+    }
+  }
 }
 
 main().catch((err) => {

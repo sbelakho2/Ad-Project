@@ -70,16 +70,16 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         (i.observed_at AT TIME ZONE 'UTC')::date AS bucket_date,
         i.publisher_id::text AS publisher_id,
         COALESCE(i.app_id::text, '') AS app_id,
-        COALESCE(NULLIF(i.ad_unit_id::text, ''), NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
+        COALESCE(NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
         COALESCE(i.adapter_id, '') AS adapter_id,
-        LEFT(COALESCE(NULLIF(i.country_code::text, ''), NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
+        LEFT(COALESCE(NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
         COUNT(*)::bigint AS impression_count,
         COUNT(*) FILTER (WHERE i.filled IS TRUE)::bigint AS filled_count,
         now() AS updated_at
       FROM analytics_impressions i
       WHERE i.is_test_mode = false
-        AND i.observed_at >= $1::date
-        AND i.observed_at < $2::date
+        AND i.observed_at >= $1::timestamptz
+        AND i.observed_at < $2::timestamptz
       GROUP BY 1,2,3,4,5,6
       ON CONFLICT (bucket_date, publisher_id, app_id, ad_unit_id, adapter_id, country_code)
       DO UPDATE SET
@@ -87,7 +87,7 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         filled_count = EXCLUDED.filled_count,
         updated_at = now()
       `,
-      [startDay, endDay]
+      [startInclusive, endExclusive]
     );
 
     // 2) Click rollups (derived from analytics_clicks; align ad_unit_id with impressions when possible)
@@ -108,7 +108,6 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         c.publisher_id::text AS publisher_id,
         COALESCE(c.app_id::text, '') AS app_id,
         COALESCE(
-          NULLIF(i.ad_unit_id::text, ''),
           NULLIF(i.meta->>'ad_unit_id', ''),
           NULLIF(c.meta->>'ad_unit_id', ''),
           COALESCE(c.placement_id::text, '')
@@ -116,9 +115,7 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         COALESCE(c.adapter_id, '') AS adapter_id,
         LEFT(
           COALESCE(
-            NULLIF(i.country_code::text, ''),
             NULLIF(i.meta->>'country_code', ''),
-            NULLIF(c.country_code::text, ''),
             NULLIF(c.meta->>'country_code', ''),
             'ZZ'
           ),
@@ -130,15 +127,15 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
       LEFT JOIN analytics_impressions i
         ON i.event_id = c.impression_id
       WHERE c.is_test_mode = false
-        AND c.observed_at >= $1::date
-        AND c.observed_at < $2::date
+        AND c.observed_at >= $1::timestamptz
+        AND c.observed_at < $2::timestamptz
       GROUP BY 1,2,3,4,5,6
       ON CONFLICT (bucket_date, publisher_id, app_id, ad_unit_id, adapter_id, country_code)
       DO UPDATE SET
         click_count = EXCLUDED.click_count,
         updated_at = now()
       `,
-      [startDay, endDay]
+      [startInclusive, endExclusive]
     );
 
     // 3) Revenue rollups
@@ -154,6 +151,9 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         total_revenue,
         avg_revenue,
         max_revenue,
+        revenue_bucket_lt_1_count,
+        revenue_bucket_1_5_count,
+        revenue_bucket_gt_5_count,
         revenue_event_count,
         updated_at
       )
@@ -167,22 +167,28 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         COALESCE(SUM(r.revenue_usd), 0) AS total_revenue,
         COALESCE(AVG(r.revenue_usd), 0) AS avg_revenue,
         COALESCE(MAX(r.revenue_usd), 0) AS max_revenue,
+        COUNT(*) FILTER (WHERE r.revenue_usd IS NOT NULL AND r.revenue_usd < 1)::bigint AS revenue_bucket_lt_1_count,
+        COUNT(*) FILTER (WHERE r.revenue_usd IS NOT NULL AND r.revenue_usd >= 1 AND r.revenue_usd <= 5)::bigint AS revenue_bucket_1_5_count,
+        COUNT(*) FILTER (WHERE r.revenue_usd IS NOT NULL AND r.revenue_usd > 5)::bigint AS revenue_bucket_gt_5_count,
         COUNT(*)::bigint AS revenue_event_count,
         now() AS updated_at
       FROM analytics_revenue_events r
       WHERE r.is_test_mode = false
-        AND r.observed_at >= $1::date
-        AND r.observed_at < $2::date
+        AND r.observed_at >= $1::timestamptz
+        AND r.observed_at < $2::timestamptz
       GROUP BY 1,2,3,4,5,6
       ON CONFLICT (bucket_date, publisher_id, app_id, ad_unit_id, adapter_id, country_code)
       DO UPDATE SET
         total_revenue = EXCLUDED.total_revenue,
         avg_revenue = EXCLUDED.avg_revenue,
         max_revenue = EXCLUDED.max_revenue,
+        revenue_bucket_lt_1_count = EXCLUDED.revenue_bucket_lt_1_count,
+        revenue_bucket_1_5_count = EXCLUDED.revenue_bucket_1_5_count,
+        revenue_bucket_gt_5_count = EXCLUDED.revenue_bucket_gt_5_count,
         revenue_event_count = EXCLUDED.revenue_event_count,
         updated_at = now()
       `,
-      [startDay, endDay]
+      [startInclusive, endExclusive]
     );
 
     // 4) Metrics rollups (combine impressions + clicks + revenue)
@@ -193,15 +199,15 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
           (i.observed_at AT TIME ZONE 'UTC')::date AS bucket_date,
           i.publisher_id::text AS publisher_id,
           COALESCE(i.app_id::text, '') AS app_id,
-          COALESCE(NULLIF(i.ad_unit_id::text, ''), NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
+          COALESCE(NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
           COALESCE(i.adapter_id, '') AS adapter_id,
-          LEFT(COALESCE(NULLIF(i.country_code::text, ''), NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
+          LEFT(COALESCE(NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
           COUNT(*)::bigint AS impression_count,
           COUNT(*) FILTER (WHERE i.filled IS TRUE)::bigint AS filled_count
         FROM analytics_impressions i
         WHERE i.is_test_mode = false
-          AND i.observed_at >= $1::date
-          AND i.observed_at < $2::date
+          AND i.observed_at >= $1::timestamptz
+          AND i.observed_at < $2::timestamptz
         GROUP BY 1,2,3,4,5,6
       ),
       clk AS (
@@ -210,7 +216,6 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
           c.publisher_id::text AS publisher_id,
           COALESCE(c.app_id::text, '') AS app_id,
           COALESCE(
-            NULLIF(i.ad_unit_id::text, ''),
             NULLIF(i.meta->>'ad_unit_id', ''),
             NULLIF(c.meta->>'ad_unit_id', ''),
             COALESCE(c.placement_id::text, '')
@@ -218,9 +223,7 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
           COALESCE(c.adapter_id, '') AS adapter_id,
           LEFT(
             COALESCE(
-              NULLIF(i.country_code::text, ''),
               NULLIF(i.meta->>'country_code', ''),
-              NULLIF(c.country_code::text, ''),
               NULLIF(c.meta->>'country_code', ''),
               'ZZ'
             ),
@@ -231,8 +234,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         LEFT JOIN analytics_impressions i
           ON i.event_id = c.impression_id
         WHERE c.is_test_mode = false
-          AND c.observed_at >= $1::date
-          AND c.observed_at < $2::date
+          AND c.observed_at >= $1::timestamptz
+          AND c.observed_at < $2::timestamptz
         GROUP BY 1,2,3,4,5,6
       ),
       rev AS (
@@ -246,8 +249,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
           COALESCE(SUM(r.revenue_usd), 0) AS total_revenue
         FROM analytics_revenue_events r
         WHERE r.is_test_mode = false
-          AND r.observed_at >= $1::date
-          AND r.observed_at < $2::date
+          AND r.observed_at >= $1::timestamptz
+          AND r.observed_at < $2::timestamptz
         GROUP BY 1,2,3,4,5,6
       ),
       dims AS (
@@ -324,7 +327,7 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         ecpm = EXCLUDED.ecpm,
         updated_at = now()
       `,
-      [startDay, endDay]
+      [startInclusive, endExclusive]
     );
 
     await client.query('COMMIT');

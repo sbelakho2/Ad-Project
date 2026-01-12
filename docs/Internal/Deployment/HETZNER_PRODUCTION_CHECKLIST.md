@@ -84,6 +84,18 @@ The following user is configured with `admin` role for production verification:
 > - **admin.apexmediation.ee → Control Plane (port 4000)** - completely separate from Console
 > - **console.apexmediation.ee → Console (port 3000)** - customer-facing dashboard
 
+### Environment File Precedence (CRITICAL)
+
+- **Canonical env file for production:** `/opt/adproject/.env`
+- **Backend runtime:** should receive `DATABASE_URL` via **PM2 env** (preferred). `/opt/adproject/.env` is a fallback for one-off scripts.
+- **One-off scripts/CLIs (analytics rollups, etc.):** run from `/opt/adproject/backend` but should still resolve `DATABASE_URL` from `/opt/adproject/.env`.
+- If `/opt/adproject/backend/.env` exists, treat it as **legacy** — do not rely on it for production DB settings.
+- PostgreSQL on the DB server requires TLS; ensure connections are encrypted (backend/scripts enable SSL automatically for non-local DB hosts).
+
+Safe verification (prints only host/port/db, never credentials):
+
+- Use the repo helper `tools/print_db_url_targets.py` (VS Code task: `tmp: prod print DATABASE_URL targets (safe)`)
+
 > **Operator Access:** The Control Plane at `https://admin.apexmediation.ee` provides operator telemetry and actions.
 > Access requires IP allowlisting and separate operator authentication.
 > See [Control Plane Architecture](../../Architecture/CONTROL_PLANE.md) for details.
@@ -95,6 +107,23 @@ The following user is configured with `admin` role for production verification:
 Use these whenever “data looks stale” or after deploying ingestion/billing changes.
 
 ### A) Synthetic traffic sources (test server)
+
+In addition to the long-running harness services, there is a high-signal end-to-end canary that:
+
+- writes events via SDK ingestion (`X-SDK-Key`) and
+- reads back via authenticated analytics API (JWT `TOKEN` or publisher `API_KEY=sk_*`).
+
+Run it on the test server:
+
+```bash
+./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; chmod +x /opt/adproject/scripts/ops/e2e_canary_verify.sh; bash /opt/adproject/scripts/ops/e2e_canary_verify.sh"
+```
+
+Notes:
+
+- Readback uses a cache-busting query param to avoid false failures from Redis-cached analytics endpoints.
+- The canary uses UTC day boundaries; around 00:00Z, “today” totals can reset.
+- If `REPLICA_DATABASE_URL` is enabled, replication lag can delay read visibility after ingestion.
 
 ```bash
 # Confirm synthetic harness services are running
@@ -585,6 +614,13 @@ All targets should show UP status at `/targets`:
 # - Rollup-table rollout is automated by the backend at startup when analytics rollups are enabled.
 # - For exceptional one-off schema changes, use a scripted, explicit migration runner ("--only")
 #   rather than executing SQL manually.
+
+# Rollup-table automation relies on the compiled backend containing:
+# - dist/scripts/ensureRollupTables.js
+# - dist/scripts/runMigrationsV2.js
+# - dist/migrations/postgres/*.sql
+# Verify on the App Server after deployment:
+./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; ls -la dist/scripts/ensureRollupTables.js dist/scripts/runMigrationsV2.js dist/migrations/postgres | head"
 
 # Analytics ingestion drift check (read-only):
 #
@@ -1248,7 +1284,8 @@ An orchestrator script is provided:
 
 Environment variables (store in `/opt/adproject/.env.slo` on the test server):
 - `API_URL` (default: https://api.apexmediation.ee)
-- `TOKEN` (required) Bearer token that belongs to the dummy publisher user (NOT an admin)
+- `TOKEN` (optional) Bearer token (JWT) that belongs to the dummy publisher user (NOT an admin)
+- `API_KEY` (optional, recommended) Publisher API key (`sk_*`) for programmatic access to analytics read APIs (more stable than JWT)
 - `SDK_KEY` (required) SDK key owned by the dummy publisher (maps activity to the correct tenant)
 - `PUBLISHER_ID` (required) Dummy publisher UUID
 - App IDs for each SDK owned by the dummy publisher (required to exercise Console, billing, multi-app flows):

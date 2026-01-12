@@ -44,12 +44,36 @@ export async function apiKeyAuth(req: Request, res: Response, next: NextFunction
 
     // Update last used asynchronously
     void apiKeyRepo.update({ id: found.id }, { lastUsedAt: new Date() });
-    // Attach minimal user context
+
+    // Attach minimal user context.
+    // NOTE: `User` entity intentionally omits several production columns (publisher_id, role).
+    // When loading `relations: ['user']`, those fields won't be present, so we fetch them explicitly.
+    type ApiRole = 'admin' | 'publisher' | 'readonly';
+
+    let publisherId = '';
+    let role: ApiRole | undefined;
+    let email = (found.user as any)?.email || '';
+    try {
+      const rows = await AppDataSource.query(
+        'SELECT publisher_id AS "publisherId", role, email FROM users WHERE id = $1 LIMIT 1',
+        [found.user.id]
+      );
+      const row = rows?.[0];
+      if (row) {
+        publisherId = String(row.publisherId || '');
+        const maybeRole = String(row.role || '').toLowerCase();
+        role = (maybeRole === 'admin' || maybeRole === 'publisher' || maybeRole === 'readonly') ? (maybeRole as ApiRole) : undefined;
+        email = String(row.email || email);
+      }
+    } catch {
+      // Best-effort; leave publisherId empty if unavailable.
+    }
+
     req.user = {
       userId: found.user.id,
-      publisherId: (found.user as any).publisherId || '',
-      email: (found.user as any).email,
-      role: (found.user as any).role,
+      publisherId,
+      email,
+      role,
     };
 
     // Record usage asynchronously

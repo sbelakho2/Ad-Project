@@ -1,9 +1,26 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
-// Load .env before validation - use absolute path from compiled location
-dotenv.config({ path: path.join(__dirname, '../../../../.env') });
+// Load .env before validation.
+// Prefer repo-root .env (../.env) when executed from backend/.
+// Never override env already provided by the process manager.
+(() => {
+  const cwd = process.cwd();
+  const cwdBase = path.basename(cwd);
+  const candidates =
+    cwdBase === 'backend'
+      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
+      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
+
+  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fs.existsSync(p));
+  if (envPath) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
+})();
 
 /**
  * Environment variable schema with comprehensive validation
@@ -83,7 +100,12 @@ const envSchema = z.object({
 
   // Analytics rollups (storage optimization)
   ANALYTICS_ROLLUP_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
-  ANALYTICS_ROLLUP_CRON: z.string().default('15 */6 * * *'), // every 6 hours at minute 15 (UTC)
+  // Backwards-compatible: if ANALYTICS_ROLLUP_FINALIZE_CRON is unset, the scheduler will fall back to ANALYTICS_ROLLUP_CRON.
+  // Finalize job: intended to run once per day (yesterday only).
+  ANALYTICS_ROLLUP_CRON: z.string().default('15 0 * * *'), // daily at 00:15 UTC
+  ANALYTICS_ROLLUP_FINALIZE_CRON: z.string().optional(),
+  // Realtime job: refreshes today's aggregates periodically.
+  ANALYTICS_ROLLUP_REALTIME_CRON: z.string().default('0 * * * *'), // hourly (minute 0) UTC
   // Default covers the common 30-day dashboard window (plus a small buffer).
   ANALYTICS_ROLLUP_LOOKBACK_DAYS: z.string().regex(/^\d+$/).transform(Number).default('35'),
 

@@ -1,7 +1,7 @@
 import { init, setConsent, requestAd, Errors } from '../src';
 import { state as mswState, timeoutHandler } from './msw/handlers';
 import { server } from './msw/server';
-import { rest } from 'msw';
+import { http, HttpResponse } from 'msw';
 
 describe('Web SDK', () => {
   beforeEach(() => {
@@ -36,14 +36,14 @@ describe('Web SDK', () => {
   it('retries on 5xx and eventually succeeds within maxRetries', async () => {
     let count = 0;
     server.use(
-      rest.post('*/auction', async (req, res, ctx) => {
+      http.post('*/auction', async ({ request }) => {
         count += 1;
         if (count <= 2) {
-          return res(ctx.status(502), ctx.json({ error: 'temporary' }));
+          return HttpResponse.json({ error: 'temporary' }, { status: 502 });
         }
-        const json = await req.json();
+        const json = await request.json();
         mswState.lastAuctionBody = json as any;
-        return res(ctx.status(200), ctx.json({ requestId: 'ok', fill: true, creative: { id: 'x', html: '<div>Ad</div>' } }));
+        return HttpResponse.json({ requestId: 'ok', fill: true, creative: { id: 'x', html: '<div>Ad</div>' } });
       })
     );
     init({ endpoint: 'https://ads.example.test', timeoutMs: 2000, maxRetries: 3, sdkVersion: '0.1.0' });
@@ -54,8 +54,8 @@ describe('Web SDK', () => {
 
   it('does not retry on 4xx and surfaces BAD_RESPONSE', async () => {
     server.use(
-      rest.post('*/auction', async (_req, res, ctx) => {
-        return res(ctx.status(400), ctx.json({ error: 'bad request' }));
+      http.post('*/auction', async () => {
+        return HttpResponse.json({ error: 'bad request' }, { status: 400 });
       })
     );
     init({ endpoint: 'https://ads.example.test', timeoutMs: 500, maxRetries: 5, sdkVersion: '0.1.0' });
@@ -65,14 +65,14 @@ describe('Web SDK', () => {
   it('retries on network error and then succeeds', async () => {
     let count = 0;
     server.use(
-      rest.post('*/auction', async (req, res, ctx) => {
+      http.post('*/auction', async ({ request }) => {
         count += 1;
         if (count <= 2) {
-          return res.networkError('connection reset');
+          return HttpResponse.error();
         }
-        const json = await req.json();
+        const json = await request.json();
         mswState.lastAuctionBody = json as any;
-        return res(ctx.status(200), ctx.json({ requestId: 'ok2', fill: true, creative: { id: 'y', html: '<div>Ad</div>' } }));
+        return HttpResponse.json({ requestId: 'ok2', fill: true, creative: { id: 'y', html: '<div>Ad</div>' } });
       })
     );
     init({ endpoint: 'https://ads.example.test', timeoutMs: 2000, maxRetries: 3, retryBackoffBaseMs: 10, retryJitterMs: 5, sdkVersion: '0.1.0' });

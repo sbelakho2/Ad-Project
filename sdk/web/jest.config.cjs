@@ -5,12 +5,12 @@ module.exports = {
   rootDir: '.',
   testMatch: ['**/tests/**/*.test.ts'],
   setupFilesAfterEnv: ['<rootDir>/setupTests.ts'],
-  // Allow transforming ESM-only packages like msw for Jest
+  // Allow transforming ESM-only packages like msw and until-async for Jest
   transformIgnorePatterns: [
-    '/node_modules/(?!(msw)/)'
+    '/node_modules/(?!(msw|until-async)/)'
   ],
   transform: {
-    '^.+\\.(ts|tsx)$': [
+    '^.+\\.(ts|tsx|js)$': [
       'ts-jest',
       { tsconfig: '<rootDir>/tsconfig.json', useESM: true },
     ],

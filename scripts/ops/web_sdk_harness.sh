@@ -18,6 +18,7 @@ if [[ -f ".env.slo" ]]; then set -a; source ".env.slo"; set +a; fi
 API_URL=${API_URL:-https://api.apexmediation.ee}
 TOKEN=${TOKEN:-}
 SDK_KEY=${SDK_KEY:-}
+SDK_KEY_WEB=${SDK_KEY_WEB:-}
 PUBLISHER_ID=${PUBLISHER_ID:-}
 APP_ID_WEB=${APP_ID_WEB:-}
 
@@ -31,7 +32,8 @@ require_env() {
     exit 2
   fi
 }
-require_env SDK_KEY "$SDK_KEY"
+SDK_KEY_EFFECTIVE=${SDK_KEY_WEB:-$SDK_KEY}
+require_env SDK_KEY "$SDK_KEY_EFFECTIVE"
 require_env PUBLISHER_ID "$PUBLISHER_ID"
 require_env APP_ID_WEB "$APP_ID_WEB"
 
@@ -41,7 +43,7 @@ CURL_CFG_FILE="$(mktemp)"
 chmod 600 "$CURL_CFG_FILE" || true
 cat >"$CURL_CFG_FILE" <<EOF
 header = "Content-Type: application/json"
-header = "X-SDK-Key: $SDK_KEY"
+header = "X-SDK-Key: $SDK_KEY_EFFECTIVE"
 EOF
 if [[ -n "$TOKEN" ]]; then
   echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_FILE"

@@ -65,14 +65,15 @@ These are created by migration `backend/migrations/postgres/20251201_150500_anal
 **Key Env Vars**:
 
 * `ANALYTICS_ROLLUP_ENABLED` (default: true)
-* `ANALYTICS_ROLLUP_CRON` (default: `15 */6 * * *` UTC)
-* `ANALYTICS_ROLLUP_LOOKBACK_DAYS` (default: 35; covers typical 30-day reporting)
+* `ANALYTICS_ROLLUP_REALTIME_CRON` (default: `0 * * * *` UTC; refreshes *today*)
+* `ANALYTICS_ROLLUP_FINALIZE_CRON` (optional; if unset, falls back to `ANALYTICS_ROLLUP_CRON`)
+* `ANALYTICS_ROLLUP_CRON` (default: `15 0 * * *` UTC; finalizes *yesterday*)
+* `ANALYTICS_ROLLUP_LOOKBACK_DAYS` (default: 35; used for startup backfill only)
 
 **New Retention Policy (post-rollups)**:
 
-* Raw impressions: keep 3 days.
-* Raw revenue events: keep 30 days (until revenue partitioning is implemented).
-* Rollups: keep 365 days (or longer; low volume).
+* Raw facts (partitioned): keep 14 days by default.
+* Rollups (monthly partitions): keep 5 years by default (or longer; low volume).
 
 **Impact**: Reduces storage footprint by ~90% for long-term data.
 
@@ -87,10 +88,10 @@ These are created by migration `backend/migrations/postgres/20251201_150500_anal
 1. **Immediate**:
     * Apply rollup table migration to production.
     * Confirm rollups are populated for the last 30 days.
-    * Once verified, reduce raw impressions retention to 3 days.
+    * Once verified, reduce raw-fact retention (default 14 days) as needed.
 
 2. **Short-term**:
-    * Migrate `analytics_revenue_events` to a partitioned table.
+    * Monitor rollup performance (today refresh + yesterday finalize) and verify rollups cover reporting windows.
 
 3. **Long-term**:
     * Optimize columns (ENUMs, extract from JSONB).

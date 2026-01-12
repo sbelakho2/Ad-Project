@@ -77,6 +77,35 @@ After successful operator login, the test:
 3. Follows internal `/admin/*` navigation links
 4. Collects runtime errors and 5xx responses
 
+## Close-to-Production Confidence (Recommended)
+The LIVE Playwright suites validate the UIs and surface backend 5xx errors, but they don’t *prove* that SDK ingestion data successfully makes it into Postgres and becomes visible in analytics read APIs.
+
+For close-to-production confidence, run the **E2E Canary Verify** on the Hetzner test server:
+- It writes a small batch via the real SDK ingestion endpoints (`/api/v1/analytics/events/*`) using `X-SDK-Key`.
+- Then it polls the authenticated analytics read API (`GET /api/v1/analytics/impressions?groupBy=date`) until today’s impressions increases.
+   - Auth can be either a dummy user `TOKEN` (JWT) or a stable `API_KEY=sk_*`.
+
+Notes for maintainers:
+- The canary’s readback requests include a cache-busting query param (`_cb=...`) on purpose. Analytics read endpoints are Redis-cached; cache invalidation should work, but the canary must not depend on it to avoid false negatives.
+- The “today” window is computed in **UTC** (00:00Z → 00:00Z). If you’re debugging around midnight UTC, you may see baseline jumps unrelated to the canary.
+- If the canary starts failing again, first check ingestion HTTP codes (must be `202`) and whether `REPLICA_DATABASE_URL` is configured (replication lag can delay read visibility).
+
+### Run Once (from VS Code)
+Use the task:
+- `tmp: test server run e2e canary verify`
+
+### Run Once (manual SSH)
+```bash
+./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; bash /opt/adproject/scripts/ops/e2e_canary_verify.sh"
+```
+
+### Optional: Periodic Systemd Timer (test server)
+Examples are in:
+- `scripts/ops/systemd/e2e-canary-verify.service.example`
+- `scripts/ops/systemd/e2e-canary-verify.timer.example`
+
+If you install those on the test server, a failure becomes a persistent `systemctl --failed` signal (and can be scraped/alerted via your existing monitoring).
+
 ## Diagnostics & Debugging
 
 ### If Login Fails with 400

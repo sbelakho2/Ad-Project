@@ -1,10 +1,51 @@
 import dotenv from 'dotenv';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import Cursor from 'pg-cursor';
 import logger from './logger';
 import { dbQueryDurationSeconds } from './prometheus';
 
-dotenv.config();
+// Prefer an explicitly-provided ENV_FILE, then repo-root .env (one level up from backend/)
+// so scripts executed from /opt/adproject/backend pick up /opt/adproject/.env.
+// Only load dotenv if DATABASE_URL isn't already set (e.g. PM2-provided env).
+if (!process.env.DATABASE_URL) {
+  const cwdBase = path.basename(process.cwd());
+  const cwdCandidates =
+    cwdBase === 'backend'
+      ? [
+          // Prefer repo-root env when running inside backend/
+          path.resolve(process.cwd(), '../.env'),
+          path.resolve(process.cwd(), '.env'),
+        ]
+      : [
+          path.resolve(process.cwd(), '.env'),
+          path.resolve(process.cwd(), '../.env'),
+        ];
+
+  const candidates = [
+    process.env.ENV_FILE,
+    ...cwdCandidates,
+    // Running from transpiled dist/ paths (backend/dist/src/utils)
+    path.resolve(__dirname, '../../../../.env'),
+    // Running from source paths (backend/src/utils)
+    path.resolve(__dirname, '../../..', '.env'),
+  ].filter((p): p is string => !!p);
+
+  const envPath = candidates.find((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+
+  if (envPath) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
+}
 
 const defaultTestConnection = 'postgresql://postgres:postgres@localhost:5432/apexmediation_test';
 const connectionString = process.env.DATABASE_URL ?? (process.env.NODE_ENV === 'test' ? defaultTestConnection : undefined);
@@ -21,7 +62,27 @@ if (!process.env.TEST_DATABASE_URL && process.env.NODE_ENV === 'test') {
   process.env.TEST_DATABASE_URL = connectionString;
 }
 
-const useSsl = process.env.DATABASE_SSL === 'true';
+const shouldUseSsl = (): boolean => {
+  if (process.env.DATABASE_SSL === 'true') return true;
+  // Backwards-compatible: some environments use libpq-style sslmode in the URL.
+  if (connectionString && /[?&]sslmode=require\b/i.test(connectionString)) return true;
+
+  // Sensible default: connections to non-local hosts should use TLS.
+  // This is important for one-off scripts (NODE_ENV may be unset) and for prod.
+  if (connectionString) {
+    try {
+      const u = new URL(connectionString);
+      const host = u.hostname;
+      const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+      return !isLocalHost;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+};
+
+const useSsl = shouldUseSsl();
 const poolMax = parseInt(process.env.DATABASE_POOL_MAX || '20', 10); // Increased from 10 to 20
 const poolMin = parseInt(process.env.DATABASE_POOL_MIN || '2', 10); // Minimum connections
 const idleTimeout = parseInt(process.env.DATABASE_POOL_IDLE_MS || '30000', 10);

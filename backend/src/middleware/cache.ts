@@ -180,7 +180,8 @@ export function invalidateCache(pattern: string | ((req: Request) => string)): (
  */
 export function invalidatePublisherCache(publisherId?: string): (req: Request, res: Response, next: NextFunction) => void {
   return invalidateCache((req) => {
-    const pubId = publisherId || req.user?.publisherId || '*';
+    const sdkPublisherId = (req as any)?.sdk?.publisherId as string | undefined;
+    const pubId = publisherId || req.user?.publisherId || sdkPublisherId || '*';
     return `*:${pubId}:*`;
   });
 }

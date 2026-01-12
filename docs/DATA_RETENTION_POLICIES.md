@@ -21,36 +21,40 @@ This document defines data retention periods for all data types stored in the sy
 
 ## Detailed Policies
 
-### 1. Analytics Data (30 days)
+### 1. Analytics Data (Tiered)
 
-**Tables:** `analytics_impressions`, `analytics_revenue_events`, `analytics_sdk_telemetry`, `analytics_views`
+**Raw fact tables (high volume):** `analytics_impressions`, `analytics_revenue_events`, `analytics_clicks`
 
-**Retention:** 30 days from observation date
+**Rollup tables (low volume):** `analytics_impression_rollups`, `analytics_click_rollups`, `analytics_revenue_rollups`, `analytics_metrics_rollups`
 
-**Implementation:** ✅ Automated via daily partition cleanup
-```sql
--- Runs daily at 5 AM Sunday
-SELECT drop_old_analytics_impressions_partitions(30);
-```
+**Retention:**
+- Raw facts: 14 days by default (partition drop)
+- Rollups: 5 years by default (monthly partition drop)
+
+**Implementation:** ✅ Automated via partition management scripts (cron)
+- Raw partitions are daily RANGE partitions on `observed_at`.
+- Rollups are monthly RANGE partitions on `bucket_date`.
 
 **Justification:**
-- Monthly billing cycles require 30 days of data
-- Performance optimization (partition pruning)
-- Storage cost management
-- Older data can be exported to data warehouse if needed
+- Raw facts are only needed for short-window debugging and “recent” queries.
+- Long-term reporting uses rollups (orders of magnitude smaller).
+- Partition drops are O(1) and avoid expensive DELETEs.
 
 **Configuration:**
-- Location: DB Server `/var/lib/postgresql/16/main`
-- Current size: ~76MB for 7 days (est. 330MB for 30 days)
-- Automated: Daily cron at 5 AM Sunday
+- Raw partition lifecycle:
+  - Create future partitions: `scripts/ops/create_future_partitions.sh`
+  - Drop old partitions: `scripts/ops/partition_retention.sh` (default 14 days)
+- Rollup lifecycle:
+  - Create monthly partitions: `scripts/ops/create_future_rollup_partitions.sh`
+  - Drop old rollup partitions: `scripts/ops/rollup_retention.sh` (default 5 years)
 
-**Manual Override:**
-```sql
--- Keep 60 days instead of 30
-SELECT drop_old_analytics_impressions_partitions(60);
+**Manual Override (raw facts):**
+```bash
+# Keep 30 days of raw instead of 14
+./scripts/ops/partition_retention.sh 30
 
--- Emergency cleanup - keep only 7 days
-SELECT drop_old_analytics_impressions_partitions(7);
+# Emergency cleanup - keep only 7 days
+./scripts/ops/partition_retention.sh 7
 ```
 
 ### 2. WAL Archives (7 days)

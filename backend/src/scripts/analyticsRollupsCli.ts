@@ -1,10 +1,46 @@
 import dotenv from 'dotenv';
+import fs from 'node:fs';
 import path from 'node:path';
 import logger from '../utils/logger';
 import { runAnalyticsRollups } from '../services/analyticsRollupService';
 
-// Load backend .env for scripts executed from /opt/adproject/backend
-dotenv.config({ path: path.join(__dirname, '../../../../.env') });
+// Load .env for scripts executed from /opt/adproject/backend.
+// Prefer repo-root .env (../.env) when cwd is backend/.
+// Never override existing env (e.g. if DATABASE_URL already provided).
+if (!process.env.DATABASE_URL) {
+  const cwd = process.cwd();
+  const cwdBase = path.basename(cwd);
+  const candidates =
+    cwdBase === 'backend'
+      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
+      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
+
+  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fs.existsSync(p));
+  if (envPath) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
+
+  // Safe diagnostics for production ops; never prints credentials.
+  try {
+    if (process.env.DATABASE_URL) {
+      const u = new URL(process.env.DATABASE_URL);
+      logger.info('Analytics rollups CLI: env loaded', {
+        cwd,
+        envPath: envPath ?? '<default>',
+        dbHost: u.hostname,
+        dbPort: u.port,
+        dbName: (u.pathname || '').replace(/^\//, ''),
+        sslmode: u.searchParams.get('sslmode') ?? undefined,
+      });
+    } else {
+      logger.warn('Analytics rollups CLI: DATABASE_URL still missing after dotenv load', { cwd, envPath: envPath ?? '<default>' });
+    }
+  } catch {
+    logger.warn('Analytics rollups CLI: could not parse DATABASE_URL after dotenv load', { cwd, envPath: envPath ?? '<default>' });
+  }
+}
 
 const usage = () => {
   // eslint-disable-next-line no-console

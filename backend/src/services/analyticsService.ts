@@ -196,6 +196,8 @@ export class AnalyticsService {
   private readonly FLUSH_INTERVAL_MS: number;
   private flushInterval: NodeJS.Timeout | null = null;
 
+  private uniqueIndexColumnsCache = new Map<string, ReadonlyArray<ReadonlyArray<string>>>();
+
   constructor(options: AnalyticsServiceOptions = {}) {
     this.BATCH_SIZE = options.batchSize ?? 100;
     this.FLUSH_INTERVAL_MS = options.flushIntervalMs ?? 5000;
@@ -682,10 +684,9 @@ export class AnalyticsService {
 
     // Use ON CONFLICT DO NOTHING to handle race conditions where another
     // flush inserted the same event_id between the NOT EXISTS check and INSERT.
-    // This silences duplicate key constraint violations without data loss.
-    const onConflictSql = usableConflictCols.includes('event_id')
-      ? 'ON CONFLICT ("event_id") DO NOTHING'
-      : '';
+    // We infer the conflict target from the actual unique indexes on the target
+    // table to avoid mismatches (especially with partitioned tables).
+    const onConflictSql = await this.buildOnConflictSql(targetTable, usableConflictCols);
 
     // Wrap INSERT + TRUNCATE in a transaction to prevent race conditions
     // where concurrent flushes could lose data if TRUNCATE runs between
@@ -705,6 +706,68 @@ export class AnalyticsService {
       await query('ROLLBACK');
       throw err;
     }
+  }
+
+  private parseSchemaAndTable(table: string): { schema: string; name: string } {
+    const parts = table.split('.').map((p) => p.trim()).filter(Boolean);
+    if (parts.length === 2) {
+      return { schema: parts[0].replace(/"/g, ''), name: parts[1].replace(/"/g, '') };
+    }
+    return { schema: 'public', name: table.replace(/"/g, '') };
+  }
+
+  private async getUniqueIndexColumns(table: string): Promise<ReadonlyArray<ReadonlyArray<string>>> {
+    const cacheKey = table;
+    const cached = this.uniqueIndexColumnsCache.get(cacheKey);
+    if (cached) return cached;
+
+    const { schema, name } = this.parseSchemaAndTable(table);
+
+    const res = await query<{ cols: string[] }>(
+      `
+        SELECT array_agg(a.attname ORDER BY x.ordinality) AS cols
+        FROM pg_index i
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN unnest(i.indkey) WITH ORDINALITY AS x(attnum, ordinality) ON true
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
+        WHERE i.indisunique
+          AND n.nspname = $1
+          AND t.relname = $2
+        GROUP BY i.indexrelid
+      `,
+      [schema, name]
+    );
+
+    const indexes = res.rows
+      .map((r) => r.cols)
+      .filter((cols): cols is string[] => Array.isArray(cols) && cols.length > 0);
+
+    this.uniqueIndexColumnsCache.set(cacheKey, indexes);
+    return indexes;
+  }
+
+  private async buildOnConflictSql(targetTable: string, usableConflictCols: ReadonlyArray<string>): Promise<string> {
+    if (!usableConflictCols.includes('event_id')) return '';
+
+    const uniqueIndexes = await this.getUniqueIndexColumns(targetTable);
+    const hasUniqueOn = (desired: ReadonlyArray<string>): boolean => {
+      const desiredSet = new Set(desired);
+      return uniqueIndexes.some((idx) => idx.length === desired.length && idx.every((c) => desiredSet.has(c)));
+    };
+
+    if (usableConflictCols.includes('observed_at') && hasUniqueOn(['event_id', 'observed_at'])) {
+      return 'ON CONFLICT ("event_id", "observed_at") DO NOTHING';
+    }
+    if (hasUniqueOn(['event_id'])) {
+      return 'ON CONFLICT ("event_id") DO NOTHING';
+    }
+
+    // Safety fallback: if the target has unique constraints we didn't detect (e.g. partition-local
+    // unique indexes), inserting a batch with duplicate rows can wedge the stage->fact merge.
+    // `ON CONFLICT DO NOTHING` (without a conflict target) is valid and will ignore any unique
+    // violations the insert encounters.
+    return 'ON CONFLICT DO NOTHING';
   }
 
   private updateBufferGauge(kind: 'impressions' | 'clicks' | 'revenue'): void {

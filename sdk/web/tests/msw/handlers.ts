@@ -1,32 +1,29 @@
-import { rest, delay } from 'msw';
+import { http, HttpResponse, delay } from 'msw';
 
 export const state = {
   lastAuctionBody: null as any,
 };
 
 export const handlers = [
-  rest.post('*/auction', async (req, res, ctx) => {
+  http.post('*/auction', async ({ request }) => {
     try {
-      const json = await req.json();
+      const json = await request.json();
       state.lastAuctionBody = json as any;
     } catch {
       // ignore
     }
-    return res(
-      ctx.status(200),
-      ctx.json({
-        requestId: 'req-123',
-        fill: true,
-        price: 1.23,
-        currency: 'USD',
-        creative: { id: 'cr-1', html: '<div>Ad</div>' },
-        ttlSeconds: 30,
-      })
-    );
+    return HttpResponse.json({
+      requestId: 'req-123',
+      fill: true,
+      price: 1.23,
+      currency: 'USD',
+      creative: { id: 'cr-1', html: '<div>Ad</div>' },
+      ttlSeconds: 30,
+    });
   }),
 ];
 
-export const timeoutHandler = rest.post('*/auction', async (_req, res, ctx) => {
+export const timeoutHandler = http.post('*/auction', async () => {
   await delay(5000);
-  return res(ctx.status(200), ctx.json({ requestId: 'late', fill: false }));
+  return HttpResponse.json({ requestId: 'late', fill: false });
 });

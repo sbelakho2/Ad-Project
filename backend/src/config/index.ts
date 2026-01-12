@@ -1,6 +1,26 @@
 import dotenv from 'dotenv';
 
-dotenv.config();
+import fs from 'node:fs';
+import path from 'node:path';
+
+// Many utility modules import config early (e.g. logger). Avoid loading the wrong
+// .env when running from /opt/adproject/backend by preferring repo-root ../.env.
+// Never override an already-provided DATABASE_URL (e.g. PM2 env).
+if (!process.env.DATABASE_URL) {
+  const cwd = process.cwd();
+  const cwdBase = path.basename(cwd);
+  const candidates =
+    cwdBase === 'backend'
+      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
+      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
+
+  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fs.existsSync(p));
+  if (envPath) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
+}
 
 const config = {
   isDevelopment: process.env.NODE_ENV === 'development',

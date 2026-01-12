@@ -1,7 +1,25 @@
 // Load environment variables first, before any other imports
 import dotenv from 'dotenv';
-import path from 'path';
-dotenv.config({ path: path.join(__dirname, '../../../.env') });
+import fsSync from 'node:fs';
+import path from 'node:path';
+
+// Prefer repo-root .env when running from backend/ (e.g. /opt/adproject/backend)
+// and never override env already provided by the process manager (PM2).
+(() => {
+  const cwd = process.cwd();
+  const cwdBase = path.basename(cwd);
+  const candidates =
+    cwdBase === 'backend'
+      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
+      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
+
+  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fsSync.existsSync(p));
+  if (envPath) {
+    dotenv.config({ path: envPath });
+  } else {
+    dotenv.config();
+  }
+})();
 
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
@@ -30,7 +48,7 @@ import { SchemaGate } from './utils/schemaGate';
 import { initAnalyticsRollupScheduler } from './services/analyticsRollupScheduler';
 import { initMigrationGuardrailScheduler } from './services/migrationGuardrailScheduler';
 import { spawn } from 'node:child_process';
-import fs from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';
@@ -325,7 +343,7 @@ const startServer = async (): Promise<void> => {
     if (env.ANALYTICS_ROLLUP_ENABLED) {
       const ensureScriptPath = path.join(__dirname, '../scripts/ensureRollupTables.js');
       try {
-        await fs.access(ensureScriptPath);
+        await fsPromises.access(ensureScriptPath);
         logger.info('Analytics rollups: ensuring rollup tables exist');
         await runNodeScript(ensureScriptPath, 2 * 60_000);
       } catch (error) {
@@ -339,7 +357,8 @@ const startServer = async (): Promise<void> => {
     // Analytics rollups (storage optimization + faster reporting)
     initAnalyticsRollupScheduler({
       enabled: env.ANALYTICS_ROLLUP_ENABLED,
-      cronSpec: env.ANALYTICS_ROLLUP_CRON,
+      finalizeCronSpec: env.ANALYTICS_ROLLUP_FINALIZE_CRON ?? env.ANALYTICS_ROLLUP_CRON,
+      realtimeCronSpec: env.ANALYTICS_ROLLUP_REALTIME_CRON,
       lookbackDays: env.ANALYTICS_ROLLUP_LOOKBACK_DAYS,
     });
 

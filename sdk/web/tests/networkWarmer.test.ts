@@ -1,4 +1,4 @@
-import { rest } from 'msw';
+import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { NetworkWarmer, getNetworkWarmer, resetNetworkWarmer } from '../src/networkWarmer';
 
@@ -7,8 +7,8 @@ describe('NetworkWarmer', () => {
     resetNetworkWarmer();
     // Add HEAD request handlers for test endpoints
     server.use(
-      rest.head('*', (_req, res, ctx) => {
-        return res(ctx.status(200));
+      http.head('*', () => {
+        return new HttpResponse(null, { status: 200 });
       })
     );
   });
@@ -56,8 +56,8 @@ describe('NetworkWarmer', () => {
     it('should handle failed connections gracefully', async () => {
       // Setup handler that fails
       server.use(
-        rest.head('https://failing.example.com', (_req, res) => {
-          return res.networkError('Connection failed');
+        http.head('https://failing.example.com', () => {
+          return HttpResponse.error();
         })
       );
 

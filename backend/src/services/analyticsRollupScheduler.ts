@@ -2,19 +2,22 @@ import cron, { ScheduledTask } from 'node-cron';
 import logger from '../utils/logger';
 import { runAnalyticsRollups } from './analyticsRollupService';
 
-let rollupJob: ScheduledTask | null = null;
+let realtimeJob: ScheduledTask | null = null;
+let finalizeJob: ScheduledTask | null = null;
 
 const utcMidnight = (d: Date): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
 export interface InitAnalyticsRollupSchedulerParams {
   enabled: boolean;
-  cronSpec: string;
+  finalizeCronSpec: string;
+  realtimeCronSpec: string;
   lookbackDays: number;
 }
 
 export function initAnalyticsRollupScheduler({
   enabled,
-  cronSpec,
+  finalizeCronSpec,
+  realtimeCronSpec,
   lookbackDays,
 }: InitAnalyticsRollupSchedulerParams): void {
   if (!enabled) {
@@ -22,48 +25,95 @@ export function initAnalyticsRollupScheduler({
     return;
   }
 
-  if (rollupJob) {
-    rollupJob.stop();
-    rollupJob = null;
+  if (realtimeJob) {
+    realtimeJob.stop();
+    realtimeJob = null;
+  }
+
+  if (finalizeJob) {
+    finalizeJob.stop();
+    finalizeJob = null;
   }
 
   const safeLookbackDays = Number.isFinite(lookbackDays) && lookbackDays > 0 ? Math.floor(lookbackDays) : 35;
 
-  const runOnce = async (reason: string): Promise<void> => {
+  const runRange = async (reason: string, startInclusive: Date, endExclusive: Date): Promise<void> => {
     const now = new Date();
-    const endExclusive = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
-    const startInclusive = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - safeLookbackDays)));
+    const startIso = startInclusive.toISOString();
+    const endIso = endExclusive.toISOString();
 
     logger.info('Analytics rollups: run starting', {
       reason,
+      now: now.toISOString(),
       lookbackDays: safeLookbackDays,
-      startInclusive: startInclusive.toISOString(),
-      endExclusive: endExclusive.toISOString(),
+      startInclusive: startIso,
+      endExclusive: endIso,
     });
 
     await runAnalyticsRollups({ startInclusive, endExclusive });
   };
 
-  // Non-blocking warm run at startup.
-  void runOnce('startup').catch(err => {
+  const utcToday = (): { start: Date; end: Date } => {
+    const now = new Date();
+    const start = utcMidnight(now);
+    const end = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
+    return { start, end };
+  };
+
+  const utcYesterday = (): { start: Date; end: Date } => {
+    const now = new Date();
+    const end = utcMidnight(now);
+    const start = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1)));
+    return { start, end };
+  };
+
+  // Non-blocking warm run at startup: backfill the most recent lookback window.
+  // This is the only time we intentionally touch multiple days at once.
+  void (async () => {
+    const now = new Date();
+    const end = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
+    const start = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - safeLookbackDays)));
+    await runRange('startup-backfill', start, end);
+  })().catch(err => {
     logger.error('Analytics rollups: startup run failed', { error: (err as Error).message });
   });
 
-  rollupJob = cron.schedule(cronSpec, async () => {
+  realtimeJob = cron.schedule(realtimeCronSpec, async () => {
     try {
-      await runOnce('scheduled');
+      const { start, end } = utcToday();
+      await runRange('scheduled-realtime-today', start, end);
     } catch (err) {
-      logger.error('Analytics rollups: scheduled run failed', { error: (err as Error).message });
+      logger.error('Analytics rollups: realtime scheduled run failed', { error: (err as Error).message });
     }
   });
 
-  rollupJob.start();
-  logger.info('Analytics rollups: scheduler started', { cronSpec, lookbackDays: safeLookbackDays });
+  finalizeJob = cron.schedule(finalizeCronSpec, async () => {
+    try {
+      const { start, end } = utcYesterday();
+      await runRange('scheduled-finalize-yesterday', start, end);
+    } catch (err) {
+      logger.error('Analytics rollups: finalize scheduled run failed', { error: (err as Error).message });
+    }
+  });
+
+  realtimeJob.start();
+  finalizeJob.start();
+  logger.info('Analytics rollups: scheduler started', {
+    realtimeCronSpec,
+    finalizeCronSpec,
+    lookbackDays: safeLookbackDays,
+  });
 }
 
 export function stopAnalyticsRollupScheduler(): void {
-  if (!rollupJob) return;
-  rollupJob.stop();
-  rollupJob = null;
+  if (realtimeJob) {
+    realtimeJob.stop();
+    realtimeJob = null;
+  }
+
+  if (finalizeJob) {
+    finalizeJob.stop();
+    finalizeJob = null;
+  }
   logger.info('Analytics rollups: scheduler stopped');
 }
