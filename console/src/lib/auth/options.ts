@@ -5,7 +5,7 @@ import { apiClient } from '@/lib/api-client'
 import axios from 'axios'
 
 const USE_MOCK_API = process.env.NEXT_PUBLIC_USE_MOCK_API === 'true'
-const ALLOW_DEMO_AUTH = process.env.NEXT_PUBLIC_ALLOW_DEMO_AUTH !== 'false'
+const ALLOW_DEMO_AUTH = process.env.NEXT_PUBLIC_ALLOW_DEMO_AUTH === 'true'
 const IS_PRODUCTION = process.env.NODE_ENV === 'production'
 const allowMockAuth = USE_MOCK_API && ALLOW_DEMO_AUTH && !IS_PRODUCTION
 
@@ -92,7 +92,7 @@ export const authOptions: NextAuthOptions = {
 
         try {
           if (allowMockAuth && !isCompletingTwofa) {
-            if (credentials?.email?.includes('demo') || credentials?.password === 'demo') {
+            if (credentials?.email?.includes('demo') && credentials?.password === 'demo') {
               return {
                 id: 'user_1',
                 email: credentials?.email,

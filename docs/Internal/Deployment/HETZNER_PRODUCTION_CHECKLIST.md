@@ -76,6 +76,7 @@ The following user is configured with `admin` role for production verification:
 > - **PostgreSQL runs on DB Server (77.42.44.35)** as a system service - NOT on App Server, NOT in Docker
 > - **Redis runs on App Server** as a system service - NOT in Docker
 > - **PgBouncer runs on App Server** as a system service (port 6432)
+> - If PgBouncer is enabled for backend connections, set `DATABASE_URL` to `...@127.0.0.1:6432/...` on the App Server; otherwise connect directly to `77.42.44.35:5432`.
 > - Backend queries PostgreSQL remotely via `DATABASE_URL` pointing to DB Server
 > - Monitoring stack runs in Docker; product services run via PM2/systemd
 > - Use `infrastructure/docker/docker-compose.hetzner.yml` (and/or `/opt/adproject/docker-compose.hetzner.yml` on-server) for monitoring containers
@@ -732,6 +733,9 @@ Run/verify (recommended):
 # Enforce PITR-quality setup (idempotent)
 ./scripts/ops/hetzner_enable_pitr.sh
 
+# Optional: relocate WAL archive off root filesystem
+# WAL_ARCHIVE_DIR=/mnt/HC_Volume_104191119/postgresql/wal ./scripts/ops/hetzner_enable_pitr.sh
+
 # Verify (no secrets)
 ./scripts/ops/hetzner_ssh.sh db -- "du -sh /var/backups/postgresql/base /var/backups/postgresql/wal /var/backups/postgresql/daily /var/backups/postgresql/weekly || true"
 ./scripts/ops/hetzner_ssh.sh db -- "sudo -u postgres psql -d adproject -P pager=off -At -c \"select pg_size_pretty(pg_database_size('adproject'));\""
@@ -1081,17 +1085,14 @@ Monitoring stack (Grafana/Prometheus/exporters) uses:
 ### 9.1 Quick Rollback
 
 ```bash
-# SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+# Preferred: git-based rollback helper (requires git checkout on /opt/adproject)
+./scripts/ops/hetzner_rollback.sh --service backend --ref <git-tag-or-sha>
 
-# Navigate to project
-cd /opt/adproject
-
-# Rollback uses a previously known-good tarball (production server has no git).
-# Re-upload the older tarball and repeat the relevant deploy steps in Section 8.
-# Then restart only the affected service:
-# - backend/console/website: pm2 restart <svc>
-# - website: pm2 restart website
+# Fallback: tarball rollback (when git is unavailable)
+# - Re-upload the older tarball and repeat the relevant deploy steps in Section 8.
+# - Then restart only the affected service:
+#   - backend/console/website: pm2 restart <svc>
+#   - website: pm2 restart website
 
 # Verify
 curl https://api.apexmediation.ee/health

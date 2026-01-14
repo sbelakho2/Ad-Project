@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 require('dotenv/config');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 const jwt = require('jsonwebtoken');
 
 async function main() {
@@ -15,7 +16,7 @@ async function main() {
     console.error('DATABASE_URL is required');
     process.exit(2);
   }
-  const ssl = process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined;
+  const ssl = buildSslConfig();
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) {
     console.error('JWT_SECRET is required in container env');

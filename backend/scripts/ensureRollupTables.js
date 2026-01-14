@@ -14,6 +14,7 @@ require('dotenv/config');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 
 const ROLLUP_MIGRATIONS = [
   '20251201_150500_analytics_rollup_tables',
@@ -52,7 +53,7 @@ async function main() {
 
   const pool = new Pool({
     connectionString,
-    ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    ssl: buildSslConfig(),
     max: 2,
     idleTimeoutMillis: 10_000,
   });

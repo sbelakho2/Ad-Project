@@ -23,7 +23,7 @@ datasources:
     secureJsonData:
       password: ${DB_PASSWORD}
     jsonData:
-      sslmode: disable
+      sslmode: require
       maxOpenConns: 5
       maxIdleConns: 2
       connMaxLifetime: 14400

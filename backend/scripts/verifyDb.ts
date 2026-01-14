@@ -1,5 +1,23 @@
 import 'dotenv/config';
+import fs from 'node:fs';
 import { Pool } from 'pg';
+
+const buildSslConfig = () => {
+  const connectionString = process.env.DATABASE_URL || '';
+  const sslEnabled = process.env.DATABASE_SSL === 'true' || /sslmode=require/i.test(connectionString);
+  if (!sslEnabled) return undefined;
+  const caPath = process.env.DATABASE_SSL_CA;
+  const rejectUnauthorizedEnv = process.env.DATABASE_SSL_REJECT_UNAUTHORIZED;
+  const rejectUnauthorized = rejectUnauthorizedEnv
+    ? rejectUnauthorizedEnv === 'true'
+    : Boolean(caPath);
+
+  const sslConfig: { rejectUnauthorized: boolean; ca?: string } = { rejectUnauthorized };
+  if (caPath) {
+    sslConfig.ca = fs.readFileSync(caPath, 'utf8');
+  }
+  return sslConfig;
+};
 
 async function main() {
   const databaseUrl = process.env.DATABASE_URL;
@@ -8,7 +26,7 @@ async function main() {
     process.exit(2);
   }
 
-  const pool = new Pool({ connectionString: databaseUrl, ssl: /sslmode=require/.test(databaseUrl) ? { rejectUnauthorized: false } : undefined });
+  const pool = new Pool({ connectionString: databaseUrl, ssl: buildSslConfig() });
   try {
     const client = await pool.connect();
     try {

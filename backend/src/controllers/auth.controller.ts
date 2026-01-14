@@ -23,7 +23,7 @@ import { getFeatureFlags } from '../config/featureFlags';
 import { query } from '../utils/postgres';
 
 // Password complexity regex
-const PASSWORD_COMPLEXITY_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]).{8,}$/;
+const PASSWORD_COMPLEXITY_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[[\]{};':"\\|,.<>/?!@#$%^&*()_+\-=]).{8,}$/;
 
 // Validation schemas
 export const loginSchema = z.object({

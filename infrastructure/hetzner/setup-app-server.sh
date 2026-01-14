@@ -17,14 +17,14 @@
 #   - Domain name pointing to this server (for SSL)
 #
 # Usage:
-#   ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+#   ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 #   ./setup-app-server.sh
 # =============================================================================
 
 set -euo pipefail
 
 # Configuration
-DB_SERVER_IP="46.62.252.96"
+DB_SERVER_IP="77.42.44.35"
 DB_PASSWORD="${DB_PASSWORD:-CHANGE_ME_IMMEDIATELY}"
 REDIS_PASSWORD="${REDIS_PASSWORD:-CHANGE_ME_REDIS}"
 DOMAIN="${DOMAIN:-api.yourapp.com}"
@@ -57,8 +57,8 @@ ufw allow 22/tcp comment 'SSH'
 ufw allow 80/tcp comment 'HTTP'
 ufw allow 443/tcp comment 'HTTPS'
 
-# Backend API (internal - via Nginx)
-# ufw allow 3001/tcp comment 'Backend API'
+# Backend API (internal - via reverse proxy)
+# ufw allow 8080/tcp comment 'Backend API'
 
 # Console (internal - via Nginx)
 # ufw allow 3000/tcp comment 'Console'
@@ -153,7 +153,7 @@ systemctl enable redis-server
 redis-cli -a "${REDIS_PASSWORD}" ping
 
 # -----------------------------------------------------------------------------
-# Step 6: Install Nginx
+# Step 6: Install Nginx (legacy; production uses Caddy)
 # -----------------------------------------------------------------------------
 echo "[6/12] Installing Nginx..."
 
@@ -204,7 +204,7 @@ http {
 
     # Upstream servers
     upstream backend {
-        server 127.0.0.1:3001;
+        server 127.0.0.1:8080;
         keepalive 32;
     }
 
@@ -302,7 +302,7 @@ mkdir -p /var/log/adproject
 cat > /opt/adproject/backend/.env << EOF
 # Backend Environment Configuration
 NODE_ENV=production
-PORT=3001
+PORT=8080
 
 # Database
 DATABASE_URL=postgresql://app_service:${DB_PASSWORD}@${DB_SERVER_IP}:5432/adproject
@@ -514,7 +514,7 @@ systemctl is-active redis-server && echo "✓ Redis: running" || echo "✗ Redis
 systemctl is-active nginx && echo "✓ Nginx: running" || echo "✗ Nginx: stopped"
 echo ""
 echo "DB Connection:"
-curl -s http://127.0.0.1:3001/health | jq . 2>/dev/null || echo "Backend health check failed"
+curl -s http://127.0.0.1:8080/health | jq . 2>/dev/null || echo "Backend health check failed"
 echo ""
 echo "Autopilot Connection:"
 curl -s http://46.62.252.96:8090/status | jq . 2>/dev/null || echo "Autopilot connection failed"

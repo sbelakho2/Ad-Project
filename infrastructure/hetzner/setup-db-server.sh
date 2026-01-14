@@ -13,7 +13,7 @@
 #   - Private network configured between App and DB servers
 #
 # Usage:
-#   ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+#   ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
 #   ./setup-db-server.sh
 # =============================================================================
 
@@ -22,7 +22,7 @@ set -euo pipefail
 # Configuration
 POSTGRES_VERSION="16"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-CHANGE_ME_IMMEDIATELY}"
-APP_SERVER_IP="77.42.44.35"
+APP_SERVER_IP="46.62.252.96"
 PRIVATE_NETWORK_INTERFACE="ens10"  # Adjust based on Hetzner private network
 
 echo "=============================================="

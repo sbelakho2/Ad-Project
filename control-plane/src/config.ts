@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod';
+import fs from 'node:fs';
 
 const envSchema = z.object({
   PORT: z.string().default('4000'),
@@ -41,6 +42,8 @@ const envSchema = z.object({
   DB_USER: z.string(),
   DB_PASSWORD: z.string(),
   DB_SSL: z.string().default('true'),
+  DB_SSL_CA: z.string().optional(),
+  DB_SSL_REJECT_UNAUTHORIZED: z.string().optional(),
   
   // Database - Operator (safe actions)
   DB_OPERATOR_USER: z.string().optional(),
@@ -146,6 +149,21 @@ export function getOperatorCredentials(): Map<string, string> {
 }
 
 // Database connection configs
+function buildSslConfig(cfg: EnvConfig): false | { rejectUnauthorized: boolean; ca?: string } {
+  if (cfg.DB_SSL !== 'true') return false;
+  const caPath = process.env.DB_SSL_CA;
+  const rejectUnauthorizedEnv = process.env.DB_SSL_REJECT_UNAUTHORIZED;
+  const rejectUnauthorized = rejectUnauthorizedEnv
+    ? rejectUnauthorizedEnv === 'true'
+    : Boolean(caPath);
+
+  const sslConfig: { rejectUnauthorized: boolean; ca?: string } = { rejectUnauthorized };
+  if (caPath) {
+    sslConfig.ca = fs.readFileSync(caPath, 'utf8');
+  }
+  return sslConfig;
+}
+
 export function getReadOnlyDbConfig() {
   const cfg = getConfig();
   return {
@@ -154,7 +172,7 @@ export function getReadOnlyDbConfig() {
     database: cfg.DB_NAME,
     user: cfg.DB_USER,
     password: cfg.DB_PASSWORD,
-    ssl: cfg.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: buildSslConfig(cfg),
   };
 }
 
@@ -169,7 +187,7 @@ export function getOperatorDbConfig() {
     database: cfg.DB_NAME,
     user: cfg.DB_OPERATOR_USER,
     password: cfg.DB_OPERATOR_PASSWORD,
-    ssl: cfg.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: buildSslConfig(cfg),
   };
 }
 
@@ -184,6 +202,6 @@ export function getBreakGlassDbConfig() {
     database: cfg.DB_NAME,
     user: cfg.DB_BREAKGLASS_USER,
     password: cfg.DB_BREAKGLASS_PASSWORD,
-    ssl: cfg.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: buildSslConfig(cfg),
   };
 }

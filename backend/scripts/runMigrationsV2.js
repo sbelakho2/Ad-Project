@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const crypto = require('node:crypto');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -15,7 +16,7 @@ if (!connectionString) {
 
 const pool = new Pool({
   connectionString,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  ssl: buildSslConfig(),
   max: parseInt(process.env.DATABASE_POOL_MAX || '10', 10),
   idleTimeoutMillis: parseInt(process.env.DATABASE_POOL_IDLE_MS || '30000', 10),
 });

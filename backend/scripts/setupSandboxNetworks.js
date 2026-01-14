@@ -9,6 +9,7 @@ require('dotenv/config');
 const { randomUUID } = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 const Stripe = require('stripe');
 const {
   SANDBOX_PUBLISHER_ID,
@@ -26,7 +27,7 @@ if (!DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  ssl: buildSslConfig(),
 });
 
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;

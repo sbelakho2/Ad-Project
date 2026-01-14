@@ -18,12 +18,12 @@ Complete GDPR-compliant monitoring stack deployed on Hetzner infrastructure with
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| **Prometheus** | http://46.62.252.96:9090 | No auth required (internal) |
-| **Grafana** | http://46.62.252.96:3001 | Stored in the team password manager / secret store (do not hard-code in docs) |
-| **Alertmanager** | http://46.62.252.96:9093 | No auth required (internal) |
-| **Node Exporter** | http://46.62.252.96:9100 | N/A (metrics only) |
-| **Postgres Exporter** | http://46.62.252.96:9187 | N/A (metrics only) |
-| **cAdvisor** | http://46.62.252.96:8081 | N/A (metrics only) |
+| **Prometheus** | http://127.0.0.1:9090 (SSH tunnel) | No auth required (localhost-only) |
+| **Grafana** | https://grafana.apexmediation.ee | Stored in the team password manager / secret store (do not hard-code in docs) |
+| **Alertmanager** | http://127.0.0.1:9093 (SSH tunnel) | No auth required (localhost-only) |
+| **Node Exporter** | http://127.0.0.1:9100 (localhost-only) | N/A (metrics only) |
+| **Postgres Exporter** | http://127.0.0.1:9187 (localhost-only) | N/A (metrics only) |
+| **cAdvisor** | http://127.0.0.1:8081 (localhost-only) | N/A (metrics only) |
 
 ## Scrape Targets (All Healthy ✅)
 

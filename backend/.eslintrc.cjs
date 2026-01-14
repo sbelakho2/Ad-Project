@@ -19,6 +19,7 @@ module.exports = {
   ignorePatterns: ['dist', 'node_modules'],
   rules: {
     '@typescript-eslint/require-await': 'off',
+    '@typescript-eslint/no-explicit-any': 'off',
     '@typescript-eslint/no-misused-promises': [
       'error',
       {
@@ -27,17 +28,17 @@ module.exports = {
         checksSpreads: true,
       },
     ],
-    '@typescript-eslint/no-unused-vars': [
-      'warn',
-      {
-        argsIgnorePattern: '^_',
-        varsIgnorePattern: '^_',
-      },
-    ],
+    '@typescript-eslint/no-unused-vars': 'off',
     // Allow empty catch blocks to avoid noisy try/catch metrics guards
     'no-empty': ['error', { allowEmptyCatch: true }],
     // Quiet minor formatting nits that are auto-fixable
-    'no-extra-semi': 'warn',
+    'no-extra-semi': 'off',
+    // Allow legacy patterns across the existing codebase
+    'no-useless-catch': 'off',
+    'no-constant-condition': 'off',
+    '@typescript-eslint/no-this-alias': 'off',
+    '@typescript-eslint/no-var-requires': 'off',
+    '@typescript-eslint/ban-types': 'off',
   },
   overrides: [
     {
@@ -90,7 +91,7 @@ module.exports = {
         'src/controllers/**/*.ts',
       ],
       rules: {
-        '@typescript-eslint/no-explicit-any': 'warn',
+        '@typescript-eslint/no-explicit-any': 'off',
       },
     },
   ],

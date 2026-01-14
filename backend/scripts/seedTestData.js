@@ -2,6 +2,7 @@
 require('dotenv/config');
 const { randomUUID } = require('node:crypto');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 const crypto = require('node:crypto');
 
 const connectionString = process.env.DATABASE_URL;
@@ -17,7 +18,7 @@ const idleTimeout = parseInt(process.env.DATABASE_POOL_IDLE_MS || '30000', 10);
 
 const pool = new Pool({
   connectionString,
-  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+  ssl: buildSslConfig(),
   max: poolMax,
   idleTimeoutMillis: idleTimeout,
 });

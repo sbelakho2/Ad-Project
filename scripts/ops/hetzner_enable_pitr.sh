@@ -11,9 +11,25 @@ set -euo pipefail
 # - DB host is reached via app server jump (handled by hetzner_ssh.sh)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-}
 
-cat <<'BASH' | "$ROOT_DIR/scripts/ops/hetzner_ssh.sh" db -- bash -s
+cat <<'BASH' | "$ROOT_DIR/scripts/ops/hetzner_ssh.sh" db -- "WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR} bash -s"
 set -euo pipefail
+
+DEFAULT_WAL_DIR="/var/backups/postgresql/wal"
+WAL_DIR="${WAL_ARCHIVE_DIR:-$DEFAULT_WAL_DIR}"
+
+if [[ "$WAL_DIR" != "$DEFAULT_WAL_DIR" ]]; then
+  echo "== 0) Relocating WAL archive dir to $WAL_DIR =="
+  sudo install -d -m 0755 "$WAL_DIR"
+  if [[ -e "$DEFAULT_WAL_DIR" && ! -L "$DEFAULT_WAL_DIR" ]]; then
+    sudo rsync -a "$DEFAULT_WAL_DIR"/ "$WAL_DIR"/ || true
+    sudo rm -rf "$DEFAULT_WAL_DIR"
+  fi
+  if [[ ! -L "$DEFAULT_WAL_DIR" ]]; then
+    sudo ln -s "$WAL_DIR" "$DEFAULT_WAL_DIR"
+  fi
+fi
 
 echo '== 1) Ensure hot staging tables are UNLOGGED (truncate first) =='
 sudo -u postgres psql -d adproject -v ON_ERROR_STOP=1 -P pager=off <<'SQL'
@@ -119,10 +135,10 @@ SH
 
 sudo chmod +x /opt/adproject/ops/pitr_basebackup.sh
 
-cat <<'SH' | sudo tee /opt/adproject/ops/prune_wal_archives.sh >/dev/null
+cat <<SH | sudo tee /opt/adproject/ops/prune_wal_archives.sh >/dev/null
 #!/usr/bin/env bash
 set -euo pipefail
-WAL_DIR="/var/backups/postgresql/wal"
+WAL_DIR="$WAL_DIR"
 KEEP_HOURS="30"
 
 [[ -d "$WAL_DIR" ]] || exit 0
@@ -159,7 +175,7 @@ sudo chmod 0644 /etc/cron.d/adproject-pitr /etc/cron.d/adproject-wal-retention
 
 echo '== 4) Snapshot =='
 df -hT /
-du -sh /var/backups/postgresql/wal /var/backups/postgresql/base /var/lib/postgresql/16/main 2>/dev/null || true
+du -sh "$WAL_DIR" /var/backups/postgresql/base /var/lib/postgresql/16/main 2>/dev/null || true
 sudo -u postgres psql -d adproject -P pager=off -At <<'SQL'
 select 'db_size='||pg_size_pretty(pg_database_size('adproject'));
 select 'archived_count='||archived_count||' failed_count='||failed_count from pg_stat_archiver;

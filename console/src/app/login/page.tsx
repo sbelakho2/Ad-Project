@@ -293,7 +293,7 @@ export default function LoginPage() {
                 <div className="p-4 bg-blue-50 border border-blue-200 text-blue-700 rounded-lg text-sm">
                   <p className="font-medium mb-1">Demo Mode</p>
                   <p>
-                    Use <strong>demo@apexmediation.ee</strong> with any password to login in sandbox
+                    Use <strong>demo@apexmediation.ee</strong> with password <strong>demo</strong> to login in sandbox
                     environments.
                   </p>
                 </div>

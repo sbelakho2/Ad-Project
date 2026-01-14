@@ -9,6 +9,7 @@
  */
 require('dotenv/config');
 const { Pool } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 const {
   SANDBOX_PUBLISHER_ID,
   FAKE_ADAPTERS,
@@ -22,7 +23,7 @@ if (!DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  ssl: buildSslConfig(),
 });
 
 const TIERS = {

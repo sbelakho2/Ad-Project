@@ -83,6 +83,20 @@ const shouldUseSsl = (): boolean => {
 };
 
 const useSsl = shouldUseSsl();
+const buildSslConfig = (): { rejectUnauthorized: boolean; ca?: string } | undefined => {
+  if (!useSsl) return undefined;
+  const caPath = process.env.DATABASE_SSL_CA;
+  const rejectUnauthorizedEnv = process.env.DATABASE_SSL_REJECT_UNAUTHORIZED;
+  const rejectUnauthorized = rejectUnauthorizedEnv
+    ? rejectUnauthorizedEnv === 'true'
+    : Boolean(caPath);
+
+  const sslConfig: { rejectUnauthorized: boolean; ca?: string } = { rejectUnauthorized };
+  if (caPath) {
+    sslConfig.ca = fs.readFileSync(caPath, 'utf8');
+  }
+  return sslConfig;
+};
 const poolMax = parseInt(process.env.DATABASE_POOL_MAX || '20', 10); // Increased from 10 to 20
 const poolMin = parseInt(process.env.DATABASE_POOL_MIN || '2', 10); // Minimum connections
 const idleTimeout = parseInt(process.env.DATABASE_POOL_IDLE_MS || '30000', 10);
@@ -91,7 +105,7 @@ const statementTimeout = parseInt(process.env.DATABASE_STATEMENT_TIMEOUT_MS || '
 
 const pool = new Pool({
   connectionString,
-  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+  ssl: buildSslConfig(),
   max: poolMax, // Maximum pool size (default: 20)
   min: poolMin, // Minimum pool size (default: 2)
   idleTimeoutMillis: idleTimeout, // How long idle clients stay in pool (default: 30s)
@@ -124,7 +138,7 @@ const buildReplicaPool = (): Pool | null => {
   if (!replicaUrl) return null;
   return new Pool({
     connectionString: replicaUrl,
-    ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+    ssl: buildSslConfig(),
     max: parseInt(process.env.REPLICA_DATABASE_POOL_MAX || '15', 10),
     min: parseInt(process.env.REPLICA_DATABASE_POOL_MIN || '1', 10),
     idleTimeoutMillis: idleTimeout,

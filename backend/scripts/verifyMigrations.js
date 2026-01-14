@@ -2,13 +2,14 @@
 require('dotenv/config');
 const { execFileSync } = require('node:child_process');
 const { Client } = require('pg');
+const { buildSslConfig } = require('./dbSsl');
 
 function log(msg){ process.stdout.write(`${msg}\n`); }
 
 async function pgCheck() {
   const cs = process.env.DATABASE_URL;
   if (!cs) throw new Error('DATABASE_URL not set');
-  const client = new Client({ connectionString: cs, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined });
+  const client = new Client({ connectionString: cs, ssl: buildSslConfig() });
   await client.connect();
   try {
     const tables = ['auctions','bids','auction_wins','signing_keys'];
