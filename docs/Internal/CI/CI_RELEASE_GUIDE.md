@@ -286,16 +286,21 @@ gh workflow run rollback.yml \
   -f previous_version=v1.2.2 \
   -f reason="Critical bug in billing module"
 
-# Or manual via Fly.io
-cd backend
-fly releases --app rival-backend-prod
-fly releases rollback v123 --app rival-backend-prod
-```
+## Manual rollback (Hetzner/PM2)
 
-#### Staging Rollback
+Rollbacks are performed by redeploying a known-good git ref to the Hetzner server.
 
 ```bash
-fly releases rollback v456 --app rival-backend-staging
+git checkout v1.2.2
+./scripts/deploy-all.sh backend
+```
+```
+
+#### Test Server Rollback
+
+```bash
+git checkout <known-good-ref>
+DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
 ```
 
 #### Database Migrations
@@ -307,8 +312,8 @@ If rollback requires database changes:
 cd backend
 npx ts-node migrations/down/<timestamp>-revert-feature.ts
 
-# Or restore from backup
-fly postgres restore --app rival-db-prod --from-snapshot <snapshot-id>
+# Or restore from backup (see Hetzner DB runbooks)
+# See: docs/PITR_RECOVERY.md
 ```
 
 ### SDK Rollback
@@ -527,7 +532,6 @@ Configure the following secrets in **Settings → Secrets and variables → Acti
 #### Backend Deployment
 | Secret | Purpose | How to Generate |
 |--------|---------|-----------------|
-| `FLY_API_TOKEN` | Fly.io deployment | `fly auth token` |
 | `DATABASE_URL` | Production database | PostgreSQL connection string |
 | `JWT_SECRET` | JWT signing | `openssl rand -base64 32` |
 | `STRIPE_SECRET_KEY` | Payment processing | Stripe dashboard → API keys |
@@ -601,16 +605,13 @@ In **Settings → Actions → General → Workflow permissions**:
 
 1. Navigate to **Settings → Secrets and variables → Actions**
 2. Click **New repository secret**
-3. Enter name (e.g., `FLY_API_TOKEN`)
+3. Enter the secret name
 4. Paste value
 5. Click **Add secret**
 
 #### Via GitHub CLI
 
 ```bash
-# Set single secret
-gh secret set FLY_API_TOKEN --body "$(fly auth token)"
-
 # Set from file
 gh secret set SIGNING_SECRET_KEY_RING_FILE < ~/.gnupg/secring.gpg.b64
 
@@ -623,10 +624,10 @@ done < production.env
 #### Via Terraform (Infrastructure as Code)
 
 ```hcl
-resource "github_actions_secret" "fly_api_token" {
+resource "github_actions_secret" "jwt_secret" {
   repository       = "ad-project"
-  secret_name      = "FLY_API_TOKEN"
-  plaintext_value  = var.fly_api_token
+  secret_name      = "JWT_SECRET"
+  plaintext_value  = var.jwt_secret
 }
 ```
 
@@ -634,7 +635,6 @@ resource "github_actions_secret" "fly_api_token" {
 
 | Secret | Rotation Frequency | Owner |
 |--------|-------------------|-------|
-| `FLY_API_TOKEN` | Quarterly | DevOps |
 | `JWT_SECRET` | Annually | Backend team |
 | `STRIPE_SECRET_KEY` | Never (rotate via Stripe dashboard) | Finance |
 | `DATABASE_URL` | Never (change password if compromised) | DevOps |
@@ -692,8 +692,8 @@ In case of emergency (e.g., critical security patch):
 
 2. **Manual deployment bypass**:
    ```bash
-   # Direct Fly.io deployment
-   fly deploy --app rival-backend-prod --strategy immediate
+  # Direct Hetzner deployment
+  ./scripts/deploy-all.sh backend
    ```
 
 3. **Hotfix workflow**:

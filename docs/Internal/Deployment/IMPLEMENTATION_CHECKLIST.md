@@ -122,8 +122,8 @@ NODE_ENV=development node -e "
 cd backend
 npm run build
 
-# Deploy to Fly.io staging
-fly deploy --config fly.staging.toml
+# Deploy to Hetzner test server
+DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
 
 # Verify deployment
 curl https://api-staging.apexmediation.ee/health
@@ -131,8 +131,8 @@ curl https://api-staging.apexmediation.ee/health
 
 ### 7. Monitor First Automation Cycle ⏳
 ```bash
-# Check cron job logs (first hour)
-fly logs --app apexmediation-backend-staging | grep "Cron"
+# Check backend logs (first hour)
+./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; pm2 logs backend --lines 500 --nostream | grep -F 'Cron' || true"
 
 # Verify self-evolving system ran
 psql $STAGING_DATABASE_URL -c "SELECT * FROM evolution_log ORDER BY timestamp DESC LIMIT 5;"

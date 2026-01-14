@@ -18,7 +18,7 @@ Fully replace the deprecated InMobi integration with Moloco across every surface
 - [x] Add conformance coverage in `backend/auction/internal/bidders/moloco_conformance_test.go` (no-fill, retry, timeout, circuit).
 - [ ] Wire `NewMolocoAdapter` into the runtime requester factory / dependency injection so `AuctionEngine` can instantiate it when `adapterName=="moloco"`.
 - [ ] Document ENV / secrets required for Moloco (seat ID, API key) in `backend/Adapters.md` + sample config (`backend/src/services/openrtbEngine.ts`).
-- [ ] Update infra manifests (Helm/Fly) with placeholders for `MOLOCO_SEAT_ID`, `MOLOCO_API_KEY`.
+- [ ] Update infra manifests (Helm/self-hosted) with placeholders for `MOLOCO_SEAT_ID`, `MOLOCO_API_KEY`.
 
 ### 2. Android SDK
 - [x] Add placeholder adapter at `sdk/core/android/src/main/kotlin/com/rivalapexmediation/adapter/moloco/Adapter.kt` so discovery remains at 15.

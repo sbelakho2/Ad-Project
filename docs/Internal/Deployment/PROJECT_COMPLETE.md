@@ -134,7 +134,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 - **Database:** PostgreSQL (Supabase Pro $25/mo)
 - **Cache:** Redis (Upstash $10/mo)
 - **Analytics:** ClickHouse Cloud ($50-100/mo)
-- **Hosting:** Fly.io 2×VMs ($14/mo)
+- **Hosting:** Hetzner (app + DB servers)
 
 ### SDKs
 - **iOS:** Swift, XCFramework, CocoaPods
@@ -231,8 +231,8 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 
 ### Environments
 - **Development:** Local (Docker Compose)
-- **Staging:** Fly.io (1 VM)
-- **Production:** Fly.io (2 VMs, blue-green deployment)
+- **Staging:** Hetzner test server
+- **Production:** Hetzner app server (PM2) + DB server (PostgreSQL)
 
 ### CI/CD Pipeline
 1. **Pull Request:**
@@ -245,9 +245,9 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 2. **Merge to Main:**
    - Full test suite
    - Build Docker image
-   - Deploy to staging
+   - Deploy to test server
    - Smoke tests
-   - Deploy to production (blue-green)
+   - Deploy to production
    - Deploy documentation
 
 3. **Git Tag (v*.*.*):**
@@ -381,7 +381,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 **Mitigation:** Daily backups to Backblaze B2, point-in-time recovery with Supabase, automated restore testing monthly
 
 **Risk:** API outage  
-**Mitigation:** Multi-region deployment with Fly.io, health checks every 30s, automatic failover, 99.95% uptime SLA
+**Mitigation:** Hetzner production health checks, kill-switches, and fast rollback via PM2 redeploy
 
 **Risk:** SDK crash in production  
 **Mitigation:** Comprehensive testing before release, staged rollout (10% → 50% → 100%), instant rollback capability, Firebase Crashlytics monitoring

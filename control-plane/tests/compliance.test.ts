@@ -3,16 +3,20 @@ import {
   generateAnnualReport, 
   generateTsdReport, 
   getComplianceStatus,
+  generateKmdInfReport,
+  getTaxForecast,
   COMPANY_INFO 
 } from '../src/services/estonian-compliance';
-import { getReadOnlyPool } from '../src/database';
+import { getReadOnlyPool, getOperatorPool } from '../src/database';
+import { logger } from '../src/logger';
 
 // Mock the database module
 jest.mock('../src/database', () => ({
   getReadOnlyPool: jest.fn(),
+  getOperatorPool: jest.fn(),
 }));
 
-// Mock the logger to avoid cluttering output
+// Mock the logger
 jest.mock('../src/logger', () => ({
   logger: {
     info: jest.fn(),
@@ -27,6 +31,9 @@ describe('Estonian Compliance Service', () => {
   beforeEach(() => {
     mockQuery = jest.fn();
     (getReadOnlyPool as jest.Mock).mockReturnValue({
+      query: mockQuery,
+    });
+    (getOperatorPool as jest.Mock).mockReturnValue({
       query: mockQuery,
     });
   });
@@ -87,15 +94,16 @@ describe('Estonian Compliance Service', () => {
   });
 
   describe('generateAnnualReport', () => {
-    it('should calculate financials correctly', async () => {
-      // Mock revenue query
+    it('should calculate financials correctly from account balances', async () => {
+      // Mock account_balances query
       mockQuery.mockResolvedValueOnce({
-        rows: [{ total: '5000000' }] // 50,000 EUR
-      });
-
-      // Mock expenses query
-      mockQuery.mockResolvedValueOnce({
-        rows: [{ total: '3000000' }] // 30,000 EUR
+        rows: [
+          { account_code: '4000', account_type: 'revenue', balance_cents: '5000000' },
+          { account_code: '5000', account_type: 'expense', balance_cents: '3000000' },
+          { account_code: '1000', account_type: 'asset', balance_cents: '10000000' },
+          { account_code: '2000', account_type: 'liability', balance_cents: '2000000' },
+          { account_code: '3000', account_type: 'equity', balance_cents: '8000000' },
+        ]
       });
 
       const report = await generateAnnualReport(2025);
@@ -105,27 +113,31 @@ describe('Estonian Compliance Service', () => {
         revenueEur: 50000,
         expensesEur: 30000,
         profitEur: 20000,
-        assetsEur: 0,
-        liabilitiesEur: 0,
-        equityEur: 0,
+        assetsEur: 100000,
+        liabilitiesEur: 20000,
+        equityEur: 80000,
       });
       expect(report.companyInfo).toEqual(COMPANY_INFO);
     });
 
-    it('should handle null values from DB', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ total: null }] });
-      mockQuery.mockResolvedValueOnce({ rows: [{ total: null }] });
+    it('should archive the report when operator is provided', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // balances
+      mockQuery.mockResolvedValueOnce({ rows: [] }); // insert archive
 
-      const report = await generateAnnualReport(2025);
+      await generateAnnualReport(2025, 'admin@apexmediation.ee');
 
-      expect(report.financials.revenueEur).toBe(0);
-      expect(report.financials.expensesEur).toBe(0);
-      expect(report.financials.profitEur).toBe(0);
+      // First query: balances, Second: insert document (including subquery for operator)
+      expect(mockQuery).toHaveBeenCalledTimes(2);
+      expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO financial_documents');
     });
   });
 
   describe('generateTsdReport', () => {
-    it('should return a placeholder TSD report', async () => {
+    it('should calculate TSD report from ledger payouts', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ total: '1000000', employees: '5' }]
+      });
+
       const report = await generateTsdReport(2025, 1);
       
       expect(report).toEqual({
@@ -133,10 +145,10 @@ describe('Estonian Compliance Service', () => {
         month: 1,
         companyInfo: COMPANY_INFO,
         generatedAt: expect.any(String),
-        employees: 0,
-        payrollEur: 0,
+        employees: 5,
+        payrollEur: 10000,
         dividendsEur: 0,
-        taxPayableEur: 0,
+        taxPayableEur: 2500,
       });
     });
   });
@@ -170,6 +182,29 @@ describe('Estonian Compliance Service', () => {
 
       expect(status.vatStatus.pendingReports).toBe(0);
       expect(status.vatStatus.nextDeadline).toBeNull();
+    });
+  });
+
+  describe('generateKmdInfReport', () => {
+    it('should return transactions over 1000 EUR', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [
+          { partner_name: 'Big Corp', registry_code: '123', invoice_number: 'INV-1', issue_date: '2025-12-01', subtotal_cents: 150000, vat_cents: 30000 }
+        ]
+      });
+
+      const report = await generateKmdInfReport(2025, 12);
+
+      expect(report.transactions).toHaveLength(1);
+      expect(report.transactions[0].sumWithoutVat).toBe(1500);
+    });
+  });
+
+  describe('getTaxForecast', () => {
+    it('should return 3 months of forecasts', async () => {
+      const forecast = await getTaxForecast();
+      expect(forecast).toHaveLength(3);
+      expect(forecast[0].totalTaxLiabilityEur).toBeGreaterThan(0);
     });
   });
 });

@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs'
 import { randomBytes } from 'crypto'
 import { query } from '../utils/postgres'
 import { sha256Hex, md5_16 } from '../utils/crypto'
+import { redis } from '../utils/redis'
 
 export type AppApiKeyRow = {
   id: string
@@ -135,7 +136,24 @@ export async function findActiveByDigest(digest: string): Promise<Pick<AppApiKey
 }
 
 export async function touchLastUsed(id: string): Promise<void> {
-  await query(`UPDATE app_api_keys SET last_used_at = NOW(), updated_at = NOW() WHERE id = $1`, [id])
+  const ttlSeconds = 5 * 60
+  const redisKey = `app_api_key:last_used:${id}`
+
+  // If Redis is available, gate to at most one DB UPDATE per TTL window per key.
+  const gate = await redis.setIfNotExists(redisKey, '1', ttlSeconds)
+  if (gate === false) {
+    return
+  }
+
+  // Always keep a DB-side staleness predicate so that even if Redis is down,
+  // we avoid rewriting the row on every request.
+  await query(
+    `UPDATE app_api_keys
+        SET last_used_at = NOW(), updated_at = NOW()
+      WHERE id = $1
+        AND (last_used_at IS NULL OR last_used_at < NOW() - interval '5 minutes')`,
+    [id]
+  )
 }
 
 export async function recordUsage(
@@ -146,11 +164,11 @@ export async function recordUsage(
   try {
     const ip = req.ip || ''
     const ua = (req.get ? req.get('user-agent') : '') || ''
-    const route = String(req.baseUrl || req.path || '').slice(0, 128)
-    const method = String(req.method || '').slice(0, 64)
+    const route = `${req.baseUrl || ''}${req.path || ''}`.slice(0, 255)
+    const method = String(req.method || '').slice(0, 10)
 
     await query(
-      `INSERT INTO app_api_key_usages (app_api_key_id, route, method, ip_hash, ua_hash, status)
+      `INSERT INTO app_api_key_usages (api_key_id, route, method, ip_hash, ua_hash, status)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         keyId,
@@ -158,7 +176,7 @@ export async function recordUsage(
         method,
         ip ? md5_16(ip) : null,
         ua ? md5_16(ua) : null,
-        status.slice(0, 16),
+        status.slice(0, 3),
       ]
     )
   } catch {

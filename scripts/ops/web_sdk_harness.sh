@@ -38,16 +38,13 @@ require_env PUBLISHER_ID "$PUBLISHER_ID"
 require_env APP_ID_WEB "$APP_ID_WEB"
 
 # Avoid leaking secrets via process args (ps/systemctl). Use a curl config file
-# for headers instead of passing -H "Authorization: Bearer ..." on the command line.
+# for headers instead of passing -H "X-SDK-Key: ..." on the command line.
 CURL_CFG_FILE="$(mktemp)"
 chmod 600 "$CURL_CFG_FILE" || true
 cat >"$CURL_CFG_FILE" <<EOF
 header = "Content-Type: application/json"
 header = "X-SDK-Key: $SDK_KEY_EFFECTIVE"
 EOF
-if [[ -n "$TOKEN" ]]; then
-  echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_FILE"
-fi
 cleanup() { rm -f "$CURL_CFG_FILE" 2>/dev/null || true; }
 trap cleanup EXIT
 

@@ -11,7 +11,7 @@
   },
   {
     "path": "Dockerfile",
-    "risk": "HIGH \u2013 cannot build as-is; needs restoration (likely missing newline separators). Blocks container builds + fly deploy.",
+    "risk": "HIGH \u2013 cannot build as-is; needs restoration (likely missing newline separators). Blocks container builds.",
     "top_level": "root",
     "fix_id": "FIX-01",
     "fix_title": "Backend & Core Platform Hardening",
@@ -31,7 +31,7 @@
   },
   {
     "path": "deploy-backend.sh",
-    "risk": "Mutation of `fly.toml` via `sed -i` for production may dirty repo; consider using env overlays. Requires manual confirmation for secrets.",
+    "risk": "Mutation of a legacy provider config via `sed -i` for production may dirty repo; consider using env overlays. Requires manual confirmation for secrets.",
     "top_level": "root",
     "fix_id": "FIX-01",
     "fix_title": "Backend & Core Platform Hardening",
@@ -198,16 +198,6 @@
     "group_priority": 1,
     "severity": 1,
     "index": 12
-  },
-  {
-    "path": "fly.toml",
-    "risk": "`PORT` mismatches (8080 here vs 4000 default). Ensure runtime `CMD` binds 8080 when deployed via Fly.",
-    "top_level": "root",
-    "fix_id": "FIX-01",
-    "fix_title": "Backend & Core Platform Hardening",
-    "group_priority": 1,
-    "severity": 1,
-    "index": 22
   },
   {
     "path": "local.properties",
@@ -1091,7 +1081,7 @@
   },
   {
     "path": "console/README.md",
-    "risk": "\u201cComponents (To Be Built)\u201d section lists several TODO widgets/forms that still appear unimplemented\u2014ensure roadmap aligns with reality; deployment guidance assumes Vercel/Docker but doesn\u2019t mention Fly.",
+    "risk": "\u201cComponents (To Be Built)\u201d section lists several TODO widgets/forms that still appear unimplemented\u2014ensure roadmap aligns with reality; deployment guidance assumes Vercel/Docker but doesn\u2019t mention Hetzner.",
     "top_level": "console",
     "fix_id": "FIX-03",
     "fix_title": "Console Productization & Data Integrity",
@@ -4061,7 +4051,7 @@
   },
   {
     "path": "monitoring/prometheus.yml",
-    "risk": "Scrape targets hard-code Fly.io hostnames; for local compose these hostnames will fail\u2014consider relabeling per environment.",
+    "risk": "Scrape targets hard-code public hostnames; for local compose these hostnames will fail\u2014consider relabeling per environment.",
     "top_level": "monitoring",
     "fix_id": "FIX-08",
     "fix_title": "Infrastructure & Observability Maturity",
@@ -6911,7 +6901,7 @@
   },
   {
     "path": "src/index.ts",
-    "risk": "Health check always reports Postgres healthy without runtime check; `app.listen` always uses env `PORT` which conflicts with Fly config (8080 vs 4000).",
+    "risk": "Health check always reports Postgres healthy without runtime check; ensure `PORT` matches the expected runtime port (8080).",
     "top_level": "src",
     "fix_id": "FIX-11",
     "fix_title": "Cross-cutting Misc Backlog",

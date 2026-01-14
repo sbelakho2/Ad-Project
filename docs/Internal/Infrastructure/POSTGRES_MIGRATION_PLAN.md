@@ -124,7 +124,7 @@ _Guardrail alignment:_ keep control-plane APIs on typed, versioned schemas; use 
 _Guardrail alignment:_ enforce HA+replica requirements, automate partition/retention workflows, and keep cost tiers visible inside Compose/Helm/Terraform.
 
 - **Docker Compose / Make / start-dev**: remove `clickhouse` service (and the `clickhouse-data` volume) from root `docker-compose*.yml`, `scripts/dev-transparency-metrics.sh`, etc.
-- **Helm charts / Terraform / Fly.toml**: drop `CLICKHOUSE_URL` secrets/envs and network policies referencing port 8123.
+- **Helm charts / Terraform / legacy configs**: drop `CLICKHOUSE_URL` secrets/envs and network policies referencing port 8123.
 - **Monitoring stack**: update Prometheus scrape configs, Grafana datasources/dashboards, and alert rules to eliminate ClickHouse jobs/metrics. Replace runbook links.
 - **CI workflows**: `.github/workflows/ci*.yml` currently spin up ClickHouse services; remove these and any env secrets (`STAGING_CLICKHOUSE_URL`, etc.).
 - **Deploy workflows**: `.github/workflows/deploy-staging.yml` and `deploy-production.yml` previously passed `clickhouse.url` Helm overrides. **Status:** ✅ Both now only set Postgres/Redis/JWT secrets, so ClickHouse creds are no longer required for any deployment pipeline.

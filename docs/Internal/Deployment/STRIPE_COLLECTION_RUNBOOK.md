@@ -59,7 +59,7 @@ Expect to see log lines grouping mediated revenue per customer and pushing usage
 
 1. Run `stripe listen --events invoice.payment_succeeded,invoice.payment_failed --forward-to http://localhost:4000/api/webhooks/stripe`.
 2. Copy the signing secret to `STRIPE_WEBHOOK_SECRET` (Infisical + deployment secrets).
-3. In production, expose `/api/webhooks/stripe` through Fly.io (already in `routes/webhooks.routes.ts`).
+3. In production, expose `/api/webhooks/stripe` via the Hetzner reverse proxy (Caddy) on `api.apexmediation.ee`.
 4. Enable **Customer Portal** → Settings → Customer portal. Allow customers to update payment methods or download invoices.
 
 Test locally by hitting `POST /api/webhooks/stripe` with a signed payload from the CLI to verify we log status transitions.

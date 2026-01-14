@@ -47,6 +47,7 @@ process.env.DATABASE_URL =
 process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'test-refresh-secret-change-me-123456';
 process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 process.env.REFRESH_TOKEN_EXPIRES_IN = process.env.REFRESH_TOKEN_EXPIRES_IN || '7d';
+process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_mock';
 
 // Initialize database connection before all tests
 beforeAll(async () => {

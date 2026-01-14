@@ -54,19 +54,25 @@ DISCORD_WEBHOOK_URL=
 # Prometheus target overrides (set to localhost services for local dev)
 PROMETHEUS_CLUSTER_LABEL=apexmediation
 PROMETHEUS_ENVIRONMENT_LABEL=production
-BACKEND_METRICS_TARGET=apexmediation-backend.fly.dev:8080
-CONSOLE_METRICS_TARGET=apexmediation-console.fly.dev:3000
+# Hetzner production (monitoring runs in Docker on the app server; scrape host services via bridge).
+# If your Docker host bridge differs, override these.
+BACKEND_METRICS_TARGET=172.17.0.1:8080
+CONSOLE_METRICS_TARGET=172.17.0.1:3000
 REDIS_METRICS_TARGET=upstash-redis-exporter:9121
 EOF
   echo "⚠️  Please edit monitoring/.env with real credentials, then re-run ./deploy-monitoring.sh start"
   exit 1
 fi
 
-BACKEND_METRICS_TARGET=${BACKEND_METRICS_TARGET:-apexmediation-backend.fly.dev:8080}
-CONSOLE_METRICS_TARGET=${CONSOLE_METRICS_TARGET:-apexmediation-console.fly.dev:3000}
+BACKEND_METRICS_TARGET=${BACKEND_METRICS_TARGET:-172.17.0.1:8080}
+CONSOLE_METRICS_TARGET=${CONSOLE_METRICS_TARGET:-172.17.0.1:3000}
 REDIS_METRICS_TARGET=${REDIS_METRICS_TARGET:-upstash-redis-exporter:9121}
 PROMETHEUS_CLUSTER_LABEL=${PROMETHEUS_CLUSTER_LABEL:-apexmediation}
 PROMETHEUS_ENVIRONMENT_LABEL=${PROMETHEUS_ENVIRONMENT_LABEL:-production}
+
+# On Linux servers, host.docker.internal may not be present.
+# Prefer setting BACKEND_METRICS_TARGET/CONSOLE_METRICS_TARGET explicitly in monitoring/.env,
+# e.g. 172.17.0.1:8080 and 172.17.0.1:3000 to scrape host-network services.
 
 render_alertmanager_config() {
   if ! command -v envsubst >/dev/null 2>&1; then

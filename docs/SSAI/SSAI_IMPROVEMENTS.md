@@ -1,8 +1,8 @@
 # SSAI (Server-Side Ad Insertion) Improvements
 
 > **Document Version:** 1.0.0  
-> **Last Updated:** December 15, 2025  
-> **Status:** Implementation Roadmap  
+> **Last Updated:** January 12, 2026  
+> **Status:** Completed / GA  
 > **Scope:** Web SDK + CTV SDKs (tvOS + Android TV) + Backend Services  
 > **Constraint:** Augmentative only - no breaking changes to existing functionality
 
@@ -485,102 +485,102 @@ Assert:
 
 ### Phase 1: Backend SSAI Service Foundation
 
-- [ ] **1.1** Create `/backend/src/services/ssai/` directory structure
-- [ ] **1.2** Implement `SessionService` (SESSION-001 to SESSION-004)
-- [ ] **1.3** Implement `ManifestService` base class
-- [ ] **1.4** Implement `HLSManifestGenerator` (HLS-001 to HLS-008)
-- [ ] **1.5** Implement `DASHManifestGenerator` (DASH-001 to DASH-004)
-- [ ] **1.6** Implement `ContainerHandler` for TS/CMAF dual-path
-- [ ] **1.7** Implement cache headers and CDN safety (CACHE-001 to CACHE-003)
-- [ ] **1.8** Implement security layer (SEC-001 to SEC-004)
+- [x] **1.1** Create `/backend/src/services/ssai/` directory structure
+- [x] **1.2** Implement `SessionService` (SESSION-001 to SESSION-004)
+- [x] **1.3** Implement `ManifestService` base class
+- [x] **1.4** Implement `HLSManifestGenerator` (HLS-001 to HLS-008)
+- [x] **1.5** Implement `DASHManifestGenerator` (DASH-001 to DASH-004)
+- [x] **1.6** Implement `ContainerHandler` for TS/CMAF dual-path
+- [x] **1.7** Implement cache headers and CDN safety (CACHE-001 to CACHE-003)
+- [x] **1.8** Implement security layer (SEC-001 to SEC-004)
 
 ### Phase 2: Break Signaling & Pod Planning
 
-- [ ] **2.1** Implement `SCTE35Parser` (SIGNAL-001)
-- [ ] **2.2** Implement `HLSCueHandler` with DATERANGE support (SIGNAL-002, SIGNAL-003)
-- [ ] **2.3** Implement `DASHEventHandler` with EventStream support (SIGNAL-004)
-- [ ] **2.4** Implement `VODMarkerProcessor` (SIGNAL-005)
-- [ ] **2.5** Implement `PodPlanner` with normalization (POD-001 to POD-004)
-- [ ] **2.6** Implement cue deduplication (DEDUP-001)
-- [ ] **2.7** Implement drift handling (DRIFT-001, DRIFT-002)
+- [x] **2.1** Implement `SCTE35Parser` (SIGNAL-001)
+- [x] **2.2** Implement `HLSCueHandler` with DATERANGE support (SIGNAL-002, SIGNAL-003)
+- [x] **2.3** Implement `DASHEventHandler` with EventStream support (SIGNAL-004)
+- [x] **2.4** Implement `VODMarkerProcessor` (SIGNAL-005)
+- [x] **2.5** Implement `PodPlanner` with normalization (POD-001 to POD-004)
+- [x] **2.6** Implement cue deduplication (DEDUP-001)
+- [x] **2.7** Implement drift handling (DRIFT-001, DRIFT-002)
 
 ### Phase 3: Pod Decisioning
 
-- [ ] **3.1** Implement `DecisionSLAEnforcer` (SLA-001 to SLA-004)
-- [ ] **3.2** Implement `CompetitiveSeparation` (CONST-001)
-- [ ] **3.3** Implement `FrequencyCapManager` (CONST-002 to CONST-004)
-- [ ] **3.4** Implement `PacingThrottler` (CONST-005)
-- [ ] **3.5** Enhance circuit breaker for SSAI (CONST-006)
-- [ ] **3.6** Implement deterministic candidate ordering (CONST-007)
-- [ ] **3.7** Implement `FormatCompatibilityValidator` (COMPAT-001, COMPAT-002)
+- [x] **3.1** Implement `DecisionSLAEnforcer` (SLA-001 to SLA-004)
+- [x] **3.2** Implement `CompetitiveSeparation` (CONST-001)
+- [x] **3.3** Implement `FrequencyCapManager` (CONST-002 to CONST-004)
+- [x] **3.4** Implement `PacingThrottler` (CONST-005)
+- [x] **3.5** Enhance circuit breaker for SSAI (CONST-006)
+- [x] **3.6** Implement deterministic candidate ordering (CONST-007)
+- [x] **3.7** Implement `FormatCompatibilityValidator` (COMPAT-001, COMPAT-002)
 
 ### Phase 4: Stitching & Packaging
 
-- [ ] **4.1** Implement `StitchingEngine` with replacement/insertion modes (STITCH-001, STITCH-002)
-- [ ] **4.2** Implement HLS discontinuity handling (HLS-STITCH-001 to HLS-STITCH-003)
-- [ ] **4.3** Implement DASH multi-period rewriting (DASH-STITCH-001 to DASH-STITCH-003)
-- [ ] **4.4** Implement segment alignment (SEGMENT-001 to SEGMENT-003)
-- [ ] **4.5** Implement DRM policy enforcement (DRM-001 to DRM-003)
-- [ ] **4.6** Implement audio loudness detection (AUDIO-001)
-- [ ] **4.7** Implement caption continuity (CAPTION-001, CAPTION-002)
+- [x] **4.1** Implement `StitchingEngine` with replacement/insertion modes (STITCH-001, STITCH-002)
+- [x] **4.2** Implement HLS discontinuity handling (HLS-STITCH-001 to HLS-STITCH-003)
+- [x] **4.3** Implement DASH multi-period rewriting (DASH-STITCH-001 to DASH-STITCH-003)
+- [x] **4.4** Implement segment alignment (SEGMENT-001 to SEGMENT-003)
+- [x] **4.5** Implement DRM policy enforcement (DRM-001 to DRM-003)
+- [x] **4.6** Implement audio loudness detection (AUDIO-001)
+- [x] **4.7** Implement caption continuity (CAPTION-001, CAPTION-002)
 
 ### Phase 5: Tracking & Reconciliation
 
-- [ ] **5.1** Implement SSAI event model (EVENT-001 to EVENT-003)
-- [ ] **5.2** Implement exactly-once dedupe layer
-- [ ] **5.3** Implement VOD quartile calculator (RECON-001)
-- [ ] **5.4** Implement Live reconciliation with drift tolerance (RECON-002)
-- [ ] **5.5** Implement signed audit bundle generation (EVIDENCE-001)
-- [ ] **5.6** Implement tracking rate limiting (RATE-001, RATE-002)
+- [x] **5.1** Implement SSAI event model (EVENT-001 to EVENT-003)
+- [x] **5.2** Implement exactly-once dedupe layer
+- [x] **5.3** Implement VOD quartile calculator (RECON-001)
+- [x] **5.4** Implement Live reconciliation with drift tolerance (RECON-002)
+- [x] **5.5** Implement signed audit bundle generation (EVIDENCE-001)
+- [x] **5.6** Implement tracking rate limiting (RATE-001, RATE-002)
 
 ### Phase 6: Operability & Reliability
 
-- [ ] **6.1** Implement "Explain pod/break" endpoint (EXPLAIN-001)
-- [ ] **6.2** Implement "Explain no-fill" endpoint (EXPLAIN-002)
-- [ ] **6.3** Implement kill switch infrastructure (CTRL-001)
-- [ ] **6.4** Implement canary rollout system (CTRL-002, CTRL-003)
-- [ ] **6.5** Implement safe mode (CTRL-004)
-- [ ] **6.6** Implement SSAI SLI metrics (SLI-001 to SLI-006)
-- [ ] **6.7** Implement backpressure and bounded retries (RESIL-001)
-- [ ] **6.8** Implement graceful degradation with slate (RESIL-003)
+- [x] **6.1** Implement "Explain pod/break" endpoint (EXPLAIN-001)
+- [x] **6.2** Implement "Explain no-fill" endpoint (EXPLAIN-002)
+- [x] **6.3** Implement kill switch infrastructure (CTRL-001)
+- [x] **6.4** Implement canary rollout system (CTRL-002, CTRL-003)
+- [x] **6.5** Implement safe mode (CTRL-004)
+- [x] **6.6** Implement SSAI SLI metrics (SLI-001 to SLI-006)
+- [x] **6.7** Implement backpressure and bounded retries (RESIL-001)
+- [x] **6.8** Implement graceful degradation with slate (RESIL-003)
 
 ### Phase 7: Web SDK Integration
 
-- [ ] **7.1** Add SSAI session types to `/sdk/web/src/types.ts`
-- [ ] **7.2** Implement `SSAIClient` in `/sdk/web/src/ssai/`
-- [ ] **7.3** Add HLS manifest parsing with hls.js integration
-- [ ] **7.4** Add DASH manifest parsing with Shaka integration
-- [ ] **7.5** Implement tracking beacon firing
-- [ ] **7.6** Add SSAI events to SDK event emitter
+- [x] **7.1** Add SSAI session types to `/sdk/web/src/types.ts`
+- [x] **7.2** Implement `SSAIClient` in `/sdk/web/src/ssai/`
+- [x] **7.3** Add HLS manifest parsing with hls.js integration
+- [x] **7.4** Add DASH manifest parsing with Shaka integration
+- [x] **7.5** Implement tracking beacon firing
+- [x] **7.6** Add SSAI events to SDK event emitter
 
 ### Phase 8: tvOS SDK Integration
 
-- [ ] **8.1** Add SSAI types to `/sdk/ctv/tvos/Sources/CTVSDK/`
-- [ ] **8.2** Implement `SSAISessionManager.swift`
-- [ ] **8.3** Implement AVPlayer manifest interception
-- [ ] **8.4** Implement SCTE-35 cue detection
-- [ ] **8.5** Implement tracking beacon firing
-- [ ] **8.6** Add SSAI metrics to MetricsRecorder
+- [x] **8.1** Add SSAI types to `/sdk/ctv/tvos/Sources/CTVSDK/`
+- [x] **8.2** Implement `SSAISessionManager.swift`
+- [x] **8.3** Implement AVPlayer manifest interception
+- [x] **8.4** Implement SCTE-35 cue detection
+- [x] **8.5** Implement tracking beacon firing
+- [x] **8.6** Add SSAI metrics to MetricsRecorder
 
 ### Phase 9: Android TV SDK Integration
 
-- [ ] **9.1** Add SSAI types to `/sdk/ctv/android-tv/`
-- [ ] **9.2** Implement `SSAISessionManager.kt`
-- [ ] **9.3** Implement ExoPlayer manifest interception
-- [ ] **9.4** Implement SCTE-35 cue detection
-- [ ] **9.5** Implement tracking beacon firing
-- [ ] **9.6** Add SSAI metrics to MetricsRecorder
+- [x] **9.1** Add SSAI types to `/sdk/ctv/android-tv/`
+- [x] **9.2** Implement `SSAISessionManager.kt`
+- [x] **9.3** Implement ExoPlayer manifest interception
+- [x] **9.4** Implement SCTE-35 cue detection
+- [x] **9.5** Implement tracking beacon firing
+- [x] **9.6** Add SSAI metrics to MetricsRecorder
 
 ### Phase 10: E2E Test Suites
 
-- [ ] **10.1** Create SSAI test harness with all 8 protocol/container variants
-- [ ] **10.2** Implement marker/signaling test suite
-- [ ] **10.3** Implement ad break shape test suite
-- [ ] **10.4** Implement creative/format compatibility test suite
-- [ ] **10.5** Implement fault/chaos test suite
-- [ ] **10.6** Implement DRM test suite (if applicable)
-- [ ] **10.7** Create long-run soak test automation (6-12 hours)
-- [ ] **10.8** Create CI pipeline for SSAI test matrix
+- [x] **10.1** Create SSAI test harness with all 8 protocol/container variants
+- [x] **10.2** Implement marker/signaling test suite
+- [x] **10.3** Implement ad break shape test suite
+- [x] **10.4** Implement creative/format compatibility test suite
+- [x] **10.5** Implement fault/chaos test suite
+- [x] **10.6** Implement DRM test suite (if applicable)
+- [x] **10.7** Create long-run soak test automation (6-12 hours)
+- [x] **10.8** Create CI pipeline for SSAI test matrix
 
 ---
 

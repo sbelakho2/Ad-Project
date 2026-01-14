@@ -305,17 +305,16 @@ Console noise is intentionally limited so critical signals surface quickly:
 
 ## Deployment
 
-### Vercel (Recommended)
+### Hetzner Production (PM2)
+
+Production deployments are performed via the repo deploy script, which builds locally and deploys to
+`/opt/adproject` on the Hetzner app server.
 
 ```bash
-# Install Vercel CLI
-npm i -g vercel
-
-# Deploy
-vercel
+./scripts/deploy-all.sh console
 ```
 
-### Docker
+### Docker (Local/Dev)
 
 ```bash
 # Build image
@@ -324,23 +323,6 @@ docker build -t ad-platform-console .
 # Run container
 docker run -p 3000:3000 ad-platform-console
 ```
-
-### Fly.io
-
-Fly is configured via `console/fly.toml` and deploys the production-ready Next.js server close to regional bidders.
-
-```bash
-# Authenticate once
-fly auth login
-
-# Set secrets for backend URLs and NextAuth session keys
-fly secrets set NEXTAUTH_SECRET=... NEXT_PUBLIC_API_URL=...
-
-# Deploy using the provided config (build uses Dockerfile)
-fly deploy --config fly.toml --remote-only
-```
-
-Scaling, certificates, and log drains can then be managed through `fly scale`, `fly certs`, and `fly logs`.
 
 ### Manual Deployment
 

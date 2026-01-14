@@ -42,7 +42,7 @@ require_env APP_ID_IOS "$APP_ID_IOS"
 require_env APP_ID_CTV "$APP_ID_CTV"
 
 # Avoid leaking secrets via process args (ps/systemctl). Use a curl config file
-# for headers instead of passing -H "Authorization: Bearer ..." on the command line.
+# for headers instead of passing -H "X-SDK-Key: ..." on the command line.
 CURL_CFG_IOS="$(mktemp)"
 CURL_CFG_CTV="$(mktemp)"
 chmod 600 "$CURL_CFG_IOS" "$CURL_CFG_CTV" || true
@@ -54,10 +54,6 @@ cat >"$CURL_CFG_CTV" <<EOF
 header = "Content-Type: application/json"
 header = "X-SDK-Key: $SDK_KEY_CTV_EFFECTIVE"
 EOF
-if [[ -n "$TOKEN" ]]; then
-  echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_IOS"
-  echo "header = \"Authorization: Bearer $TOKEN\"" >>"$CURL_CFG_CTV"
-fi
 cleanup() { rm -f "$CURL_CFG_IOS" "$CURL_CFG_CTV" 2>/dev/null || true; }
 trap cleanup EXIT
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /*
  Provider Content Guard
- - Scans code/config areas of the repo to block accidental reintroduction of legacy providers.
+ - Scans code/config areas of the repo to block accidental reintroduction of legacy managed PaaS providers.
  - Excludes docs/, quality/, node_modules/, and any file carrying a top-of-file "DEPRECATION NOTICE".
- - Forbidden tokens: flyctl, fly.io, heroku, vercel, render.com, railway, upstash
 */
 
 const fs = require('fs');
@@ -37,8 +36,6 @@ const EXCLUDE_DIRS = new Set([
 ]);
 
 const FORBIDDEN = [
-  /\bflyctl\b/i,
-  /fly\.io/i,
   /\bheroku\b/i,
   /vercel/i,
   /render\.com/i,

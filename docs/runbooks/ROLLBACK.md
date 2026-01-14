@@ -1,6 +1,6 @@
 # Rollback Runbook
 
-**Last Updated:** 2025-01-06  
+**Last Updated:** 2026-01-12  
 **Owner:** DevOps  
 **Approval Required:** On-call lead for production rollback
 
@@ -33,7 +33,8 @@ ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
 |---------|------|--------|-------|
 | Backend | 8080 | 46.62.252.96 | Node.js API |
 | Console | 3000 | 46.62.252.96 | Next.js dashboard |
-| Grafana | 3001 | 46.62.252.96 | Monitoring dashboards |
+| Control Plane | 3001 | 46.62.252.96 | Operator Cockpit |
+| Grafana | 3001 | 46.62.252.96 | Monitoring dashboards (Port conflict? Check prod config) |
 | Prometheus | 9090 | 46.62.252.96 | Metrics collection |
 | Alertmanager | 9093 | 46.62.252.96 | Alert routing |
 | PostgreSQL | 5432 | 77.42.44.35 | Database |

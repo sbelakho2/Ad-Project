@@ -27,10 +27,9 @@ NEXT_PUBLIC_ENABLE_FRAUD_DETECTION=true
 ```
 
 ### Backend Requirements
+Each service can sit behind its own host/port combination. The example above matches the default Docker Compose stack where everything is exposed via the backend container on `localhost:8080`. If you split services across hosts, keep the `/api/v1` suffix and update the host/port for each `NEXT_PUBLIC_*_API_URL` accordingly.
 
-Each service can sit behind its own host/port combination. The example above matches the default Docker/Fly stack where everything is exposed via the backend container on `localhost:8080`. If you split services across hosts, keep the `/api/v1` suffix and update the host/port for each `NEXT_PUBLIC_*_API_URL` accordingly.
-
-Make sure your `.env.local` entries point to the correct hosts for your environment (Fly, Docker, or local dev). Supporting infrastructure usually includes:
+Make sure your `.env.local` entries point to the correct hosts for your environment (Hetzner, Docker, or local dev). Supporting infrastructure usually includes:
 - PostgreSQL (port 5432)
 - Redis (port 6379)
 

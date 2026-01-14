@@ -236,6 +236,23 @@ export const streamQuery = async function* <T extends QueryResultRow = QueryResu
 
 export const getClient = (): Promise<PoolClient> => pool.connect();
 
+export const closePools = async (): Promise<void> => {
+  // Primarily for one-off scripts/CLIs so they can exit cleanly.
+  // Safe to call multiple times.
+  try {
+    await pool.end();
+  } catch {
+    /* noop */
+  }
+  if (replicaPool) {
+    try {
+      await replicaPool.end();
+    } catch {
+      /* noop */
+    }
+  }
+};
+
 type InsertManyOptions = {
   /** Column names (or a named constraint) to apply in ON CONFLICT clause */
   onConflictColumns?: ReadonlyArray<string>;

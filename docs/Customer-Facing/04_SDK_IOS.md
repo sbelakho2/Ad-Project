@@ -34,8 +34,6 @@ Run `pod install`.
 In your `AppDelegate.swift` or `App` struct.
 
 ```swift
-import ApexMediation
-
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
@@ -59,8 +57,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 ### 3. Load & Show Interstitial
 
 ```swift
-import ApexMediation
-
 class ViewController: UIViewController {
 
     override func viewDidLoad() {

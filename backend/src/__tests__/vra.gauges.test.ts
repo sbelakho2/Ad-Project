@@ -5,10 +5,7 @@
  * Enable with: ENABLE_VRA_GAUGES_TEST=1 npm run test:backend
  */
 
-const enabled = process.env.ENABLE_VRA_GAUGES_TEST === '1';
-const maybe = enabled ? describe : describe.skip;
-
-maybe('VRA gauges — registration and set()', () => {
+describe('VRA gauges — registration and set()', () => {
   beforeAll(() => {
     // Disable default prom-client collectors for this test to keep isolation
     process.env.PROMETHEUS_COLLECT_DEFAULTS = '0';

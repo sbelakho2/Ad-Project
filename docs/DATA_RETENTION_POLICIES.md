@@ -13,11 +13,11 @@ This document defines data retention periods for all data types stored in the sy
 | **PostgreSQL Logs** | 7 days | ✅ Daily | Debugging window, prevent disk fill |
 | **Docker Logs** | 5 rotations × 50MB | ✅ Automatic | Application logs, compressed after rotation |
 | **Session Data** | 90 days | ❌ Manual | User sessions, balance UX vs security |
-| **Audit Logs** | 1 year | ❌ Manual | Compliance, security investigations |
+| **Audit Logs** | 7 years | ✅ Automated | Compliance, financial investigations |
 | **User Accounts** | Indefinite | ❌ Manual | Core data, deleted only on request |
-| **Invoices** | 7 years | ❌ Never | Legal/tax requirements (varies by jurisdiction) |
-| **Payment Events** | 7 years | ❌ Never | Financial audit trail |
-| **Webhook Events** | 30 days | ❌ Manual | Debugging, replay capability |
+| **Invoices** | 7 years | ✅ Automated | Legal/tax requirements (Estonian Accounting Act) |
+| **Payment Events** | 7 years | ✅ Automated | Financial audit trail |
+| **Webhook Events** | 30 days | ✅ Automated | Debugging, replay capability |
 
 ## Detailed Policies
 
@@ -138,7 +138,6 @@ sed -i 's/-mtime +7/-mtime +14/' /usr/local/bin/pg_wal_cleanup.sh
 
 **Implementation:** ✅ Automated via Docker daemon
 ```json
-// /etc/docker/daemon.json
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -202,43 +201,22 @@ $$ LANGUAGE plpgsql;
 3. Test cleanup doesn't break active sessions
 4. Monitor session table size
 
-### 6. Audit Logs (1 year) ⚠️ TODO
+### 6. Audit Logs (7 years)
 
-**Tables:** `audit_log`, `transaction_log`, `billing_audit`
+**Tables:** `audit_log`, `transaction_log`, `billing_audit`, `control_plane.audit_logs`
 
-**Retention:** 1 year from creation
+**Retention:** 7 years from creation
 
-**Implementation:** ❌ Not yet automated
+**Implementation:** ✅ Automated via partition management and dedicated service logic in control-plane.
 
 **Justification:**
 - Security investigations
-- Compliance requirements (SOC 2, GDPR)
+- Compliance requirements (SOC 2, GDPR, Estonian Accounting Act)
 - Financial audit trail
 
-**Recommended Implementation:**
-```sql
--- Partition audit logs by month
-CREATE TABLE audit_log_2025_12 PARTITION OF audit_log
-  FOR VALUES FROM ('2025-12-01') TO ('2026-01-01');
-
--- Create cleanup function
-CREATE OR REPLACE FUNCTION cleanup_old_audit_logs()
-RETURNS void AS $$
-DECLARE
-  cutoff_date date := CURRENT_DATE - INTERVAL '1 year';
-BEGIN
-  -- Drop partitions older than 1 year
-  -- Implementation depends on audit log structure
-  RAISE NOTICE 'Audit log cleanup: cutoff date %', cutoff_date;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Action Required:**
-1. Partition audit_log table by month (similar to analytics_impressions)
-2. Create automated cleanup function
-3. Add quarterly cron job (manual review before deletion)
-4. Document compliance requirements
+**Configuration:**
+- `AUDIT_RETENTION_YEARS` environment variable in control-plane (default: 7).
+- Partition lifecycle: `scripts/ops/partition_retention.sh`.
 
 ### 7. User Accounts (Indefinite)
 
@@ -287,70 +265,38 @@ COMMIT;
 
 ### 8. Invoices & Payment Events (7 years)
 
-**Tables:** `invoices`, `payments`, `stripe_webhook_events`, `transaction_log`
+**Tables:** `invoices`, `payments`, `stripe_webhook_events`, `transaction_log`, `financial_documents`
 
 **Retention:** 7 years (legal requirement)
 
-**Implementation:** Never deleted automatically
+**Implementation:** ✅ Automated via S3 Object Lock (WORM) and financial_documents retention tracking.
 
 **Justification:**
-- Tax law requirements (varies by jurisdiction):
-  - US: 7 years (IRS)
-  - EU: 6-10 years (depends on country)
-  - UK: 6 years
+- Estonian Accounting Act requirements (7 years)
 - Financial audit trail
 - Dispute resolution
 
 **Storage Optimization:**
-```sql
--- Move invoices older than 2 years to archive partition
-CREATE TABLE invoices_archive PARTITION OF invoices
-  FOR VALUES FROM ('1970-01-01') TO ('2023-01-01');
+- PDF and XML artifacts are stored in S3 with `ObjectLockMode: COMPLIANCE`.
+- Metadata remains in PostgreSQL for reporting.
+- Archives older than 2 years can be moved to S3 Glacier.
 
--- Compress old partitions
--- Consider pg_dump + external storage for very old data
-```
-
-**Action Required:**
-1. Document legal retention requirements for your jurisdiction
-2. Implement invoice partitioning by year
-3. Create archival process for invoices > 2 years old
-4. Store archives in cheaper cold storage (S3 Glacier, etc.)
-
-### 9. Webhook Events (30 days) ⚠️ TODO
+### 9. Webhook Events (30 days)
 
 **Table:** `stripe_webhook_events`
 
 **Retention:** 30 days from receipt
 
-**Implementation:** ❌ Not yet automated
+**Implementation:** ✅ Automated via background job cleanup (BullMQ).
 
 **Justification:**
 - Debugging webhook delivery issues
 - Replay capability for failed events
 - Stripe keeps events for 30 days, we match that
 
-**Recommended Implementation:**
-```sql
--- Create cleanup function
-CREATE OR REPLACE FUNCTION cleanup_old_webhook_events()
-RETURNS void AS $$
-BEGIN
-  DELETE FROM stripe_webhook_events 
-  WHERE created_at < NOW() - INTERVAL '30 days';
-  
-  RAISE NOTICE 'Webhook events cleanup completed';
-END;
-$$ LANGUAGE plpgsql;
-
--- Schedule via cron (weekly)
--- 0 4 * * 0 psql -U postgres -d adproject -c "SELECT cleanup_old_webhook_events();"
-```
-
-**Action Required:**
-1. Create cleanup function
-2. Add weekly cron job
-3. Test doesn't break active webhook processing
+**Configuration:**
+- Cleanup job runs daily at 4:00 AM UTC.
+- `WEBHOOK_RETENTION_DAYS` environment variable (default: 30).
 
 ## Implementation Checklist
 
@@ -359,13 +305,13 @@ $$ LANGUAGE plpgsql;
 - [x] WAL archives: 7 days automated cleanup  
 - [x] PostgreSQL logs: 7 days automated rotation
 - [x] Docker logs: 250MB per container automatic rotation
+- [x] Audit logs: 7-year retention with automated persistence
+- [x] Webhook events: 30 days automated cleanup
+- [x] Invoice archival: S3 Object Lock (WORM) integration
 
 ### ⚠️ Pending Implementation
 - [ ] Session data: 90 days cleanup function + cron
-- [ ] Audit logs: 1 year retention with partitioning
-- [ ] Webhook events: 30 days cleanup function + cron
-- [ ] Invoice archival: Cold storage for > 2 years
-- [ ] User deletion: Automated GDPR compliance workflow
+- [ ] User deletion: Automated GDPR compliance workflow (manual verify still required)
 
 ### 📝 Documentation Needed
 - [ ] Legal retention requirements for your jurisdiction

@@ -69,14 +69,6 @@ npm install @apexmediation/web-sdk
 **React Example:**
 
 ```jsx
-import { init, ApexAd } from '@apexmediation/web-sdk/react';
-
-// Initialize once (e.g., in App.js)
-init({
-  appId: 'YOUR_APP_ID',
-  endpoint: 'https://api.apexmediation.ee'
-});
-
 function App() {
   return (
     <div>

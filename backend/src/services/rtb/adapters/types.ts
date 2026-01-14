@@ -22,6 +22,7 @@ export const isAbortError = (e: unknown): boolean => {
 
 export interface AdapterBidRequest {
   requestId: string;
+  publisherId: string;
   placementId: string;
   adFormat: AdFormat;
   floorCpm: number;
@@ -52,6 +53,7 @@ export function validateAdapterBidRequest(req: AdapterBidRequest): AdapterBidReq
   const allowedFormats: AdFormat[] = ['banner', 'interstitial', 'rewarded', 'native'];
   if (!req || typeof req !== 'object') throw new Error('Invalid request');
   if (!req.requestId || typeof req.requestId !== 'string') throw new Error('requestId required');
+  if (!req.publisherId || typeof req.publisherId !== 'string') throw new Error('publisherId required');
   if (!req.placementId || typeof req.placementId !== 'string') throw new Error('placementId required');
   if (!allowedFormats.includes(req.adFormat)) throw new Error('Unsupported adFormat');
   if (typeof req.floorCpm !== 'number' || !Number.isFinite(req.floorCpm) || req.floorCpm < 0) {

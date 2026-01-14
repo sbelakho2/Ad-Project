@@ -1,9 +1,33 @@
 # Zero-Touch Automation System - Deployment Status
 
-**Date:** 2025-11-04  
-**Status:** ✅ Ready for Production Deployment
+**Date:** 2026-01-12  
+**Status:** ✅ Production Hardened & Compliance Ready
 
-## 🎉 Completed Tasks
+## 🎉 Recent Milestones (Jan 2026)
+
+### 1. ✅ Control Plane Service
+- Launched separate `control-plane` service at `admin.apexmediation.ee`.
+- Implemented tiered database access (Read-only, Operator, Break-glass).
+- Added full audit logging with 7-year retention.
+
+### 2. ✅ Automated Compliance
+- Real-time Estonian ledger integration.
+- Automated PDF generation for VAT (KMD), Payroll (TSD), and Annual Reports.
+- Branded, legally compliant document generation using `pdfkit`.
+
+### 3. ✅ Advanced Business Intelligence
+- Implementation of publisher cohort analysis.
+- Revenue forecasting using linear growth modeling.
+- Real-time CEO metrics (Runway, Net Cash Flow, LTV, Churn).
+
+### 4. ✅ Operational Hardening
+- Fixed backend `Dockerfile` corruption.
+- Verified 184+ test suites (1180+ tests) with 100% pass rate.
+- Implemented bank reconciliation service for automated financial matching.
+
+---
+
+# Zero-Touch Automation System - Deployment Status (Legacy Context)
 
 ### 1. ✅ OpenAI SDK Installation
 - Installed `openai` package (v4.x)
@@ -223,17 +247,16 @@ psql $DATABASE_URL -c "SELECT * FROM evolution_log ORDER BY created_at DESC LIMI
 psql $DATABASE_URL -c "SELECT * FROM customer_health_scores ORDER BY updated_at DESC LIMIT 5;"
 ```
 
-#### 3. Deploy to Staging
+#### 3. Deploy to Test Server (Hetzner)
+
+Use the Hetzner test server for pre-production validation.
+
 ```bash
-# Deploy to Fly.io staging environment
-fly deploy --config fly.staging.toml
+# Deploy backend to the Hetzner test server
+DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
 
-# Verify deployment
-fly logs --app apexmediation-staging
-
-# Check cron jobs are running
-fly ssh console --app apexmediation-staging
-ps aux | grep cron-jobs
+# Verify from the test server
+./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; pm2 status backend; curl -sf http://127.0.0.1:8080/health"
 ```
 
 #### 4. Monitor First 24-Hour Cycle

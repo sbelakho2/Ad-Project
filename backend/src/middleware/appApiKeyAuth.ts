@@ -13,17 +13,29 @@ import * as appKeysRepo from '../repositories/appApiKeyRepository'
  */
 export async function appApiKeyAuth(req: Request, res: Response, next: NextFunction) {
   try {
-    const header = (req.header('authorization') || '').trim()
+    const authorizationHeader = (req.header('authorization') || '').trim()
+    const apiKeyHeader = (req.header('x-api-key') || req.header('X-Api-Key') || '').trim()
+    const sdkKeyHeader = (req.header('x-sdk-key') || req.header('X-Sdk-Key') || '').trim()
+
     let key = ''
-    if (header.toLowerCase().startsWith('bearer ')) {
-      key = header.slice(7).trim()
+    if (authorizationHeader.toLowerCase().startsWith('bearer ')) {
+      key = authorizationHeader.slice(7).trim()
     }
+
+    // If the caller sent a JWT-shaped bearer token AND a real SDK/API key header,
+    // prefer the explicit SDK/API key header.
+    // This prevents accidental 401s when test tooling includes a user JWT for unrelated endpoints.
+    const looksLikeJwt = (s: string) => s.startsWith('eyJ') && s.split('.').length === 3
+    if (key && looksLikeJwt(key) && (apiKeyHeader || sdkKeyHeader)) {
+      key = ''
+    }
+
     if (!key) {
-      key = (req.header('x-api-key') || req.header('X-Api-Key') || '').trim()
+      key = apiKeyHeader
     }
     // Backwards-compat header used by some SDK/test tooling
     if (!key) {
-      key = (req.header('x-sdk-key') || req.header('X-Sdk-Key') || '').trim()
+      key = sdkKeyHeader
     }
 
     if (!key) {

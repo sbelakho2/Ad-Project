@@ -437,8 +437,7 @@ export const soakTestConfigs: Record<string, SoakTestConfig> = {
 };
 
 // Jest test suite (using quick config for CI)
-const RUN_SSAI_SOAK_TESTS = process.env.RUN_SSAI_SOAK_TESTS === 'true';
-const describeSoak = RUN_SSAI_SOAK_TESTS ? describe : describe.skip;
+const describeSoak = describe;
 
 describeSoak('SSAI Soak Test Suite', () => {
   jest.setTimeout(60 * 1000); // should be plenty for the quick config

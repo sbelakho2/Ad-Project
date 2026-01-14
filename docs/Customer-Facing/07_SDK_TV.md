@@ -66,13 +66,10 @@ end
 For native ads, ensure your views override `canBecomeFocused`.
 
 ```swift
+// Example custom view
 class AdView: UIView {
     override var canBecomeFocused: Bool {
         return true
-    }
-    
-    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
-        // Handle focus visual changes (scale, shadow)
     }
 }
 ```

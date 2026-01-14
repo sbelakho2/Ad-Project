@@ -22,7 +22,7 @@
 
 1. **Triage**
    - Check Grafana dashboards (`monitoring/grafana-dashboards.yml`).
-   - Pull recent `kubectl`/`flyctl` events if deployment-related.
+   - Pull recent service events if deployment-related (`pm2 logs`, `journalctl`, and Caddy logs).
 2. **Stabilize**
    - Use kill-switches (`backend/Adapters.md` section 6) for faulty bidders.
    - Trigger rollback via `deploy-production.yml` workflow dispatch if release regression.

@@ -54,7 +54,7 @@ Express supports multiple trust proxy values:
 **Our Default**: `1` (single proxy hop)
 
 **When to Use**:
-- ✅ Behind Fly.io proxy
+- ✅ Behind Caddy reverse proxy (Hetzner)
 - ✅ Behind nginx reverse proxy
 - ✅ Behind AWS ALB/ELB
 - ✅ Behind Cloudflare
@@ -74,7 +74,7 @@ Internet → [TLS] → Load Balancer → [HTTP] → Backend API
 
 ### Configuration Points
 
-#### 1. Load Balancer/Proxy (nginx example)
+#### 1. Reverse Proxy (nginx example)
 
 ```nginx
 server {
@@ -97,14 +97,14 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
 
     location / {
-        proxy_pass http://backend:4000;
+      proxy_pass http://127.0.0.1:8080;
     }
 }
 ```
 
 #### 2. Backend API (no TLS needed)
 
-The backend listens on HTTP (port 4000) and trusts X-Forwarded-Proto for protocol detection.
+The backend listens on HTTP (port 8080 in Hetzner production) and trusts X-Forwarded-Proto for protocol detection.
 
 #### 3. CORS Configuration
 

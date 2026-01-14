@@ -1,5 +1,5 @@
 # Rival ApexMediation SRS v2.0 — Enhanced Unity Competitor Platform
-_Last updated: 2025-11-18 16:55 UTC_
+_Last updated: 2026-01-12 19:25 UTC_
 
 > **FIX-10 governance:** This SRS outlines the target architecture. For real delivery status, reference `docs/Internal/Deployment/PROJECT_STATUS.md` and map any implementation evidence back to `docs/Internal/Development/FIXES.md`. New risks, deviations, or sign-offs captured here must also be logged in `docs/Internal/Development/AD_PROJECT_FILE_ANALYSIS.md`.
 
@@ -1096,8 +1096,8 @@ $$ LANGUAGE plpgsql;
 - 90-day data retention (configurable)
 
 #### SDK Security
-```kotlin
-// Android ProGuard rules
+```text
+# Android ProGuard rules
 -keep class com.platform.sdk.** { *; }
 -dontwarn com.platform.sdk.internal.**
 
@@ -1616,7 +1616,7 @@ curl -s https://platform.com/migrate | bash
 ## Appendix B: API Documentation
 
 ### OpenRTB 2.6 Implementation
-```json
+```http
 // Bid Request Example
 POST /openrtb2/auction
 {

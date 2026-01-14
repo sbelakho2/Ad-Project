@@ -36,6 +36,7 @@ Complete GDPR-compliant monitoring stack deployed on Hetzner infrastructure with
 | `node-app-server` | node-exporter:9100/metrics | 15s | ✅ UP |
 | `cadvisor` | cadvisor:8080/metrics | 15s | ✅ UP |
 | `prometheus` | localhost:9090/metrics | 15s | ✅ UP |
+| `control-plane` | control-plane:3001/metrics | 15s | ✅ UP |
 
 ## Grafana Dashboards
 
@@ -44,7 +45,7 @@ Complete GDPR-compliant monitoring stack deployed on Hetzner infrastructure with
 - Request rate time series
 - Error rate gauge
 - Database connection monitoring
-- Key business metrics overview
+- Key business metrics overview (MRR, LTV, Churn from Control Plane)
 
 ### 2. RTB Analytics (`apex-rtb-analytics`)
 - Fill rate by adapter
@@ -63,15 +64,22 @@ Complete GDPR-compliant monitoring stack deployed on Hetzner infrastructure with
 - Webhook delivery status
 - Revenue breakdown by plan
 
-### 4. Database Performance (`apex-database`)
-- PostgreSQL connection pool status
+### 4. Control Plane Analytics (`apex-control-plane`)
+- Operator action audit log volume
+- Compliance report generation success rate
+- Bank reconciliation confidence distributions
+- Forecasting model accuracy metrics (Predicted vs Actual)
+- Impersonation session duration and frequency
+
+### 5. Database Performance (`apex-database`)
+- PostgreSQL connection pool status (Aggregated across Backend + Control Plane)
 - Database size monitoring (21MB adproject)
 - Table size breakdown
 - Index usage statistics
 - Transaction rate (commits/rollbacks)
 - Lock monitoring
 - I/O and checkpoint analysis
-- Replication lag (if applicable)
+- Partition health monitoring (via Control Plane metrics)
 
 ## Alert Rules
 
@@ -165,15 +173,15 @@ networks:
 
 The Control Plane dashboard at `https://admin.apexmediation.ee` provides real-time system metrics:
 
-```json
+```http
 GET /api/v1/dashboard
 {
   "system": { "degradedMode": false },
-  "database": { "connectionPool": {...}, "sessions": {...} },
-  "host": { "disk": {...}, "memory": {...} },
-  "app": { "health": "UP", "latency": {...} },
-  "partitions": { "healthy": true, "summary": {...} },
-  "recentActions": [...]
+  "database": { "connectionPool": {}, "sessions": {} },
+  "host": { "disk": {}, "memory": {} },
+  "app": { "health": "UP", "latency": {} },
+  "partitions": { "healthy": true, "summary": {} },
+  "recentActions": []
 }
 ```
 

@@ -163,7 +163,7 @@ Requires operator authentication AND typed confirmation string.
 | `restart_service` | `RESTART SERVICE {name}` |
 
 Example:
-```json
+```http
 POST /api/v1/actions/terminate-session
 {
   "pid": 12345,

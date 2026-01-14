@@ -144,6 +144,28 @@ class RedisClient {
   }
 
   /**
+   * Set key only if it does not already exist, with expiry (seconds).
+   *
+   * Returns:
+   * - true  => key was set
+   * - false => key already existed
+   * - null  => Redis unavailable or error
+   */
+  async setIfNotExists(key: string, value: string, ttlSeconds: number): Promise<boolean | null> {
+    if (!this.client || !this.isConnected) {
+      return null;
+    }
+
+    try {
+      const result = await this.client.set(key, value, { NX: true, EX: ttlSeconds });
+      return result === 'OK';
+    } catch (error) {
+      logger.error('Redis setIfNotExists error', { error, key });
+      return null;
+    }
+  }
+
+  /**
    * Direct setEx helper for call sites that already serialize values
    */
   async setEx(key: string, ttl: number, value: string): Promise<boolean> {

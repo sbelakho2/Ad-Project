@@ -20,9 +20,6 @@ The SDK uses the External Dependency Manager for Unity (EDM4U) to handle Android
 Create a script (e.g., `AdsManager.cs`) and attach it to a GameObject in your first scene.
 
 ```csharp
-using Apex.Mediation;
-using UnityEngine;
-
 public class AdsManager : MonoBehaviour
 {
     [SerializeField] private ApexConfig sdkConfig; // Assign in Inspector

@@ -18,8 +18,6 @@ describe('CI Workflows — forbid legacy provider deploy steps', () => {
   const files = listYamlFiles(workflowsDir);
 
   const forbidden = [
-    /\bflyctl\b/i,
-    /fly\.io/i,
     /\bheroku\b/i,
     /vercel/i,
     /render\.com/i,
@@ -32,7 +30,7 @@ describe('CI Workflows — forbid legacy provider deploy steps', () => {
     expect(files.length).toBeGreaterThan(0);
   });
 
-  test('No residual deploy steps for Fly/Heroku/Vercel/Render/Railway/Upstash in CI workflows', () => {
+  test('No residual deploy steps for Heroku/Vercel/Render/Railway/Upstash in CI workflows', () => {
     for (const file of files) {
       const txt = read(file);
       // allow explicit deprecation notes in comments

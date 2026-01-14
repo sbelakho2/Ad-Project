@@ -15,6 +15,7 @@ import logger from '../../utils/logger';
 import { query } from '../../utils/postgres';
 import { selectModelVersion, getModelEndpoint } from '../../utils/mlCanary';
 import { Counter, Histogram, Gauge } from 'prom-client';
+import { sendAlert } from '../alertService';
 
 // -----------------------------------------------------
 // Prometheus Metrics for shadow scoring
@@ -362,6 +363,31 @@ export async function calculatePSI(modelVersion: string, windowHours: number = 2
     }
     
     const driftDetected = psi > 0.25;
+    
+    if (driftDetected) {
+      void sendAlert({
+        severity: 'high',
+        component: 'ML_FRAUD',
+        title: 'Significant ML Model Drift Detected',
+        message: `Fraud model ${modelVersion} has PSI=${psi.toFixed(4)}, which exceeds the critical threshold of 0.25.`,
+        metadata: {
+          psi,
+          modelVersion,
+          bucketComparison,
+        },
+      });
+    } else if (psi > 0.1) {
+      void sendAlert({
+        severity: 'medium',
+        component: 'ML_FRAUD',
+        title: 'Moderate ML Model Drift Detected',
+        message: `Fraud model ${modelVersion} has PSI=${psi.toFixed(4)}, indicating moderate shift (threshold 0.1).`,
+        metadata: {
+          psi,
+          modelVersion,
+        },
+      });
+    }
     
     // Update Prometheus gauges
     shadowFraudPsiGauge.set({ model_version: modelVersion }, psi);

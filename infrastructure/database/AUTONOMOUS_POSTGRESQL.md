@@ -437,20 +437,18 @@ curl -X POST https://api.apexmediation.ee/api/v1/auth/login \
 
 ### Migration Application Procedure
 
-**Location**: `/migrations/` directory (80+ SQL files)
+**Canonical location**: `backend/migrations/` (SQL migrations applied by the backend deployment pipeline).
 
-**Applied**: December 23, 2025
+**Production topology (Hetzner-only)**:
+- PostgreSQL runs as a system service on the Hetzner **DB Server** (77.42.44.35), not in Docker.
+- The DB Server is reached via the App Server jump host.
 
-**Method**:
+**Preferred method**: deploy via `scripts/deploy-all.sh` (runs backend migrations as part of deploy).
+
+**Manual method (when needed)**:
 ```bash
-# SSH to production server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
-
-# Execute all migrations in order
-for f in /opt/adproject/migrations/*.sql; do
-  echo "Applying $(basename $f)..."
-  docker exec -i postgres-production psql -U adproject -d adproject < "$f"
-done
+# Run a specific migration on the DB server via the app server jump.
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; cd /opt/adproject; sudo -u postgres psql -d adproject -v ON_ERROR_STOP=1 -f backend/migrations/<migration>.sql"
 ```
 
 **Critical Migrations**:
@@ -459,12 +457,12 @@ done
 3. `002b_refresh_tokens.sql`: JWT refresh token storage
 4. Analytics tables: Impressions, revenue, SDK telemetry
 5. VRA tables: Ledger partitioning, network connections
-6. `999_two_factor_auth.sql`: 2FA authentication (added Dec 23, 2025)
+6. `040_two_factor_auth.sql`: 2FA authentication (added Dec 23, 2025)
 
 **Missing Table Fix** (December 23, 2025):
 - **Issue**: Login endpoint returned 500 errors with `relation "two_factor_auth" does not exist`
 - **Root Cause**: Migration file for `two_factor_auth` table was missing
-- **Resolution**: Created `/migrations/999_two_factor_auth.sql` and applied manually
+- **Resolution**: Added `backend/migrations/040_two_factor_auth.sql` and applied via the standard migration path
 - **Result**: Login successful, JWT tokens generated correctly
 
 ### Database Schema Reference

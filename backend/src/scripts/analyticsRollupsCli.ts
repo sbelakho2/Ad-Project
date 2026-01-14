@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
 import logger from '../utils/logger';
+import { closePools } from '../utils/postgres';
 import { runAnalyticsRollups } from '../services/analyticsRollupService';
 
 // Load .env for scripts executed from /opt/adproject/backend.
@@ -76,6 +77,14 @@ const parseUtcDate = (s: string): Date => {
   return new Date(Date.UTC(y, m - 1, d));
 };
 
+const print = (msg: string, data?: Record<string, unknown>) => {
+  // Always emit a human-readable progress line to stdout so long runs don't
+  // look "stalled" when structured logger output isn't visible in nohup/SSH.
+  // Keep it secret-safe (no credentials).
+  // eslint-disable-next-line no-console
+  console.log(`[${new Date().toISOString()}] ${msg}${data ? ` ${JSON.stringify(data)}` : ''}`);
+};
+
 async function main(): Promise<void> {
   const daysArg = parseArg('--days');
   const startArg = parseArg('--start');
@@ -110,6 +119,10 @@ async function main(): Promise<void> {
     startInclusive: startInclusive.toISOString(),
     endExclusive: endExclusive.toISOString(),
   });
+  print('Analytics rollups CLI: starting', {
+    startInclusive: startInclusive.toISOString(),
+    endExclusive: endExclusive.toISOString(),
+  });
 
   // Run day-by-day to keep transactions small and reduce lock pressure.
   for (let d = new Date(startInclusive); d < endExclusive; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1))) {
@@ -119,14 +132,49 @@ async function main(): Promise<void> {
       startInclusive: d.toISOString(),
       endExclusive: next.toISOString(),
     });
+    print('Analytics rollups CLI: running day', {
+      startInclusive: d.toISOString(),
+      endExclusive: next.toISOString(),
+    });
+
+    const t0 = Date.now();
+    const heartbeat = setInterval(() => {
+      print('Analytics rollups CLI: still running day', {
+        startInclusive: d.toISOString(),
+        endExclusive: next.toISOString(),
+        elapsedMs: Date.now() - t0,
+      });
+    }, 60_000);
+    // Allow the process to exit promptly once work completes.
+    heartbeat.unref?.();
 
     await runAnalyticsRollups({ startInclusive: d, endExclusive: next });
+
+    clearInterval(heartbeat);
+
+    print('Analytics rollups CLI: finished day', {
+      startInclusive: d.toISOString(),
+      endExclusive: next.toISOString(),
+      elapsedMs: Date.now() - t0,
+    });
   }
 
   logger.info('Analytics rollups CLI: completed');
+  print('Analytics rollups CLI: completed');
+
+  try {
+    await closePools();
+  } catch {
+    // ignore shutdown errors; the CLI has already completed successfully.
+  }
 }
 
 main().catch(err => {
   logger.error('Analytics rollups CLI: failed', { error: (err as Error).message });
-  process.exit(1);
+  print('Analytics rollups CLI: failed', { error: (err as Error).message });
+  closePools()
+    .catch(() => undefined)
+    .finally(() => {
+      process.exit(1);
+    });
 });

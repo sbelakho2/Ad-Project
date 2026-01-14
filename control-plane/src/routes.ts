@@ -86,12 +86,13 @@ import {
   dropOldPartition,
 } from './adapters/action-gateway';
 
-import {
-  getComplianceStatus,
-  getVatReports,
-  generateAnnualReport,
-  generateTsdReport,
-} from './services/estonian-compliance';
+import { getComplianceStatus, getVatReports, generateAnnualReport, generateTsdReport, generateKmdInfReport, getTaxForecast } from './services/estonian-compliance';
+import { generateVatPDF, generateAnnualReportPDF, generateTsdPDF, generateKmdInfPDF } from './services/pdf-generator';
+import { getBusinessOverview } from './services/business-analytics';
+import { getCohortAnalysis, getRevenueForecast } from './services/advanced-analytics';
+import { processBankStatement, confirmReconciliation } from './services/reconciliation';
+import { getImpersonationLink } from './adapters/backend-api';
+import { queryReadOnly } from './database';
 
 const router = Router();
 
@@ -124,9 +125,7 @@ router.get('/health', (req: Request, res: Response) => {
  */
 router.get('/ready', asyncHandler(async (req: Request, res: Response) => {
   try {
-    const { getReadOnlyPool } = await import('./database.js');
-    const pool = getReadOnlyPool();
-    await pool.query('SELECT 1');
+    await queryReadOnly('SELECT 1');
     res.json({ status: 'ready' });
   } catch (err) {
     res.status(503).json({ status: 'not ready', error: (err as Error).message });
@@ -715,7 +714,6 @@ router.post('/api/v1/actions/drop-partition', asyncHandler(async (req: Request, 
  * Get recent audit logs
  */
 router.get('/api/v1/audit', asyncHandler(async (req: Request, res: Response) => {
-  const { queryReadOnly } = await import('./database.js');
   const limit = parseInt(req.query.limit as string) || 100;
   const actor = req.query.actor as string;
   const action = req.query.action as string;
@@ -752,7 +750,6 @@ router.get('/api/v1/audit', asyncHandler(async (req: Request, res: Response) => 
  * Get current system state
  */
 router.get('/api/v1/system/state', asyncHandler(async (req: Request, res: Response) => {
-  const { queryReadOnly } = await import('./database.js');
   const rows = await queryReadOnly<{ key: string; value: string; updated_at: string }>(`
     SELECT key, value, updated_at FROM system_state ORDER BY key
   `);
@@ -839,14 +836,40 @@ router.get('/api/v1/compliance/vat-reports', requireOperator, asyncHandler(async
   res.json(reports);
 }));
 
+router.get('/api/v1/compliance/vat-reports/:id/pdf', requireOperator, asyncHandler(async (req, res) => {
+  const reports = await getVatReports();
+  const report = reports.find(r => r.id === req.params.id);
+  if (!report) {
+    res.status(404).json({ error: 'Report not found' });
+    return;
+  }
+  const pdf = await generateVatPDF(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=vat-report-${report.year}-Q${report.quarter}.pdf`);
+  res.send(pdf);
+}));
+
 router.get('/api/v1/compliance/annual-report/:year', requireOperator, asyncHandler(async (req, res) => {
   const year = parseInt(req.params.year);
   if (isNaN(year)) {
     res.status(400).json({ error: 'Invalid year' });
     return;
   }
-  const report = await generateAnnualReport(year);
+  const report = await generateAnnualReport(year, (req as any).operator?.username);
   res.json(report);
+}));
+
+router.get('/api/v1/compliance/annual-report/:year/pdf', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  if (isNaN(year)) {
+    res.status(400).json({ error: 'Invalid year' });
+    return;
+  }
+  const report = await generateAnnualReport(year);
+  const pdf = await generateAnnualReportPDF(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=annual-report-${year}.pdf`);
+  res.send(pdf);
 }));
 
 router.get('/api/v1/compliance/tsd-report/:year', requireOperator, asyncHandler(async (req, res) => {
@@ -860,6 +883,134 @@ router.get('/api/v1/compliance/tsd-report/:year', requireOperator, asyncHandler(
   
   const report = await generateTsdReport(year, month);
   res.json(report);
+}));
+
+router.get('/api/v1/compliance/tsd-report/:year/pdf', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
+  
+  if (isNaN(year)) {
+    res.status(400).json({ error: 'Invalid year' });
+    return;
+  }
+  
+  const report = await generateTsdReport(year, month);
+  const pdf = await generateTsdPDF(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=tsd-report-${year}${month ? '-M' + month : ''}.pdf`);
+  res.send(pdf);
+}));
+
+router.get('/api/v1/compliance/kmd-inf/:year/:month', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  const month = parseInt(req.params.month);
+  const report = await generateKmdInfReport(year, month);
+  res.json(report);
+}));
+
+router.get('/api/v1/compliance/kmd-inf/:year/:month/pdf', requireOperator, asyncHandler(async (req, res) => {
+  const year = parseInt(req.params.year);
+  const month = parseInt(req.params.month);
+  const report = await generateKmdInfReport(year, month);
+  const pdf = await generateKmdInfPDF(report);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=kmd-inf-${year}-${month}.pdf`);
+  res.send(pdf);
+}));
+
+router.get('/api/v1/compliance/forecast', requireOperator, asyncHandler(async (req, res) => {
+  const forecast = await getTaxForecast();
+  res.json({ forecast });
+}));
+
+// ============================================
+// DATA EXPLORER ROUTES
+// ============================================
+
+/**
+ * List users (publishers)
+ */
+router.get('/api/v1/data/users', requireOperator, asyncHandler(async (req, res) => {
+  const users = await queryReadOnly(`
+    SELECT id, email, company_name, created_at, status
+    FROM users
+    ORDER BY created_at DESC
+    LIMIT 100
+  `);
+  res.json({ users });
+}));
+
+/**
+ * List invoices
+ */
+router.get('/api/v1/data/invoices', requireOperator, asyncHandler(async (req, res) => {
+  const invoices = await queryReadOnly(`
+    SELECT i.id, i.invoice_number, u.email as customer_email, i.total_cents, i.status, i.issue_date
+    FROM invoices i
+    JOIN users u ON i.customer_id = u.id
+    ORDER BY i.issue_date DESC
+    LIMIT 100
+  `);
+  res.json({ invoices });
+}));
+
+// ============================================
+// BUSINESS ANALYTICS ROUTES
+// ============================================
+
+/**
+ * Get business metrics overview
+ */
+router.get('/api/v1/analytics/overview', requireOperator, asyncHandler(async (req, res) => {
+  const overview = await getBusinessOverview();
+  res.json(overview);
+}));
+
+/**
+ * Advanced Analytics: Cohorts
+ */
+router.get('/api/v1/analytics/cohorts', requireOperator, asyncHandler(async (req, res) => {
+  const cohorts = await getCohortAnalysis();
+  res.json({ cohorts });
+}));
+
+/**
+ * Advanced Analytics: Forecast
+ */
+router.get('/api/v1/analytics/forecast', requireOperator, asyncHandler(async (req, res) => {
+  const forecast = await getRevenueForecast();
+  res.json({ forecast });
+}));
+
+// ============================================
+// RECONCILIATION ROUTES
+// ============================================
+
+/**
+ * Process bank statement
+ */
+router.get('/api/v1/reconciliation/process', requireOperator, asyncHandler(async (req, res) => {
+  const matches = await processBankStatement((req as any).operator?.username);
+  res.json({ matches });
+}));
+
+/**
+ * Confirm reconciliation
+ */
+router.post('/api/v1/reconciliation/confirm', requireOperator, asyncHandler(async (req, res) => {
+  const { match } = req.body;
+  const ok = await confirmReconciliation(match, (req as any).operator?.username);
+  res.json({ ok });
+}));
+
+/**
+ * Get impersonation link for a user
+ */
+router.post('/api/v1/support/impersonate', requireOperator, asyncHandler(async (req, res) => {
+  const { userId } = req.body;
+  const operator = (req as any).operator?.username;
+  const result = await getImpersonationLink(userId, operator);
+  res.json(result);
 }));
 
 export default router;

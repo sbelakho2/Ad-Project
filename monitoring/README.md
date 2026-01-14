@@ -44,9 +44,12 @@ Services will be available at:
 
 > 🗃 Grafana dashboards are provisioned read-only (`allowUiUpdates=false`). To apply tweaks: edit the JSON under `monitoring/grafana/`, copy it into `monitoring/dashboards/` (or `kubectl create configmap ... --from-file` in clusters), then restart the stack so Grafana reloads the exported files. Avoid editing dashboards in the UI or changes will be discarded on the next deploy. When you *do* prototype in the UI, capture the results with `./deploy-monitoring.sh export-dashboards` (requires `GRAFANA_API_KEY` + optional `GRAFANA_URL`) so the JSON in source control stays authoritative.
 
-> 🌐 Set `GF_SERVER_ROOT_URL` in `.env` when you want Grafana to advertise a non-localhost URL (e.g., a Fly.io preview). The compose file now defaults this to `http://localhost:3000`, which keeps login redirects working during local development.
+> 🌐 Set `GF_SERVER_ROOT_URL` in `.env` when you want Grafana to advertise a non-localhost URL. The compose file now defaults this to `http://localhost:3000`, which keeps login redirects working during local development.
 
-> 📡 Prometheus scrape targets live in `.env` (`BACKEND_METRICS_TARGET`, `CONSOLE_METRICS_TARGET`, etc.). Point them at `host.docker.internal:<port>` for local services or keep the default Fly.io hosts for staging/prod. The deploy script rewrites `prometheus.generated.yml` with whatever hosts you configure.
+> 📡 Prometheus scrape targets live in `.env` (`BACKEND_METRICS_TARGET`, `CONSOLE_METRICS_TARGET`, etc.).
+> - Local development: use `host.docker.internal:<port>`.
+> - Hetzner (Docker scraping host services): use `172.17.0.1:<port>` (e.g. `172.17.0.1:8080`).
+> The deploy script rewrites `prometheus.generated.yml` with whatever hosts you configure.
 
 ### Production Deployment
 

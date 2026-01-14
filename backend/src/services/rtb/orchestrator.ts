@@ -11,6 +11,8 @@ import * as breaker from '../../utils/redisCircuitBreaker';
 import { generateLandscapeId } from './auctionIdempotency';
 import { scoreShadow, ShadowScoreInput } from '../inference/shadowFraudScoring';
 import { recordPerformanceMetric } from '../performanceMetricsRecorder';
+import { getFraudSettings } from '../publisherSettingsService';
+import logger from '../../utils/logger';
 
 const envInt = (key: string, dflt: number) => {
   const v = parseInt(process.env[key] || '', 10);
@@ -77,6 +79,7 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
   const armLabel = migration ? migration.arm : 'control';
   const metricLabels = { arm: armLabel, exp_id: migration?.experimentId ?? 'none' } as const;
   const decisionStartedAt = Date.now();
+  const fraudSettings = await getFraudSettings(input.publisherId);
 
   const recordDeadlineHit = (latencyMs: number, meta?: Record<string, unknown>) => {
     try {
@@ -227,12 +230,13 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
     const bidId = crypto.randomUUID();
     const landscapeId = generateLandscapeId(requestId, bidId);
 
-    // Shadow fraud scoring: score ALL requests but NEVER block traffic (SDK_CHECKS 7.1)
-    // This is async/fire-and-forget - auction proceeds regardless of scoring result
+    // Fraud scoring: score ALL requests.
+    // If autoBlock is enabled, we await the result to potentially block traffic.
     const deviceRecord = (input.device as Record<string, unknown>) || {};
-    void scoreShadow({
+    const scoringPromise = scoreShadow({
       requestId,
       placementId: input.placementId,
+      publisherId: input.publisherId,
       deviceInfo: {
         ip: deviceRecord.ip as string | undefined,
         userAgent: deviceRecord.ua as string | undefined,
@@ -247,7 +251,40 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
         latencyMs,
       },
       metadata: migration ? { experimentId: migration.experimentId, arm: migration.arm } : undefined,
-    }).catch(() => { /* silent fail - shadow scoring must never impact auction */ });
+    });
+
+    if (fraudSettings.autoBlock) {
+      try {
+        const fraudResult = await scoringPromise;
+        if (fraudResult && fraudResult.score >= fraudSettings.autoBlockThreshold) {
+          logger.info('Blocking fraudulent bid', {
+            requestId,
+            publisherId: input.publisherId,
+            score: fraudResult.score,
+            threshold: fraudSettings.autoBlockThreshold,
+            reasons: fraudResult.reasons,
+          });
+
+          // Record as blocked in shadow outcomes if in an experiment
+          if (migration) {
+            await recordOutcome('error', {
+              errorReason: 'FRAUD_BLOCKED',
+              metadata: {
+                ...(baseMetadata || {}),
+                fraud_score: fraudResult.score,
+              },
+            });
+          }
+
+          return { success: false, landscapeId, reason: 'FRAUD_BLOCKED', latencyMs: Date.now() - decisionStartedAt };
+        }
+      } catch (e) {
+        logger.warn('Fraud scoring failed during autoBlock check; allowing bid (fail-open)', { error: e, requestId });
+      }
+    } else {
+      // Fire-and-forget in shadow mode
+      scoringPromise.catch(() => { /* silent fail */ });
+    }
 
     if (migration && mode === 'shadow') {
       await recordOutcome('win', {

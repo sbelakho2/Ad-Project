@@ -8,6 +8,17 @@ export interface RunAnalyticsRollupsParams {
 
 const formatUtcDate = (d: Date): string => d.toISOString().slice(0, 10);
 
+const formatUtcMonthSuffix = (d: Date): string => {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}_${m}`;
+};
+
+const firstOfUtcMonth = (d: Date): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+
+const addUtcMonths = (d: Date, months: number): Date =>
+  new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1));
+
 const rollupTables = [
   'analytics_impression_rollups',
   'analytics_click_rollups',
@@ -37,6 +48,81 @@ async function rollupTablesExist(): Promise<boolean> {
   return true;
 }
 
+async function ensureMonthlyRollupPartitions(
+  client: { query: (sql: string) => Promise<unknown> },
+  startInclusive: Date,
+  endExclusive: Date
+): Promise<void> {
+  const isDefaultPartitionConstraintViolation = (err: unknown): boolean => {
+    const anyErr = err as { message?: string };
+    const msg = (anyErr?.message ?? '').toLowerCase();
+    return msg.includes('updated partition constraint for default partition') && msg.includes('would be violated by some row');
+  };
+
+  // The intended production design is monthly RANGE partitions on bucket_date.
+  // If the ops script/cron isn't running, rollups accumulate in the DEFAULT partition,
+  // which grows unbounded and becomes a performance + maintenance risk.
+  const startMonth = firstOfUtcMonth(startInclusive);
+  const endMonth = firstOfUtcMonth(endExclusive);
+
+  for (let cur = startMonth; cur.getTime() <= endMonth.getTime(); cur = addUtcMonths(cur, 1)) {
+    const next = addUtcMonths(cur, 1);
+    const fromYmd = formatUtcDate(cur);
+    const toYmd = formatUtcDate(next);
+    const suffix = formatUtcMonthSuffix(cur);
+
+    for (const parent of rollupTables) {
+      const partition = `${parent}_${suffix}`;
+
+      // Hard safety: only allow expected identifier characters.
+      if (!/^[a-z0-9_]+$/i.test(partition) || !/^[a-z0-9_]+$/i.test(parent)) {
+        throw new Error(`Invalid rollup partition identifier: parent=${parent} partition=${partition}`);
+      }
+
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF EXISTS (
+              SELECT 1 FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname='public' AND c.relname = '${parent}'
+            ) THEN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_tables
+                WHERE schemaname='public' AND tablename='${partition}'
+              ) THEN
+                EXECUTE format(
+                  'CREATE TABLE public.%I PARTITION OF public.%I FOR VALUES FROM (%L) TO (%L)',
+                  '${partition}',
+                  '${parent}',
+                  '${fromYmd}',
+                  '${toYmd}'
+                );
+              END IF;
+            END IF;
+          END $$;
+        `);
+      } catch (err) {
+        // If DEFAULT already contains rows that belong to the new partition range,
+        // Postgres refuses to create/attach the partition until those rows are moved.
+        // Don't fail rollups here; warn and let ops migrate DEFAULT rows.
+        if (isDefaultPartitionConstraintViolation(err)) {
+          logger.warn('Analytics rollups: cannot create monthly partition because DEFAULT contains rows in-range; migrate DEFAULT first', {
+            parent,
+            partition,
+            fromYmd,
+            toYmd,
+            error: (err as Error).message,
+          });
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+}
+
 export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunAnalyticsRollupsParams): Promise<void> {
   const startDay = formatUtcDate(startInclusive);
   const endDay = formatUtcDate(endExclusive);
@@ -48,9 +134,31 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
 
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-    await client.query("SET LOCAL statement_timeout = '120s'");
-    await client.query("SET LOCAL lock_timeout = '5s'");
+    const maxAttempts = 3;
+    const isRetryableLockError = (err: unknown): boolean => {
+      const anyErr = err as { code?: string; message?: string };
+      const code = anyErr?.code;
+      const msg = (anyErr?.message ?? '').toLowerCase();
+      return code === '55P03' || code === '40P01' || msg.includes('lock timeout') || msg.includes('deadlock');
+    };
+
+    const sleepMs = async (ms: number): Promise<void> =>
+      new Promise(resolve => {
+        setTimeout(resolve, ms);
+      });
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        // Apply lock timeout for the session during partition creation too.
+        await client.query("SET lock_timeout = '30s'");
+
+        // Ensure monthly rollup partitions exist (keeps rollups bounded and maintenance-friendly).
+        await ensureMonthlyRollupPartitions(client, startInclusive, endExclusive);
+
+        await client.query('BEGIN');
+        await client.query("SET LOCAL statement_timeout = '120s'");
+        // Production reality: rollups compete with reads/writes; 5s is too aggressive and causes wedge.
+        await client.query("SET LOCAL lock_timeout = '30s'");
 
     // 1) Impression rollups
     await client.query(
@@ -330,12 +438,39 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
       [startInclusive, endExclusive]
     );
 
-    await client.query('COMMIT');
-    logger.info('Analytics rollups: completed', { startDay, endDay });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    logger.error('Analytics rollups: failed', { startDay, endDay, error: (error as Error).message });
-    throw error;
+        await client.query('COMMIT');
+        logger.info('Analytics rollups: completed', { startDay, endDay, attempt });
+        return;
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // ignore
+        }
+
+        if (isRetryableLockError(error) && attempt < maxAttempts) {
+          const backoffMs = attempt === 1 ? 1000 : attempt === 2 ? 3000 : 10000;
+          logger.warn('Analytics rollups: retrying after lock contention', {
+            startDay,
+            endDay,
+            attempt,
+            backoffMs,
+            error: (error as Error)?.message,
+          });
+          await sleepMs(backoffMs);
+          continue;
+        }
+
+        throw error;
+      } finally {
+        // Clean up any session-level overrides.
+        try {
+          await client.query('RESET lock_timeout');
+        } catch {
+          // ignore
+        }
+      }
+    }
   } finally {
     client.release();
   }

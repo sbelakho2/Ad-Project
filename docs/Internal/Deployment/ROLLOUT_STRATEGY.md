@@ -2,12 +2,12 @@
 
 > DEPRECATION NOTICE (2025-11-25)
 >
-> This document contains references to legacy providers such as Fly.io, Supabase-as-primary, and Upstash.
+> This document contains references to legacy providers and deprecated infrastructure approaches.
 > The authoritative production path is now DigitalOcean droplet (FRA1) + DO Managed Postgres (TLS `?sslmode=require`)
 > + self‑hosted Redis behind a private bridge, with Nginx TLS and gated HSTS, as defined by
 > `docs/Internal/Infrastructure/INFRASTRUCTURE_MIGRATION_PLAN.md`, `docs/Internal/Infrastructure/DO_READINESS_CHECKLIST.md`,
 > and `docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md`.
-> Keep this file for historical context only; do not plan new work against Fly/Upstash/etc.
+> Keep this file for historical context only; do not plan new work against deprecated providers.
 
 **Company:** Bel Consulting OÜ  
 **Product:** ApexMediation - Mobile Ad Mediation SDK  
@@ -1781,9 +1781,9 @@ Template: https://postmortems.pagerduty.com/
 
 ---
 
-> Update — 2025-11-24: DigitalOcean-Centric Costing
+> Update — 2026-01-12: Hetzner-Only Production
 >
-> The recommended baseline stack is now DigitalOcean droplet (2 vCPU/4GB) + DO Managed Postgres + Redis on-droplet + Spaces/B2. Monitoring uses DO built-ins with optional on-box Prometheus/Grafana. Historical Fly.io/Supabase references remain below for context but are no longer the primary plan.
+> The recommended baseline stack is now Hetzner (app server + DB server). Monitoring runs self-hosted.
 
 ## Summary: The Automated Solo Operator Model
 
@@ -1802,8 +1802,8 @@ Template: https://postmortems.pagerduty.com/
 
 | Category | Cost | Automation Strategy | Free Alternative Used |
 |----------|------|---------------------|----------------------|
-| **Infrastructure** | $44-49 | DigitalOcean droplet ($24) + DO Managed Postgres ($15) + Redis on droplet ($0) + Spaces/B2 ($5) | Historic: Fly.io + Supabase + Upstash + ClickHouse |
-| **Monitoring** | $0 | Self-hosted Grafana + Prometheus + Loki on Fly.io | Replace Datadog ($300+/mo) |
+| **Infrastructure** | $ | Hetzner app+DB servers + Redis on app server + object storage | Legacy stack removed |
+| **Monitoring** | $ | Self-hosted Grafana + Prometheus + Loki (Hetzner) | Replace Datadog ($300+/mo) |
 | **Error Tracking** | $0 | Sentry free tier (5K events/mo) + GlitchTip self-hosted | Datadog APM |
 | **Email** | $0-15 | Resend.com (3K emails/mo free) or Amazon SES ($0.10/1K) | SendGrid $15+/mo |
 | **Uptime Monitoring** | $0 | BetterStack free tier (10 monitors) + self-hosted Upptime | UptimeRobot paid |
@@ -1814,7 +1814,7 @@ Template: https://postmortems.pagerduty.com/
 | **CI/CD** | $0 | GitHub Actions (3000 min/mo free) | CircleCI/Travis paid |
 | **SSL/CDN** | $0 | Cloudflare Free tier | AWS CloudFront |
 | **Documentation** | $0 | Docusaurus on Cloudflare Pages | GitBook $29/mo |
-| **Secrets Management** | $0 | Infisical self-hosted on Fly.io | AWS Secrets Manager $0.40/secret |
+| **Secrets Management** | $ | Secrets stored and managed for Hetzner deployments | AWS Secrets Manager $0.40/secret |
 | **Backup Storage** | $10 | Backblaze B2 ($5/TB) + Cloudflare R2 ($5) | AWS S3 $23/TB |
 | **Domain** | $12/yr | Cloudflare Registrar (at-cost pricing) | GoDaddy $20+/yr |
 | **Marketing** | $0-50 | Organic only: SEO, content, community | Paid ads $500+/mo |
@@ -1851,29 +1851,17 @@ stack:
 # Total infrastructure: ~$150/mo (vs AWS $500-1500/mo)
 ```
 
-**2. Monitoring Stack (100% Free)**
+**2. Monitoring Stack (Self-Hosted)**
 
 ```yaml
-# Self-hosted observability on single Fly.io VM ($7/mo)
 monitoring:
   metrics: prometheus  # Time-series metrics
-  logs: loki  # Log aggregation
-  traces: tempo  # Distributed tracing
+  logs: loki           # Log aggregation
   dashboards: grafana  # Unified UI
-  alerting: alertmanager  # Alert routing
-  
-# Deploy script:
-fly.io:
-  app: apexmediation-monitoring
-  vm: shared-cpu-1x  # $0.01/hour = $7/mo
-  storage: 10GB volume  # $1.50/mo
-  
-# Replace expensive SaaS:
-# - Datadog ($300+/mo) → Grafana stack ($8.50/mo)
-# - New Relic ($99+/mo) → Prometheus + Tempo ($0)
-# - PagerDuty ($21+/mo) → Alertmanager + Ntfy.sh ($0)
+  alerting: alertmanager
 
-# Savings: $420+/month
+# Deployment: Hetzner (Docker Compose) on the monitoring host/network.
+# See: monitoring/README.md and docs/Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md
 ```
 
 **3. Email Automation (100% Free for <10K customers)**
@@ -1975,7 +1963,7 @@ marketing_stack:
   social_media:
     - buffer_free_tier: 3 social accounts, 10 posts/queue
     - ifttt: auto-cross-post (blog → Twitter/LinkedIn/Reddit)
-    - zapier_alternative: n8n self-hosted on Fly.io
+    - zapier_alternative: n8n self-hosted (Hetzner)
     
   email_marketing:
     - listmonk_self_hosted: unlimited subscribers, $7/mo VM
@@ -2000,11 +1988,10 @@ cicd:
   optimization:
     - cache_dependencies: 90% faster builds
     - matrix_strategy: parallel testing
-    - self_hosted_runner: unlimited minutes on Fly.io VM
+    - self_hosted_runner: unlimited minutes on a Hetzner runner
     
   deployment:
-    - flyctl: zero-downtime deployments
-    - kubernetes: overkill for solo operator, use Fly.io apps
+    - ssh_rsync: deploy via scripts/ + PM2
     - cost: $0 (vs CircleCI $70/mo, GitLab CI $19/mo)
 
 infrastructure_as_code:
@@ -2013,7 +2000,7 @@ infrastructure_as_code:
   - ansible: server configuration
   
 secrets_management:
-  - infisical_self_hosted: on Fly.io $7/mo VM
+  - infisical_self_hosted: on Hetzner
   - vs_aws_secrets_manager: $0.40/secret/mo = $40/mo for 100 secrets
   - savings: $33/month
 ```
@@ -2028,14 +2015,14 @@ error_tracking:
     upgrade_at: >5K errors/mo (indicates bigger problems!)
     
   glitchtip_self_hosted:
-    cost: $7/mo Fly.io VM
+    cost: Hetzner VM / existing server capacity
     unlimited_events: true
     compatible_with: sentry SDK (drop-in replacement)
     
 logging:
   loki_self_hosted: part of monitoring stack
   retention: 30 days (vs CloudWatch 7 days free)
-  cost: $1.50/mo for 10GB Fly.io volume
+  cost: included in Hetzner disk capacity
   
 # vs Datadog Logs: $0.10/GB ingested = $50+/mo
 # Savings: $48.50/month
@@ -2069,9 +2056,9 @@ database_strategy:
       - serverless (pay for usage)
     benefit: cheaper for inconsistent traffic
     
-  # Option C: Fly.io Postgres (DIY)
-  fly_postgres:
-    cost: $7/mo VM + $1.50/mo storage
+  # Option C: Self-hosted Postgres (DIY)
+  self_hosted_postgres:
+    cost: host VM + storage
     maintenance: manual (backups, upgrades)
     savings: $16/mo vs Supabase
     trade_off: time vs money
@@ -2110,8 +2097,8 @@ export class SelfHealingService {
       if (!health.ok) {
         console.log(`Service ${service} unhealthy, restarting...`);
         
-        // Fly.io: auto-restart unhealthy instances
-        await fly.machines.restart(service);
+        // Auto-restart unhealthy instances via process manager (PM2/systemd)
+        await processManager.restart(service);
         
         // Alert only if restart fails
         if (!await this.checkHealthRetry(service)) {
@@ -2128,19 +2115,19 @@ export class SelfHealingService {
    */
   async autoScale() {
     const metrics = await prometheus.query('api_request_rate_5m');
-    const currentReplicas = await fly.machines.count('api');
+    const currentReplicas = await capacityManager.currentReplicas('api');
     
     // Scale up: >100 req/s per instance
     if (metrics.value > currentReplicas * 100) {
       const newCount = Math.min(currentReplicas + 2, 10);
-      await fly.machines.scale('api', newCount);
+      await capacityManager.scale('api', newCount);
       await this.log(`Scaled up to ${newCount} instances`);
     }
     
     // Scale down: <20 req/s per instance (after 10 min)
     if (metrics.value < currentReplicas * 20) {
       const newCount = Math.max(currentReplicas - 1, 2);
-      await fly.machines.scale('api', newCount);
+      await capacityManager.scale('api', newCount);
       await this.log(`Scaled down to ${newCount} instances`);
     }
   }

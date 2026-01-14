@@ -26,10 +26,7 @@ dependencies {
 In your `Application` class or main `Activity`. You can configure the SDK using the `SDKConfig` builder.
 
 ```kotlin
-import com.rivalapexmediation.sdk.BelAds
-import com.rivalapexmediation.sdk.SDKConfig
-import com.rivalapexmediation.sdk.LogLevel
-
+// In your Application class or main Activity.
 class MyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
@@ -53,9 +50,6 @@ class MyApplication : Application() {
 Use `BelInterstitial` for interstitial ads.
 
 ```kotlin
-import com.rivalapexmediation.sdk.BelInterstitial
-import com.rivalapexmediation.sdk.AdLoadCallback
-
 // Load
 BelInterstitial.load(context, "PLACEMENT_ID", object : AdLoadCallback {
     override fun onAdLoaded(placementId: String) {
@@ -141,8 +135,6 @@ If you use code shrinking, add these rules to `proguard-rules.pro`:
 Open the **Mediation Debugger** to verify your integration and adapter status:
 
 ```kotlin
-import com.rivalapexmediation.sdk.debug.DebugPanel
-
 // Launch the debugger activity
 DebugPanel.open(context)
 ```

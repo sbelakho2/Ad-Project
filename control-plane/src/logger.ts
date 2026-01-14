@@ -37,25 +37,5 @@ export const auditLogger = winston.createLogger({
   ],
 });
 
-/**
- * Log an audit event (immutable, compliance-grade)
- */
-export interface AuditEvent {
-  actor: string;
-  action: string;
-  target?: string;
-  preState?: unknown;
-  postState?: unknown;
-  result: 'success' | 'failure' | 'denied';
-  reason?: string;
-  ip?: string;
-  userAgent?: string;
-}
-
-export function logAudit(event: AuditEvent): void {
-  auditLogger.info('AUDIT', {
-    ...event,
-    timestamp: new Date().toISOString(),
-    retentionYears: parseInt(getConfig().AUDIT_RETENTION_YEARS, 10),
-  });
-}
+import { logAudit, AuditEvent } from './audit';
+export { AuditEvent, logAudit };

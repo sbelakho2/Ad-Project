@@ -137,7 +137,7 @@ describe('Compliance API Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual(mockReport);
-      expect(generateAnnualReport).toHaveBeenCalledWith(2025);
+      expect(generateAnnualReport).toHaveBeenCalledWith(2025, undefined);
     });
 
     it('should return 400 for invalid year', async () => {

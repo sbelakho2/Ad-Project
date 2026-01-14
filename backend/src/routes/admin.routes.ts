@@ -9,6 +9,8 @@ import logger from '../utils/logger';
 import { redis } from '../utils/redis';
 import { reconciliationService } from '../services/reconciliationService';
 import { AppError } from '../middleware/errorHandler';
+import jwt from 'jsonwebtoken';
+import { User } from '../database/entities/user.entity';
 
 const router = Router();
 
@@ -192,27 +194,54 @@ router.post('/billing/resend-invoice', async (req: Request, res: Response, next:
 
 /**
  * POST /api/v1/admin/impersonate/start
- * Read-only impersonation scaffold (feature-flagged via ADMIN_IMPERSONATION_ENABLED)
+ * Issues a short-lived impersonation token for a target user
  */
 router.post('/impersonate/start', async (req: Request, res: Response, next: NextFunction) => {
   const enabled = process.env.ADMIN_IMPERSONATION_ENABLED === 'true';
   if (!enabled) {
     return res.status(404).json({ success: false, error: 'Impersonation disabled' });
   }
+
   try {
-    const actor = (req.user as any)?.userId || null;
-    const orgId = (req.user as any)?.organizationId || (req.user as any)?.orgId || null;
-    await query(
-      `INSERT INTO billing_audit (organization_id, actor_user_id, event_type, metadata, created_at)
-       VALUES ($1, $2, $3, $4, NOW())`,
-      [orgId, actor, 'admin_impersonation_start', JSON.stringify({})]
+    const { userId } = req.body;
+    if (!userId) throw new AppError('userId is required', 400);
+
+    // 1. Verify user exists
+    const userRepo = AppDataSource.getRepository(User);
+    const targetUser = await userRepo.findOne({ where: { id: userId } });
+    if (!targetUser) throw new AppError('Target user not found', 404);
+
+    // 2. Generate short-lived JWT (1 hour)
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new AppError('JWT_SECRET not configured', 500);
+
+    const token = jwt.sign(
+      {
+        userId: targetUser.id,
+        email: targetUser.email,
+        role: 'publisher', // Force publisher role for safety
+        organizationId: (targetUser as any).organizationId,
+        impersonatedBy: req.user?.email
+      },
+      jwtSecret,
+      { expiresIn: '1h' }
     );
-  } catch (e) {
-    // best-effort audit write
-    void e;
+
+    // 3. Audit
+    await query(
+      `INSERT INTO billing_audit (organization_id, actor, event_type, data, created_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [(targetUser as any).organizationId ?? null, req.user?.email, 'admin_impersonation_start', JSON.stringify({ targetUserId: userId })]
+    ).catch(e => logger.warn('Audit fail', { error: e }));
+
+    return res.json({ 
+      success: true, 
+      token,
+      consoleUrl: `${process.env.CONSOLE_URL || 'http://localhost:3000'}/auth/impersonate?token=${token}`
+    });
+  } catch (err) {
+    next(err);
   }
-  // In a real implementation, set a signed cookie/header to indicate read-only impersonation context
-  return res.json({ success: true, message: 'Impersonation started (read-only scaffold)' });
 });
 
 /**

@@ -98,6 +98,23 @@ export class HealthCheckController {
     const endTime = new Date(Date.now() + 5 * 60 * 1000);
     const startTime = new Date(endTime.getTime() - days * 24 * 60 * 60 * 1000);
 
+    const redisCacheKey = `publicSLOs:v1:days:${days}`;
+    try {
+      const redisCached = await redis.get<unknown>(redisCacheKey);
+      if (redisCached) {
+        HealthCheckController.publicSLOCache = {
+          expiresAtMs: now + 60 * 1000,
+          payload: redisCached,
+        };
+
+        res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=900');
+        res.status(200).json(redisCached);
+        return;
+      }
+    } catch (error) {
+      logger.warn('[HealthCheck] Redis SLO cache read failed', { error });
+    }
+
     try {
       const sql = `
         WITH impression_metrics AS (
@@ -248,6 +265,13 @@ export class HealthCheckController {
         expiresAtMs: now + 5 * 60 * 1000,
         payload,
       };
+
+      // Best-effort cross-process cache to avoid heavy SLO scans on every node.
+      try {
+        await redis.set(redisCacheKey, payload, 300);
+      } catch (error) {
+        logger.warn('[HealthCheck] Redis SLO cache write failed', { error });
+      }
 
       res.set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=900');
       res.status(200).json(payload);

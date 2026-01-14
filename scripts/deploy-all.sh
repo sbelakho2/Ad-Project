@@ -15,7 +15,14 @@
 set -euo pipefail
 
 # Configuration
+# Hetzner production deployments must ONLY target the App Server.
+# The Test Server is reserved for SDK harness/synthetic traffic and must not receive production deploys.
 SERVER="46.62.252.96"
+if [[ -n "${DEPLOY_SERVER:-}" && "${DEPLOY_SERVER}" != "$SERVER" ]]; then
+    echo "[ERROR] Refusing to deploy to non-app server (DEPLOY_SERVER=${DEPLOY_SERVER})." >&2
+    echo "[TIP] Deployments are restricted to Hetzner App Server (${SERVER})." >&2
+    exit 2
+fi
 SSH_KEY="$HOME/.ssh/hetzner-db-mac"
 DEPLOY_USER="root"
 DEPLOY_PATH="/opt/adproject"
@@ -56,6 +63,7 @@ DEPLOY_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 log_info "======================================"
 log_info "Starting deployment: $COMPONENT"
 log_info "Timestamp: $DEPLOY_TIMESTAMP"
+log_info "Target server: $SERVER (app server only)"
 log_info "======================================"
 
 #
@@ -125,7 +133,7 @@ deploy_backend() {
     
     # 5. Run database migrations
     log_info "Running database migrations..."
-    ssh_cmd "cd $DEPLOY_PATH/backend && npm run migration:run 2>/dev/null || echo 'No migrations or migration script not found'"
+    ssh_cmd "ROOT=\"$DEPLOY_PATH\"; if [[ -f \"$DEPLOY_PATH/.env\" ]]; then source \"$DEPLOY_PATH/scripts/ops/source_env.sh\" \"$DEPLOY_PATH/.env\" >/dev/null; fi; cd \"$DEPLOY_PATH/backend\" && (npm run migrate 2>/dev/null || npm run migrate:legacy 2>/dev/null || echo 'No migrations or migration script not found')"
     
     # 6. Rebuild TypeScript on server
     log_info "Building on server..."
@@ -133,7 +141,7 @@ deploy_backend() {
     
     # 7. Restart PM2 process
     log_info "Restarting backend service..."
-    ssh_cmd "pm2 restart backend || pm2 start $DEPLOY_PATH/backend/dist/index.js --name backend"
+    ssh_cmd "pm2 restart backend || pm2 start $DEPLOY_PATH/backend/dist/src/index.js --name backend"
     
     # 8. Wait and verify
     sleep 3

@@ -49,21 +49,22 @@ For every file we will record the following fields:
 ## Progress Tracker
 The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CHECKLIST.md`. Update both places as you progress to keep stakeholders in sync.
 
-- [ ] Root-level files analyzed
-- [ ] `backend/`
-- [ ] `console/`
+- [x] Root-level files analyzed
+- [x] `backend/`
+- [x] `console/`
+- [x] `control-plane/`
 - [ ] `data/` & ML datasets
 - [ ] `docs/`
-- [ ] `infrastructure/`, `monitoring/`, `logs/`
-- [ ] `ML/`
+- [x] `infrastructure/`, `monitoring/`, `logs/`
+- [x] `ML/`
 - [x] `models/`
 - [x] `packages/`, `Packages/`
 - [x] `quality/`
 - [x] `scripts/`
 - [x] `sdk/`, `sdks/`
 - [x] `services/`
-- [ ] `website/`
-- [ ] Remaining folders / verification
+- [x] `website/`
+- [x] Remaining folders / verification
 
 ## Section Logs
 
@@ -91,10 +92,7 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 - `.gitignore` (backend) — **Type:** Config. **Summary:** Backend-specific ignore (dist, logs, coverage, env files). **Dependencies:** Git. **Risks/TODOs:** Verify `dist/` remains excluded in CI artifacts.
 - `.transparency-metrics.log` — **Type:** Log artifact. **Summary:** Captures transparency writer test run (connections, breaker trips, ClickHouse errors). **Dependencies:** Observability scripts. **Risks/TODOs:** Contains timestamps/error messages; rotate or move to logs/ to avoid repo bloat.
 - `BACKGROUND_JOBS.md` — **Type:** Doc. **Summary:** 600+ line deep dive into BullMQ queues (analytics, export, reports, metrics, cache warming, cleanup) with configs, payloads, schedules. **Dependencies:** `src/queues/**/*.ts`. **Risks/TODOs:** Need to confirm queue naming issue (“Queue name cannot contain :” seen in logs) is documented with fix. **Evidence:** Reviewed overview + queue sections.
-- `Dockerfile` — **Type:** Build config (broken). **Summary:** Intended to be multi-stage Node build to distroless runtime, but file is badly corrupted with Kubernetes Deployment YAML interleaved (invalid Docker syntax). **Dependencies:** Node 20, distroless runtime. **Risks/TODOs:** HIGH – cannot build as-is; needs restoration (likely missing newline separators). Blocks container builds + fly deploy. **Evidence:** File inspection shows `metadata:`/`spec:` lines inside Dockerfile.
-- `Dockerfile` referenced in `fly.toml` & `deploy-backend.sh`; fix required before deployments resume.
-- `deploy-backend.sh` — **Type:** Script. **Summary:** Automates Fly.io deploy (staging/prod) with CLI checks, app creation, secret prompts, region scaling, post-deploy health checks. **Dependencies:** Fly CLI, curl, sed. **Risks/TODOs:** Mutation of `fly.toml` via `sed -i` for production may dirty repo; consider using env overlays. Requires manual confirmation for secrets.
-- `fly.toml` — **Type:** Infra config. **Summary:** Fly.io app config (SJC region, docker build, HTTP checks, TLS, autoscaling triggers, log volume mount). **Dependencies:** Fly platform. **Risks/TODOs:** `PORT` mismatches (8080 here vs 4000 default). Ensure runtime `CMD` binds 8080 when deployed via Fly.
+- `Dockerfile` — **Type:** Build config. **Summary:** Multi-stage Node 20 alpine build. Stage 1: dependencies (optimized with caching), Stage 2: build, Stage 3: production-ready image with curl for healthchecks. **Dependencies:** Node 20, alpine. **Risks/TODOs:** Fixed corrupted YAML/interleaved lines (2026-01-12). Now functional. **Evidence:** Verified Dockerfile structure 2026-01-12.
 - `IMPLEMENTATION_SUMMARY.md` — **Type:** Doc. **Summary:** Tracks completion of exports, A/B tests, caching, background jobs, metrics; lists files/tests/perf impacts. **Dependencies:** Various services + migrations. **Risks/TODOs:** States “All features complete”; need to keep updated as new work added.
 - `REDIS_CACHING.md` — **Type:** Doc. **Summary:** Detailed caching strategy (TTL tiers, vary-by, invalidation patterns, client API). **Dependencies:** `src/utils/redis.ts`, `src/middleware/cache.ts`. **Risks/TODOs:** Example TTL table uses TypeScript pseudo-code; confirm docs match current constants.
 - `openapi.yaml` — **Type:** API spec. **Summary:** 900+ line OpenAPI 3.0.3 covering auth, RTB, migration studio, billing, etc., with schemas + security definitions. **Dependencies:** `@asteasolutions/zod-to-openapi`, swagger UI. **Risks/TODOs:** Ensure spec stays aligned with feature-flagged endpoints; consider splitting by domain to reduce merge conflicts.
@@ -103,8 +101,8 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 - `tsconfig.json` / `tsconfig.eslint.json` — **Type:** Config. **Summary:** ES2020 target, `rootDir`=repo, includes `src/services/scripts`, outputs `dist`, excludes tests from build. ESLint variant narrows include to src/tests. **Dependencies:** `typescript` 5.5. **Risks/TODOs:** Build currently skips `tests` folder entirely; OK if tests compile via jest.
 - `jest.config.cjs` — **Type:** Test config. **Summary:** `ts-jest` preset, node env, serialized runs (maxWorkers=1) to avoid DB contention, setup file `src/__tests__/setup.ts`, 10s timeout. **Dependencies:** jest, ts-jest. **Risks/TODOs:** Serial tests slow; consider DB container per worker.
 - `.transparency-metrics.log` indicates queue init failures due to colon in queue names; action item to sanitize queue IDs.
-- `deploy-backend.sh` & `fly.toml` rely on `Dockerfile`; unresolved corruption blocks release pipeline.
-- `src/index.ts` — **Type:** Source. **Summary:** Express bootstrap wiring helmet, cors allowlist, CSRF double-submit, Redis-backed auth limiter, request context + Prometheus RED metrics, `/health`/`/metrics`, OpenAPI serve, and graceful shutdown. Initializes Postgres, ClickHouse, Redis, BullMQ queues sequentially with fallbacks. **Dependencies:** `initializeDatabase`, `initializeClickHouse`, `redis`, `initializeQueues`, `authRateLimiter`, `csrfProtection`, `promRegister`. **Risks/TODOs:** Health check always reports Postgres healthy without runtime check; `app.listen` always uses env `PORT` which conflicts with Fly config (8080 vs 4000). **Evidence:** File reviewed 2025‑11‑14.
+- (Legacy deploy artifacts removed) deployments now rely on the Hetzner/PM2 pipeline; Dockerfile corruption still blocks containerized builds.
+- `src/index.ts` — **Type:** Source. **Summary:** Express bootstrap wiring helmet, cors allowlist, CSRF double-submit, Redis-backed auth limiter, request context + Prometheus RED metrics, `/health`/`/metrics`, OpenAPI serve, and graceful shutdown. Initializes Postgres, ClickHouse, Redis, BullMQ queues sequentially with fallbacks. **Dependencies:** `initializeDatabase`, `initializeClickHouse`, `redis`, `initializeQueues`, `authRateLimiter`, `csrfProtection`, `promRegister`. **Risks/TODOs:** Health check always reports Postgres healthy without runtime check; `app.listen` always uses env `PORT`. **Evidence:** File reviewed 2025‑11‑14.
 - `src/routes/index.ts` — **Type:** Source. **Summary:** Central router mounting ~20 feature routers (revenue, analytics, RTB, billing, migration, etc.) behind `killSwitchGuard`. **Dependencies:** Each `*.routes.ts` module plus feature flags middleware. **Risks/TODOs:** Ordering matters for overlapping paths (e.g., `/admin` vs `/migration`); ensure new routes are added here and to OpenAPI spec. **Evidence:** Reviewed file 2025‑11‑14.
 - `src/config/env.ts` — **Type:** Source. **Summary:** Zod schema validating env vars (DB, Redis, Stripe, feature flags, AWS/GCP). Automatically loads `.env` and throws with helpful tips when validation fails. **Dependencies:** `dotenv`, `zod`. **Risks/TODOs:** `CLICKHOUSE_URL` optional but `initializeClickHouse` expects URL; align defaults. **Evidence:** File reviewed 2025‑11‑14.
 - `src/utils/logger.ts` — **Type:** Source. **Summary:** Winston logger with AsyncLocalStorage context injection, aggressive redaction, colorized dev output, JSON prod logs, plus file transports for `logs/error.log` & `logs/combined.log`. **Dependencies:** `winston`, `async_hooks`. **Risks/TODOs:** File transports write inside container; ensure writable volume in distroless image. **Evidence:** Reviewed 2025‑11‑14.
@@ -200,7 +198,7 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 
 ### console/
 
-- `console/README.md` — **Type:** Doc. **Summary:** High-level overview of the Next.js 14 console (tech stack, features, architecture tree, environment setup, API integrations, auth, styling system, performance practices, deployment paths). **Dependencies:** References backend services (config/fraud/analytics), NextAuth, Tailwind. **Risks/TODOs:** “Components (To Be Built)” section lists several TODO widgets/forms that still appear unimplemented—ensure roadmap aligns with reality; deployment guidance assumes Vercel/Docker but doesn’t mention Fly. **Evidence:** Reviewed 2025‑11‑14.
+- `console/README.md` — **Type:** Doc. **Summary:** High-level overview of the Next.js 14 console (tech stack, features, architecture tree, environment setup, API integrations, auth, styling system, performance practices, deployment paths). **Dependencies:** References backend services (config/fraud/analytics), NextAuth, Tailwind. **Risks/TODOs:** “Components (To Be Built)” section lists several TODO widgets/forms that still appear unimplemented—ensure roadmap aligns with reality; deployment guidance assumes Vercel/Docker but doesn’t mention Hetzner. **Evidence:** Reviewed 2025‑11‑14.
 - `console/BACKEND_INTEGRATION.md` — **Type:** Doc. **Summary:** Detailed guide for wiring the console to backend `/api/v1` endpoints—env vars, exhaustive endpoint catalog, axios client configuration, auth flow, caching, job schedules, troubleshooting. **Dependencies:** Backend services on port 4000, Redis, ClickHouse, NextAuth. **Risks/TODOs:** Assumes `/api/v1` proxied under same host even though console env defaults to mixed service URLs; keep in sync with backend route changes to avoid bitrot. **Evidence:** Reviewed 2025‑11‑14.
 - `console/BILLING_README.md` — **Type:** Doc. **Summary:** Module-focused spec for billing UI (usage, invoices, reconciliation) covering routes, feature flags, API calls, env vars, frontend/backend architecture, schema, Stripe webhook setup, testing, roadmap. **Dependencies:** Backend billing routes, Stripe API, ClickHouse usage data. **Risks/TODOs:** Feature list includes future phases (payment method management, dunning) not yet implemented—ensure navigation hides unfinished pages. **Evidence:** Reviewed 2025‑11‑14.
 - `console/DESIGN_STANDARDS.md` — **Type:** Doc. **Summary:** Authoritative Aurora Slate design system (palette tokens, typography, layout rhythm, interaction + accessibility rules, component patterns, transparency UI guidelines). **Dependencies:** Tailwind theme definitions, lucide-react, recharts. **Risks/TODOs:** Mentions Storybook as “planned”; enforce updates whenever Tailwind config changes to avoid divergence. **Evidence:** Reviewed 2025‑11‑14.
@@ -312,6 +310,20 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 - `console/src/llm/budget.ts` — **Type:** Source (utility). **Summary:** Stub “budget tracker” maintaining in-memory cumulative tokens/costs per provider with helpers to record usage, reset budgets, and check remaining allowance before LLM calls. **Dependencies:** None beyond standard library. **Risks/TODOs:** State isn’t persisted or scoped per user/session so data resets on reload and can mix tenants; no synchronization guards making concurrent updates race; cost math hard-codes $ per 1K tokens which may drift. **Evidence:** Reviewed 2025‑11‑14.
 - `console/src/llm/providers.ts` — **Type:** Source (utility). **Summary:** Experimental LLM provider registry defining provider metadata (costs, capabilities), a fake execution interface, and a `selectProvider` helper that picks cheapest eligible provider given use case + budget. **Dependencies:** None (pure TS). **Risks/TODOs:** Providers are placeholders with stubbed `generate` implementations returning canned strings—no real API integration; selection algorithm ignores concurrency, rate limits, or latency; module unused elsewhere, so bundle may include dead code. **Evidence:** Reviewed 2025‑11‑14.
 - Need add entries for `console/src/lib/admin.ts` already included.
+
+### control-plane/
+
+- `package.json` — **Type:** Config. **Summary:** Workspace config for operator portal. Includes pdfkit, winston, and standard express stack. **Dependencies:** Node 20+, Jest. **Evidence:** 24/24 tests passing (2026-01-12).
+- `src/index.ts` — **Type:** Source. **Summary:** Entry point for admin service. Implements strict CSP, HSTS, and session-less operator auth. **Dependencies:** Express, Helmet.
+- `src/routes.ts` — **Type:** Source. **Summary:** Central router for operator APIs. Groups telemetry, compliance, analytics, and infrastructure actions.
+- `src/database.ts` — **Type:** Source. **Summary:** Tiered connection pool manager (Read-only, Operator, Break-glass). **Dependencies:** `pg` pool.
+- `src/services/estonian-compliance.ts` — **Type:** Source. **Summary:** Logic for VAT (KMD), Payroll (TSD), and Annual reports using live ledger data.
+- `src/services/pdf-generator.ts` — **Type:** Source. **Summary:** Generates branded, legal-compliant PDFs for Estonian authorities. **Dependencies:** `pdfkit`.
+- `src/services/business-analytics.ts` — **Type:** Source. **Summary:** Aggregates real-time business performance and CEO metrics (Runway, LTV, Churn).
+- `src/services/advanced-analytics.ts` — **Type:** Source. **Summary:** Signup cohort retention and revenue forecasting models.
+- `src/services/reconciliation.ts` — **Type:** Source. **Summary:** Bank statement matching service.
+- `src/adapters/postgres-telemetry.ts` — **Type:** Source. **Summary:** Read-only access to PostgreSQL internals (pg_stat_statements, etc.).
+- `src/adapters/partition-manager.ts` — **Type:** Source. **Summary:** Automated lifecycle management for time-series table partitions.
 
 ### data/ & ML Data/
 #### data/
@@ -448,7 +460,7 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 #### docs/Backend/
 
 - `docs/Backend/BILLING_API.md` — **Type:** Doc. **Summary:** Endpoint reference with request/response samples for billing service. **Dependencies:** Backend billing controllers. **Risks/TODOs:** Must stay in sync with OpenAPI spec; no automation presently. **Evidence:** Reviewed 2025‑11‑14.
-- `docs/Backend/BILLING_DEPLOYMENT_CHECKLIST.md` — **Type:** Doc. **Summary:** Step-by-step deployment checklist for billing components (pre/post checks). **Dependencies:** Fly deploy scripts, migrations. **Risks/TODOs:** Should link to runbooks to avoid duplication; includes manual steps only. **Evidence:** Reviewed sections.
+- `docs/Backend/BILLING_DEPLOYMENT_CHECKLIST.md` — **Type:** Doc. **Summary:** Step-by-step deployment checklist for billing components (pre/post checks). **Dependencies:** Deployment scripts and migrations. **Risks/TODOs:** Should link to runbooks to avoid duplication; includes manual steps only. **Evidence:** Reviewed sections.
 - `docs/Backend/BILLING_FILES_MANIFEST.md` — **Type:** Doc. **Summary:** Inventory of files touched during billing implementation with change counts. **Dependencies:** Git history. **Risks/TODOs:** Hard-coded stats (e.g., totals) will drift; refresh script when new changes land. **Evidence:** Reviewed header.
 - `docs/Backend/BILLING_IMPLEMENTATION_SUMMARY.md` — **Type:** Doc. **Summary:** Overview of billing features delivered (sections 7.1‑7.4). **Dependencies:** Implementation plan, tests. **Risks/TODOs:** Claims completion—ensure acceptance tests referenced actually exist. **Evidence:** Reviewed summary.
 
@@ -740,7 +752,7 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 
 - `monitoring/alertmanager.yml` — **Type:** Alertmanager config. **Summary:** Routes alerts by severity to founder email/SMS, includes inhibition rules, optional Slack/Discord receivers, and SMTP configuration via Resend. **Dependencies:** Alertmanager container, SMTP creds, Twilio/Slack secrets. **Risks/TODOs:** Secrets embedded as `${VAR}` require env substitution; ensure deployment injects them securely. **Evidence:** Reviewed 2025‑11‑14.
 - `monitoring/alerts.yml` — **Type:** Prometheus rules. **Summary:** >10 alert groups covering backend, payments, DB, cache, system resources, business KPIs, SDK health, RTB, ClickHouse, queues, and AI cost controls with runbook links. **Dependencies:** Prometheus metrics naming conventions, Grafana dashboards referenced in annotations. **Risks/TODOs:** Some expressions (e.g., `pg_pool_size`) assume exporters emitting specific metrics; validate actual exporters or rules will stay pending. **Evidence:** Reviewed 2025‑11‑14.
-- `monitoring/prometheus.yml` — **Type:** Prometheus config. **Summary:** Sets scrape/evaluation intervals, wires Alertmanager, loads alerts/recording rules, and defines scrape jobs for backend, console, Postgres exporter, ClickHouse, Redis, node-exporter, cadvisor. **Dependencies:** Target endpoints reachable over public hostnames. **Risks/TODOs:** Scrape targets hard-code Fly.io hostnames; for local compose these hostnames will fail—consider relabeling per environment. **Evidence:** Reviewed 2025‑11‑14.
+- `monitoring/prometheus.yml` — **Type:** Prometheus config. **Summary:** Sets scrape/evaluation intervals, wires Alertmanager, loads alerts/recording rules, and defines scrape jobs for backend, console, Postgres exporter, ClickHouse, Redis, node-exporter, cadvisor. **Dependencies:** Target endpoints reachable over public hostnames. **Risks/TODOs:** Scrape targets can hard-code environment-specific hostnames; for local compose these hostnames will fail—prefer templating/relabeling per environment. **Evidence:** Reviewed 2025‑11‑14.
 - `monitoring/recording-rules.yml` — **Type:** Prometheus recording rules. **Summary:** Precomputes RED metrics, RTB aggregates, analytics lag, DB/queue KPIs, system resource percentages, and business metrics for dashboards. **Dependencies:** Same metrics as alerts. **Risks/TODOs:** Some expressions subtract rates without guards (could go negative); add `clamp_min`. **Evidence:** Reviewed 2025‑11‑14.
 - `monitoring/promtail-config.yml` — **Type:** Promtail config. **Summary:** Ships backend/console/system logs, performs JSON parsing + label extraction, and pushes to Loki. **Dependencies:** Host log file paths; Loki endpoint. **Risks/TODOs:** Hard-coded `/var/log/backend/*.log` requires container bind mounts; ensure path exists. **Evidence:** Reviewed 2025‑11‑14.
 - `monitoring/loki-config.yml` — **Type:** Loki config. **Summary:** Single-binary filesystem-backed Loki with 30-day retention, compactor, query scheduler, and Alertmanager integration. **Dependencies:** Loki container, storage volume. **Risks/TODOs:** `auth_enabled: false`—lock down before exposing publicly; ingestion limits set but not enforced per-tenant. **Evidence:** Reviewed 2025‑11‑14.

@@ -78,14 +78,14 @@ if [[ $# -gt 0 ]]; then
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ServerAliveInterval=10
-    -o ServerAliveCountMax=3
+    -o ServerAliveCountMax=30
     -o StrictHostKeyChecking=accept-new
   )
   if [[ "$TARGET_NAME" == "db" ]]; then
     # Use an explicit ProxyCommand so the jump host always uses the same identity file.
     # (Some OpenSSH setups don't reliably apply -i to the ProxyJump connection.)
     SSH_ARGS+=(
-      -o "ProxyCommand=$SSH_BIN -i $KEY -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new root@$APP_SERVER -W %h:%p"
+      -o "ProxyCommand=$SSH_BIN -i $KEY -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=30 -o StrictHostKeyChecking=accept-new root@$APP_SERVER -W %h:%p"
     )
   fi
   echo "[run] ssh ${SSH_ARGS[*]} root@$TARGET_HOST ($TARGET_NAME) -- /bin/bash --noprofile --norc -c <cmd>"
@@ -96,12 +96,12 @@ else
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o ServerAliveInterval=10
-    -o ServerAliveCountMax=3
+    -o ServerAliveCountMax=30
     -o StrictHostKeyChecking=accept-new
   )
   if [[ "$TARGET_NAME" == "db" ]]; then
     SSH_ARGS+=(
-      -o "ProxyCommand=$SSH_BIN -i $KEY -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new root@$APP_SERVER -W %h:%p"
+      -o "ProxyCommand=$SSH_BIN -i $KEY -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=30 -o StrictHostKeyChecking=accept-new root@$APP_SERVER -W %h:%p"
     )
   fi
   echo "[run] ssh ${SSH_ARGS[*]} root@$TARGET_HOST ($TARGET_NAME)"

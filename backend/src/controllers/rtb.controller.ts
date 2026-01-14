@@ -24,6 +24,12 @@ export const requestBid = async (
 
     // Ensure requestId is present (generate if missing)
     const requestId = body.requestId || crypto.randomUUID?.() || `req-${Date.now()}`;
+    const publisherId = (req as any).sdk?.publisherId;
+
+    if (!publisherId) {
+      res.status(401).json({ success: false, error: 'Unauthorized: Publisher ID missing' });
+      return;
+    }
 
     // Check idempotency cache for duplicate request
     if (idempotency.isIdempotencyEnabled()) {
@@ -59,6 +65,7 @@ export const requestBid = async (
 
     const result = await runAuction({
       requestId,
+      publisherId,
       placementId: body.placementId,
       adFormat: body.adFormat,
       floorCpm: body.floorCpm ?? 0,

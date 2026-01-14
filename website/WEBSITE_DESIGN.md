@@ -1170,9 +1170,9 @@ export interface AnalyticsOverview {
 - Go microservices (auction, fraud)
 
 **Deployment:**
-- Vercel (website)
-- Fly.io (backend)
-- CloudFlare (CDN)
+- Hetzner (PM2) for backend/console/website
+- Caddy (TLS reverse proxy)
+- Cloudflare (DNS/CDN)
 
 ---
 

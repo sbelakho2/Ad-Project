@@ -378,16 +378,14 @@ npm run cron
 npx ts-node scripts/cron-jobs.ts
 ```
 
-**Production (Fly.io):**
-```toml
-# fly.toml
-[[services]]
-  internal_port = 3000
-  processes = ["app"]
+**Production (Hetzner / PM2):**
+```bash
+# App server
+cd /opt/adproject/backend
 
-[processes]
-  app = "node dist/server.js"
-  cron = "node dist/scripts/cron-jobs.js"
+# Ensure the cron runner is a separate PM2 process
+pm2 start dist/scripts/cron-jobs.js --name backend-cron
+pm2 save
 ```
 
 **Production (Docker):**

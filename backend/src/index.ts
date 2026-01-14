@@ -57,47 +57,51 @@ const app: Application = express();
 const PORT = env.PORT;
 const API_VERSION = env.API_VERSION;
 
-// Phase 1 (Infra readiness): non-breaking production posture warnings
-// These logs help operators ensure FRA1/TLS-aligned settings without changing business logic.
+// Phase 1 (Infra readiness): strict production posture enforcement
+// Ensures FRA1/TLS-aligned settings are met before processing traffic.
 (() => {
-  try {
-    if (process.env.NODE_ENV === 'production') {
-      // 1) DATABASE_URL should enforce TLS
-      const dbUrl = process.env.DATABASE_URL || '';
-      if (dbUrl && !/sslmode=require/i.test(dbUrl)) {
-        logger.warn(
-          'DATABASE_URL does not include sslmode=require — add ?sslmode=require for managed Postgres in production.'
-        );
+  if (process.env.NODE_ENV === 'production') {
+    // 1) DATABASE_URL should enforce TLS
+    const dbUrl = process.env.DATABASE_URL || '';
+    const dbSsl = (process.env.DATABASE_SSL || '').toLowerCase() === 'true';
+    if (dbSsl && dbUrl && !/sslmode=require/i.test(dbUrl)) {
+      const msg = 'CRITICAL: DATABASE_URL does not include sslmode=require — add ?sslmode=require for managed Postgres in production.';
+      logger.error(msg);
+      if (process.env.SKIP_STRICT_SECURITY !== '1') {
+        throw new Error(msg);
       }
+    }
 
-      // 2) REDIS_URL should include a password and target private network host
-      const redisUrl = process.env.REDIS_URL || '';
-      if (redisUrl) {
-        try {
-          const u = new URL(redisUrl);
-          const hasPassword = (u.password && u.password.length > 0);
-          if (!hasPassword) {
-            logger.warn('REDIS_URL has no password — set a strong password and require AUTH in production.');
+    // 2) REDIS_URL should include a password
+    const redisUrl = process.env.REDIS_URL || '';
+    if (redisUrl) {
+      try {
+        const u = new URL(redisUrl);
+        const hasPassword = (u.password && u.password.length > 0);
+        if (!hasPassword) {
+          const msg = 'CRITICAL: REDIS_URL has no password — set a strong password and require AUTH in production.';
+          logger.error(msg);
+          if (process.env.SKIP_STRICT_SECURITY !== '1') {
+            throw new Error(msg);
           }
-          if (u.hostname && !['redis', 'localhost'].includes(u.hostname) && /^[0-9.]+$/.test(u.hostname)) {
-            logger.warn('REDIS_URL points to a raw IP — ensure Redis is not publicly exposed and is reachable only on private network.');
-          }
-        } catch {
-          logger.warn('REDIS_URL is not a valid URL — expected e.g. redis://:<password>@redis:6379/0');
         }
+      } catch {
+        logger.warn('REDIS_URL is not a valid URL — expected e.g. redis://:<password>@redis:6379/0');
       }
+    }
 
-      // 3) CORS allowlist should include console + apex domains
-      const corsAllow = (process.env.CORS_ALLOWLIST || process.env.CORS_ORIGIN || '').split(',').map(s => s.trim());
-      const requiredOrigins = ['https://console.apexmediation.ee', 'https://apexmediation.ee'];
-      for (const origin of requiredOrigins) {
-        if (!corsAllow.includes(origin)) {
-          logger.warn(`CORS allowlist does not include ${origin} — add it for production.`);
+    // 3) CORS allowlist should include console + apex domains
+    const corsAllow = (process.env.CORS_ALLOWLIST || process.env.CORS_ORIGIN || '').split(',').map(s => s.trim());
+    const requiredOrigins = ['https://console.apexmediation.ee', 'https://apexmediation.ee'];
+    for (const origin of requiredOrigins) {
+      if (!corsAllow.includes(origin)) {
+        const msg = `CRITICAL: CORS allowlist does not include ${origin} — add it for production.`;
+        logger.error(msg);
+        if (process.env.SKIP_STRICT_SECURITY !== '1') {
+          throw new Error(msg);
         }
       }
     }
-  } catch {
-    // best-effort warnings only; never block startup
   }
 })();
 

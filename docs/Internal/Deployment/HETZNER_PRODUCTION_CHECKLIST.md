@@ -188,7 +188,33 @@ Optional backend liveness/status probe (from app server):
   done"
 ```
 
-### C) Billing pipeline (tables + config smoke)
+### C) Postgres safety: WAL archives + root disk headroom (CRITICAL)
+
+Postgres can fail in surprising ways when the DB server root filesystem fills (e.g. failing to write internal init files, relation cache, temp files). In this stack the most common cause is WAL archiving growing on `/`.
+
+Run on DB server (via jump host):
+
+```bash
+./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; \
+  echo '[df]'; df -h / /mnt/HC_Volume_104191119 || true; \
+  echo; \
+  echo '[wal archive size]'; sudo du -sh /var/backups/postgresql/wal 2>/dev/null || true; \
+  echo; \
+  echo '[archiver health]'; sudo -u postgres psql -d adproject -P pager=off -c \"select * from pg_stat_archiver;\""
+```
+
+Expected:
+
+- `/` has safe free space headroom (do not operate at ~100% used)
+- WAL archive size is consistent with your PITR target window and prune jobs
+- `pg_stat_archiver.failed_count` is not increasing
+
+If `/var/backups/postgresql/wal` is large and living on `/`:
+
+- Prefer relocating archived WAL off root (e.g. to the mounted volume) rather than just shortening retention.
+- Ensure only one retention/prune job is active (multiple cron jobs can fight each other, or misconfigure the effective PITR window).
+
+### D) Billing pipeline (tables + config smoke)
 
 Billing tables may legitimately be empty until the first customer subscription/payment activity occurs.
 
@@ -643,6 +669,39 @@ All targets should show UP status at `/targets`:
 
 # (Optional verification) Check backend logs for:
 # - "Analytics rollups: ensuring rollup tables exist"
+```
+
+### 7.1.1 Analytics Rollups (Long-Running CLIs)
+
+Long rollup runs can look like they “stall” when executed over SSH (no output for a while, or the SSH session drops). To make rollups reliable and to prevent duplicate concurrent runs, use the repo helper which:
+
+- runs the job **detached** (background) and writes a server-side log file
+- uses a singleton lock (`flock`) so only one rollup run happens at a time
+- records the current log path so you can `tail` and `status` without remembering it
+
+Run (from your local repo checkout):
+
+```bash
+# Start a rollup run in the background (recommended)
+./scripts/ops/prod_analytics_rollups.sh start --start 2026-01-08 --end 2026-01-09
+
+# Follow the current log
+./scripts/ops/prod_analytics_rollups.sh tail
+
+# Show whether a run is active + last log lines
+./scripts/ops/prod_analytics_rollups.sh status
+```
+
+If you explicitly want to run in the foreground (less reliable for long ranges):
+
+```bash
+./scripts/ops/prod_analytics_rollups.sh start --start 2026-01-08 --end 2026-01-09 --fg
+```
+
+Stop a stuck run (rare; prefer letting it finish):
+
+```bash
+./scripts/ops/prod_analytics_rollups.sh stop
 ```
 
 ### 7.2 Backups

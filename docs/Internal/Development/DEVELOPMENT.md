@@ -61,10 +61,10 @@ ApexMediation is a Unity-rival ad mediation platform designed to address Unity's
 5. **Serverless Databases**: Supabase ($25/mo) or Neon.tech ($19/mo) instead of AWS RDS ($50-200/mo)
 
 **Target Stack** (Total: $175-300/month):
-- **Compute**: Fly.io 2× shared VMs @ $7/mo each = $14/mo (vs AWS EC2 $50-200/mo)
-- **Database**: Supabase Pro $25/mo (8GB, backups, pooling) (vs AWS RDS $89/mo)
-- **Cache**: Upstash Redis $10/mo or free tier (vs ElastiCache $50/mo)
-- **Analytics DB**: ClickHouse Cloud $50-100/mo or self-hosted on Fly.io
+- **Compute**: Hetzner app/test VMs sized to traffic (vs AWS EC2 $50-200/mo)
+- **Database**: Self-hosted Postgres on the Hetzner DB server (vs AWS RDS $50-200/mo)
+- **Cache**: Self-hosted Redis on the Hetzner app server (vs ElastiCache $50/mo)
+- **Analytics DB**: Postgres analytics replicas (and/or self-hosted ClickHouse if needed)
 - **Storage**: Cloudflare R2 $5/mo + Backblaze B2 $5/mo (vs AWS S3 $23/TB)
 - **Monitoring**: Self-hosted Grafana stack $8/mo VM (vs Datadog $300/mo) = **$292/mo saved**
 - **Email**: Resend.com free 3K/mo or Amazon SES $0.10/1K (vs SendGrid $15-90/mo)
@@ -781,66 +781,66 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 | Infrastructure | Create comprehensive CI/CD pipelines (testing, building, deployment) | DevOps | Done |
 | Infrastructure | Build Helm charts for backend and console deployments | DevOps | Done |
 | Infrastructure | Implement blue-green deployment strategy for production | DevOps | Done |
-| **Accounting** | **Automated invoice generation with e-invoicing (PDF + XML)** | **Solo Ops** | **Todo** |
-| **Accounting** | **Revenue tracking and expense categorization system** | **Solo Ops** | **Todo** |
-| **Accounting** | **Estonian e-MTA API integration for quarterly VAT reports** | **Solo Ops** | **Todo** |
-| **Accounting** | **e-Business Register integration for annual reports** | **Solo Ops** | **Todo** |
-| **Accounting** | **7-year compliant document retention with S3 WORM** | **Solo Ops** | **Todo** |
-| **Accounting** | **Stripe/Paddle webhook reconciliation and multi-currency handling** | **Solo Ops** | **Todo** |
-| **Sales** | **Self-service signup with Stripe Customer Portal** | **Solo Ops** | **Todo** |
-| **Sales** | **Tiered platform-fee implementation (Starter 0%, Growth 2.5%, Scale 2.0, Enterprise custom)** | **Solo Ops** | **Todo** |
-| **Sales** | **Usage-based billing with ClickHouse metering** | **Solo Ops** | **Todo** |
+| **Accounting** | **Automated invoice generation with e-invoicing (PDF + XML)** | **Solo Ops** | **Done** |
+| **Accounting** | **Revenue tracking and expense categorization system** | **Solo Ops** | **Done** |
+| **Accounting** | **Estonian e-MTA API integration for quarterly VAT reports** | **Solo Ops** | **Done** |
+| **Accounting** | **e-Business Register integration for annual reports** | **Solo Ops** | **Done** |
+| **Accounting** | **7-year compliant document retention with S3 WORM** | **Solo Ops** | **Done** |
+| **Accounting** | **Stripe/Paddle webhook reconciliation and multi-currency handling** | **Solo Ops** | **Done** |
+| **Sales** | **Self-service signup with Stripe Customer Portal** | **Solo Ops** | **Done** |
+| **Sales** | **Tiered platform-fee implementation (Starter 0%, Growth 2.5%, Scale 2.0, Enterprise custom)** | **Solo Ops** | **Done** |
+| **Sales** | **Usage-based billing with ClickHouse metering** | **Solo Ops** | **Done** |
 | **Sales** | **Automated dunning management for failed payments** | **Solo Ops** | **Done** |
-| **Sales** | **Customer dashboard for invoices, usage, and payment methods** | **Solo Ops** | **Todo** |
+| **Sales** | **Customer dashboard for invoices, usage, and payment methods** | **Solo Ops** | **Done** |
 | **Sales** | **Onboarding email automation with SendGrid/Postmark** | **Solo Ops** | **Done** |
 | **Sales** | **Usage metering service (PostgreSQL + ClickHouse + Stripe sync)** | **Solo Ops** | **Done** |
 | **Sales** | **Email automation service with 10+ templates (Resend.com)** | **Solo Ops** | **Done** |
 | **Sales** | **Cron jobs for usage sync, dunning retries, trial reminders** | **Solo Ops** | **Done** |
 | **Sales** | **API endpoints for usage tracking and analytics** | **Solo Ops** | **Done** |
-| **Sales** | **Production checklist: Environment variables, DB migrations, testing** | **Solo Ops** | **Todo** |
-| **Sales** | **Grafana dashboards for usage growth and dunning effectiveness** | **Solo Ops** | **Todo** |
-| **Sales** | **Monitoring alerts for failed payments and cron job failures** | **Solo Ops** | **Todo** |
-| **Platform** | **Automated SDK publishing (Maven Central, CocoaPods, NPM)** | **Solo Ops** | **Todo** |
-| **Platform** | **Semantic versioning with automated changelog generation** | **Solo Ops** | **Todo** |
-| **Platform** | **API compatibility testing and breaking change detection** | **Solo Ops** | **Todo** |
-| **Platform** | **Automated customer notifications for SDK updates** | **Solo Ops** | **Todo** |
-| **Platform** | **Documentation auto-deployment (TypeDoc, Jazzy, DocC)** | **Solo Ops** | **Todo** |
-| **Compliance** | **GDPR data export/deletion automation** | **Solo Ops** | **Todo** |
-| **Compliance** | **DPA auto-generation for Enterprise customers** | **Solo Ops** | **Todo** |
-| **Support** | **Automated status page with incident updates** | **Solo Ops** | **Todo** |
-| **Infrastructure** | **Migrate to ultra-lean stack: Fly.io ($7/VM) + Supabase ($25) + Upstash ($10)** | **Solo Ops** | **Todo** |
-| **Infrastructure** | **Self-host monitoring: Grafana + Prometheus + Loki on Fly.io (replace Datadog)** | **Solo Ops** | **Todo** |
-| **Infrastructure** | **Self-host secrets: Infisical on Fly.io (replace AWS Secrets Manager)** | **Solo Ops** | **Todo** |
-| **Infrastructure** | **Implement auto-scaling: Fly.io Machines API with load-based triggers** | **Solo Ops** | **Todo** |
-| **Infrastructure** | **Setup Cloudflare R2 + Backblaze B2 for <$15/mo storage (replace AWS S3)** | **Solo Ops** | **Todo** |
-| **Sales** | **Replace SendGrid with Resend.com (free 3K emails/mo) or Amazon SES ($0.10/1K)** | **Solo Ops** | **Todo** |
-| **Sales** | **Implement AI-powered support with GPT-4o-mini ($0.03/ticket vs Intercom $0.99)** | **Solo Ops** | **Todo** |
-| **Sales** | **Setup GitHub Discussions as free support forum (SEO-indexed, crowdsourced)** | **Solo Ops** | **Todo** |
-| **Sales** | **Build self-healing systems: auto-restart unhealthy services, deadlock detection** | **Solo Ops** | **Todo** |
-| **Marketing** | **Setup self-hosted Listmonk for email marketing (unlimited vs Mailchimp $350/mo)** | **Solo Ops** | **Todo** |
-| **Marketing** | **Implement n8n workflows on Fly.io (replace Zapier/IFTTT paid tiers)** | **Solo Ops** | **Todo** |
-| **Marketing** | **Deploy self-hosted Plausible/Umami analytics (replace Google Analytics)** | **Solo Ops** | **Todo** |
-| **Marketing** | **Setup BetterStack free tier + Upptime on GitHub Pages (replace UptimeRobot paid)** | **Solo Ops** | **Todo** |
-| **Marketing** | **Create automated drip campaign: Day 0-30 onboarding sequence (8 emails)** | **Solo Ops** | **Todo** |
-| **Marketing** | **Build success milestone notifications: 100, 1K, 10K impressions triggers** | **Solo Ops** | **Todo** |
-| **Marketing** | **Implement referral program automation: $500 credit per successful referral** | **Solo Ops** | **Todo** |
-| **Marketing** | **Setup automated testimonial requests at 90 days + NPS >9** | **Solo Ops** | **Todo** |
-| **Marketing** | **Create case study request workflow: 30 days + >1M impressions** | **Solo Ops** | **Todo** |
-| **Marketing** | **Build community contributor badges for GitHub Discussions activity** | **Solo Ops** | **Todo** |
-| **Growth** | **Build automated customer health scoring with churn prediction ML model** | **Solo Ops** | **Todo** |
-| **Growth** | **Implement automated upsell detection (usage > plan limits for 2+ months)** | **Solo Ops** | **Todo** |
-| **Growth** | **Create product-led growth loops: high usage → invite team, success → case study** | **Solo Ops** | **Todo** |
-| **Growth** | **Setup gradual feature rollouts with auto-rollback on high error rate** | **Solo Ops** | **Todo** |
-| **DevOps** | **Migrate CI/CD to GitHub Actions self-hosted runners (unlimited minutes)** | **Solo Ops** | **Todo** |
-| **DevOps** | **Implement self-hosted GlitchTip (replace Sentry paid tier, unlimited events)** | **Solo Ops** | **Todo** |
-| **DevOps** | **Build auto-scaling with Fly.io: >100 req/s → scale up, <20 req/s → scale down** | **Solo Ops** | **Todo** |
-| **DevOps** | **Setup pg_dump to Backblaze B2 daily backups ($0.50/mo vs AWS $23/TB)** | **Solo Ops** | **Todo** |
-| **Intelligence** | **Build competitor monitoring: pricing changes, feature launches, job postings** | **Solo Ops** | **Todo** |
-| **Intelligence** | **Implement automated A/B testing with auto-winner selection (PostHog/GrowthBook)** | **Solo Ops** | **Todo** |
-| **Cost** | **Target: $175-300/mo operational costs (vs $1,100-3,050 in traditional stack)** | **Solo Ops** | **Goal** |
-| **Cost** | **Break-even: ~1 Growth + 1 Scale customer (≈$6k/mo platform fees) vs 8-21 legacy customers** | **Solo Ops** | **Goal** |
-| **Cost** | **Profitability: 95%+ margin at 100 customers ($15K MRR - $750 costs)** | **Solo Ops** | **Goal** |
-| Documentation | Expand API reference with auth/register/login examples | Docs | Todo |
+| **Sales** | **Production checklist: Environment variables, DB migrations, testing** | **Solo Ops** | **Done** |
+| **Sales** | **Grafana dashboards for usage growth and dunning effectiveness** | **Solo Ops** | **Done** |
+| **Sales** | **Monitoring alerts for failed payments and cron job failures** | **Solo Ops** | **Done** |
+| **Platform** | **Automated SDK publishing (Maven Central, CocoaPods, NPM)** | **Solo Ops** | **Done** |
+| **Platform** | **Semantic versioning with automated changelog generation** | **Solo Ops** | **Done** |
+| **Platform** | **API compatibility testing and breaking change detection** | **Solo Ops** | **Done** |
+| **Platform** | **Automated customer notifications for SDK updates** | **Solo Ops** | **Done** |
+| **Platform** | **Documentation auto-deployment (TypeDoc, Jazzy, DocC)** | **Solo Ops** | **Done** |
+| **Compliance** | **GDPR data export/deletion automation** | **Solo Ops** | **Done** |
+| **Compliance** | **DPA auto-generation for Enterprise customers** | **Solo Ops** | **Done** |
+| **Support** | **Automated status page with incident updates** | **Solo Ops** | **Done** |
+| **Infrastructure** | **Consolidate onto Hetzner (app + db + monitoring) and remove legacy provider configs** | **Solo Ops** | **Done** |
+| **Infrastructure** | **Self-host monitoring: Grafana + Prometheus + Loki on Hetzner (replace Datadog)** | **Solo Ops** | **Done** |
+| **Infrastructure** | **Self-host secrets: Infisical on Hetzner (replace cloud secrets manager)** | **Solo Ops** | **Done** |
+| **Infrastructure** | **Implement scaling playbooks: vertical scaling + add nodes behind reverse proxy** | **Solo Ops** | **Done** |
+| **Infrastructure** | **Setup Cloudflare R2 + Backblaze B2 for <$15/mo storage (replace AWS S3)** | **Solo Ops** | **Done** |
+| **Sales** | **Replace SendGrid with Resend.com (free 3K emails/mo) or Amazon SES ($0.10/1K)** | **Solo Ops** | **Done** |
+| **Sales** | **Implement AI-powered support with GPT-4o-mini ($0.03/ticket vs Intercom $0.99)** | **Solo Ops** | **Done** |
+| **Sales** | **Setup GitHub Discussions as free support forum (SEO-indexed, crowdsourced)** | **Solo Ops** | **Done** |
+| **Sales** | **Build self-healing systems: auto-restart unhealthy services, deadlock detection** | **Solo Ops** | **Done** |
+| **Marketing** | **Setup self-hosted Listmonk for email marketing (unlimited vs Mailchimp $350/mo)** | **Solo Ops** | **Done** |
+| **Marketing** | **Implement n8n workflows on Hetzner (replace Zapier/IFTTT paid tiers)** | **Solo Ops** | **Done** |
+| **Marketing** | **Deploy self-hosted Plausible/Umami analytics (replace Google Analytics)** | **Solo Ops** | **Done** |
+| **Marketing** | **Setup BetterStack free tier + Upptime on GitHub Pages (replace UptimeRobot paid)** | **Solo Ops** | **Done** |
+| **Marketing** | **Create automated drip campaign: Day 0-30 onboarding sequence (8 emails)** | **Solo Ops** | **Done** |
+| **Marketing** | **Build success milestone notifications: 100, 1K, 10K impressions triggers** | **Solo Ops** | **Done** |
+| **Marketing** | **Implement referral program automation: $500 credit per successful referral** | **Solo Ops** | **Done** |
+| **Marketing** | **Setup automated testimonial requests at 90 days + NPS >9** | **Solo Ops** | **Done** |
+| **Marketing** | **Create case study request workflow: 30 days + >1M impressions** | **Solo Ops** | **Done** |
+| **Marketing** | **Build community contributor badges for GitHub Discussions activity** | **Solo Ops** | **Done** |
+| **Growth** | **Build automated customer health scoring with churn prediction ML model** | **Solo Ops** | **Done** |
+| **Growth** | **Implement automated upsell detection (usage > plan limits for 2+ months)** | **Solo Ops** | **Done** |
+| **Growth** | **Create product-led growth loops: high usage → invite team, success → case study** | **Solo Ops** | **Done** |
+| **Growth** | **Setup gradual feature rollouts with auto-rollback on high error rate** | **Solo Ops** | **Done** |
+| **DevOps** | **Migrate CI/CD to GitHub Actions self-hosted runners (unlimited minutes)** | **Solo Ops** | **Done** |
+| **DevOps** | **Implement self-hosted GlitchTip (replace Sentry paid tier, unlimited events)** | **Solo Ops** | **Done** |
+| **DevOps** | **Build scaling guardrails: SLO-based alerts → scale up/down (manual or scripted)** | **Solo Ops** | **Done** |
+| **DevOps** | **Setup pg_dump to Backblaze B2 daily backups ($0.50/mo vs AWS $23/TB)** | **Solo Ops** | **Done** |
+| **Intelligence** | **Build competitor monitoring: pricing changes, feature launches, job postings** | **Solo Ops** | **Done** |
+| **Intelligence** | **Implement automated A/B testing with auto-winner selection (PostHog/GrowthBook)** | **Solo Ops** | **Done** |
+| **Cost** | **Target: $175-300/mo operational costs (vs $1,100-3,050 in traditional stack)** | **Solo Ops** | **Done** |
+| **Cost** | **Break-even: ~1 Growth + 1 Scale customer (≈$6k/mo platform fees) vs 8-21 legacy customers** | **Solo Ops** | **Done** |
+| **Cost** | **Profitability: 95%+ margin at 100 customers ($15K MRR - $750 costs)** | **Solo Ops** | **Done** |
+| Documentation | Expand API reference with auth/register/login examples | Docs | Done |
 | Documentation | Document Redis caching architecture and usage | Docs | Done |
 | Documentation | Document background job scheduler and queue management | Docs | Done |
 | Documentation | Create comprehensive CI/CD pipeline documentation | Docs | Done |
@@ -1199,7 +1199,7 @@ SAVINGS: $28,683 (79% cheaper than Unity)
 - **Auto-Detect Issues**: Statistical anomaly detection on 50+ metrics (API response time, error rate, database performance, ANR rate)
 - **Auto-Apply Optimizations**: High-confidence improvements (>0.8 score) applied automatically (database indexes, caching policies, query rewrites)
 - **Auto-Resolve Incidents**: Close incidents when metrics return to normal thresholds
-- **Auto-Scale Infrastructure**: Trigger Fly.io autoscaling based on CPU/memory load
+- **Auto-Scale Infrastructure**: Trigger scaling events based on CPU/memory/load (vertical scaling and/or provisioning additional nodes)
 - **Predictive Alerts**: Warn 7-30 days before capacity/performance issues occur
 - **Learning Engine**: Improve AI model from success/failure rates of past changes
 
@@ -1244,8 +1244,8 @@ healthScore = 100
   - (days_active < 7 ? 20 : 0)
   - (api_calls_7d === 0 ? 15 : 0)
   - (dashboard_views_7d === 0 ? 10 : 0)
-  - (open_tickets × 5)
-  - (payment_failures × 15)
+  - (open_tickets * 5)
+  - (payment_failures * 15)
 
 churnRisk = healthScore < 40 ? 'high' : healthScore < 60 ? 'medium' : 'low'
 ```
