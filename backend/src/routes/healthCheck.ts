@@ -22,6 +22,14 @@ export function createHealthCheckRoutes(pool: Pool): Router {
   router.get('/health', (req, res) => controller.liveness(req, res));
 
   /**
+   * Liveness probe (versioned alias)
+   * GET /api/v1/health
+   *
+   * No authentication required - used by deploy/CI checks
+   */
+  router.get('/api/v1/health', (req, res) => controller.liveness(req, res));
+
+  /**
    * Readiness probe
    * GET /ready
    * 
