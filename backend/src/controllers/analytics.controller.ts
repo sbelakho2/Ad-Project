@@ -187,14 +187,17 @@ async function enqueueIfEnabled(kind: 'impressions' | 'clicks' | 'revenue', even
 // ========================================
 
 // Validation schemas for event ingestion
+// NOTE: adapter_id is a UUID per-request identifier (not semantically an "adapter ID")
+// adapter_name contains the actual adapter name ("admob", "unity", "ironsource", etc.)
+// Rollups should group by adapter_name, NOT adapter_id to achieve meaningful aggregation
 const impressionEventSchema = z.object({
   event_id: z.string().uuid(),
   timestamp: z.string().datetime(),
   publisher_id: z.string().uuid(),
   app_id: z.string().uuid(),
   placement_id: z.string().uuid(),
-  adapter_id: z.string().uuid(),
-  adapter_name: z.string(),
+  adapter_id: z.string().uuid(), // Per-request UUID, NOT adapter name - see adapter_name
+  adapter_name: z.string(), // Actual adapter: "admob", "unity", "ironsource", etc.
   ad_unit_id: z.string(),
   ad_format: z.enum(['banner', 'interstitial', 'rewarded', 'native', 'video']),
   country_code: z.string().length(2),

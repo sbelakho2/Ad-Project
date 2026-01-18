@@ -179,7 +179,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         i.publisher_id::text AS publisher_id,
         COALESCE(i.app_id::text, '') AS app_id,
         COALESCE(NULLIF(i.meta->>'ad_unit_id', ''), COALESCE(i.placement_id::text, '')) AS ad_unit_id,
-        COALESCE(i.adapter_id, '') AS adapter_id,
+        -- Use adapter_name for grouping, not adapter_id (which is a UUID per-request)
+        COALESCE(i.adapter_name, '') AS adapter_id,
         LEFT(COALESCE(NULLIF(i.meta->>'country_code', ''), 'ZZ'), 2)::char(2) AS country_code,
         COUNT(*)::bigint AS impression_count,
         COUNT(*) FILTER (WHERE i.filled IS TRUE)::bigint AS filled_count,
@@ -220,7 +221,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
           NULLIF(c.meta->>'ad_unit_id', ''),
           COALESCE(c.placement_id::text, '')
         ) AS ad_unit_id,
-        COALESCE(c.adapter_id, '') AS adapter_id,
+        -- Use adapter_name for grouping, not adapter_id (which is a UUID per-request)
+        COALESCE(c.adapter_name, '') AS adapter_id,
         LEFT(
           COALESCE(
             NULLIF(i.meta->>'country_code', ''),
@@ -270,7 +272,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         r.publisher_id::text AS publisher_id,
         COALESCE(r.app_id::text, '') AS app_id,
         COALESCE(NULLIF(r.metadata->>'ad_unit_id', ''), COALESCE(r.placement_id::text, '')) AS ad_unit_id,
-        COALESCE(r.adapter_id, '') AS adapter_id,
+        -- Use adapter_name for grouping, not adapter_id (which is a UUID per-request)
+        COALESCE(r.adapter_name, '') AS adapter_id,
         LEFT(COALESCE(NULLIF(r.country_code::text, ''), 'ZZ'), 2)::char(2) AS country_code,
         COALESCE(SUM(r.revenue_usd), 0) AS total_revenue,
         COALESCE(AVG(r.revenue_usd), 0) AS avg_revenue,
