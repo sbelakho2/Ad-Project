@@ -473,6 +473,35 @@ export class InvoiceService {
       ]
     );
   }
+
+  /**
+   * Resend an invoice email via Stripe
+   */
+  async resendInvoiceEmail(stripeInvoiceId: string, email?: string): Promise<{ stripeInvoiceId: string; status: string }> {
+    const stripe = getStripeClient();
+
+    let invoice = await stripe.invoices.retrieve(stripeInvoiceId);
+    if (!invoice) {
+      throw new Error('Invoice not found in Stripe');
+    }
+
+    if (email && invoice.customer_email !== email) {
+      invoice = await stripe.invoices.update(stripeInvoiceId, {
+        customer_email: email,
+      });
+    }
+
+    if (invoice.status === 'draft') {
+      invoice = await stripe.invoices.finalizeInvoice(stripeInvoiceId);
+    }
+
+    await stripe.invoices.sendInvoice(stripeInvoiceId);
+
+    return {
+      stripeInvoiceId,
+      status: invoice.status || 'unknown',
+    };
+  }
 }
 
 export const invoiceService = new InvoiceService();

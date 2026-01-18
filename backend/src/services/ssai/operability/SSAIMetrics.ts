@@ -111,6 +111,20 @@ export class SSAIMetrics {
   }
 
   /**
+   * Get fill rate entries
+   */
+  getFillRateEntries(): Array<{ partnerId: string; filled: number; requested: number; fillRate: number }> {
+    const entries: Array<{ partnerId: string; filled: number; requested: number; fillRate: number }> = [];
+    for (const [partnerId, data] of this.fillRates.entries()) {
+      const requested = data.requested || 0;
+      const filled = data.filled || 0;
+      const fillRate = requested > 0 ? filled / requested : 0;
+      entries.push({ partnerId, filled, requested, fillRate });
+    }
+    return entries;
+  }
+
+  /**
    * Record decision latency
    */
   recordDecisionLatency(partnerId: string, latencyMs: number): void {
@@ -130,6 +144,19 @@ export class SSAIMetrics {
     const sorted = [...latencies].sort((a, b) => a - b);
     const index = Math.ceil(sorted.length * 0.99) - 1;
     return sorted[index];
+  }
+
+  /**
+   * Get decision latency entries
+   */
+  getDecisionLatencyEntries(): Array<{ partnerId: string; p99Ms: number; count: number }> {
+    const entries: Array<{ partnerId: string; p99Ms: number; count: number }> = [];
+    for (const [partnerId, latencies] of this.decisionLatencies.entries()) {
+      const count = latencies.length;
+      const p99Ms = count > 0 ? this.getDecisionLatencyP99(partnerId) : 0;
+      entries.push({ partnerId, p99Ms, count });
+    }
+    return entries;
   }
 
   /**

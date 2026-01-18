@@ -39,8 +39,37 @@ export async function sendAlert(options: AlertOptions): Promise<void> {
   // PagerDuty integration (stub)
   const pdRoutingKey = process.env.PAGERDUTY_ROUTING_KEY;
   if (pdRoutingKey && (severity === 'high' || severity === 'critical')) {
-    logger.info('Would send PagerDuty alert', { title, severity });
-    // TODO: Implement PagerDuty Events API v2 call
+    try {
+      const pdSeverity =
+        severity === 'critical'
+          ? 'critical'
+          : severity === 'high'
+          ? 'error'
+          : severity === 'medium'
+          ? 'warning'
+          : 'info';
+
+      await fetch('https://events.pagerduty.com/v2/enqueue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          routing_key: pdRoutingKey,
+          event_action: 'trigger',
+          payload: {
+            summary: `[${component}] ${title}`,
+            source: component,
+            severity: pdSeverity,
+            timestamp: new Date().toISOString(),
+            custom_details: {
+              message,
+              metadata,
+            },
+          },
+        }),
+      });
+    } catch (error) {
+      logger.warn('Failed to send PagerDuty alert', { error });
+    }
   }
 }
 

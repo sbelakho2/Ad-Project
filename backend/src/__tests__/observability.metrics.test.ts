@@ -1,5 +1,19 @@
 import request from 'supertest';
 import { createTestApp } from '../__tests__/helpers/testApp';
+import { twofaEventsTotal } from '../utils/prometheus';
+
+jest.mock('../services/twofa.service', () => ({
+  __esModule: true,
+  default: {
+    isEnabled: jest.fn().mockResolvedValue(false),
+    getBackupCodesCount: jest.fn().mockResolvedValue(0),
+    enroll: jest.fn().mockResolvedValue({ secret: 'secret', otpauthUrl: 'otpauth://test', qrCode: 'data' }),
+    verifyAndEnable: jest.fn().mockResolvedValue({ enabled: true }),
+    regenerateBackupCodes: jest.fn().mockResolvedValue({ codes: ['code-1'] }),
+    verifyTokenOrBackupCode: jest.fn().mockResolvedValue(true),
+    disable: jest.fn().mockResolvedValue({ disabled: true }),
+  },
+}));
 
 describe('Observability metrics', () => {
   const app = createTestApp();
@@ -18,7 +32,27 @@ describe('Observability metrics', () => {
     expect(text).toMatch(/auth_attempts_total\{outcome="failure"}\s+\d+/);
   });
 
-  // NOTE: 2FA metrics tests require a database-backed test environment.
-  // These are covered in integration tests.
-  it.todo('increments twofa_events_total on enroll/verify (requires db)');
+  it('increments twofa_events_total on enroll/verify', async () => {
+    await request(app)
+      .post('/api/v1/auth/2fa/enroll')
+      .send({})
+      .expect(200);
+
+    await request(app)
+      .post('/api/v1/auth/2fa/verify')
+      .send({ token: '123456' })
+      .expect(200);
+
+    const metric = await twofaEventsTotal.get();
+    const values = metric?.values ?? [];
+    const enrollSample = values.find((entry) =>
+      entry.labels?.event === 'enroll' && entry.labels?.outcome === 'success'
+    );
+    const verifySample = values.find((entry) =>
+      entry.labels?.event === 'verify' && entry.labels?.outcome === 'success'
+    );
+
+    expect(enrollSample?.value).toBeGreaterThanOrEqual(1);
+    expect(verifySample?.value).toBeGreaterThanOrEqual(1);
+  });
 });

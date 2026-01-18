@@ -109,6 +109,12 @@ async function proxy(request: NextRequest, params: Promise<{ path?: string[] }>)
     const lower = key.toLowerCase()
     if (HOP_BY_HOP_HEADERS.has(lower)) return
     if (lower === 'set-cookie') return
+    // The fetch API automatically decompresses the response body.
+    // Do NOT forward content-encoding as the body is now uncompressed.
+    // This prevents Caddy from double-compressing the response.
+    if (lower === 'content-encoding') return
+    // Content-length may also be wrong after decompression
+    if (lower === 'content-length') return
     responseHeaders.set(key, value)
   })
 

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import logger from '../utils/logger';
 import { redis } from '../utils/redis';
 import { reconciliationService } from '../services/reconciliationService';
+import { invoiceService } from '../services/invoiceService';
 import { AppError } from '../middleware/errorHandler';
 import jwt from 'jsonwebtoken';
 import { User } from '../database/entities/user.entity';
@@ -160,12 +161,13 @@ router.post('/billing/resend-invoice', async (req: Request, res: Response, next:
       throw new AppError('Invalid email format', 400);
     }
     
-    // TODO: Implement actual invoice email resend via Stripe or email service
-    // For now, log the request and return success
+    const result = await invoiceService.resendInvoiceEmail(invoiceId, email);
+
     logger.info('Invoice email resend requested by operator', {
       operator: req.user?.email,
       invoiceId,
       recipientEmail: email,
+      stripeStatus: result.status,
     });
     
     // Audit log
@@ -184,7 +186,8 @@ router.post('/billing/resend-invoice', async (req: Request, res: Response, next:
 
     res.json({
       success: true,
-      message: 'Invoice email queued for delivery',
+      message: 'Invoice email resent via Stripe',
+      data: result,
     });
   } catch (error) {
     logger.error('Error resending invoice email', { error, user: req.user });

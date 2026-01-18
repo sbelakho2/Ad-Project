@@ -2,9 +2,13 @@
 // Create a dummy publisher, user, 5 apps, and per-app SDK keys.
 // Usage:
 //   DATABASE_URL=postgres://... node backend/scripts/create_dummy_publisher.js \
-//     --email sales@apexmediation.ee \
-//     --password '&&Pw20354491' \
-//     --company "Apex Dummy Publisher"
+//     --email "user@example.com" \
+//     --password "your-password" \
+//     --company "Dummy Publisher"
+//
+// Notes:
+// - If --password is omitted, a random password is generated.
+// - Use --print-password to print the chosen/generated password.
 
 require('dotenv/config');
 const { randomUUID, createHash, randomBytes } = require('node:crypto');
@@ -17,9 +21,19 @@ function arg(name, def) {
   return def;
 }
 
-const email = arg('email', 'sales@apexmediation.ee');
-const password = arg('password', '&&Pw20354491');
-const company = arg('company', 'Apex Dummy Publisher');
+const printPassword = process.argv.includes('--print-password');
+
+const email =
+  arg('email', undefined) ||
+  process.env.DUMMY_EMAIL ||
+  `dummy+${Date.now()}@example.com`;
+
+const password =
+  arg('password', undefined) ||
+  process.env.DUMMY_PASSWORD ||
+  randomBytes(18).toString('base64url');
+
+const company = arg('company', 'Dummy Publisher');
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -134,6 +148,10 @@ async function main() {
 
     // Print out env values
     console.log('--- Dummy Publisher Created/Ensured ---');
+    console.log(`EMAIL=${email}`);
+    if (printPassword) {
+      console.log(`PASSWORD=${password}`);
+    }
     console.log(`PUBLISHER_ID=${publisherId}`);
     for (const [k, v] of Object.entries(appIds)) {
       console.log(`APP_ID_${k}=${v}`);

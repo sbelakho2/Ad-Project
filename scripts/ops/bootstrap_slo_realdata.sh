@@ -3,7 +3,7 @@
 #
 # This script from your local machine will:
 # 1) SSH to the App Server and create/ensure a dummy publisher + 5 apps + SDK keys
-# 2) Obtain a JWT for sales@apexmediation.ee
+# 2) Obtain a JWT for a chosen dummy user email
 # 3) Compose a .env.slo locally using returned IDs
 # 4) Copy .env.slo to the Test Server and enable the systemd service
 #
@@ -30,6 +30,11 @@ ssh -i "$SSH_KEY" root@"$APP_SERVER_IP" -- "apt-get update -y && apt-get install
 
 echo "[2/7] Creating dummy publisher + apps + SDK keys on app server..."
 scp -i "$SSH_KEY" backend/scripts/create_dummy_publisher.js root@"$APP_SERVER_IP":"$REMOTE_PROJECT_DIR"/backend/scripts/create_dummy_publisher.js >/dev/null
+DEFAULT_DUMMY_EMAIL="dummy+$(date +%s)@example.com"
+DUMMY_EMAIL=${DUMMY_EMAIL:-$DEFAULT_DUMMY_EMAIL}
+# Optional; if omitted the create_dummy_publisher script will generate a random password
+DUMMY_PASSWORD=${DUMMY_PASSWORD:-}
+
 ssh -i "$SSH_KEY" root@"$APP_SERVER_IP" -- "\
   set -euo pipefail; \
   cd $REMOTE_PROJECT_DIR; \
@@ -38,13 +43,19 @@ ssh -i "$SSH_KEY" root@"$APP_SERVER_IP" -- "\
   # copy the script into the container path expected by the image (/app/backend/scripts)
   docker exec -i \"\$CID\" mkdir -p /app/backend/scripts; \
   docker cp backend/scripts/create_dummy_publisher.js \"\$CID\":/app/backend/scripts/create_dummy_publisher.js; \
-  docker exec -i \"\$CID\" node /app/backend/scripts/create_dummy_publisher.js \
-      --email sales@apexmediation.ee \
-      --password '&&Pw20354491' \
-      --company 'Apex Dummy Publisher'" \
+  if [[ -n \"$DUMMY_PASSWORD\" ]]; then \
+    docker exec -i \"\$CID\" node /app/backend/scripts/create_dummy_publisher.js \
+        --email \"$DUMMY_EMAIL\" \
+        --password \"$DUMMY_PASSWORD\" \
+        --company 'Dummy Publisher'; \
+  else \
+    docker exec -i \"\$CID\" node /app/backend/scripts/create_dummy_publisher.js \
+        --email \"$DUMMY_EMAIL\" \
+        --company 'Dummy Publisher'; \
+  fi" \
   | tee "$WORK_DIR/dummy.out"
 
-echo "[3/7] Minting JWT in backend container for sales@apexmediation.ee ..."
+echo "[3/7] Minting JWT in backend container for $DUMMY_EMAIL ..."
 scp -i "$SSH_KEY" backend/scripts/mint_token.js root@"$APP_SERVER_IP":"$REMOTE_PROJECT_DIR"/backend/scripts/mint_token.js >/dev/null
 ssh -i "$SSH_KEY" root@"$APP_SERVER_IP" -- "\
   set -euo pipefail; \
@@ -54,7 +65,7 @@ ssh -i "$SSH_KEY" root@"$APP_SERVER_IP" -- "\
   mkdir -p /opt/adproject/tmp; \
   docker exec -i \"\$CID\" mkdir -p /app/backend/scripts; \
   docker cp backend/scripts/mint_token.js \"\$CID\":/app/backend/scripts/mint_token.js; \
-  docker exec -i \"\$CID\" env EMAIL=sales@apexmediation.ee node /app/backend/scripts/mint_token.js > /opt/adproject/tmp/dummy.token"
+  docker exec -i \"\$CID\" env EMAIL=\"$DUMMY_EMAIL\" node /app/backend/scripts/mint_token.js > /opt/adproject/tmp/dummy.token"
 scp -i "$SSH_KEY" root@"$APP_SERVER_IP":/opt/adproject/tmp/dummy.token "$WORK_DIR"/dummy.token >/dev/null
 
 PUBLISHER_ID=$(grep '^PUBLISHER_ID=' "$WORK_DIR/dummy.out" | cut -d= -f2)

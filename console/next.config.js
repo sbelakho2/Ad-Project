@@ -5,7 +5,12 @@ const nextConfig = {
   swcMinify: true,
   images: {
     // Allow images from local dev and production domains
-    domains: ['localhost', 'apexmediation.ee', 'console.apexmediation.ee'],
+    remotePatterns: [
+      { protocol: 'http', hostname: 'localhost' },
+      { protocol: 'https', hostname: 'apexmediation.ee' },
+      { protocol: 'https', hostname: 'console.apexmediation.ee' },
+      { protocol: 'https', hostname: '*.apexmediation.ee' },
+    ],
   },
   output: 'standalone',
   compress: false, // Disable compression to fix Playwright ERR_CONTENT_DECODING_FAILED

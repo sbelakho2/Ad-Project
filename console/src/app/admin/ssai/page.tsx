@@ -68,72 +68,29 @@ interface PlatformMetrics {
   revenue: number
 }
 
-// Mock data generator (in production, replace with real API)
-function generateMockAdapters(): AdapterStatus[] {
-  const adapters = [
-    { name: 'Google Ad Manager', baseLatency: 45 },
-    { name: 'SpringServe', baseLatency: 62 },
-    { name: 'FreeWheel', baseLatency: 78 },
-    { name: 'SpotX', baseLatency: 55 },
-    { name: 'Magnite', baseLatency: 68 },
-    { name: 'PubMatic', baseLatency: 52 },
-  ]
-
-  return adapters.map((a) => ({
-    name: a.name,
-    status: Math.random() > 0.1 ? 'active' : 'degraded',
-    latency_p95_ms: a.baseLatency + Math.floor(Math.random() * 30),
-    success_rate: 0.95 + Math.random() * 0.049,
-    requests_24h: Math.floor(50000 + Math.random() * 150000),
-    revenue_24h: Math.floor(500 + Math.random() * 2000),
-    timeout_rate: Math.random() * 0.02,
-  }))
-}
-
-function generateMockSSAIMetrics(): SSAIMetrics {
-  return {
-    total_sessions_24h: Math.floor(80000 + Math.random() * 40000),
-    active_sessions: Math.floor(500 + Math.random() * 300),
-    avg_session_duration_sec: Math.floor(180 + Math.random() * 120),
-    ad_fill_rate: 0.85 + Math.random() * 0.12,
-    beacons_fired_24h: Math.floor(500000 + Math.random() * 200000),
-    beacon_success_rate: 0.98 + Math.random() * 0.019,
-    midroll_completion_rate: 0.82 + Math.random() * 0.15,
-    preroll_completion_rate: 0.9 + Math.random() * 0.08,
-  }
-}
-
-function generateMockPlatformMetrics(): PlatformMetrics[] {
-  return [
-    { platform: 'Roku', sessions_24h: 35000, fill_rate: 0.92, completion_rate: 0.88, avg_latency_ms: 42, revenue: 1250 },
-    { platform: 'Fire TV', sessions_24h: 28000, fill_rate: 0.89, completion_rate: 0.85, avg_latency_ms: 48, revenue: 980 },
-    { platform: 'Apple TV', sessions_24h: 22000, fill_rate: 0.94, completion_rate: 0.91, avg_latency_ms: 38, revenue: 1100 },
-    { platform: 'Android TV', sessions_24h: 18000, fill_rate: 0.87, completion_rate: 0.84, avg_latency_ms: 52, revenue: 720 },
-    { platform: 'Samsung TV', sessions_24h: 15000, fill_rate: 0.91, completion_rate: 0.86, avg_latency_ms: 45, revenue: 680 },
-    { platform: 'Web Video', sessions_24h: 42000, fill_rate: 0.88, completion_rate: 0.82, avg_latency_ms: 55, revenue: 1400 },
-  ]
-}
-
-function generateTimeSeriesData(points: number = 24): Array<{
+type TimeSeriesPoint = {
   time: string
   sessions: number
   fillRate: number
   revenue: number
-}> {
-  const data = []
-  const now = Date.now()
-  for (let i = points - 1; i >= 0; i--) {
-    data.push({
-      time: new Date(now - i * 3600000).toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      sessions: Math.floor(2000 + Math.random() * 3000),
-      fillRate: 0.85 + Math.random() * 0.1,
-      revenue: Math.floor(80 + Math.random() * 60),
-    })
+}
+
+type AdminDashboardResponse = {
+  adapters: AdapterStatus[]
+  platformMetrics: PlatformMetrics[]
+  timeSeries: TimeSeriesPoint[]
+  ssai?: {
+    safeMode?: { active: boolean; reason: string }
+    counters?: Record<string, number>
+    metrics?: SSAIMetrics
+    killSwitches?: Array<{ key: string; active: boolean; reason: string; activatedAt: number; activatedBy: string }>
+    rollouts?: Array<{ key: string; enabled: boolean; percentage: number; tenants: string[] }>
   }
-  return data
+}
+
+async function fetchAdminDashboard(): Promise<AdminDashboardResponse> {
+  const res = await apiClient.get('/ssai/admin/dashboard')
+  return res.data as AdminDashboardResponse
 }
 
 // Colors
@@ -150,47 +107,25 @@ export default function AdminSSAIPage() {
   const { isOperator, isLoading: gateLoading } = useAdminGate()
   const [refreshKey, setRefreshKey] = useState(0)
 
-  // Mock queries (replace with real API in production)
   const {
-    data: adapters,
-    isLoading: adaptersLoading,
-    refetch: refetchAdapters,
+    data: dashboard,
+    isLoading: dashboardLoading,
+    refetch: refetchDashboard,
   } = useQuery({
-    queryKey: ['admin-adapters', refreshKey],
-    queryFn: async () => generateMockAdapters(),
-    refetchInterval: 60000,
-    enabled: isOperator,
-  })
-
-  const {
-    data: ssaiMetrics,
-    isLoading: ssaiLoading,
-    refetch: refetchSSAI,
-  } = useQuery({
-    queryKey: ['admin-ssai-metrics', refreshKey],
-    queryFn: async () => generateMockSSAIMetrics(),
+    queryKey: ['admin-ssai-dashboard', refreshKey],
+    queryFn: fetchAdminDashboard,
     refetchInterval: 30000,
     enabled: isOperator,
   })
 
-  const {
-    data: platformMetrics,
-    isLoading: platformLoading,
-    refetch: refetchPlatform,
-  } = useQuery({
-    queryKey: ['admin-platform-metrics', refreshKey],
-    queryFn: async () => generateMockPlatformMetrics(),
-    refetchInterval: 60000,
-    enabled: isOperator,
-  })
-
-  const timeSeriesData = useMemo(() => generateTimeSeriesData(), [refreshKey])
+  const adapters = dashboard?.adapters ?? []
+  const platformMetrics = dashboard?.platformMetrics ?? []
+  const timeSeriesData = useMemo(() => dashboard?.timeSeries ?? [], [dashboard])
+  const ssaiMetrics = useMemo<SSAIMetrics | null>(() => dashboard?.ssai?.metrics ?? null, [dashboard])
 
   const handleRefresh = () => {
     setRefreshKey((k) => k + 1)
-    refetchAdapters()
-    refetchSSAI()
-    refetchPlatform()
+    refetchDashboard()
   }
 
   if (gateLoading) {
@@ -209,12 +144,12 @@ export default function AdminSSAIPage() {
     )
   }
 
-  const isLoading = adaptersLoading || ssaiLoading || platformLoading
+  const isLoading = dashboardLoading
 
   // Aggregate metrics
-  const totalRequests = adapters?.reduce((sum, a) => sum + a.requests_24h, 0) ?? 0
-  const totalRevenue = adapters?.reduce((sum, a) => sum + a.revenue_24h, 0) ?? 0
-  const avgSuccessRate = adapters?.length
+  const totalRequests = adapters.reduce((sum, a) => sum + a.requests_24h, 0)
+  const totalRevenue = adapters.reduce((sum, a) => sum + a.revenue_24h, 0)
+  const avgSuccessRate = adapters.length
     ? adapters.reduce((sum, a) => sum + a.success_rate, 0) / adapters.length
     : 0
 
@@ -251,7 +186,7 @@ export default function AdminSSAIPage() {
           subtitle="Currently streaming"
           icon={Play}
           color="primary"
-          loading={ssaiLoading}
+          loading={dashboardLoading}
         />
         <MetricCard
           title="Ad Fill Rate"
@@ -259,7 +194,7 @@ export default function AdminSSAIPage() {
           subtitle="24h average"
           icon={Zap}
           color="success"
-          loading={ssaiLoading}
+          loading={dashboardLoading}
         />
         <MetricCard
           title="Beacons Success"
@@ -267,7 +202,7 @@ export default function AdminSSAIPage() {
           subtitle="Tracking accuracy"
           icon={CheckCircle2}
           color="purple"
-          loading={ssaiLoading}
+          loading={dashboardLoading}
         />
         <MetricCard
           title="Avg Session Length"
@@ -275,7 +210,7 @@ export default function AdminSSAIPage() {
           subtitle="Engagement time"
           icon={Clock}
           color="cyan"
-          loading={ssaiLoading}
+          loading={dashboardLoading}
         />
       </div>
 
@@ -378,7 +313,7 @@ export default function AdminSSAIPage() {
               </tr>
             </thead>
             <tbody>
-              {platformLoading ? (
+              {isLoading ? (
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-gray-500">Loading...</td>
                 </tr>
@@ -440,7 +375,7 @@ export default function AdminSSAIPage() {
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {adaptersLoading ? (
+          {isLoading ? (
             <div className="col-span-full py-8 text-center text-gray-500">Loading adapters...</div>
           ) : (
             adapters?.map((adapter) => (

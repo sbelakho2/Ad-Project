@@ -876,7 +876,7 @@ test.describe('UI Stress Tests', () => {
   test('45. Login with special characters in password', async ({ page }) => {
     await page.goto(`${CONSOLE_URL}/login`, { waitUntil: 'networkidle' });
     
-    // The password has special chars: &&Pw20354491
+    // Exercise passwords that contain special characters.
     const emailInput = page.locator('input[type="email"], input[name="email"]');
     const passwordInput = page.locator('input[type="password"], input[name="password"]');
     

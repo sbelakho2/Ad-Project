@@ -118,18 +118,22 @@ async function fetchRedMetrics(): Promise<RedMetrics> {
   return res.data
 }
 
-// Generate mock historical data for demo
+// Generate deterministic historical data (no randomness) for charts
 function generateHistoricalData(current: number, points: number = 24): MetricPoint[] {
   const data: MetricPoint[] = []
   const now = Date.now()
+  const amplitude = current * 0.15
+  const base = current
   for (let i = points - 1; i >= 0; i--) {
-    const variance = (Math.random() - 0.5) * 0.3 * current
+    const t = (points - 1 - i) / Math.max(points - 1, 1)
+    const wave = Math.sin(t * Math.PI * 2)
+    const value = Math.max(0, base + amplitude * wave)
     data.push({
       time: new Date(now - i * 3600000).toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
       }),
-      value: Math.max(0, current + variance),
+      value,
     })
   }
   return data

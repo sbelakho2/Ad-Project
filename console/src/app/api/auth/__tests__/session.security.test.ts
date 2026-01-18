@@ -168,7 +168,7 @@ describe('Session/Cookie security (NextAuth)', () => {
     })
     const provider = getCredentialsProvider(authOptions)
 
-    const demoUser = await provider.authorize({ email: 'demo@acme.com', password: 'anything' })
+    const demoUser = await provider.authorize({ email: 'demo@acme.com', password: 'demo' })
     const realUser = await provider.authorize({ email: 'ops@acme.com', password: 'anything' })
 
     expect(post).not.toHaveBeenCalled()

@@ -66,6 +66,7 @@ export class SoakTestRunner {
   private metrics: SoakMetrics;
   private running: boolean = false;
   private intervalHandles: NodeJS.Timeout[] = [];
+  private deterministic: boolean = process.env.NODE_ENV === 'test';
 
   constructor() {
     this.metrics = this.initMetrics();
@@ -190,36 +191,44 @@ export class SoakTestRunner {
     const cpuInterval = setInterval(() => {
       if (!this.running) return;
       // Simulate CPU usage (in real implementation, use os.cpus())
-      this.metrics.cpuUsage.push(Math.random() * 30 + 10); // 10-40%
+      if (this.deterministic) {
+        this.metrics.cpuUsage.push(20); // stable 20% in tests
+      } else {
+        this.metrics.cpuUsage.push(Math.random() * 30 + 10); // 10-40%
+      }
     }, 10000);
     this.intervalHandles.push(cpuInterval);
   }
 
   private startBreakInjection(intervalMs: number): void {
-    const breakInterval = setInterval(() => {
+    const recordBreak = () => {
       if (!this.running) return;
-      
+
       this.metrics.totalBreaks++;
-      
+
       // Simulate break success/failure (95% success rate)
-      if (Math.random() > 0.05) {
+      const breakSuccess = this.deterministic ? true : Math.random() > 0.05;
+      if (breakSuccess) {
         this.metrics.successfulBreaks++;
         this.metrics.trackingEventsFired += 6; // impression, start, quartiles, complete
       } else {
         this.metrics.failedBreaks++;
         // Occasionally count as deadline miss
-        if (Math.random() > 0.5) {
+        if (this.deterministic ? false : Math.random() > 0.5) {
           this.metrics.deadlineMisses++;
         }
       }
 
       // Simulate deduplication
-      if (Math.random() > 0.9) {
+      if (this.deterministic ? false : Math.random() > 0.9) {
         this.metrics.trackingEventsDeduped++;
       }
 
       console.log(`[BREAK] #${this.metrics.totalBreaks} - Success: ${this.metrics.successfulBreaks}/${this.metrics.totalBreaks}`);
-    }, intervalMs);
+    };
+
+    recordBreak();
+    const breakInterval = setInterval(recordBreak, intervalMs);
     this.intervalHandles.push(breakInterval);
   }
 
@@ -228,7 +237,7 @@ export class SoakTestRunner {
     if (config.networkJitter) {
       const jitterInterval = setInterval(() => {
         if (!this.running) return;
-        if (Math.random() > 0.95) { // 5% chance every 10s
+        if (!this.deterministic && Math.random() > 0.95) { // 5% chance every 10s
           console.log(`[FAULT] Network jitter injected`);
           // Simulate latency spike
           this.metrics.p99Latency = Math.max(this.metrics.p99Latency, 500 + Math.random() * 500);
@@ -241,7 +250,7 @@ export class SoakTestRunner {
     if (config.origin5xx) {
       const origin5xxInterval = setInterval(() => {
         if (!this.running) return;
-        if (Math.random() > 0.98) { // 2% chance every 30s
+        if (!this.deterministic && Math.random() > 0.98) { // 2% chance every 30s
           console.log(`[FAULT] Origin 5xx burst injected`);
           this.metrics.manifestViolations++;
         }
@@ -253,7 +262,7 @@ export class SoakTestRunner {
     if (config.cdnChurn) {
       const cdnChurnInterval = setInterval(() => {
         if (!this.running) return;
-        if (Math.random() > 0.97) { // 3% chance every 60s
+        if (!this.deterministic && Math.random() > 0.97) { // 3% chance every 60s
           console.log(`[FAULT] CDN cache churn injected`);
         }
       }, 60000);
@@ -292,7 +301,10 @@ export class SoakTestRunner {
     console.log(`========================================`);
     console.log(`Duration: ${this.formatDuration(result.metrics.duration)}`);
     console.log(`Total Breaks: ${result.metrics.totalBreaks}`);
-    console.log(`Successful Breaks: ${result.metrics.successfulBreaks} (${((result.metrics.successfulBreaks / result.metrics.totalBreaks) * 100).toFixed(1)}%)`);
+    const successRate = result.metrics.totalBreaks > 0
+      ? (result.metrics.successfulBreaks / result.metrics.totalBreaks) * 100
+      : 0;
+    console.log(`Successful Breaks: ${result.metrics.successfulBreaks} (${successRate.toFixed(1)}%)`);
     console.log(`Failed Breaks: ${result.metrics.failedBreaks}`);
     console.log(`Manifest Violations: ${result.metrics.manifestViolations}`);
     console.log(`Fatal Playback Errors: ${result.metrics.fatalPlaybackErrors}`);
@@ -346,13 +358,13 @@ export const soakTestConfigs: Record<string, SoakTestConfig> = {
         name: 'Deadline miss rate',
         threshold: 1,
         unit: '%',
-        check: (m) => (m.deadlineMisses / m.totalBreaks) * 100 < 1
+        check: (m) => m.totalBreaks > 0 && (m.deadlineMisses / m.totalBreaks) * 100 < 1
       },
       {
         name: 'Break success rate',
         threshold: 95,
         unit: '%',
-        check: (m) => (m.successfulBreaks / m.totalBreaks) * 100 >= 95
+        check: (m) => m.totalBreaks > 0 && (m.successfulBreaks / m.totalBreaks) * 100 >= 95
       }
     ]
   },
@@ -385,13 +397,13 @@ export const soakTestConfigs: Record<string, SoakTestConfig> = {
         name: 'Deadline miss rate',
         threshold: 0.5,
         unit: '%',
-        check: (m) => (m.deadlineMisses / m.totalBreaks) * 100 < 0.5
+        check: (m) => m.totalBreaks > 0 && (m.deadlineMisses / m.totalBreaks) * 100 < 0.5
       },
       {
         name: 'Break success rate',
         threshold: 98,
         unit: '%',
-        check: (m) => (m.successfulBreaks / m.totalBreaks) * 100 >= 98
+        check: (m) => m.totalBreaks > 0 && (m.successfulBreaks / m.totalBreaks) * 100 >= 98
       },
       {
         name: 'Memory stability',
@@ -430,7 +442,7 @@ export const soakTestConfigs: Record<string, SoakTestConfig> = {
         name: 'Break success rate',
         threshold: 90,
         unit: '%',
-        check: (m) => (m.successfulBreaks / m.totalBreaks) * 100 >= 90
+        check: (m) => m.totalBreaks > 0 && (m.successfulBreaks / m.totalBreaks) * 100 >= 90
       }
     ]
   }

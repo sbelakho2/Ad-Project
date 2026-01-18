@@ -227,14 +227,15 @@ class ReportingServiceImpl implements ReportingService {
         let rollupFilled = 0;
 
         if (rollupStartDay < rollupEndDay) {
+          // Use pre-aggregated publisher-level summary for fast dashboard queries
           const rollupSql = `
             SELECT
               COALESCE(SUM(total_revenue), 0) AS total_revenue,
               COALESCE(SUM(impression_count), 0) AS total_impressions,
               COALESCE(SUM(click_count), 0) AS total_clicks,
               COALESCE(SUM(filled_count), 0) AS total_filled
-            FROM analytics_metrics_rollups
-            WHERE publisher_id = $1
+            FROM analytics_publisher_daily_summary
+            WHERE publisher_id = $1::text
               AND bucket_date >= $2::date
               AND bucket_date < $3::date
           `;
@@ -273,7 +274,7 @@ class ReportingServiceImpl implements ReportingService {
                   COUNT(*)::bigint AS impressions,
                   COUNT(*) FILTER (WHERE filled IS TRUE)::bigint AS filled
                 FROM analytics_impressions
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::uuid
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -281,7 +282,7 @@ class ReportingServiceImpl implements ReportingService {
               clk AS (
                 SELECT COUNT(*)::bigint AS clicks
                 FROM analytics_clicks
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::text
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -289,7 +290,7 @@ class ReportingServiceImpl implements ReportingService {
               rev AS (
                 SELECT COALESCE(SUM(revenue_usd), 0) AS revenue
                 FROM analytics_revenue_events
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::uuid
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -342,7 +343,7 @@ class ReportingServiceImpl implements ReportingService {
           COALESCE(COUNT(DISTINCT r.impression_id), 0) AS total_impressions,
           COALESCE(COUNT(*) FILTER (WHERE r.revenue_type = 'click'), 0) AS total_clicks
         FROM analytics_revenue_events r
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.observed_at < $3
           AND r.is_test_mode = false
@@ -410,14 +411,15 @@ class ReportingServiceImpl implements ReportingService {
         const points: TimeSeriesDataPoint[] = [];
 
         if (rollupStartDay < rollupEndDay) {
+          // Use pre-aggregated publisher-level summary for fast dashboard queries
           const rollupSql = `
             SELECT
               bucket_date AS bucket,
               COALESCE(SUM(total_revenue), 0) AS revenue,
               COALESCE(SUM(impression_count), 0) AS impressions,
               COALESCE(SUM(click_count), 0) AS clicks
-            FROM analytics_metrics_rollups
-            WHERE publisher_id = $1
+            FROM analytics_publisher_daily_summary
+            WHERE publisher_id = $1::text
               AND bucket_date >= $2::date
               AND bucket_date < $3::date
             GROUP BY bucket
@@ -425,7 +427,7 @@ class ReportingServiceImpl implements ReportingService {
           `;
 
           const rollupResult = await runQuery<{
-            bucket: string;
+            bucket: Date | string;
             revenue: string;
             impressions: string;
             clicks: string;
@@ -436,8 +438,12 @@ class ReportingServiceImpl implements ReportingService {
               const impressions = Number.parseInt(row.impressions);
               const revenue = Number.parseFloat(row.revenue);
               const clicks = Number.parseInt(row.clicks);
+              // Handle both Date objects (from node-postgres) and strings
+              const bucketDate = row.bucket instanceof Date
+                ? row.bucket
+                : new Date(`${row.bucket}T00:00:00.000Z`);
               return {
-                timestamp: new Date(`${row.bucket}T00:00:00.000Z`).toISOString(),
+                timestamp: bucketDate.toISOString(),
                 revenue,
                 impressions,
                 clicks,
@@ -456,7 +462,7 @@ class ReportingServiceImpl implements ReportingService {
                   date_trunc('day', observed_at) AS bucket,
                   COUNT(*)::bigint AS impressions
                 FROM analytics_impressions
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::uuid
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -467,7 +473,7 @@ class ReportingServiceImpl implements ReportingService {
                   date_trunc('day', observed_at) AS bucket,
                   COUNT(*)::bigint AS clicks
                 FROM analytics_clicks
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::text
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -478,7 +484,7 @@ class ReportingServiceImpl implements ReportingService {
                   date_trunc('day', observed_at) AS bucket,
                   COALESCE(SUM(revenue_usd), 0) AS revenue
                 FROM analytics_revenue_events
-                WHERE publisher_id = $1
+                WHERE publisher_id = $1::uuid
                   AND observed_at >= $2
                   AND observed_at < $3
                   AND is_test_mode = false
@@ -505,7 +511,7 @@ class ReportingServiceImpl implements ReportingService {
           `;
 
           const rawResult = await runQuery<{
-            bucket: Date;
+            bucket: Date | string;
             revenue: string;
             impressions: string;
             clicks: string;
@@ -516,8 +522,10 @@ class ReportingServiceImpl implements ReportingService {
               const impressions = Number.parseInt(row.impressions);
               const revenue = Number.parseFloat(row.revenue);
               const clicks = Number.parseInt(row.clicks);
+              // Handle both Date objects and strings from PostgreSQL
+              const bucketDate = row.bucket instanceof Date ? row.bucket : new Date(row.bucket);
               return {
-                timestamp: new Date(row.bucket).toISOString(),
+                timestamp: bucketDate.toISOString(),
                 revenue,
                 impressions,
                 clicks,
@@ -538,7 +546,7 @@ class ReportingServiceImpl implements ReportingService {
           COUNT(DISTINCT r.impression_id) AS impressions,
           COUNT(*) FILTER (WHERE r.revenue_type = 'click') AS clicks
         FROM analytics_revenue_events r
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.observed_at < $3
           AND r.is_test_mode = false
@@ -547,21 +555,25 @@ class ReportingServiceImpl implements ReportingService {
       `;
 
       const result = await runQuery<{
-        bucket: Date;
+        bucket: Date | string;
         revenue: string;
         impressions: string;
         clicks: string;
       }>(sql, [publisherId, startDate, endDate]);
 
-      return result.map(row => ({
-        timestamp: new Date(row.bucket).toISOString(),
-        revenue: parseFloat(row.revenue),
-        impressions: parseInt(row.impressions),
-        clicks: parseInt(row.clicks),
-        ecpm: parseInt(row.impressions) > 0
-          ? (parseFloat(row.revenue) / parseInt(row.impressions)) * 1000
-          : 0,
-      }));
+      return result.map(row => {
+        // Handle both Date objects and strings from PostgreSQL
+        const bucketDate = row.bucket instanceof Date ? row.bucket : new Date(row.bucket);
+        return {
+          timestamp: bucketDate.toISOString(),
+          revenue: parseFloat(row.revenue),
+          impressions: parseInt(row.impressions),
+          clicks: parseInt(row.clicks),
+          ecpm: parseInt(row.impressions) > 0
+            ? (parseFloat(row.revenue) / parseInt(row.impressions)) * 1000
+            : 0,
+        };
+      });
     } catch (error) {
       logger.error('Failed to get time series data', { publisherId, error });
       throw error;
@@ -587,7 +599,7 @@ class ReportingServiceImpl implements ReportingService {
           AVG(i.latency_ms) AS avg_latency
         FROM analytics_revenue_events r
         LEFT JOIN analytics_impressions i ON r.impression_id = i.event_id
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.observed_at < $3
           AND r.is_test_mode = false
@@ -641,7 +653,7 @@ class ReportingServiceImpl implements ReportingService {
             COALESCE(SUM(total_revenue), 0) AS revenue,
             COALESCE(SUM(impression_count), 0) AS impressions
           FROM analytics_metrics_rollups
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::text
             AND bucket_date >= $2::date
             AND bucket_date < $3::date
           GROUP BY country_code
@@ -673,7 +685,7 @@ class ReportingServiceImpl implements ReportingService {
           SUM(r.revenue_usd) AS revenue,
           COUNT(DISTINCT r.impression_id) AS impressions
         FROM analytics_revenue_events r
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.observed_at < $3
           AND r.is_test_mode = false
@@ -724,7 +736,7 @@ class ReportingServiceImpl implements ReportingService {
             COALESCE(SUM(total_revenue), 0) AS revenue,
             COALESCE(SUM(impression_count), 0) AS impressions
           FROM analytics_metrics_rollups
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::text
             AND bucket_date >= $2::date
             AND bucket_date < $3::date
             AND app_id <> ''
@@ -757,7 +769,7 @@ class ReportingServiceImpl implements ReportingService {
           SUM(r.revenue_usd) AS revenue,
           COUNT(DISTINCT r.impression_id) AS impressions
         FROM analytics_revenue_events r
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.observed_at < $3
           AND r.is_test_mode = false
@@ -803,7 +815,7 @@ class ReportingServiceImpl implements ReportingService {
           COALESCE(COUNT(DISTINCT r.impression_id), 0) AS impressions,
           COALESCE(COUNT(DISTINCT r.adapter_id), 0) AS active_adapters
         FROM analytics_revenue_events r
-        WHERE r.publisher_id = $1
+        WHERE r.publisher_id = $1::uuid
           AND r.observed_at >= $2
           AND r.is_test_mode = false
       `;
@@ -853,7 +865,7 @@ class ReportingServiceImpl implements ReportingService {
             100.0 * COUNT(*) FILTER (WHERE filled IS TRUE) / NULLIF(COUNT(*), 0) AS fill_rate,
             SUM(revenue_usd) AS revenue
           FROM analytics_impressions
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::uuid
             AND observed_at >= $2
           GROUP BY adapter_id, adapter_name
         ),
@@ -866,7 +878,7 @@ class ReportingServiceImpl implements ReportingService {
             COUNT(*) AS error_count_24h,
             MAX(message) FILTER (WHERE event_type = 'error') AS last_issue
           FROM analytics_sdk_telemetry
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::uuid
             AND observed_at >= $2
           GROUP BY adapter_id
         )
@@ -959,7 +971,7 @@ class ReportingServiceImpl implements ReportingService {
           COUNT(*) FILTER (WHERE fraud_type = 'anomaly') AS anomaly_detections,
           COALESCE(SUM(revenue_blocked_cents), 0) / 100.0 AS blocked_revenue
         FROM analytics_fraud_events
-        WHERE publisher_id = $1
+        WHERE publisher_id = $1::text
           AND observed_at >= $2
           AND observed_at < $3
       `;
@@ -980,7 +992,7 @@ class ReportingServiceImpl implements ReportingService {
           fraud_type,
           COUNT(*) AS count
         FROM analytics_fraud_events
-        WHERE publisher_id = $1
+        WHERE publisher_id = $1::text
           AND observed_at >= $2
           AND observed_at < $3
           AND blocked
@@ -1045,14 +1057,14 @@ class ReportingServiceImpl implements ReportingService {
             COUNT(*) FILTER (WHERE viewable) AS viewable_impressions,
             COUNT(*) FILTER (WHERE measurable) AS measurable_impressions
           FROM analytics_impressions
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::uuid
             AND observed_at >= $2
             AND observed_at < $3
         ),
         click_metrics AS (
           SELECT COUNT(*) AS clicks
           FROM analytics_clicks
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::text
             AND observed_at >= $2
             AND observed_at < $3
         ),
@@ -1061,14 +1073,14 @@ class ReportingServiceImpl implements ReportingService {
             COUNT(*) AS total_events,
             COUNT(*) FILTER (WHERE blocked) AS blocked_events
           FROM analytics_fraud_events
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::text
             AND observed_at >= $2
             AND observed_at < $3
         ),
         brand_safety AS (
           SELECT AVG(risk_score) AS avg_risk_score
           FROM analytics_creative_scans
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::text
             AND observed_at >= $2
             AND observed_at < $3
         ),
@@ -1078,7 +1090,7 @@ class ReportingServiceImpl implements ReportingService {
             COUNT(*) FILTER (WHERE event_type = 'anr') AS anr_events,
             COUNT(*) FILTER (WHERE event_type = 'crash') AS crash_events
           FROM analytics_sdk_telemetry
-          WHERE publisher_id = $1
+          WHERE publisher_id = $1::uuid
             AND observed_at >= $2
             AND observed_at < $3
         )

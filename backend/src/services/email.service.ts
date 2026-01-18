@@ -7,12 +7,13 @@
  */
 
 import crypto from 'node:crypto';
+import { Resend } from 'resend';
 import logger from '../utils/logger';
 
 export interface EmailOptions {
   to: string;
   subject: string;
-  template: 'email-verification' | 'password-reset' | 'login-alert' | 'account-locked';
+  template: 'email-verification' | 'password-reset' | 'login-alert' | 'account-locked' | 'team-invite';
   data: Record<string, unknown>;
 }
 
@@ -23,6 +24,13 @@ export interface EmailResult {
 }
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://console.apexmediation.ee';
+const DEFAULT_FROM =
+  process.env.EMAIL_FROM ||
+  process.env.RESEND_FROM ||
+  'ApexMediation <no-reply@apexmediation.ee>';
+
+const resendApiKey = process.env.RESEND_API_KEY;
+const resend = resendApiKey ? new Resend(resendApiKey) : null;
 
 /**
  * Generate email HTML based on template
@@ -119,6 +127,29 @@ const generateEmailHtml = (template: EmailOptions['template'], data: Record<stri
         </html>
       `;
 
+    case 'team-invite':
+      return `
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #333;">You're Invited</h1>
+          <p>${data.inviterEmail || 'A team member'} has invited you to join their ApexMediation workspace.</p>
+          <p><strong>Role:</strong> ${data.role || 'Member'}</p>
+          <a href="${data.inviteUrl}"
+             style="display: inline-block; background: #4F46E5; color: white; padding: 12px 24px;
+                    text-decoration: none; border-radius: 6px; margin: 16px 0;">
+            Accept Invitation
+          </a>
+          <p style="color: #666; font-size: 14px;">
+            This invite link will expire in 7 days. If you weren't expecting this, you can ignore this email.
+          </p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
+          <p style="color: #999; font-size: 12px;">ApexMediation - Ad Monetization Platform</p>
+        </body>
+        </html>
+      `;
+
     default:
       return `<p>${JSON.stringify(data)}</p>`;
   }
@@ -132,20 +163,23 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
   const messageId = crypto.randomUUID();
   const html = generateEmailHtml(options.template, options.data);
 
-  // In production with SMTP configured, send real email
-  if (process.env.SMTP_HOST && process.env.NODE_ENV === 'production') {
+  const text = typeof html === 'string'
+    ? html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
+
+  if (resend) {
     try {
-      // TODO: Implement actual SMTP sending with nodemailer
-      // For now, log that we would send
-      logger.info('Would send email via SMTP', {
+      const result = await resend.emails.send({
+        from: DEFAULT_FROM,
         to: options.to,
         subject: options.subject,
-        template: options.template,
-        messageId,
+        html,
+        text,
       });
-      return { success: true, messageId };
+
+      return { success: true, messageId: result?.data?.id || messageId };
     } catch (error) {
-      logger.error('Failed to send email', {
+      logger.error('Failed to send email via Resend', {
         to: options.to,
         subject: options.subject,
         error: error instanceof Error ? error.message : 'Unknown error',

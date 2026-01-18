@@ -441,6 +441,30 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
       [startInclusive, endExclusive]
     );
 
+    // Update publisher-level daily summary for fast dashboard queries
+    await client.query(
+      `
+      INSERT INTO analytics_publisher_daily_summary (bucket_date, publisher_id, total_revenue, impression_count, click_count, filled_count)
+      SELECT
+        bucket_date,
+        publisher_id,
+        SUM(total_revenue),
+        SUM(impression_count),
+        SUM(click_count),
+        SUM(filled_count)
+      FROM analytics_metrics_rollups
+      WHERE bucket_date >= $1::date AND bucket_date < $2::date
+      GROUP BY bucket_date, publisher_id
+      ON CONFLICT (bucket_date, publisher_id)
+      DO UPDATE SET
+        total_revenue = EXCLUDED.total_revenue,
+        impression_count = EXCLUDED.impression_count,
+        click_count = EXCLUDED.click_count,
+        filled_count = EXCLUDED.filled_count
+      `,
+      [startInclusive, endExclusive]
+    );
+
         await client.query('COMMIT');
         logger.info('Analytics rollups: completed', { startDay, endDay, attempt });
         return;

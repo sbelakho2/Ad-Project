@@ -27,6 +27,7 @@ export interface ISessionStore {
   addActivePod(sessionId: string, podId: string): Promise<void>;
   completePod(sessionId: string, podId: string): Promise<void>;
   getByIdempotencyKey(key: string): Promise<SSAISession | null>;
+  getAllSessions(): SSAISession[];
 }
 
 /**
@@ -303,6 +304,13 @@ export class InMemorySessionStore implements ISessionStore {
     return Array.from(this.sessions.values()).filter(
       (s) => s.state === 'active'
     );
+  }
+
+  /**
+   * Get all sessions (including expired/terminated)
+   */
+  getAllSessions(): SSAISession[] {
+    return Array.from(this.sessions.values());
   }
 
   /**

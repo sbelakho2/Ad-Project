@@ -8,6 +8,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { v4 as uuid } from 'uuid';
 import { authenticate, authorize } from '../middleware/auth';
 import { query } from '../utils/postgres';
+import { sendEmail } from '../services/email.service';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -40,13 +41,6 @@ const findExistingUserIdByEmail = async (email: string): Promise<string | null> 
   } catch {
     return null;
   }
-};
-
-// Stub email service - TODO: implement proper email sending
-const sendEmail = async (options: { to: string; subject: string; template: string; data: any }): Promise<void> => {
-  logger.info('Email send stub:', { to: options.to, subject: options.subject });
-  // In production, this would send via SendGrid, AWS SES, etc.
-  return Promise.resolve();
 };
 
 // Invite token expiration in milliseconds (7 days)

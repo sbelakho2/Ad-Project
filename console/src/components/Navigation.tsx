@@ -12,7 +12,7 @@ import type { Role } from '@/lib/rbac'
 import { usePlanAccess } from '@/lib/usePlanAccess'
 import {
   LayoutDashboard,
-  LayoutGrid,
+  Layers,
   ArrowLeftRight,
   Puzzle,
   TrendingUp,
@@ -43,7 +43,7 @@ type NavBlueprint = {
 
 const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'dashboard', label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'placements', label: 'Placements', href: '/placements', icon: LayoutGrid },
+  { key: 'placements', label: 'Placements', href: '/placements', icon: Layers },
   { key: 'migration-studio', label: 'Migration Studio', labelKey: 'migrationStudio.nav', href: '/migration-studio', icon: ArrowLeftRight, featureFlag: 'migrationStudio' },
   { key: 'adapters', label: 'Adapters', href: '/adapters', icon: Puzzle },
   { key: 'analytics', label: 'Analytics', href: '/analytics', icon: TrendingUp },

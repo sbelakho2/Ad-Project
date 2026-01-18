@@ -2,7 +2,6 @@ import { Request, Response } from 'express';
 import twofaService from '../services/twofa.service';
 import logger from '../utils/logger';
 import { twofaEventsTotal } from '../utils/prometheus';
-import { safeInc } from '../utils/metrics';
 
 export async function status(req: Request, res: Response) {
   const userId = req.user?.userId;
@@ -27,8 +26,7 @@ export async function enroll(req: Request, res: Response) {
   const email = (req.user as any)?.email || 'user@example.com';
   const issuer = process.env.TWOFA_ISSUER || 'ApexMediation';
   const data = await twofaService.enroll(userId, email, issuer, { actorEmail: email, ip: req.ip || null });
-  // Labels must match metric definition: { event, outcome }
-  safeInc(twofaEventsTotal, { event: 'enroll', outcome: 'success' });
+  try { twofaEventsTotal.labels('enroll', 'success').inc(); } catch (e) { void e; }
   return res.json({ data });
 }
 
@@ -40,11 +38,11 @@ export async function verify(req: Request, res: Response) {
   const token = String(req.body?.token || '');
   try {
     const data = await twofaService.verifyAndEnable(userId, token, { actorEmail: (req.user as any)?.email, ip: req.ip || null });
-    safeInc(twofaEventsTotal, { event: 'verify', outcome: 'success' });
+    try { twofaEventsTotal.labels('verify', 'success').inc(); } catch (e) { void e; }
     return res.json({ data });
   } catch (e: any) {
     logger.warn('2FA verify failed', { userId, error: e?.message });
-    safeInc(twofaEventsTotal, { event: 'verify', outcome: 'failure' });
+    try { twofaEventsTotal.labels('verify', 'failure').inc(); } catch (err) { void err; }
     return res.status(400).json({ error: e?.message || 'Verification failed' });
   }
 }
@@ -56,10 +54,10 @@ export async function regenerateBackupCodes(req: Request, res: Response) {
   }
   try {
     const data = await twofaService.regenerateBackupCodes(userId, { actorEmail: (req.user as any)?.email, ip: req.ip || null });
-    safeInc(twofaEventsTotal, { event: 'regen', outcome: 'success' });
+    try { twofaEventsTotal.labels('regen', 'success').inc(); } catch (e) { void e; }
     return res.json({ data });
   } catch (e: any) {
-    safeInc(twofaEventsTotal, { event: 'regen', outcome: 'failure' });
+    try { twofaEventsTotal.labels('regen', 'failure').inc(); } catch (err) { void err; }
     return res.status(400).json({ error: e?.message || 'Unable to regenerate backup codes' });
   }
 }
@@ -84,10 +82,10 @@ export async function disable(req: Request, res: Response) {
     const ok2fa = await twofaService.verifyTokenOrBackupCode(userId, code);
     if (!ok2fa) return res.status(400).json({ error: 'Invalid 2FA code' });
     await twofaService.disable(userId, { actorEmail: (req.user as any)?.email, ip: req.ip || null });
-    safeInc(twofaEventsTotal, { event: 'disable', outcome: 'success' });
+    try { twofaEventsTotal.labels('disable', 'success').inc(); } catch (e) { void e; }
     return res.json({ data: { disabled: true } });
   } catch (e: any) {
-    safeInc(twofaEventsTotal, { event: 'disable', outcome: 'failure' });
+    try { twofaEventsTotal.labels('disable', 'failure').inc(); } catch (err) { void err; }
     return res.status(400).json({ error: e?.message || 'Unable to disable 2FA' });
   }
 }
