@@ -485,10 +485,10 @@ export class InvoiceService {
       throw new Error('Invoice not found in Stripe');
     }
 
-    if (email && invoice.customer_email !== email) {
-      invoice = await stripe.invoices.update(stripeInvoiceId, {
-        customer_email: email,
-      });
+    // Update customer email if different (customer is a string ID or Customer object)
+    if (email && invoice.customer_email !== email && invoice.customer) {
+      const customerId = typeof invoice.customer === 'string' ? invoice.customer : invoice.customer.id;
+      await stripe.customers.update(customerId, { email });
     }
 
     if (invoice.status === 'draft') {
