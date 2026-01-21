@@ -58,8 +58,11 @@ export default async function StatusPage() {
   let live: LiveStatus | null = null
   let usedLkg = false
 
+  // Use absolute URL for server-side rendering
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://apexmediation.ee'
+
   try {
-    const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ''}/api/public/status`, {
+    const res = await fetch(`${baseUrl}/api/public/status`, {
       // Don’t cache HTML errors, and allow ISR at route-handler layer
       cache: 'no-store',
       headers: { accept: 'application/json' },

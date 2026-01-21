@@ -364,6 +364,8 @@ const startServer = async (): Promise<void> => {
       finalizeCronSpec: env.ANALYTICS_ROLLUP_FINALIZE_CRON ?? env.ANALYTICS_ROLLUP_CRON,
       realtimeCronSpec: env.ANALYTICS_ROLLUP_REALTIME_CRON,
       lookbackDays: env.ANALYTICS_ROLLUP_LOOKBACK_DAYS,
+      realtimeLookbackHours: env.ANALYTICS_ROLLUP_REALTIME_LOOKBACK_HOURS,
+      startupBackfillEnabled: env.ANALYTICS_ROLLUP_STARTUP_BACKFILL,
     });
 
     // Migration guardrail scheduler (snapshot aggregation + automated evaluation)

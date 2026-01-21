@@ -70,6 +70,7 @@ export interface MeteringConfig {
   enableRemoteReporting?: boolean;
   samplingRate?: number;
   reportEndpoint?: string;
+  apiKey?: string;
 }
 
 /**
@@ -461,7 +462,10 @@ export class UsageMeter {
       // Default fetch-based reporting
       const response = await fetch(this.config.reportEndpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.apiKey ? { 'X-Api-Key': this.config.apiKey } : {}),
+        },
         body: JSON.stringify({
           metrics,
           breakdown: {
@@ -559,6 +563,11 @@ export class UsageMeterBuilder {
 
   withReportEndpoint(endpoint: string): this {
     this.config.reportEndpoint = endpoint;
+    return this;
+  }
+
+  withApiKey(apiKey: string): this {
+    this.config.apiKey = apiKey;
     return this;
   }
 

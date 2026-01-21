@@ -12,6 +12,8 @@ export interface InitAnalyticsRollupSchedulerParams {
   finalizeCronSpec: string;
   realtimeCronSpec: string;
   lookbackDays: number;
+  realtimeLookbackHours: number;
+  startupBackfillEnabled: boolean;
 }
 
 export function initAnalyticsRollupScheduler({
@@ -19,6 +21,8 @@ export function initAnalyticsRollupScheduler({
   finalizeCronSpec,
   realtimeCronSpec,
   lookbackDays,
+  realtimeLookbackHours,
+  startupBackfillEnabled,
 }: InitAnalyticsRollupSchedulerParams): void {
   if (!enabled) {
     logger.info('Analytics rollups: scheduler disabled');
@@ -36,6 +40,7 @@ export function initAnalyticsRollupScheduler({
   }
 
   const safeLookbackDays = Number.isFinite(lookbackDays) && lookbackDays > 0 ? Math.floor(lookbackDays) : 35;
+  const safeRealtimeHours = Number.isFinite(realtimeLookbackHours) && realtimeLookbackHours > 0 ? Math.floor(realtimeLookbackHours) : 6;
 
   const runRange = async (reason: string, startInclusive: Date, endExclusive: Date): Promise<void> => {
     const now = new Date();
@@ -69,18 +74,23 @@ export function initAnalyticsRollupScheduler({
 
   // Non-blocking warm run at startup: backfill the most recent lookback window.
   // This is the only time we intentionally touch multiple days at once.
-  void (async () => {
-    const now = new Date();
-    const end = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
-    const start = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - safeLookbackDays)));
-    await runRange('startup-backfill', start, end);
-  })().catch(err => {
-    logger.error('Analytics rollups: startup run failed', { error: (err as Error).message });
-  });
+  if (startupBackfillEnabled) {
+    void (async () => {
+      const now = new Date();
+      const end = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)));
+      const start = utcMidnight(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - safeLookbackDays)));
+      await runRange('startup-backfill', start, end);
+    })().catch(err => {
+      logger.error('Analytics rollups: startup run failed', { error: (err as Error).message });
+    });
+  }
 
   realtimeJob = cron.schedule(realtimeCronSpec, async () => {
     try {
-      const { start, end } = utcToday();
+      const { end } = utcToday();
+      const now = new Date();
+      const windowStart = new Date(now.getTime() - safeRealtimeHours * 60 * 60 * 1000);
+      const start = windowStart < end ? windowStart : end;
       await runRange('scheduled-realtime-today', start, end);
     } catch (err) {
       logger.error('Analytics rollups: realtime scheduled run failed', { error: (err as Error).message });
@@ -102,6 +112,8 @@ export function initAnalyticsRollupScheduler({
     realtimeCronSpec,
     finalizeCronSpec,
     lookbackDays: safeLookbackDays,
+    realtimeLookbackHours: safeRealtimeHours,
+    startupBackfillEnabled,
   });
 }
 

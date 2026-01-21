@@ -176,6 +176,35 @@ export const usageRecordSchema = z.object({
   }),
 });
 
+export const sdkUsageMetricsSchema = z.object({
+  body: z.object({
+    metrics: z
+      .object({
+        adRequests: z.number().int().min(0).optional(),
+        adImpressions: z.number().int().min(0).optional(),
+        adClicks: z.number().int().min(0).optional(),
+        videoStarts: z.number().int().min(0).optional(),
+        videoCompletes: z.number().int().min(0).optional(),
+        totalRevenue: z.number().min(0).optional(),
+        apiCalls: z.number().int().min(0).optional(),
+        cacheHits: z.number().int().min(0).optional(),
+        cacheMisses: z.number().int().min(0).optional(),
+        errors: z.number().int().min(0).optional(),
+        periodStart: z.number().optional(),
+        periodEnd: z.number().optional(),
+        dataTransferGb: z.number().min(0).optional(),
+      })
+      .passthrough(),
+    breakdown: z
+      .object({
+        byPlacement: z.record(z.unknown()).optional(),
+        byAdapter: z.record(z.unknown()).optional(),
+        byAdFormat: z.record(z.unknown()).optional(),
+      })
+      .optional(),
+  }),
+});
+
 const planTierSchema = z.enum(['starter', 'growth', 'scale', 'enterprise']);
 
 // =====================================================================

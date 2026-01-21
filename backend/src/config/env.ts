@@ -106,8 +106,12 @@ const envSchema = z.object({
   ANALYTICS_ROLLUP_FINALIZE_CRON: z.string().optional(),
   // Realtime job: refreshes today's aggregates periodically.
   ANALYTICS_ROLLUP_REALTIME_CRON: z.string().default('0 * * * *'), // hourly (minute 0) UTC
+  // Realtime rollup window: how many hours back from now to recompute.
+  ANALYTICS_ROLLUP_REALTIME_LOOKBACK_HOURS: z.string().regex(/^[0-9]+$/).transform(Number).default('6'),
   // Default covers the common 30-day dashboard window (plus a small buffer).
   ANALYTICS_ROLLUP_LOOKBACK_DAYS: z.string().regex(/^\d+$/).transform(Number).default('35'),
+  // Run a startup backfill on boot (can be heavy on WAL if restarts are frequent).
+  ANALYTICS_ROLLUP_STARTUP_BACKFILL: z.string().transform(v => v === 'true' || v === '1').default('false'),
 
   // Migration guardrail scheduler (snapshot aggregation + automated evaluation)
   MIGRATION_GUARDRAIL_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),

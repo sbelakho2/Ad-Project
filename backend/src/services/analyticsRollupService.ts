@@ -195,6 +195,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         impression_count = EXCLUDED.impression_count,
         filled_count = EXCLUDED.filled_count,
         updated_at = now()
+      WHERE (analytics_impression_rollups.impression_count, analytics_impression_rollups.filled_count)
+        IS DISTINCT FROM (EXCLUDED.impression_count, EXCLUDED.filled_count)
       `,
       [startInclusive, endExclusive]
     );
@@ -244,6 +246,8 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
       DO UPDATE SET
         click_count = EXCLUDED.click_count,
         updated_at = now()
+      WHERE (analytics_click_rollups.click_count)
+        IS DISTINCT FROM (EXCLUDED.click_count)
       `,
       [startInclusive, endExclusive]
     );
@@ -298,6 +302,23 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         revenue_bucket_gt_5_count = EXCLUDED.revenue_bucket_gt_5_count,
         revenue_event_count = EXCLUDED.revenue_event_count,
         updated_at = now()
+      WHERE (
+        analytics_revenue_rollups.total_revenue,
+        analytics_revenue_rollups.avg_revenue,
+        analytics_revenue_rollups.max_revenue,
+        analytics_revenue_rollups.revenue_bucket_lt_1_count,
+        analytics_revenue_rollups.revenue_bucket_1_5_count,
+        analytics_revenue_rollups.revenue_bucket_gt_5_count,
+        analytics_revenue_rollups.revenue_event_count
+      ) IS DISTINCT FROM (
+        EXCLUDED.total_revenue,
+        EXCLUDED.avg_revenue,
+        EXCLUDED.max_revenue,
+        EXCLUDED.revenue_bucket_lt_1_count,
+        EXCLUDED.revenue_bucket_1_5_count,
+        EXCLUDED.revenue_bucket_gt_5_count,
+        EXCLUDED.revenue_event_count
+      )
       `,
       [startInclusive, endExclusive]
     );
@@ -437,6 +458,23 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         fill_rate = EXCLUDED.fill_rate,
         ecpm = EXCLUDED.ecpm,
         updated_at = now()
+      WHERE (
+        analytics_metrics_rollups.impression_count,
+        analytics_metrics_rollups.filled_count,
+        analytics_metrics_rollups.click_count,
+        analytics_metrics_rollups.total_revenue,
+        analytics_metrics_rollups.ctr,
+        analytics_metrics_rollups.fill_rate,
+        analytics_metrics_rollups.ecpm
+      ) IS DISTINCT FROM (
+        EXCLUDED.impression_count,
+        EXCLUDED.filled_count,
+        EXCLUDED.click_count,
+        EXCLUDED.total_revenue,
+        EXCLUDED.ctr,
+        EXCLUDED.fill_rate,
+        EXCLUDED.ecpm
+      )
       `,
       [startInclusive, endExclusive]
     );
@@ -461,6 +499,17 @@ export async function runAnalyticsRollups({ startInclusive, endExclusive }: RunA
         impression_count = EXCLUDED.impression_count,
         click_count = EXCLUDED.click_count,
         filled_count = EXCLUDED.filled_count
+      WHERE (
+        analytics_publisher_daily_summary.total_revenue,
+        analytics_publisher_daily_summary.impression_count,
+        analytics_publisher_daily_summary.click_count,
+        analytics_publisher_daily_summary.filled_count
+      ) IS DISTINCT FROM (
+        EXCLUDED.total_revenue,
+        EXCLUDED.impression_count,
+        EXCLUDED.click_count,
+        EXCLUDED.filled_count
+      )
       `,
       [startInclusive, endExclusive]
     );

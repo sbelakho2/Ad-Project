@@ -38,12 +38,14 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   const rtbPath = new RegExp(`^/api/${apiVersion}/rtb/`);
   const webhooksPath = new RegExp(`^/api/${apiVersion}/webhooks/`);
   const analyticsEventsPath = new RegExp(`^/api/${apiVersion}/analytics/events`);
+  const metricsUsagePath = new RegExp(`^/api/${apiVersion}/metrics/usage$`);
   const migrationAssignPath = new RegExp(`^/api/${apiVersion}/migration/assign$`);
   
   // API endpoints with Bearer token authentication (REST API clients, not browser sessions)
   // These use JWT tokens which provide their own CSRF protection via Authorization header
   const hasAuthorizationHeader = req.headers.authorization?.startsWith('Bearer ');
   const hasSdkKeyHeader = !!req.headers['x-sdk-key'];
+  const hasApiKeyHeader = !!req.headers['x-api-key'];
   
   // Exempt CSRF for auth acquisition endpoints, ops-only feature flag toggles, and SDK/RTB endpoints
   if (method === 'POST' && (authAcquire.test(path) || flagsPath.test(path))) {
@@ -61,12 +63,16 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction) 
   if (analyticsEventsPath.test(path)) {
     return next();
   }
+  // Metrics usage ingestion uses app API keys (non-browser), exempt from CSRF
+  if (metricsUsagePath.test(path)) {
+    return next();
+  }
   // Migration /assign endpoint uses SDK secret auth, exempt from CSRF
   if (migrationAssignPath.test(path)) {
     return next();
   }
   // API endpoints using Bearer token or SDK key auth are exempt (non-browser clients)
-  if (hasAuthorizationHeader || hasSdkKeyHeader) {
+  if (hasAuthorizationHeader || hasSdkKeyHeader || hasApiKeyHeader) {
     return next();
   }
   return (baseCsurf as unknown as (req: Request, res: Response, next: NextFunction) => void)(req, res, next);

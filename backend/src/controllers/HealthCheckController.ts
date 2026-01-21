@@ -120,7 +120,14 @@ export class HealthCheckController {
         WITH impression_metrics AS (
           SELECT
             COUNT(*)::bigint AS total_requests,
-            COUNT(*) FILTER (WHERE status = 'success' OR filled IS TRUE)::bigint AS successful_requests,
+            -- Consider a request successful if:
+            -- 1. It completed (has latency_ms), OR
+            -- 2. It has explicit success status OR filled=true, AND
+            -- 3. It doesn't have an error status
+            COUNT(*) FILTER (
+              WHERE (latency_ms IS NOT NULL OR status = 'success' OR filled IS TRUE)
+                AND (status IS DISTINCT FROM 'error')
+            )::bigint AS successful_requests,
             COUNT(*) FILTER (WHERE status = 'error')::bigint AS error_requests,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)
               FILTER (WHERE latency_ms IS NOT NULL) AS latency_p95_ms

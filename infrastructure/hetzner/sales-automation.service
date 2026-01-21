@@ -1,0 +1,44 @@
+[Unit]
+Description=ApexMediation Sales Automation Daemon
+Documentation=https://github.com/apexmediation/ad-project
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/adproject/backend
+
+# Environment
+EnvironmentFile=/opt/adproject/.env
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS="--max-old-space-size=512"
+
+# Main process
+ExecStart=/usr/bin/node dist/src/scripts/salesAutomationCli.js daemon
+
+# Restart policy
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/adproject/backend/logs
+
+# Resource limits
+MemoryLimit=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sales-automation
+
+[Install]
+WantedBy=multi-user.target

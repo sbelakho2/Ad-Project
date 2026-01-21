@@ -35,14 +35,14 @@ CREATE INDEX IF NOT EXISTS idx_app_api_keys_app_active
 -- Minimal usage/audit trail (IP/UA hashed)
 CREATE TABLE IF NOT EXISTS app_api_key_usages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  app_api_key_id UUID REFERENCES app_api_keys(id) ON DELETE CASCADE,
+  api_key_id UUID REFERENCES app_api_keys(id) ON DELETE CASCADE,
   ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  route VARCHAR(128),
-  method VARCHAR(64),
+  route VARCHAR(255),
+  method VARCHAR(10),
   ip_hash VARCHAR(64),
   ua_hash VARCHAR(64),
-  status VARCHAR(16)
+  status VARCHAR(3)
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_api_key_usages_key
-  ON app_api_key_usages(app_api_key_id);
+  ON app_api_key_usages(api_key_id);

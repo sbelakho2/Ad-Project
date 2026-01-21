@@ -12,6 +12,12 @@ Public API
 - requestAd(request): POSTs to {endpoint}/auction with AbortController timeout and validates response.
 - on(event, handler): subscribe to SDK events (consent:updated, ad:requested, ad:filled, ad:error).
 
+Usage metering (billing)
+- The SDK can post billable usage metrics to the API for Stripe usage sync.
+- Endpoint: POST /api/v1/metrics/usage
+- Authentication: X-Api-Key header with an app API key.
+- Configure the SDK with reportEndpoint + apiKey if you enable remote reporting.
+
 Build outputs
 - ESM: dist/index.esm.js
 - UMD: dist/index.umd.js
