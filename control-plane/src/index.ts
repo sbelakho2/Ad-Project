@@ -18,8 +18,9 @@ import compression from 'compression';
 
 import { loadConfig } from './config';
 import { logger, logAudit } from './logger';
-import { initializePools, closePools, getReadOnlyPool } from './database';
+import { initializePools, closePools, getReadOnlyPool, queryReadOnly } from './database';
 import routes from './routes';
+import { getOrchestrator } from './services/autonomous-orchestrator';
 
 // Load and validate configuration
 const config = loadConfig();
@@ -350,6 +351,7 @@ app.get('/admin', (req: Request, res: Response) => {
           <div class="brand">APEX CONTROL PLANE</div>
           <nav class="nav">
             <a class="nav-item active" data-view="dashboard" href="#dashboard">Dashboard</a>
+            <a class="nav-item" data-view="intelligence" href="#intelligence">Intelligence (V2)</a>
             <a class="nav-item" data-view="sales" href="#sales">Sales Automation</a>
             <a class="nav-item" data-view="compliance" href="#compliance">Compliance</a>
             <a class="nav-item" data-view="data-explorer" href="#data-explorer">Data Explorer</a>
@@ -649,6 +651,83 @@ app.get('/admin', (req: Request, res: Response) => {
           </div>
         </div>
         <div id="view-partitions" class="view hidden"><div id="partitions-content">Loading...</div></div>
+
+        <!-- Intelligence V2 View -->
+        <div id="view-intelligence" class="view hidden">
+          <!-- Worker Status -->
+          <div class="card" style="margin-bottom: 24px; border: 2px solid #334155;">
+            <div class="card-header">
+              <div style="display: flex; align-items: center; gap: 12px;">
+                <span class="card-title">Worker Status (Test Server)</span>
+                <span id="intel-worker-badge" style="padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">-</span>
+              </div>
+              <button class="btn" onclick="checkWorkerHealth()">Check Health</button>
+            </div>
+            <div id="intel-worker-info" style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Click 'Check Health' to verify worker connection.</div>
+          </div>
+
+          <!-- System Stats -->
+          <div class="grid">
+            <div class="card">
+              <div class="card-title">Discovery Sources</div>
+              <div id="intel-sources-count" style="font-size: 24px; font-weight: bold; margin-top: 10px;">-</div>
+              <div id="intel-sources-detail" style="font-size: 12px; color: #94a3b8; margin-top: 5px;"></div>
+            </div>
+            <div class="card">
+              <div class="card-title">Scored Contacts</div>
+              <div id="intel-contacts-scored" style="font-size: 24px; font-weight: bold; margin-top: 10px;">-</div>
+              <div id="intel-contacts-detail" style="font-size: 12px; color: #94a3b8; margin-top: 5px;"></div>
+            </div>
+            <div class="card">
+              <div class="card-title">Avg Lead Score</div>
+              <div id="intel-avg-score" style="font-size: 24px; font-weight: bold; margin-top: 10px;">-</div>
+              <div id="intel-score-detail" style="font-size: 12px; color: #94a3b8; margin-top: 5px;"></div>
+            </div>
+            <div class="card">
+              <div class="card-title">Thompson Sampler</div>
+              <div id="intel-bandit-arms" style="font-size: 24px; font-weight: bold; margin-top: 10px;">-</div>
+              <div id="intel-bandit-detail" style="font-size: 12px; color: #94a3b8; margin-top: 5px;"></div>
+            </div>
+          </div>
+
+          <!-- Job Triggers -->
+          <div class="card" style="margin: 24px 0;">
+            <div class="card-header">
+              <span class="card-title">Job Controls</span>
+              <div>
+                <button class="btn" onclick="runDiscoveryJob()">Run Discovery</button>
+                <button class="btn" onclick="runScoringJob()">Run Scoring</button>
+                <button class="btn btn-primary" onclick="loadIntelligenceStats()">Refresh Stats</button>
+              </div>
+            </div>
+            <div id="intel-job-result" style="font-size: 13px; color: #94a3b8;">Ready to run jobs via worker.</div>
+          </div>
+
+          <!-- Lead Sources Management -->
+          <div class="card" style="margin-bottom: 24px;">
+            <div class="card-header">
+              <span class="card-title">Lead Sources</span>
+              <button class="btn btn-primary" onclick="showAddSourceModal()">+ Add Source</button>
+            </div>
+            <div id="intel-sources-table">Loading sources...</div>
+          </div>
+
+          <!-- Hot Leads -->
+          <div class="card" style="margin-bottom: 24px;">
+            <div class="card-header">
+              <span class="card-title">Hot Leads (Score ≥ 70)</span>
+            </div>
+            <div id="intel-hot-leads">Loading...</div>
+          </div>
+
+          <!-- Inbox / Review Queue -->
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Reply Inbox</span>
+            </div>
+            <div id="intel-inbox">Loading inbox...</div>
+          </div>
+        </div>
         <div class="scroll-spacer" aria-hidden="true"></div>
       </div>
     </div>
@@ -875,6 +954,7 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
   async function loadViewData(view) {
     switch(view) {
       case 'dashboard': loadDashboard(); break;
+      case 'intelligence': loadIntelligence(); break;
       case 'sales': loadSales(); break;
       case 'compliance': loadCompliance(); break;
       case 'data-explorer': loadDataExplorer(); break;
@@ -952,6 +1032,252 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
         document.getElementById('dashboard-insights').textContent = 'No action items detected.';
       }
     } catch (e) { console.error(e); }
+  }
+
+  // =============================================
+  // INTELLIGENCE V2 (Autonomous Sales System)
+  // =============================================
+
+  async function loadIntelligence() {
+    await Promise.all([
+      loadIntelligenceStats(),
+      loadIntelligenceSources(),
+      loadHotLeads(),
+      loadIntelligenceInbox()
+    ]);
+  }
+
+  async function loadIntelligenceStats() {
+    try {
+      var stats = await apiFetchJson('/api/autonomous/stats', null);
+      if (!stats || !stats.stats) {
+        document.getElementById('intel-sources-count').textContent = '-';
+        document.getElementById('intel-contacts-scored').textContent = '-';
+        document.getElementById('intel-avg-score').textContent = '-';
+        document.getElementById('intel-bandit-arms').textContent = '-';
+        return;
+      }
+      var s = stats.stats;
+      
+      document.getElementById('intel-sources-count').textContent = s.discovery.sources || 0;
+      document.getElementById('intel-sources-detail').textContent = s.discovery.lastScrape 
+        ? 'Last scrape: ' + new Date(s.discovery.lastScrape).toLocaleString() 
+        : 'No scrapes yet';
+      
+      document.getElementById('intel-contacts-scored').textContent = s.scoring.scored + ' / ' + s.scoring.contacts;
+      document.getElementById('intel-contacts-detail').textContent = 'Total contacts: ' + s.scoring.contacts;
+      
+      document.getElementById('intel-avg-score').textContent = s.scoring.avgScore || 0;
+      document.getElementById('intel-score-detail').textContent = s.scoring.avgScore >= 50 ? 'Good lead quality' : 'Needs more sources';
+      
+      document.getElementById('intel-bandit-arms').textContent = s.optimizer.arms + ' arms';
+      document.getElementById('intel-bandit-detail').textContent = s.optimizer.trials + ' trials, ' + Math.round(s.optimizer.convergence * 100) + '% convergence';
+    } catch (e) { console.error(e); }
+  }
+
+  window.checkWorkerHealth = async function() {
+    var badge = document.getElementById('intel-worker-badge');
+    var info = document.getElementById('intel-worker-info');
+    badge.textContent = 'CHECKING...';
+    badge.style.background = '#78716c';
+    badge.style.color = '#e7e5e4';
+    
+    try {
+      var resp = await apiFetch('/api/autonomous/health');
+      var data = await resp.json();
+      
+      if (data.status === 'healthy') {
+        badge.textContent = 'HEALTHY';
+        badge.style.background = '#166534';
+        badge.style.color = '#4ade80';
+        info.textContent = 'Worker is connected and operational.';
+      } else {
+        badge.textContent = 'UNHEALTHY';
+        badge.style.background = '#7f1d1d';
+        badge.style.color = '#f87171';
+        info.textContent = 'Worker returned unhealthy status.';
+      }
+    } catch (e) {
+      badge.textContent = 'ERROR';
+      badge.style.background = '#7f1d1d';
+      badge.style.color = '#f87171';
+      info.textContent = 'Could not reach worker: ' + e.message;
+    }
+  }
+
+  window.runDiscoveryJob = async function() {
+    document.getElementById('intel-job-result').innerHTML = 'Running discovery job...';
+    try {
+      var resp = await apiFetch('/api/autonomous/discover', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ batchSize: 5 })
+      });
+      var data = await resp.json();
+      if (data.success && data.job) {
+        document.getElementById('intel-job-result').innerHTML = 
+          '<span style="color:#10b981;">Discovery complete: processed ' + data.job.processed + ' sources, ' + data.job.errors + ' errors</span>';
+      } else {
+        document.getElementById('intel-job-result').innerHTML = '<span style="color:#ef4444;">Discovery failed: ' + (data.error || 'unknown') + '</span>';
+      }
+      loadIntelligenceStats();
+      loadIntelligenceSources();
+    } catch (e) {
+      document.getElementById('intel-job-result').innerHTML = '<span style="color:#ef4444;">Error: ' + e.message + '</span>';
+    }
+  }
+
+  window.runScoringJob = async function() {
+    document.getElementById('intel-job-result').innerHTML = 'Running scoring job...';
+    try {
+      var resp = await apiFetch('/api/autonomous/score', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ batchSize: 100 })
+      });
+      var data = await resp.json();
+      if (data.success && data.job) {
+        document.getElementById('intel-job-result').innerHTML = 
+          '<span style="color:#10b981;">Scoring complete: processed ' + data.job.processed + ' contacts, ' + data.job.errors + ' errors</span>';
+      } else {
+        document.getElementById('intel-job-result').innerHTML = '<span style="color:#ef4444;">Scoring failed: ' + (data.error || 'unknown') + '</span>';
+      }
+      loadIntelligenceStats();
+      loadHotLeads();
+    } catch (e) {
+      document.getElementById('intel-job-result').innerHTML = '<span style="color:#ef4444;">Error: ' + e.message + '</span>';
+    }
+  }
+
+  async function loadIntelligenceSources() {
+    try {
+      var data = await apiFetchJson('/api/autonomous/sources', { sources: [] });
+      var sources = data.sources || [];
+      
+      if (sources.length === 0) {
+        document.getElementById('intel-sources-table').innerHTML = '<p style="color: #94a3b8;">No sources configured. Add a source to start lead discovery.</p>';
+        return;
+      }
+      
+      var html = '<table><thead><tr><th>Name</th><th>Type</th><th>Last Scraped</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+      sources.forEach(function(s) {
+        var lastScraped = s.last_scraped_at ? new Date(s.last_scraped_at).toLocaleString() : 'Never';
+        html += '<tr>' +
+          '<td>' + (s.source_name || s.sourceName || 'Unnamed') + '</td>' +
+          '<td>' + (s.source_type || s.sourceType || '-') + '</td>' +
+          '<td>' + lastScraped + '</td>' +
+          '<td><span class="pill ' + (s.active !== false ? 'pill-success' : 'pill-warning') + '">' + (s.active !== false ? 'Active' : 'Paused') + '</span></td>' +
+          '<td><button class="btn" onclick="deleteSource(\\'' + s.id + '\\')" style="padding:4px 8px;font-size:11px;color:#ef4444;">Delete</button></td>' +
+        '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('intel-sources-table').innerHTML = html;
+    } catch (e) { 
+      console.error(e);
+      document.getElementById('intel-sources-table').innerHTML = '<p style="color: #ef4444;">Failed to load sources.</p>';
+    }
+  }
+
+  window.showAddSourceModal = async function() {
+    var name = prompt('Source name (e.g., "Google Play Games"):');
+    if (!name) return;
+    
+    var typeChoice = prompt('Source type:\\n1) google_play\\n2) itunes\\n\\nEnter number:', '1');
+    var sourceType = typeChoice === '2' ? 'itunes' : 'google_play';
+    
+    var category = prompt('Category/Search term (e.g., "GAME" for Google Play, "game" for iTunes):', 'GAME');
+    if (!category) return;
+    
+    try {
+      var resp = await apiFetch('/api/autonomous/sources', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sourceName: name,
+          sourceType: sourceType,
+          sourceConfig: sourceType === 'google_play' ? { category: category } : { searchTerm: category },
+          scrapeIntervalHours: 24
+        })
+      });
+      var data = await resp.json();
+      if (data.success) {
+        alert('Source added!');
+        loadIntelligenceSources();
+        loadIntelligenceStats();
+      } else {
+        alert('Error: ' + (data.error || 'Failed to add source'));
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  }
+
+  window.deleteSource = async function(id) {
+    if (!confirm('Delete this source?')) return;
+    try {
+      await apiFetch('/api/autonomous/sources/' + id, { method: 'DELETE' });
+      loadIntelligenceSources();
+      loadIntelligenceStats();
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  }
+
+  async function loadHotLeads() {
+    try {
+      // Use the dedicated hot-leads endpoint
+      var leadsData = await apiFetchJson('/api/autonomous/hot-leads?minScore=50&limit=10&status=all', { leads: [] });
+      var leads = leadsData.leads || [];
+      
+      if (leads.length === 0) {
+        document.getElementById('intel-hot-leads').innerHTML = '<p style="color: #94a3b8;">No hot leads yet. Run scoring to analyze contacts.</p>';
+        return;
+      }
+      
+      var html = '<table><thead><tr><th>Company</th><th>Email</th><th>Score</th><th>Status</th></tr></thead><tbody>';
+      leads.forEach(function(l) {
+        var tierColor = l.score >= 70 ? '#10b981' : (l.score >= 50 ? '#f59e0b' : '#94a3b8');
+        html += '<tr>' +
+          '<td>' + (l.company_name || l.app_name || '-') + '</td>' +
+          '<td>' + (l.email || '-') + '</td>' +
+          '<td style="color:' + tierColor + ';font-weight:bold;">' + (l.score || 0) + '</td>' +
+          '<td><span class="pill">' + (l.status || 'new') + '</span></td>' +
+        '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('intel-hot-leads').innerHTML = html;
+    } catch (e) { 
+      console.error(e);
+      document.getElementById('intel-hot-leads').innerHTML = '<p style="color: #94a3b8;">No leads data available.</p>';
+    }
+  }
+
+  async function loadIntelligenceInbox() {
+    try {
+      var data = await apiFetchJson('/api/autonomous/inbox', { messages: [], pendingCount: 0 });
+      var messages = data.messages || [];
+      
+      if (messages.length === 0) {
+        document.getElementById('intel-inbox').innerHTML = '<p style="color: #94a3b8;">No replies pending review. ' + (data.pendingCount || 0) + ' total in queue.</p>';
+        return;
+      }
+      
+      var html = '<table><thead><tr><th>From</th><th>Subject</th><th>Classification</th><th>Received</th><th>Actions</th></tr></thead><tbody>';
+      messages.forEach(function(m) {
+        html += '<tr>' +
+          '<td>' + (m.fromEmail || '-') + '</td>' +
+          '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + (m.subject || '-') + '</td>' +
+          '<td><span class="pill">' + (m.classification || 'unclassified') + '</span></td>' +
+          '<td>' + (m.receivedAt ? new Date(m.receivedAt).toLocaleString() : '-') + '</td>' +
+          '<td><button class="btn" style="padding:4px 8px;font-size:11px;">Review</button></td>' +
+        '</tr>';
+      });
+      html += '</tbody></table>';
+      document.getElementById('intel-inbox').innerHTML = html;
+    } catch (e) { 
+      console.error(e);
+      document.getElementById('intel-inbox').innerHTML = '<p style="color: #94a3b8;">Inbox unavailable.</p>';
+    }
   }
 
   // =============================================
@@ -1813,6 +2139,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ROUTES
 // ============================================
 
+// Autonomous sales routes are mounted via routes.ts → /api/autonomous/*
+
 app.use(routes);
 
 // ============================================
@@ -1879,6 +2207,18 @@ async function startServer() {
       logger.info('Database connection verified', {
         serverTime: result.rows[0].time,
       });
+
+      // Initialize Autonomous Sales Orchestrator (pre-loads Naive Bayes model)
+      logger.info('Initializing Autonomous Sales Orchestrator...');
+      try {
+        await getOrchestrator();
+        logger.info('Autonomous Sales Orchestrator initialized successfully');
+      } catch (err) {
+        // Log but don't fail startup - orchestrator can be lazy-initialized later
+        logger.warn('Failed to pre-initialize Autonomous Sales Orchestrator', {
+          error: (err as Error).message,
+        });
+      }
     }
     
     // Start HTTP server
