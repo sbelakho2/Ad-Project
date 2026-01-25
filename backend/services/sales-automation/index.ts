@@ -2,8 +2,10 @@
 // Main entry point for the automated sales system
 // Orchestrates discovery, enrichment, outreach, and analytics
 // IMPROVED v2: Added spam prevention, reliability, deduplication, personalization, logging
+// IMPROVED v3: REVOLUTIONARY features - predictive scoring, self-learning, intent detection
 // OVERCOMES competitor issues: Apollo spam, Instantly bugs, Smartlead unreliability, Lemlist complexity
 
+// ===== CORE SERVICES =====
 export { ProspectDiscoveryService } from './ProspectDiscoveryService';
 export { LeadEnrichmentService } from './LeadEnrichmentService';
 export { OutreachService } from './OutreachService';
@@ -12,13 +14,24 @@ export { EmailWarmupService } from './EmailWarmupService';
 export { EmailVerificationService } from './EmailVerificationService';
 export { SendTimingOptimizer } from './SendTimingOptimizer';
 export { EngagementBranchingService } from './EngagementBranchingService';
-// NEW: Competitor issue fixes
+
+// ===== COMPETITOR FIX SERVICES (v2) =====
 export { SpamPrevention } from './SpamPrevention';
 export { ReliabilityGuard } from './ReliabilityGuard';
 export { IntelligentDeduplication } from './IntelligentDeduplication';
 export { AdaptivePersonalization } from './AdaptivePersonalization';
 export { TransparentLogging } from './TransparentLogging';
 export { DataQualityEngine } from './DataQualityEngine';
+
+// ===== REVOLUTIONARY SERVICES (v3) =====
+// These features don't exist in ANY competitor
+export { PredictiveLeadScoring } from './PredictiveLeadScoring';
+export { SelfLearningSequences } from './SelfLearningSequences';
+export { SmartReplyAnalyzer } from './SmartReplyAnalyzer';
+export { DomainHealthGuard } from './DomainHealthGuard';
+export { IntentSignalDetector } from './IntentSignalDetector';
+export { FollowUpOptimizer } from './FollowUpOptimizer';
+export { AutomationEngine, createAutomationEngine } from './AutomationEngine';
 
 import { ProspectDiscoveryService } from './ProspectDiscoveryService';
 import { LeadEnrichmentService } from './LeadEnrichmentService';
@@ -28,13 +41,20 @@ import { EmailWarmupService } from './EmailWarmupService';
 import { EmailVerificationService } from './EmailVerificationService';
 import { SendTimingOptimizer } from './SendTimingOptimizer';
 import { EngagementBranchingService } from './EngagementBranchingService';
-// NEW: Competitor issue fixes
+// Competitor issue fixes
 import { SpamPrevention } from './SpamPrevention';
 import { ReliabilityGuard } from './ReliabilityGuard';
 import { IntelligentDeduplication } from './IntelligentDeduplication';
 import { AdaptivePersonalization } from './AdaptivePersonalization';
 import { TransparentLogging } from './TransparentLogging';
 import { DataQualityEngine } from './DataQualityEngine';
+// Revolutionary services
+import { PredictiveLeadScoring } from './PredictiveLeadScoring';
+import { SelfLearningSequences } from './SelfLearningSequences';
+import { SmartReplyAnalyzer } from './SmartReplyAnalyzer';
+import { DomainHealthGuard } from './DomainHealthGuard';
+import { IntentSignalDetector } from './IntentSignalDetector';
+import { FollowUpOptimizer } from './FollowUpOptimizer';
 
 export class SalesAutomationEngine {
   private discovery: ProspectDiscoveryService;
@@ -57,7 +77,7 @@ export class SalesAutomationEngine {
   private intervals: NodeJS.Timeout[] = [];
   private defaultMailbox: string;
 
-  constructor(databaseUrl: string, defaultMailbox: string = 'sabel@apexmediation.ee') {
+  constructor(databaseUrl: string, defaultMailbox: string = 'sales@apexmediation.ee') {
     this.discovery = new ProspectDiscoveryService(databaseUrl);
     this.enrichment = new LeadEnrichmentService(databaseUrl);
     this.outreach = new OutreachService(databaseUrl);
@@ -67,7 +87,7 @@ export class SalesAutomationEngine {
     this.timing = new SendTimingOptimizer(databaseUrl);
     this.branching = new EngagementBranchingService(databaseUrl);
     // NEW: Initialize competitor issue fixes
-    this.spamPrevention = new SpamPrevention();
+    this.spamPrevention = new SpamPrevention(databaseUrl);
     this.reliability = new ReliabilityGuard(databaseUrl);
     this.deduplication = new IntelligentDeduplication(databaseUrl);
     this.personalization = new AdaptivePersonalization(databaseUrl);
@@ -88,9 +108,9 @@ export class SalesAutomationEngine {
     console.log('[SalesEngine] Starting automated sales engine (v2 - COMPETITOR FIXES)...');
     this.isRunning = true;
 
-    // Initialize new services
+    // Initialize new services (only those with initialize() methods)
     await this.logging.initialize();
-    await this.reliability.initialize();
+    // Note: reliability doesn't have initialize() - it's ready on construction
     this.logging.info('system', 'Sales automation engine starting', { version: 'v2' });
 
     // Initialize mailbox warmup
@@ -122,7 +142,8 @@ export class SalesAutomationEngine {
       const hour = new Date().getHours();
       if (hour >= 8 && hour <= 18) {  // Business hours only
         // Check system health before warmup
-        if (!this.reliability.isSystemHealthy()) {
+        const health = this.reliability.getHealth();
+        if (health.overall !== 'healthy') {
           this.logging.warn('warmup', 'Skipping warmup - system unhealthy');
           return;
         }
@@ -157,7 +178,7 @@ export class SalesAutomationEngine {
         const result = await this.deduplication.runDeduplicationCycle();
         this.logging.info('system', 'Deduplication complete', {
           duplicatesFound: result.duplicatesFound,
-          merged: result.contactsMerged,
+          merged: result.merged,
         });
       } catch (error) {
         this.logging.error('system', 'Deduplication failed', { error: String(error) });
@@ -178,7 +199,8 @@ export class SalesAutomationEngine {
     this.intervals.push(setInterval(async () => {
       try {
         // Check system health first
-        if (!this.reliability.isSystemHealthy()) {
+        const health = this.reliability.getHealth();
+        if (health.overall !== 'healthy') {
           this.logging.warn('email_send', 'Outreach paused - system unhealthy');
           return;
         }
@@ -285,9 +307,10 @@ export class SalesAutomationEngine {
     this.logging.info('system', 'Running full sales cycle manually');
 
     // Check system health first
-    if (!this.reliability.isSystemHealthy()) {
-      this.logging.warn('system', 'System unhealthy - attempting recovery before cycle');
-      await this.reliability.attemptRecovery('all');
+    const health = this.reliability.getHealth();
+    if (health.overall !== 'healthy') {
+      this.logging.warn('system', 'System unhealthy - triggering health check before cycle');
+      await this.reliability.triggerHealthCheck();
     }
 
     // Check warmup status first
@@ -313,7 +336,8 @@ export class SalesAutomationEngine {
     // Only run outreach if warmup allows and system is healthy
     let outreachResult = { sent: 0, errors: 0 };
     const canSend = await this.warmup.canSendColdEmail(this.defaultMailbox);
-    if (canSend.allowed && this.reliability.isSystemHealthy()) {
+    const currentHealth = this.reliability.getHealth();
+    if (canSend.allowed && currentHealth.overall === 'healthy') {
       outreachResult = await this.outreach.runOutreachCycle();
     } else {
       this.logging.info('email_send', `Skipping outreach: ${canSend.reason || 'system unhealthy'}`);
@@ -336,7 +360,7 @@ export class SalesAutomationEngine {
       verification: verificationResult,
       outreach: outreachResult,
       branching: branchingResult,
-      deduplication: { found: dedupResult.duplicatesFound, merged: dedupResult.contactsMerged },
+      deduplication: { found: dedupResult.duplicatesFound, merged: dedupResult.merged },
       quality: { actionRequired: qualityReport.actionRequired },
     };
   }
@@ -431,7 +455,7 @@ export class SalesAutomationEngine {
       this.getVerificationStats(),
       this.getEngagementAnalytics(),
       this.getSendTimingPerformance(),
-      this.reliability.getHealthStatus(),
+      Promise.resolve(this.reliability.getHealth()),
       this.dataQuality.generateQualityReport(),
       this.logging.getActivitySummary(24),
     ]);
@@ -459,15 +483,15 @@ export class SalesAutomationEngine {
   async checkEmailForSpam(subject: string, body: string): Promise<{
     score: number;
     canSend: boolean;
-    triggers: string[];
-    autoFixedBody?: string;
+    issues: string[];
+    suggestions: string[];
   }> {
-    const result = this.spamPrevention.checkEmail(subject, body);
+    const result = this.spamPrevention.checkEmail(subject, body, this.defaultMailbox);
     return {
       score: result.score,
-      canSend: result.score >= 80,
-      triggers: result.triggers.map(t => t.word),
-      autoFixedBody: result.autoFixedBody !== body ? result.autoFixedBody : undefined,
+      canSend: result.passesThreshold,
+      issues: result.issues.map(i => i.message),
+      suggestions: result.suggestions,
     };
   }
 
@@ -518,7 +542,7 @@ export class SalesAutomationEngine {
    * OVERCOMES: "duplicates everywhere"
    */
   async findDuplicates() {
-    return this.deduplication.findDuplicates();
+    return this.deduplication.getDeduplicationStats();
   }
 
   /**
@@ -526,15 +550,16 @@ export class SalesAutomationEngine {
    * OVERCOMES: "platform bugs", "system randomly stops"
    */
   getSystemReliability() {
-    return this.reliability.getHealthStatus();
+    return this.reliability.getHealth();
   }
 
   /**
    * Force system recovery attempt
    * OVERCOMES: "can't fix issues myself"
    */
-  async forceRecovery(component?: string) {
-    return this.reliability.attemptRecovery(component || 'all');
+  async forceRecovery(_component?: string) {
+    // Trigger a health check which runs auto-recovery if needed
+    return this.reliability.triggerHealthCheck();
   }
 
   /**

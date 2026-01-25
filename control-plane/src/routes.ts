@@ -61,14 +61,16 @@ import {
   getReplicationStatus,
 } from './adapters/postgres-telemetry';
 
-import { getHostTelemetry } from './adapters/host-telemetry';
+import { getHostTelemetry, getHostTelemetryBundle } from './adapters/host-telemetry';
+import { getS3StorageTelemetry } from './adapters/s3-telemetry';
 import { getAutopilotHealth, getMigrationStudioMetrics, getVRAExperimentStatus } from './adapters/autopilot';
 import { getAppTelemetry, getSlowEndpoints, getSaturatedPools, getHighErrorEndpoints } from './adapters/app-telemetry';
 
 // Partition management
-import { 
+import {
   getAllPartitionStatus, 
   getPartitionStatus, 
+  getPartitionStatusForSchema,
   createFuturePartitions,
   dropOldPartitions,
   checkPartitionHealth,
@@ -94,7 +96,21 @@ import { processBankStatement, confirmReconciliation } from './services/reconcil
 import { getImpersonationLink } from './adapters/backend-api';
 import { queryReadOnly } from './database';
 
+// Sales Automation
+import * as salesAutomation from './services/sales-automation';
+
+// Autonomous Sales API (v2)
+import autonomousApiRoutes from './routes/autonomous-api';
+
 const router = Router();
+
+async function getTableColumns(tableName: string): Promise<Set<string>> {
+  const rows = await queryReadOnly<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = $1`,
+    [tableName]
+  );
+  return new Set(rows.map(row => row.column_name));
+}
 
 /**
  * Error wrapper for async routes
@@ -454,6 +470,14 @@ router.get('/api/v1/telemetry/host', asyncHandler(async (req: Request, res: Resp
 }));
 
 /**
+ * Host telemetry (app + db)
+ */
+router.get('/api/v1/telemetry/hosts', asyncHandler(async (req: Request, res: Response) => {
+  const hosts = await getHostTelemetryBundle();
+  res.json({ hosts });
+}));
+
+/**
  * App telemetry (latency, pools, errors)
  */
 router.get('/api/v1/telemetry/app', asyncHandler(async (req: Request, res: Response) => {
@@ -533,7 +557,10 @@ router.get('/api/v1/partitions', asyncHandler(async (req: Request, res: Response
  */
 router.get('/api/v1/partitions/:tableName', asyncHandler(async (req: Request, res: Response) => {
   const { tableName } = req.params;
-  const status = await getPartitionStatus(tableName);
+  const schema = typeof req.query.schema === 'string' ? req.query.schema : 'public';
+  const status = schema && schema !== 'public'
+    ? await getPartitionStatusForSchema(tableName, schema)
+    : await getPartitionStatus(tableName);
   res.json(status);
 }));
 
@@ -772,28 +799,36 @@ router.get('/api/v1/dashboard', asyncHandler(async (req: Request, res: Response)
     appTelemetry,
     autopilotHealth,
     partitionHealth,
+    s3Telemetry,
   ] = await Promise.all([
     getDatabaseStats(),
-    getHostTelemetry(),
+    getHostTelemetryBundle(),
     getAppTelemetry(),
     getAutopilotHealth(),
     checkPartitionHealth(),
+    getS3StorageTelemetry(),
   ]);
   
   // Calculate overall health
   const issues: string[] = [];
   
-  // Check disk usage (get max from array of disks)
-  if (hostTelemetry && hostTelemetry.disk && hostTelemetry.disk.length > 0) {
-    const maxDiskUsage = Math.max(...hostTelemetry.disk.map(d => d.use_percent));
+  // Check disk usage (get max from app + db disks)
+  const appDisks = hostTelemetry.app?.disk || [];
+  const dbDisks = hostTelemetry.db?.disk || [];
+  const diskUsages = [...appDisks, ...dbDisks].map(d => d.use_percent);
+  if (diskUsages.length > 0) {
+    const maxDiskUsage = Math.max(...diskUsages);
     if (maxDiskUsage > 85) {
-      issues.push(`Disk usage at ${maxDiskUsage}%`);
+      issues.push(`Disk usage at ${Math.round(maxDiskUsage)}%`);
     }
   }
   
   // Check memory usage
-  if (hostTelemetry && hostTelemetry.memory && hostTelemetry.memory.use_percent > 90) {
-    issues.push(`Memory usage at ${hostTelemetry.memory.use_percent}%`);
+  if (hostTelemetry.app?.memory?.use_percent && hostTelemetry.app.memory.use_percent > 90) {
+    issues.push(`App memory usage at ${Math.round(hostTelemetry.app.memory.use_percent)}%`);
+  }
+  if (hostTelemetry.db?.memory?.use_percent && hostTelemetry.db.memory.use_percent > 90) {
+    issues.push(`DB memory usage at ${Math.round(hostTelemetry.db.memory.use_percent)}%`);
   }
   
   // Check autopilot health
@@ -808,6 +843,35 @@ router.get('/api/v1/dashboard', asyncHandler(async (req: Request, res: Response)
   const overallHealth = issues.length === 0 ? 'OK' : 
                         issues.length <= 2 ? 'DEGRADED' : 'CRITICAL';
   
+  const insights: string[] = [];
+  if (!hostTelemetry.app) {
+    insights.push('Configure HOST_TELEMETRY_ENDPOINT_APP to monitor app server disk/memory.');
+  }
+  if (!hostTelemetry.db) {
+    insights.push('Configure HOST_TELEMETRY_ENDPOINT_DB to monitor DB server disk/memory.');
+  }
+  if (!s3Telemetry) {
+    insights.push('Configure S3_STORAGE_ENDPOINT to report bucket usage and object counts.');
+  }
+  if (partitionHealth && !partitionHealth.healthy) {
+    insights.push('Run partition maintenance: missing or unhealthy partitions detected.');
+  }
+  if (autopilotHealth && autopilotHealth.overall_status !== 'OK') {
+    insights.push('Investigate autopilot jobs: background maintenance is degraded.');
+  }
+  if (appTelemetry?.health?.status === 'DOWN') {
+    insights.push('Backend metrics report DOWN: check app health and metrics endpoint.');
+  }
+  if (diskUsages.length > 0 && Math.max(...diskUsages) > 80) {
+    insights.push('Disk usage above 80%: review backups and archival policies.');
+  }
+  if (dbTelemetry && dbTelemetry.length > 0) {
+    const topDb = dbTelemetry[0];
+    if (topDb.size_bytes > 50 * 1024 * 1024 * 1024) {
+      insights.push('Database size exceeds 50GB: consider rollup archiving or retention tuning.');
+    }
+  }
+
   res.json({
     timestamp: new Date().toISOString(),
     health: {
@@ -816,9 +880,15 @@ router.get('/api/v1/dashboard', asyncHandler(async (req: Request, res: Response)
     },
     database: dbTelemetry,
     host: hostTelemetry,
+    storage: {
+      app: hostTelemetry.app?.disk || null,
+      db: hostTelemetry.db?.disk || null,
+      s3: s3Telemetry,
+    },
     app: appTelemetry.health,
     autopilot: autopilotHealth,
     partitions: partitionHealth,
+    insights,
   });
 }));
 
@@ -931,10 +1001,36 @@ router.get('/api/v1/compliance/forecast', requireOperator, asyncHandler(async (r
  * List users (publishers)
  */
 router.get('/api/v1/data/users', requireOperator, asyncHandler(async (req, res) => {
+  const userColumns = await getTableColumns('users');
+  const publisherColumns = await getTableColumns('publishers');
+  const hasPublisherJoin = userColumns.has('publisher_id') && publisherColumns.size > 0;
+
+  const companyExpr = userColumns.has('company_name')
+    ? 'u.company_name'
+    : publisherColumns.has('company_name')
+      ? 'p.company_name'
+      : 'NULL';
+
+  const statusExpr = userColumns.has('status')
+    ? 'u.status'
+    : publisherColumns.has('status')
+      ? 'p.status'
+      : `'active'`;
+
+  const createdExpr = userColumns.has('created_at')
+    ? 'u.created_at'
+    : publisherColumns.has('created_at')
+      ? 'p.created_at'
+      : 'NOW()';
+
   const users = await queryReadOnly(`
-    SELECT id, email, company_name, created_at, status
-    FROM users
-    ORDER BY created_at DESC
+    SELECT u.id, u.email,
+           ${companyExpr} as company_name,
+           ${createdExpr} as created_at,
+           ${statusExpr} as status
+    FROM users u
+    ${hasPublisherJoin ? 'LEFT JOIN publishers p ON u.publisher_id = p.id' : ''}
+    ORDER BY ${createdExpr} DESC
     LIMIT 100
   `);
   res.json({ users });
@@ -944,11 +1040,38 @@ router.get('/api/v1/data/users', requireOperator, asyncHandler(async (req, res) 
  * List invoices
  */
 router.get('/api/v1/data/invoices', requireOperator, asyncHandler(async (req, res) => {
+  const invoiceColumns = await getTableColumns('invoices');
+
+  const dateExpr = invoiceColumns.has('issue_date')
+    ? 'i.issue_date'
+    : invoiceColumns.has('invoice_date')
+      ? 'i.invoice_date'
+      : 'i.created_at';
+
+  const totalExpr = invoiceColumns.has('total_cents')
+    ? 'i.total_cents'
+    : invoiceColumns.has('total_amount_cents')
+      ? 'i.total_amount_cents'
+      : 'NULL';
+
+  const statusExpr = invoiceColumns.has('status')
+    ? 'i.status'
+    : `'unknown'`;
+
+  const numberExpr = invoiceColumns.has('invoice_number')
+    ? 'i.invoice_number'
+    : 'i.id::text';
+
   const invoices = await queryReadOnly(`
-    SELECT i.id, i.invoice_number, u.email as customer_email, i.total_cents, i.status, i.issue_date
+    SELECT i.id,
+           ${numberExpr} as invoice_number,
+           u.email as customer_email,
+           ${totalExpr} as total_cents,
+           ${statusExpr} as status,
+           ${dateExpr} as issue_date
     FROM invoices i
     JOIN users u ON i.customer_id = u.id
-    ORDER BY i.issue_date DESC
+    ORDER BY ${dateExpr} DESC
     LIMIT 100
   `);
   res.json({ invoices });
@@ -1012,5 +1135,305 @@ router.post('/api/v1/support/impersonate', requireOperator, asyncHandler(async (
   const result = await getImpersonationLink(userId, operator);
   res.json(result);
 }));
+
+// ============================================
+// SALES AUTOMATION ROUTES
+// ============================================
+
+/**
+ * Get sales automation status
+ */
+router.get('/api/v1/sales/status', requireOperator, asyncHandler(async (req, res) => {
+  const status = await salesAutomation.getSalesAutomationStatus();
+  res.json(status);
+}));
+
+/**
+ * Toggle sales automation system on/off
+ */
+router.post('/api/v1/sales/toggle', requireOperator, asyncHandler(async (req, res) => {
+  const { enabled } = req.body;
+  const result = await salesAutomation.setSystemEnabled(enabled === true);
+  res.json(result);
+}));
+
+/**
+ * Get sales automation statistics
+ */
+router.get('/api/v1/sales/stats', requireOperator, asyncHandler(async (req, res) => {
+  const stats = await salesAutomation.getSalesAutomationStats();
+  res.json(stats);
+}));
+
+/**
+ * Get contacts
+ */
+router.get('/api/v1/sales/contacts', requireOperator, asyncHandler(async (req, res) => {
+  const { status, limit, offset, search } = req.query;
+  const result = await salesAutomation.getContacts({
+    status: status as string,
+    limit: limit ? parseInt(limit as string) : undefined,
+    offset: offset ? parseInt(offset as string) : undefined,
+    search: search as string,
+  });
+  res.json(result);
+}));
+
+/**
+ * Add a contact
+ */
+router.post('/api/v1/sales/contacts', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.addContact(req.body);
+  res.json(result);
+}));
+
+/**
+ * Update a contact
+ */
+router.put('/api/v1/sales/contacts/:id', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.updateContact(req.params.id, req.body);
+  res.json(result);
+}));
+
+/**
+ * Delete a contact
+ */
+router.delete('/api/v1/sales/contacts/:id', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.deleteContact(req.params.id);
+  res.json(result);
+}));
+
+/**
+ * Import contacts (CSV data)
+ */
+router.post('/api/v1/sales/contacts/import', requireOperator, asyncHandler(async (req, res) => {
+  const { contacts } = req.body;
+  const result = await salesAutomation.importContacts(contacts);
+  res.json(result);
+}));
+
+/**
+ * Get sequences
+ */
+router.get('/api/v1/sales/sequences', requireOperator, asyncHandler(async (req, res) => {
+  const sequences = await salesAutomation.getSequences();
+  res.json({ sequences });
+}));
+
+/**
+ * Get single sequence
+ */
+router.get('/api/v1/sales/sequences/:id', requireOperator, asyncHandler(async (req, res) => {
+  const sequence = await salesAutomation.getSequence(req.params.id);
+  res.json({ sequence });
+}));
+
+/**
+ * Create sequence
+ */
+router.post('/api/v1/sales/sequences', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.createSequence(req.body);
+  res.json(result);
+}));
+
+/**
+ * Update sequence
+ */
+router.put('/api/v1/sales/sequences/:id', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.updateSequence(req.params.id, req.body);
+  res.json(result);
+}));
+
+/**
+ * Delete sequence
+ */
+router.delete('/api/v1/sales/sequences/:id', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.deleteSequence(req.params.id);
+  res.json(result);
+}));
+
+/**
+ * Get enrollments
+ */
+router.get('/api/v1/sales/enrollments', requireOperator, asyncHandler(async (req, res) => {
+  const { sequenceId, status, limit, offset } = req.query;
+  const result = await salesAutomation.getEnrollments({
+    sequenceId: sequenceId as string,
+    status: status as string,
+    limit: limit ? parseInt(limit as string) : undefined,
+    offset: offset ? parseInt(offset as string) : undefined,
+  });
+  res.json(result);
+}));
+
+/**
+ * Enroll contacts in a sequence
+ */
+router.post('/api/v1/sales/enrollments/enroll', requireOperator, asyncHandler(async (req, res) => {
+  const { sequenceId, contactStatus, limit } = req.body;
+  const result = await salesAutomation.enrollContacts({
+    sequenceId,
+    contactStatus,
+    limit,
+  });
+  res.json(result);
+}));
+
+/**
+ * Pause an enrollment
+ */
+router.post('/api/v1/sales/enrollments/:id/pause', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.pauseEnrollment(req.params.id);
+  res.json(result);
+}));
+
+/**
+ * Resume an enrollment
+ */
+router.post('/api/v1/sales/enrollments/:id/resume', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.resumeEnrollment(req.params.id);
+  res.json(result);
+}));
+
+/**
+ * Get emails
+ */
+router.get('/api/v1/sales/emails', requireOperator, asyncHandler(async (req, res) => {
+  const { contactId, status, limit, offset } = req.query;
+  const result = await salesAutomation.getEmails({
+    contactId: contactId as string,
+    status: status as string,
+    limit: limit ? parseInt(limit as string) : undefined,
+    offset: offset ? parseInt(offset as string) : undefined,
+  });
+  res.json(result);
+}));
+
+/**
+ * Run outreach cycle (send pending emails)
+ */
+router.post('/api/v1/sales/run', requireOperator, asyncHandler(async (req, res) => {
+  const { dryRun } = req.body;
+  const result = await salesAutomation.runOutreachCycle(dryRun);
+  res.json(result);
+}));
+
+/**
+ * Get activity log
+ */
+router.get('/api/v1/sales/activity', requireOperator, asyncHandler(async (req, res) => {
+  const { contactId, limit } = req.query;
+  const activity = await salesAutomation.getActivityLog({
+    contactId: contactId as string,
+    limit: limit ? parseInt(limit as string) : undefined,
+  });
+  res.json({ activity });
+}));
+
+// ============================================
+// SALES AUTOMATION CONFIG ROUTES (NEW)
+// ============================================
+
+/**
+ * Get sales automation configuration
+ */
+router.get('/api/v1/sales/config', requireOperator, asyncHandler(async (req, res) => {
+  const config = await salesAutomation.getSalesConfig();
+  res.json({ config });
+}));
+
+/**
+ * Update sales automation configuration
+ */
+router.put('/api/v1/sales/config', requireOperator, asyncHandler(async (req, res) => {
+  const result = await salesAutomation.updateSalesConfig(req.body);
+  res.json(result);
+}));
+
+// ============================================
+// SALES AUTOMATION REVIEW QUEUE ROUTES (NEW)
+// ============================================
+
+/**
+ * Get draft emails for review
+ */
+router.get('/api/v1/sales/drafts', requireOperator, asyncHandler(async (req, res) => {
+  const { limit, offset } = req.query;
+  const result = await salesAutomation.getDraftEmails({
+    limit: limit ? parseInt(limit as string) : undefined,
+    offset: offset ? parseInt(offset as string) : undefined,
+  });
+  res.json(result);
+}));
+
+/**
+ * Approve a draft email (sends it)
+ */
+router.post('/api/v1/sales/drafts/:id/approve', requireOperator, asyncHandler(async (req, res) => {
+  const operator = (req as any).operator;
+  const result = await salesAutomation.approveDraftEmail(
+    req.params.id, 
+    operator?.email || 'unknown'
+  );
+  res.json(result);
+}));
+
+/**
+ * Reject a draft email
+ */
+router.post('/api/v1/sales/drafts/:id/reject', requireOperator, asyncHandler(async (req, res) => {
+  const { reason } = req.body;
+  const result = await salesAutomation.rejectDraftEmail(req.params.id, reason || 'Rejected by operator');
+  res.json(result);
+}));
+
+/**
+ * Bulk approve draft emails
+ */
+router.post('/api/v1/sales/drafts/bulk-approve', requireOperator, asyncHandler(async (req, res) => {
+  const { emailIds } = req.body;
+  const operator = (req as any).operator;
+  const result = await salesAutomation.bulkApproveDrafts(
+    emailIds || [], 
+    operator?.email || 'unknown'
+  );
+  res.json(result);
+}));
+
+// ============================================
+// SALES AUTOMATION CONTACT VERIFICATION ROUTES (NEW)
+// ============================================
+
+/**
+ * Get unverified contacts
+ */
+router.get('/api/v1/sales/contacts/unverified', requireOperator, asyncHandler(async (req, res) => {
+  const { limit } = req.query;
+  const contacts = await salesAutomation.getUnverifiedContacts(
+    limit ? parseInt(limit as string) : undefined
+  );
+  res.json({ contacts });
+}));
+
+/**
+ * Mark contact as verified/unverified
+ */
+router.post('/api/v1/sales/contacts/:id/verify', requireOperator, asyncHandler(async (req, res) => {
+  const { verified, status } = req.body;
+  const result = await salesAutomation.markContactVerified(
+    req.params.id, 
+    verified === true,
+    status
+  );
+  res.json(result);
+}));
+
+// ============================================
+// AUTONOMOUS SALES API (V2)
+// ============================================
+
+// Mount autonomous sales API under /api/autonomous
+// This is the zero-cost AI sales system
+router.use('/api/autonomous', autonomousApiRoutes);
 
 export default router;

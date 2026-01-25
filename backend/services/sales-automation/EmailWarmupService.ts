@@ -63,10 +63,8 @@ const DEFAULT_WARMUP_CONFIG: WarmupConfig = {
   ],
   warmupEmails: [
     // These should be real emails you control that will open/reply
-    'warmup1@apexmediation.ee',
-    'warmup2@apexmediation.ee',
-    'support@apexmediation.ee',
-    'team@apexmediation.ee',
+     'hello@apexmediation.ee',
+     'apexmediation@proton.me',
   ],
   minimumWarmupDays: 11,
 };

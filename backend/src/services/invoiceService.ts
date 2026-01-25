@@ -402,6 +402,7 @@ export class InvoiceService {
       collection_method: 'charge_automatically',
       metadata: {
         subscription_id: subscriptionId,
+        customer_id: customerId,
       },
     });
 
@@ -429,6 +430,37 @@ export class InvoiceService {
     const stripe = getStripeClient();
     const stripeInvoice = await stripe.invoices.retrieve(stripeInvoiceId);
 
+    const stripeCustomerId =
+      typeof stripeInvoice.customer === 'string'
+        ? stripeInvoice.customer
+        : stripeInvoice.customer?.id;
+
+    let customerId = stripeInvoice.metadata?.customer_id || null;
+    if (!customerId && stripeCustomerId) {
+      const customerLookup = await db.query(
+        `SELECT id FROM users WHERE stripe_customer_id = $1`,
+        [stripeCustomerId]
+      );
+      customerId = customerLookup.rows[0]?.id || null;
+    }
+
+    // Access subscription from the invoice response
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const invoiceData = stripeInvoice as any;
+    const stripeSubscriptionId =
+      typeof invoiceData.subscription === 'string'
+        ? invoiceData.subscription
+        : invoiceData.subscription?.id;
+
+    let subscriptionId: string | null = null;
+    if (stripeSubscriptionId) {
+      const subscriptionLookup = await db.query(
+        `SELECT id FROM subscriptions WHERE stripe_subscription_id = $1`,
+        [stripeSubscriptionId]
+      );
+      subscriptionId = subscriptionLookup.rows[0]?.id || null;
+    }
+
     const lineItems = stripeInvoice.lines.data.map((line: any) => ({
       description: line.description || '',
       quantity: line.quantity || 1,
@@ -439,6 +471,7 @@ export class InvoiceService {
     await db.query(
       `INSERT INTO invoices (
         customer_id,
+        subscription_id,
         invoice_number,
         invoice_date,
         due_date,
@@ -450,16 +483,19 @@ export class InvoiceService {
         paid_at,
         stripe_invoice_id,
         line_items
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (stripe_invoice_id) DO UPDATE SET
+        customer_id = EXCLUDED.customer_id,
+        subscription_id = EXCLUDED.subscription_id,
         status = EXCLUDED.status,
         paid_at = EXCLUDED.paid_at,
         updated_at = NOW()`,
       [
-        stripeInvoice.metadata?.customer_id || null,
+        customerId,
+        subscriptionId,
         stripeInvoice.number,
         new Date(stripeInvoice.created * 1000),
-        new Date(stripeInvoice.due_date! * 1000),
+        stripeInvoice.due_date ? new Date(stripeInvoice.due_date * 1000) : new Date(),
         stripeInvoice.subtotal,
         (stripeInvoice as any).tax || 0,
         stripeInvoice.total,

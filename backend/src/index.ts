@@ -47,6 +47,8 @@ import { issueCsrfToken } from './middleware/csrf';
 import { SchemaGate } from './utils/schemaGate';
 import { initAnalyticsRollupScheduler } from './services/analyticsRollupScheduler';
 import { initMigrationGuardrailScheduler } from './services/migrationGuardrailScheduler';
+import { initBillingScheduler } from './services/billingScheduler';
+import { initSalesAutomationScheduler } from './services/salesAutomationScheduler';
 import { spawn } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 
@@ -212,9 +214,10 @@ const limiter = rateLimit({
 });
 app.use(`/api/${API_VERSION}/`, limiter);
 
-// Raw body parsing for Stripe webhooks (must be BEFORE express.json())
-// Stripe needs the raw body buffer for signature verification
+// Raw body parsing for webhook signature verification (must be BEFORE express.json())
+// Stripe and Resend need the raw body buffer for signature verification
 app.use(`/api/${API_VERSION}/webhooks/stripe`, express.raw({ type: 'application/json' }));
+app.use(`/api/${API_VERSION}/webhooks/resend`, express.raw({ type: 'application/json' }));
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -374,6 +377,28 @@ const startServer = async (): Promise<void> => {
       snapshotCronSpec: env.MIGRATION_GUARDRAIL_SNAPSHOT_CRON,
       evaluationCronSpec: env.MIGRATION_GUARDRAIL_EVALUATION_CRON,
       pool,
+    });
+
+    // Billing automation scheduler (usage sync, dunning, reconciliation)
+    initBillingScheduler({
+      enabled: env.BILLING_ENABLED && env.BILLING_SCHEDULER_ENABLED,
+      usageLimitCronSpec: env.BILLING_USAGE_LIMIT_CRON,
+      usageSyncCronSpec: env.BILLING_USAGE_SYNC_CRON,
+      dunningCronSpec: env.BILLING_DUNNING_CRON,
+      reconciliationCronSpec: env.BILLING_RECONCILIATION_CRON,
+      reconciliationEnabled: env.BILLING_RECONCILIATION_ENABLED,
+    });
+
+    // Sales automation scheduler (autonomous outreach)
+    initSalesAutomationScheduler({
+      enabled: env.SALES_AUTOMATION_ENABLED,
+      cronSpec: env.SALES_AUTOMATION_CRON,
+      runOnStartup: env.SALES_AUTOMATION_RUN_ON_STARTUP,
+      databaseUrl: env.DATABASE_URL,
+      defaultMailbox: env.SALES_AUTOMATION_DEFAULT_MAILBOX,
+      maxDailyEmails: env.SALES_AUTOMATION_MAX_DAILY_EMAILS,
+      enableSelfLearning: env.SALES_AUTOMATION_SELF_LEARNING_ENABLED,
+      enableAutonomousMode: env.SALES_AUTOMATION_AUTONOMOUS_MODE,
     });
 
     // Initialize VRA services

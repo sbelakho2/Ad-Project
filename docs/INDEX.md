@@ -15,6 +15,7 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 
 ## 👨‍💻 Developer Resources
 - **[Backend API](./Developer-Facing/README.md)**: API reference and integration guides.
+- **[Autonomous Sales API](./Developer-Facing/AUTONOMOUS_SALES_API.md)**: API reference for the outbound sales automation system.
 - **[SDK Integration](./Customer-Facing/00_OVERVIEW.md)**: Android, iOS, Unity, Web, and TV SDK docs.
 - **[Testing Guide](./Internal/Development/TESTING_GUIDE.md)**: Strategies for unit, integration, and E2E testing.
 
@@ -30,10 +31,15 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[Data Retention](./DATA_RETENTION_POLICIES.md)**: GDPR and local compliance policies.
 - **[Billing & Tiers](./Developer-Facing/Billing-and-Tiers.md)**: Revenue share models and platform tiers.
 
-## 📊 Quality Assurance
+## � Sales Automation
+- **[Autonomous Sales V2](./Internal/Sales/AUTONOMOUS_SALES_V2.md)**: Zero-cost outbound prospecting with Thompson Sampling, Spintax, and Naive Bayes classification.- **[Autonomous Sales V2 Quick Ref](./Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)**: Quick reference for V2 operations.- **[Cialdini Sales Strategy](./Internal/Sales/CIALDINI_SALES_STRATEGY.md)**: Psychology-based trial nurture system (V1).
+- **[Sales Automation Operations](./Internal/Sales/SALES_AUTOMATION_OPERATIONS.md)**: V1 operations guide.
+- **[Sales Automation Summary](./Internal/Sales/SALES_AUTOMATION_SUMMARY.md)**: V1 implementation overview.
+
+## �📊 Quality Assurance
 - **[Live Testing Report](./LIVE_TESTING.md)**: Results from latest live execution cycles.
 - **[User Journey Analysis](./USER_JOURNEY_ANALYSIS.md)**: UX and flow validation.
 - **[Sandbox Execution](./Internal/QA/sandbox-execution/2025-12-08/PROGRESS.md)**: Progress tracking for sandbox verification.
 
 ---
-*Last updated: 2026-01-12*
+*Last updated: 2026-01-25*

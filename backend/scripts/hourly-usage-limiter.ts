@@ -196,18 +196,22 @@ async function logAudit(
   }
 
   const query = `
-    INSERT INTO billing_audit_log (
-      organization_id,
+    INSERT INTO billing_audit (
       event_type,
-      metadata,
+      actor,
+      customer_id,
+      data,
       created_at
-    ) VALUES ($1, 'usage_limit_exceeded', $2, NOW())
+    ) VALUES ($1, $2, $3, $4, NOW())
   `;
 
   for (const org of exceeded) {
     await pool.query(query, [
+      'usage_limit_exceeded',
+      'system',
       org.organization_id,
       JSON.stringify({
+        organization_id: org.organization_id,
         exceeded_metrics: org.exceeded_metrics,
         impressions_percent: org.impressions_percent.toFixed(2),
         clicks_percent: org.clicks_percent.toFixed(2),

@@ -554,10 +554,10 @@ VALUES (
 <p>Would a quick 15-minute call next week work to see if we''re a fit?</p>
 
 <p>Best,<br>
-Sabel</p>
+Aaron</p>
 
 <p style="font-size: 12px; color: #666;">
-Sabel Akhoua | Founder, ApexMediation<br>
+ApexMediation<br>
 <a href="https://apexmediation.ee">apexmediation.ee</a>
 </p>
 </body>
@@ -592,7 +592,7 @@ VALUES (
 <p>Got 15 minutes this week?</p>
 
 <p>Best,<br>
-Sabel</p>
+Aaron</p>
 </body>
 </html>'
 ) ON CONFLICT DO NOTHING;
@@ -634,7 +634,7 @@ VALUES (
 <p>Worth a quick chat?</p>
 
 <p>Best,<br>
-Sabel</p>
+Aaron</p>
 </body>
 </html>'
 ) ON CONFLICT DO NOTHING;
@@ -661,16 +661,16 @@ VALUES (
 <ul>
   <li>Free migration from {{current_mediation}}</li>
   <li>14-day trial, no credit card required</li>
-  <li>Direct line to me: sabel@apexmediation.ee</li>
+  <li>Direct line to us: sales@apexmediation.ee</li>
 </ul>
 
 <p>Wishing {{app_name}} continued success! 🚀</p>
 
 <p>Best,<br>
-Sabel</p>
+Aaron</p>
 
 <p style="font-size: 11px; color: #999;">
-P.S. If you''d rather not hear from me, just reply "unsubscribe" and I''ll remove you immediately.
+P.S. If you''d rather not hear from us, just reply "unsubscribe" and we''ll remove you immediately.
 </p>
 </body>
 </html>'

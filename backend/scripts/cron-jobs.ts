@@ -3,8 +3,6 @@
 // Run via: node -r ts-node/register scripts/cron-jobs.ts
 
 import cron from 'node-cron';
-import { usageMeteringService } from '../services/billing/UsageMeteringService';
-import { dunningManagementService } from '../services/billing/DunningManagementService';
 import { emailAutomationService } from '../services/email/EmailAutomationService';
 import { firstCustomerExperienceService } from '../services/growth/FirstCustomerExperienceService';
 import { valueMultiplierService } from '../services/monetization/ValueMultiplierService';
@@ -14,6 +12,8 @@ import { influenceBasedSalesService } from '../services/sales/InfluenceBasedSale
 import { ingestAppAdsCorpus, ingestSellersFromUrls, writeJsonFile, type InventoryDomain } from '../src/services/appAdsIngestion';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+// REVOLUTIONARY: Sales Automation Engine with full intelligence
+import { SalesAutomationEngine } from '../services/sales-automation';
 
 /**
  * 04:15 - Enrichment cache refresh (daily)
@@ -27,6 +27,48 @@ cron.schedule('15 4 * * *', async () => {
     console.error('[Cron] Failed to refresh enrichment datasets:', error);
   }
 });
+
+// ============================================================================
+// REVOLUTIONARY: SALES AUTOMATION ENGINE (Fully automated outreach)
+// OVERCOMES: "No cron job exists", "Requires button press"
+// ============================================================================
+
+const salesAutomationEnabled = process.env.SALES_AUTOMATION_ENABLED === 'true';
+let salesEngine: SalesAutomationEngine | null = null;
+
+if (salesAutomationEnabled && process.env.DATABASE_URL) {
+  console.log('[Cron] 📧 SALES AUTOMATION ENABLED');
+  salesEngine = new SalesAutomationEngine(process.env.DATABASE_URL);
+  
+  /**
+   * Sales Outreach - Every 30 minutes during business hours (9 AM - 6 PM)
+   * REVOLUTIONARY: Automated outreach with spam prevention, domain health, and scoring
+   */
+  cron.schedule('*/30 9-18 * * 1-5', async () => {
+    try {
+      console.log('[Cron] [Sales] Running automated outreach cycle...');
+      const result = await salesEngine!.runFullCycle();
+      console.log(`[Cron] [Sales] Cycle complete: sent=${result.outreach.sent}, errors=${result.outreach.errors}`);
+    } catch (error) {
+      console.error('[Cron] [Sales] Outreach cycle failed:', error);
+    }
+  });
+
+  /**
+   * Sales Analytics - Daily at 7 PM (end of business day)
+   */
+  cron.schedule('0 19 * * 1-5', async () => {
+    try {
+      console.log('[Cron] [Sales] Generating daily analytics...');
+      const metrics = await salesEngine!.getPipelineMetrics();
+      console.log('[Cron] [Sales] Pipeline metrics:', JSON.stringify(metrics, null, 2));
+    } catch (error) {
+      console.error('[Cron] [Sales] Analytics generation failed:', error);
+    }
+  });
+} else {
+  console.log('[Cron] ⏸️  Sales automation disabled (set SALES_AUTOMATION_ENABLED=true to enable)');
+}
 import { referralSystemService } from '../services/growth/ReferralSystemService';
 import { mlModelOptimizationService } from '../services/intelligence/MLModelOptimizationService';
 import { comprehensiveAutomationService } from '../services/automation/ComprehensiveAutomationService';
@@ -80,42 +122,6 @@ cron.schedule('15 */6 * * *', async () => {
   await refreshSupplyChainCorpus();
 });
 
-/**
- * 01:00 - Usage limit checks (hourly)
- */
-cron.schedule('0 * * * *', async () => {
-  try {
-    await usageMeteringService.checkUsageLimits();
-  } catch (error) {
-    console.error('[Cron] Error checking usage limits:', error);
-  }
-});
-
-/**
- * 02:00 - Stripe usage sync (daily)
- */
-cron.schedule('0 2 * * *', async () => {
-  try {
-    console.log('[Cron] Starting daily Stripe usage sync...');
-    await usageMeteringService.syncUsageToStripe();
-    console.log('[Cron] Stripe usage sync complete');
-  } catch (error) {
-    console.error('[Cron] Error syncing usage to Stripe:', error);
-  }
-});
-
-/**
- * 03:00 - Dunning retries (daily)
- */
-cron.schedule('0 3 * * *', async () => {
-  try {
-    console.log('[Cron] Starting dunning retry processing...');
-    await dunningManagementService.processDunningRetries();
-    console.log('[Cron] Dunning retry processing complete');
-  } catch (error) {
-    console.error('[Cron] Error processing dunning retries:', error);
-  }
-});
 
 /**
  * 04:00 - ML model optimization (daily)

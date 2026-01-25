@@ -114,13 +114,18 @@ export class AutomationEngine {
     this.dataQuality = new DataQualityEngine(this.config.databaseUrl);
 
     // Initialize core services
-    this.outreach = new OutreachService(this.config.databaseUrl);
+    this.outreach = new OutreachService(this.config.databaseUrl, {
+      fromEmail: this.config.defaultMailbox,
+      replyTo: this.config.defaultMailbox,
+      dailyLimit: this.config.maxDailyEmails,
+    });
     this.warmup = new EmailWarmupService(this.config.databaseUrl);
     this.verification = new EmailVerificationService(this.config.databaseUrl);
     this.timing = new SendTimingOptimizer(this.config.databaseUrl);
     this.branching = new EngagementBranchingService(this.config.databaseUrl);
 
-    // Initialize all tables
+    // Initialize services that have initialize() methods
+    // Note: Many services are synchronous and don't need initialization
     await Promise.all([
       this.leadScoring.initialize(),
       this.selfLearning.initialize(),
@@ -128,13 +133,13 @@ export class AutomationEngine {
       this.domainHealth.initialize(),
       this.intentDetector.initialize(),
       this.followUpOptimizer.initialize(),
-      this.spamPrevention.initialize(),
-      this.reliabilityGuard.initialize(),
-      this.deduplication.initialize(),
-      this.personalization.initialize(),
       this.logging.initialize(),
-      this.dataQuality.initialize(),
+      // Note: spamPrevention, reliabilityGuard, deduplication, personalization, 
+      // dataQuality don't have initialize() - they're ready on construction
     ]);
+    
+    // Start reliability monitoring (non-async)
+    this.reliabilityGuard.startMonitoring();
 
     console.log('[AutomationEngine] ✅ All services initialized');
   }
@@ -186,92 +191,39 @@ export class AutomationEngine {
 
       // 4. Run data quality checks
       results.push(await this.runTask('Data Quality', async () => {
-        const issues = await this.dataQuality.runQualityChecks();
-        if (issues.length > 0) {
-          await this.dataQuality.autoFixIssues(issues.slice(0, 10));
-        }
-        return `${issues.length} issues found`;
+        const report = await this.dataQuality.generateQualityReport();
+        return `${report.totalContacts} contacts, ${report.actionRequired} need attention`;
       }));
 
       // 5. Deduplicate contacts
       results.push(await this.runTask('Deduplication', async () => {
-        const duplicates = await this.deduplication.findDuplicates();
-        if (duplicates.length > 0) {
-          await this.deduplication.autoMergeDuplicates(duplicates.slice(0, 5));
-        }
-        return `${duplicates.length} duplicate sets`;
+        const result = await this.deduplication.runDeduplicationCycle();
+        return `${result.duplicatesFound} duplicate groups, ${result.merged} merged`;
       }));
 
       // 6. Can we send? Check domain health
       const sendDecision = await this.domainHealth.canSend(this.config.defaultMailbox);
       
       if (sendDecision.allowed) {
-        // 7. Get contacts ready for outreach
-        results.push(await this.runTask('Prepare Outreach', async () => {
-          const prioritized = await this.leadScoring.getHotLeads(
-            Math.min(50, this.config.maxDailyEmails)
-          );
-          return `${prioritized.length} contacts ready`;
+        // 7. Run the outreach service cycle (handles its own sending logic)
+        results.push(await this.runTask('Outreach Cycle', async () => {
+          // The OutreachService handles:
+          // - Finding enrolled contacts
+          // - Checking send timing
+          // - Sending pending emails
+          const outreachResult = await this.outreach.runOutreachCycle();
+          await this.domainHealth.recordSend(this.config.defaultMailbox);
+          return `Sent: ${outreachResult.sent}, Errors: ${outreachResult.errors}`;
         }));
 
-        // 8. Send emails with all protections
-        results.push(await this.runTask('Send Emails', async () => {
-          let sent = 0;
-          const hotLeads = await this.leadScoring.getHotLeads(20);
-
-          for (const lead of hotLeads) {
-            // Check if we can still send
-            const canSend = await this.domainHealth.canSend(this.config.defaultMailbox);
-            if (!canSend.allowed) {
-              console.log(`[AutomationEngine] Stopping sends: ${canSend.reason}`);
-              break;
-            }
-
-            try {
-              // Get optimal timing
-              const timing = await this.timing.getOptimalSendTime(lead.contactId);
-
-              // Get personalized content
-              const personalized = await this.personalization.personalizeEmail(
-                lead.contactId,
-                'default-template',
-                {}
-              );
-
-              // Check spam score
-              const spamCheck = await this.spamPrevention.checkEmail(
-                personalized.subject,
-                personalized.body
-              );
-
-              if (spamCheck.score > 5) {
-                console.log(`[AutomationEngine] Skipping ${lead.contactId}: spam score too high`);
-                continue;
-              }
-
-              // Send via outreach service (if timing is now)
-              if (timing <= new Date()) {
-                await this.outreach.sendEmail({
-                  contactId: lead.contactId,
-                  from: this.config.defaultMailbox,
-                  subject: personalized.subject,
-                  body: personalized.body,
-                });
-
-                await this.domainHealth.recordSend(this.config.defaultMailbox);
-                sent++;
-              }
-            } catch (error) {
-              console.error(`[AutomationEngine] Error sending to ${lead.contactId}:`, error);
-              await this.reliabilityGuard.recordError('send', error);
-            }
-          }
-
-          return `${sent} emails sent`;
+        // 8. Enroll new qualified contacts for future outreach
+        results.push(await this.runTask('Enroll Contacts', async () => {
+          const enrolled = await this.outreach.enrollQualifiedContacts();
+          return `${enrolled} new contacts enrolled`;
         }));
       } else {
         results.push({
-          task: 'Send Emails',
+          task: 'Outreach Cycle',
           success: false,
           duration: 0,
           details: `Skipped: ${sendDecision.reason}`,
@@ -290,18 +242,22 @@ export class AutomationEngine {
           // Find sequence gaps
           const gaps = await this.followUpOptimizer.findSequenceGaps();
 
-          return `${winners.length} test winners, ${patterns.length} patterns, ${gaps.length} gaps`;
+          return `${winners.length} test winners, ${patterns.patternsFound} patterns, ${gaps.length} gaps`;
         }));
       }
 
       // 10. Run warmup (if needed)
       results.push(await this.runTask('Warmup', async () => {
-        const warmupStatus = await this.warmup.runDailyWarmup(this.config.defaultMailbox);
-        return `Warmup: ${warmupStatus}`;
+        const warmupStatus = await this.warmup.getMailboxStatus(this.config.defaultMailbox);
+        return `Warmup: Day ${warmupStatus?.currentDay || 0}, Phase ${warmupStatus?.phase || 0}`;
       }));
 
-      // 11. Log summary
-      await this.logging.logCycleComplete(results);
+      // 11. Log summary - use info instead of non-existent method
+      this.logging.info('automation', 'Cycle complete', {
+        cycleId: `cycle_${Date.now()}`,
+        taskCount: results.length,
+        successCount: results.filter(r => r.success).length
+      });
 
       console.log('[AutomationEngine] ═══════════════════════════════════════');
       console.log('[AutomationEngine] ✅ Cycle complete');
@@ -309,7 +265,7 @@ export class AutomationEngine {
 
     } catch (error) {
       console.error('[AutomationEngine] ❌ Cycle failed:', error);
-      await this.reliabilityGuard.recordError('cycle', error);
+      this.reliabilityGuard.recordCircuitBreakerFailure('database');
     } finally {
       this.isRunning = false;
     }
@@ -421,7 +377,7 @@ export class AutomationEngine {
       results.push({
         service: 'Self-Learning',
         status: 'healthy',
-        message: `${patterns.length} patterns detected`,
+        message: `${patterns.patternsFound} patterns detected`,
       });
     } catch (error) {
       results.push({ service: 'Self-Learning', status: 'error', message: String(error) });
@@ -429,7 +385,7 @@ export class AutomationEngine {
 
     // Check spam prevention
     try {
-      const testCheck = await this.spamPrevention.checkEmail('Test', 'Test body');
+      const testCheck = this.spamPrevention.checkEmail('Test', 'Test body', this.config.defaultMailbox);
       results.push({
         service: 'Spam Prevention',
         status: 'healthy',
@@ -441,11 +397,12 @@ export class AutomationEngine {
 
     // Check reliability guard
     try {
-      const circuitStatus = await this.reliabilityGuard.getCircuitStatus();
+      const health = this.reliabilityGuard.getHealth();
+      const isHealthy = health.overall === 'healthy';
       results.push({
         service: 'Reliability Guard',
-        status: circuitStatus === 'closed' ? 'healthy' : 'warning',
-        message: `Circuit: ${circuitStatus}`,
+        status: isHealthy ? 'healthy' : 'warning',
+        message: `System: ${health.overall}`,
       });
     } catch (error) {
       results.push({ service: 'Reliability Guard', status: 'error', message: String(error) });
@@ -498,7 +455,7 @@ export class AutomationEngine {
 export function createAutomationEngine(config: Partial<EngineConfig> = {}): AutomationEngine {
   const fullConfig: EngineConfig = {
     databaseUrl: process.env.DATABASE_URL || '',
-    defaultMailbox: config.defaultMailbox || 'sabel@apexmediation.ee',
+    defaultMailbox: config.defaultMailbox || 'sales@apexmediation.ee',
     maxDailyEmails: config.maxDailyEmails || 100,
     enableSelfLearning: config.enableSelfLearning ?? true,
     enableAutonomousMode: config.enableAutonomousMode ?? true,

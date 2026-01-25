@@ -315,12 +315,15 @@ export class LeadEnrichmentService {
           'User-Agent': 'ApexMediation-Enrichment/1.0',
           'Accept': 'application/vnd.github.v3+json',
         });
-        const repos = JSON.parse(reposResponse);
+        const repos = JSON.parse(reposResponse) as Array<{ language?: string }>;
         
-        const languages = [...new Set(repos
-          .map((r: any) => r.language)
-          .filter(Boolean)
-        )];
+        const languageSet = new Set<string>();
+        for (const r of repos) {
+          if (r.language) {
+            languageSet.add(r.language);
+          }
+        }
+        const languages = Array.from(languageSet);
 
         return {
           org: org.login,

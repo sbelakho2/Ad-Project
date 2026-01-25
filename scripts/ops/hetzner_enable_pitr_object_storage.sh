@@ -36,10 +36,14 @@ WAL_DIR=${WAL_DIR:-/mnt/HC_Volume_104191119/postgresql-backups/wal}
 cat <<'BASH' | "$ROOT_DIR/scripts/ops/hetzner_ssh.sh" db -- "S3_BUCKET=${S3_BUCKET} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-} S3_ENDPOINT=${S3_ENDPOINT:-} S3_WAL_PREFIX=${S3_WAL_PREFIX} S3_BASE_PREFIX=${S3_BASE_PREFIX} WAL_DIR=${WAL_DIR} bash -s"
 set -euo pipefail
 
-# Install AWS CLI if needed
+# Install AWS CLI if needed (use a local venv to avoid system Python restrictions)
 if ! command -v aws >/dev/null 2>&1; then
   apt-get update -y
-  apt-get install -y awscli
+  apt-get install -y python3-venv
+  python3 -m venv /opt/adproject/ops/awscli-venv
+  /opt/adproject/ops/awscli-venv/bin/pip install -U pip awscli
+  ln -sf /opt/adproject/ops/awscli-venv/bin/aws /usr/local/bin/aws
+  chmod 755 /usr/local/bin/aws
 fi
 
 install -d -m 0755 /opt/adproject/ops
@@ -54,6 +58,7 @@ S3_WAL_PREFIX="${S3_WAL_PREFIX}"
 S3_BASE_PREFIX="${S3_BASE_PREFIX}"
 WAL_DIR="${WAL_DIR}"
 ENV
+chown postgres:postgres /opt/adproject/ops/s3_archive.env
 chmod 0600 /opt/adproject/ops/s3_archive.env
 
 cat <<'SH' | tee /opt/adproject/ops/pg_wal_archive_s3.sh >/dev/null
@@ -91,7 +96,7 @@ if [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
   export AWS_DEFAULT_REGION
 fi
 
-aws_args=(s3 cp "$ARCHIVE_FILE" "${S3_BUCKET%/}/${S3_WAL_PREFIX}${WAL_FILE}.gz")
+aws_args=(/usr/local/bin/aws s3 cp "$ARCHIVE_FILE" "${S3_BUCKET%/}/${S3_WAL_PREFIX}${WAL_FILE}.gz")
 if [[ -n "${S3_ENDPOINT:-}" ]]; then
   aws_args+=(--endpoint-url "$S3_ENDPOINT")
 fi
@@ -111,7 +116,7 @@ if [[ -f /opt/adproject/ops/s3_archive.env ]]; then
   set +a
 fi
 
-BASE_DIR="/var/backups/postgresql/base"
+BASE_DIR="/mnt/HC_Volume_104191119/postgresql-backups/base"
 S3_BASE_PREFIX="${S3_BASE_PREFIX:-base/}"
 
 latest=$(ls -1t "$BASE_DIR"/base_*.tar.gz 2>/dev/null | head -n 1 || true)
@@ -130,7 +135,7 @@ if [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
 fi
 
 fname=$(basename "$latest")
-aws_args=(s3 cp "$latest" "${S3_BUCKET%/}/${S3_BASE_PREFIX}${fname}")
+aws_args=(/usr/local/bin/aws s3 cp "$latest" "${S3_BUCKET%/}/${S3_BASE_PREFIX}${fname}")
 if [[ -n "${S3_ENDPOINT:-}" ]]; then
   aws_args+=(--endpoint-url "$S3_ENDPOINT")
 fi

@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "jest",
+    "test": "NODE_OPTIONS= NODE_NO_WARNINGS=1 jest",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit"
   },
@@ -37,6 +37,8 @@
     "pdfkit": "^0.17.2",
     "pg": "^8.11.3",
     "prom-client": "^15.1.0",
+    "resend": "^4.0.0",
+    "@aws-sdk/client-s3": "^3.750.0",
     "winston": "^3.11.0",
     "zod": "^3.22.4"
   },
@@ -60,6 +62,6 @@
     "supertest": "^7.1.4",
     "ts-jest": "^29.4.6",
     "tsx": "^4.6.2",
-    "typescript": "^5.3.2"
+    "typescript": "5.3.3"
   }
 }

@@ -15,11 +15,11 @@ interface OutreachConfig {
 }
 
 const DEFAULT_CONFIG: OutreachConfig = {
-  fromEmail: 'sabel@apexmediation.ee',
-  fromName: 'Sabel from ApexMediation',
-  replyTo: 'sabel@apexmediation.ee',
+  fromEmail: 'sales@apexmediation.ee',
+  fromName: 'Aaron from ApexMediation',
+  replyTo: 'sales@apexmediation.ee',
   dailyLimit: 100, // Resend free tier is 3K/month ≈ 100/day
-  trackingDomain: 'api.apexmediation.ee',
+  trackingDomain: 'apexmediation.ee',
 };
 
 export class OutreachService {
@@ -400,7 +400,7 @@ export class OutreachService {
         replyTo: this.config.replyTo,
         headers: {
           'X-Entity-Ref-ID': email.id,
-          'List-Unsubscribe': `<mailto:unsubscribe@apexmediation.ee?subject=unsubscribe-${email.contact_id}>`,
+          'List-Unsubscribe': `<mailto:sales@apexmediation.ee?subject=unsubscribe-${email.contact_id}>`,
         },
       });
 

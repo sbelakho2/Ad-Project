@@ -199,16 +199,18 @@ async function logSyncResult(
   usageRecord: UsageRecord
 ): Promise<void> {
   const query = `
-    INSERT INTO billing_audit_log (
-      organization_id,
+    INSERT INTO billing_audit (
       event_type,
-      metadata,
+      actor,
+      customer_id,
+      data,
       created_at
-    ) VALUES ($1, $2, $3, NOW())
+    ) VALUES ($1, $2, $3, $4, NOW())
   `;
 
   const eventType = result.status === 'success' ? 'stripe_usage_synced' : 'stripe_usage_sync_failed';
   const metadata = {
+    organization_id: result.organization_id,
     subscription_item_id: result.subscription_item_id,
     status: result.status,
     impressions: usageRecord.impressions,
@@ -218,7 +220,7 @@ async function logSyncResult(
     error_message: result.error_message,
   };
 
-  await pool.query(query, [result.organization_id, eventType, JSON.stringify(metadata)]);
+  await pool.query(query, [eventType, 'system', result.organization_id, JSON.stringify(metadata)]);
 }
 
 async function main(): Promise<void> {

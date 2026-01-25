@@ -19,7 +19,8 @@ type LogCategory =
   | 'discovery'
   | 'scheduling'
   | 'sequence'
-  | 'system';
+  | 'system'
+  | 'automation';
 
 interface LogEntry {
   id?: string;

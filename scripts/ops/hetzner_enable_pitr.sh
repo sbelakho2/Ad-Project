@@ -108,7 +108,7 @@ cat <<'SH' | sudo tee /opt/adproject/ops/pitr_basebackup.sh >/dev/null
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_DIR="/var/backups/postgresql/base"
+BASE_DIR="/mnt/HC_Volume_104191119/postgresql-backups/base"
 mkdir -p "$BASE_DIR"
 STAMP=$(date -u +%F)
 OUT="$BASE_DIR/base_${STAMP}.tar.gz"
@@ -175,7 +175,7 @@ sudo chmod 0644 /etc/cron.d/adproject-pitr /etc/cron.d/adproject-wal-retention
 
 echo '== 4) Snapshot =='
 df -hT /
-du -sh "$WAL_DIR" /var/backups/postgresql/base /var/lib/postgresql/16/main 2>/dev/null || true
+du -sh "$WAL_DIR" /mnt/HC_Volume_104191119/postgresql-backups/base /var/lib/postgresql/16/main 2>/dev/null || true
 sudo -u postgres psql -d adproject -P pager=off -At <<'SQL'
 select 'db_size='||pg_size_pretty(pg_database_size('adproject'));
 select 'archived_count='||archived_count||' failed_count='||failed_count from pg_stat_archiver;

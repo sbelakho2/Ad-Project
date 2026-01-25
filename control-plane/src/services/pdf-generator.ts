@@ -166,7 +166,7 @@ export async function generateTsdPDF(report: TsdReport): Promise<Buffer> {
       .text(report.companyInfo.name, col1, 130)
       .text(`Registry Code: ${report.companyInfo.registryCode}`, col1, 145);
 
-    let y = 200;
+    const y = 200;
     const rows = [
       ['Number of Employees', report.employees.toString()],
       ['Total Gross Payroll', `€${report.payrollEur.toLocaleString()}`],

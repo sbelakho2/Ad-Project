@@ -168,7 +168,8 @@ test.describe('Control Plane LIVE — login with dummy operator', () => {
     await page.waitForTimeout(500).catch(() => {})
 
     await page.waitForURL('**/admin', { timeout: 30_000 })
-    await expect(page.getByRole('heading', { name: /^Control Plane$/i })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.brand', { hasText: 'APEX CONTROL PLANE' })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('#view-title')).toHaveText(/dashboard/i, { timeout: 10_000 })
 
     // Log server errors but don't fail on expected missing tables
     if (serverErrors.length > 0) {

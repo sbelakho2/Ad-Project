@@ -38,4 +38,5 @@ export const auditLogger = winston.createLogger({
 });
 
 import { logAudit, AuditEvent } from './audit';
-export { AuditEvent, logAudit };
+export type { AuditEvent };
+export { logAudit };

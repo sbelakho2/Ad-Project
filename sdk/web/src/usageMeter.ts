@@ -136,6 +136,7 @@ const DEFAULT_CONFIG: Required<MeteringConfig> = {
   enableRemoteReporting: true,
   samplingRate: 1.0,
   reportEndpoint: '/api/v1/metrics/usage',
+  apiKey: '',
 };
 
 /**

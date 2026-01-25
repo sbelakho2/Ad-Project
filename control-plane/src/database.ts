@@ -102,15 +102,18 @@ export async function queryReadOnly<T = unknown>(
 
 /**
  * Execute an operator-level query (with audit context)
+ * When called with just sql and params, uses 'system' as actor
  */
 export async function queryOperator<T = unknown>(
   sql: string,
   params: unknown[] = [],
-  actor: string,
-  reason: string
+  actor?: string,
+  reason?: string
 ): Promise<T[]> {
   const pool = getOperatorPool();
-  logger.info('Operator query', { actor, reason, sql: sql.substring(0, 100) });
+  const effectiveActor = actor || 'system';
+  const effectiveReason = reason || 'autonomous-operation';
+  logger.info('Operator query', { actor: effectiveActor, reason: effectiveReason, sql: sql.substring(0, 100) });
   const result = await pool.query(sql, params);
   return result.rows as T[];
 }

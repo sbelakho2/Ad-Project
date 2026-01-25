@@ -62,6 +62,20 @@ npm install
 npm run dev
 ```
 
+### Compliance Smoke Test
+Run the compliance smoke test using an operator JWT.
+
+Required env:
+- `CONTROL_PLANE_URL` (defaults to `http://localhost:4000` if unset)
+- `OPERATOR_TOKEN` (operator JWT signed with `OPERATOR_JWT_SECRET`)
+
+Example (local):
+```bash
+OPERATOR_TOKEN=$(node -e "const jwt=require('jsonwebtoken'); const secret=process.env.OPERATOR_JWT_SECRET; const email=(process.env.OPERATOR_CREDENTIALS||'').split(',')[0]?.split(':')[0]||'operator@apexmediation.ee'; console.log(jwt.sign({ sub: email, role: 'operator' }, secret, { expiresIn: '2h' }));") \
+CONTROL_PLANE_URL=http://localhost:4000 \
+node scripts/smoke-test-compliance.ts
+```
+
 ## 🛡️ Security & Auditing
 
 - **Audit Logging**: Every operator action is logged with actor ID, reason, and timestamp.

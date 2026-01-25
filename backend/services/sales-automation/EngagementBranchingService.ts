@@ -55,7 +55,7 @@ No pressure at all - but if you're even slightly curious, I'd be happy to show y
 What do you think?
 
 Best,
-Sabel`,
+Aaron`,
       },
       {
         delay: 5,
@@ -74,7 +74,7 @@ Here's what I found:
 Want me to send over the full analysis? Takes 2 minutes to read.
 
 Cheers,
-Sabel`,
+Aaron`,
       },
     ],
   },
@@ -111,7 +111,7 @@ Since you're clearly researching options, I thought you might find this useful -
 Would you like me to do a similar analysis for {{app_name}}? I can usually turn it around in 24 hours.
 
 Best,
-Sabel`,
+Aaron`,
       },
     ],
   },
@@ -139,9 +139,9 @@ c) Actually, let's chat - hit reply and suggest a time
 No hard feelings either way!
 
 Cheers,
-Sabel
+Aaron
 
-P.S. If you do want to chat later, you can always reach me at sabel@apexmediation.ee`,
+P.S. If you do want to chat later, you can always reach us at sales@apexmediation.ee`,
       },
     ],
   },
@@ -168,7 +168,7 @@ Since you showed interest before, I thought you might want to take another look.
 Want to see a quick demo of the new features?
 
 Best,
-Sabel`,
+Aaron`,
       },
     ],
   },

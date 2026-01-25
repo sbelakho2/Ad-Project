@@ -1,8 +1,11 @@
-# Sales Automation - Operations Guide
+# Sales Automation - Operations Guide (V1)
 
 **ApexMediation Self-Service Sales Automation**  
 **Last Updated:** 2025-11-03  
-**Status:** Production Ready
+**Status:** Production Ready  
+**Type:** Inbound Trial Nurture
+
+> **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system with Thompson Sampling, Spintax, and Naive Bayes classification
 
 ---
 

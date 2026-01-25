@@ -4,6 +4,8 @@ import { logger } from '../utils/logger';
 import { invoiceService } from '../services/invoiceService';
 import { Pool, PoolClient } from 'pg';
 import { dunningManagementService } from '../../services/billing/DunningManagementService';
+// REVOLUTIONARY: Import sales automation webhook handler
+import { handleResendWebhook, processReply } from '../../services/sales-automation/webhook';
 
 const router = Router();
 
@@ -528,5 +530,84 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription): Pro
     );
   });
 }
+
+// ============================================================================
+// REVOLUTIONARY: RESEND WEBHOOK (Sales Automation)
+// Handles email opens, clicks, bounces, and spam complaints
+// OVERCOMES: "No feedback loop", "Domain tanks without warning"
+// ============================================================================
+
+/**
+ * POST /api/v1/webhooks/resend
+ * Handle Resend email events (opens, clicks, bounces, spam complaints)
+ * 
+ * Note: This endpoint receives raw JSON from Resend
+ * Configure in Resend Dashboard:
+ *   URL: https://api.apexmediation.ee/api/v1/webhooks/resend
+ *   Events: email.delivered, email.opened, email.clicked, email.bounced, email.complained
+ */
+router.post('/resend', async (req: Request, res: Response) => {
+  try {
+    const signature = req.headers['svix-signature'] as string || '';
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : typeof req.body === 'string'
+        ? req.body
+        : JSON.stringify(req.body ?? {});
+    
+    const result = await handleResendWebhook(rawBody, signature);
+    
+    if (result.success) {
+      logger.info('Resend webhook processed', { message: result.message });
+      return res.status(200).json(result);
+    } else {
+      logger.warn('Resend webhook failed', { message: result.message });
+      return res.status(400).json(result);
+    }
+  } catch (error) {
+    logger.error('Resend webhook error', { error: error instanceof Error ? error.message : 'Unknown' });
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
+
+/**
+ * POST /api/v1/webhooks/resend/reply
+ * Handle incoming email replies (via forwarding or Resend inbound)
+ * 
+ * REVOLUTIONARY: Uses SmartReplyAnalyzer to categorize replies
+ */
+router.post('/resend/reply', async (req: Request, res: Response) => {
+  try {
+    const payload = Buffer.isBuffer(req.body)
+      ? JSON.parse(req.body.toString('utf8'))
+      : typeof req.body === 'string'
+        ? JSON.parse(req.body)
+        : req.body;
+
+    const { from, subject, body } = payload || {};
+    
+    if (!from || !body) {
+      return res.status(400).json({ success: false, message: 'Missing from or body' });
+    }
+    
+    const result = await processReply(from, subject || '(no subject)', body);
+    
+    if (result.success) {
+      logger.info('Reply processed', { 
+        from, 
+        category: result.category, 
+        sentiment: result.sentiment,
+        suggestedAction: result.suggestedAction,
+      });
+      return res.status(200).json(result);
+    } else {
+      logger.info('Reply from unknown contact', { from });
+      return res.status(200).json({ success: false, message: 'Contact not found' });
+    }
+  } catch (error) {
+    logger.error('Reply processing error', { error: error instanceof Error ? error.message : 'Unknown' });
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
 
 export default router;

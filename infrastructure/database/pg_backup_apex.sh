@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-BACKUP_DIR="/var/backups/postgresql"
+BACKUP_DIR="/mnt/HC_Volume_104191119/postgresql-backups"
 DATE=$(date +%Y-%m-%d_%H%M%S)
 DAY_OF_WEEK=$(date +%u)
 LOG_FILE="/var/log/postgresql/backup.log"
@@ -13,6 +13,8 @@ LOG_FILE="/var/log/postgresql/backup.log"
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
+
+mkdir -p "$BACKUP_DIR/daily" "$BACKUP_DIR/weekly"
 
 log "Starting backup..."
 
@@ -34,9 +36,9 @@ if [ "$DAY_OF_WEEK" -eq 7 ]; then
     log "Weekly backup created"
 fi
 
-# Cleanup: keep 7 daily backups
-find "$BACKUP_DIR/daily" -name "*.dump" -mtime +7 -delete
-log "Old daily backups cleaned (keeping 7 days)"
+# Cleanup: keep 3 daily backups
+find "$BACKUP_DIR/daily" -name "*.dump" -mtime +3 -delete
+log "Old daily backups cleaned (keeping 3 days)"
 
 # Cleanup: keep 4 weekly backups
 find "$BACKUP_DIR/weekly" -name "*.dump" -mtime +28 -delete

@@ -100,7 +100,8 @@ async function loginAsLiveOperator(page: Page) {
   })
 
   await page.waitForURL('**/admin', { timeout: 30_000 })
-  await expect(page.getByRole('heading', { name: /^Control Plane$/i })).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('.brand', { hasText: 'APEX CONTROL PLANE' })).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('#view-title')).toHaveText(/dashboard/i, { timeout: 30_000 })
 }
 
 test.describe('Control Plane LIVE — deep operator pages (non-destructive)', () => {
@@ -130,8 +131,8 @@ test.describe('Control Plane LIVE — deep operator pages (non-destructive)', ()
     // Start from the main dashboard.
     await test.step('Visit /admin (dashboard)', async () => {
       await page.goto('/admin', { waitUntil: 'domcontentloaded', timeout: 60_000 })
-      await expect(page.getByRole('heading', { name: /^Control Plane$/i })).toBeVisible({ timeout: 30_000 })
-      await expect(page.getByRole('heading', { name: /trusted devices/i })).toBeVisible({ timeout: 30_000 })
+      await expect(page.locator('.brand', { hasText: 'APEX CONTROL PLANE' })).toBeVisible({ timeout: 30_000 })
+      await expect(page.locator('.card-title', { hasText: /overall health/i })).toBeVisible({ timeout: 30_000 })
     })
 
     const adminLinks = page.locator('a[href^="/admin"]')

@@ -80,13 +80,28 @@ const envSchema = z.object({
   
   // External Services - Email
   RESEND_API_KEY: z.string().startsWith('re_', 'RESEND_API_KEY must start with re_').optional(),
+  RESEND_WEBHOOK_SECRET: z.string().optional(),
   
   // External Services - AI
   OPENAI_API_KEY: z.string().startsWith('sk-', 'OPENAI_API_KEY must start with sk-').optional(),
   
   // Feature Flags
   TRANSPARENCY_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('false'),
+  SALES_AUTOMATION_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('false'),
+  SALES_AUTOMATION_CRON: z.string().default('*/30 * * * *'),
+  SALES_AUTOMATION_RUN_ON_STARTUP: z.string().transform(v => v === 'true' || v === '1').default('false'),
+  SALES_AUTOMATION_DEFAULT_MAILBOX: z.string().email().default('sales@apexmediation.ee'),
+  SALES_AUTOMATION_MAX_DAILY_EMAILS: z.string().regex(/^\d+$/).transform(Number).default('100'),
+  SALES_AUTOMATION_SELF_LEARNING_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
+  SALES_AUTOMATION_AUTONOMOUS_MODE: z.string().transform(v => v === 'true' || v === '1').default('true'),
+  SALES_AUTOMATION_TRACKING_DOMAIN: z.string().optional(),
   BILLING_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('false'),
+  BILLING_SCHEDULER_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
+  BILLING_USAGE_LIMIT_CRON: z.string().default('0 * * * *'),
+  BILLING_USAGE_SYNC_CRON: z.string().default('0 2 * * *'),
+  BILLING_DUNNING_CRON: z.string().default('0 3 * * *'),
+  BILLING_RECONCILIATION_CRON: z.string().default('30 3 * * *'),
+  BILLING_RECONCILIATION_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
   FRAUD_DETECTION_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('true'),
   AB_TESTING_ENABLED: z.string().transform(v => v === 'true' || v === '1').default('false'),
   FEATURE_KILL_SWITCH: z.string().transform(v => v === 'true' || v === '1').default('false'),

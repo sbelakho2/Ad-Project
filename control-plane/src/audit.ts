@@ -29,40 +29,29 @@ export async function logAudit(event: AuditEvent): Promise<void> {
   try {
     const sql = `
       INSERT INTO audit_logs (
+        actor,
         action,
-        resource_type,
-        resource_id,
-        changes,
+        target,
+        pre_state,
+        post_state,
+        result,
+        reason,
         ip_address,
         user_agent,
-        created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
     `;
 
-    // Map AuditEvent to audit_logs table
-    // Since audit_logs has publisher_id/user_id as UUIDs, and we have actor as string,
-    // we store the actor in the 'changes' or metadata for now, or use a dedicated table.
-    // Given the schema from data/schemas/postgresql.sql:
-    // resource_type, resource_id, changes (JSONB)
-    
-    const changes = {
-      actor: event.actor,
-      result: event.result,
-      reason: event.reason,
-      preState: event.preState,
-      postState: event.postState,
-    };
-
-    // We don't have a reliable mapping for UUIDs here without extra lookups,
-    // so we store the technical details in 'changes'.
-    
     await queryOperator(
       sql,
       [
+        event.actor,
         event.action,
-        event.target || 'system',
-        null, // resource_id
-        JSON.stringify(changes),
+        event.target || null,
+        event.preState ? JSON.stringify(event.preState) : null,
+        event.postState ? JSON.stringify(event.postState) : null,
+        event.result,
+        event.reason || null,
         event.ip || null,
         event.userAgent || null
       ],

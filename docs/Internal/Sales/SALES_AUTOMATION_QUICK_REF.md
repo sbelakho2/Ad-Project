@@ -1,4 +1,6 @@
-# 🎯 Sales Automation Quick Reference
+# 🎯 Sales Automation Quick Reference (V1 - Cialdini)
+
+> **📢 For Outbound Prospecting:** See [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md)
 
 ## The 6 Principles (1-Page Cheat Sheet)
 

@@ -1,155 +1,174 @@
-# Automated Sales System (Zero-Cost)
+# Sales Automation System - ACTUALLY USABLE
 
-## Overview
+## 🎛️ Control Panel UI (NEW)
 
-Fully automated outbound sales system for ApexMediation. **No paid API calls** - uses only free public data sources, self-hosted services, and existing infrastructure.
+**All settings are now editable from the Control Plane UI:**
+- Navigate to: `https://admin.apexmediation.ee/admin/sales-automation/control`
 
-## Business Context
+### What You Can Control From UI:
+- ✅ Sender name and email (no code changes!)
+- ✅ Daily send limits
+- ✅ Enable/disable review queue (drafts)
+- ✅ Require email verification before sending
+- ✅ View and edit email sequences
+- ✅ Approve/reject draft emails
+- ✅ Run outreach cycles (dry-run or live)
 
-ApexMediation is a BYO (Bring-Your-Own) ad mediation platform targeting:
-- **Mobile app publishers** monetizing with ads (gaming, utility, media apps)
-- **Mid-tier publishers** ($10K-$500K/month in ad revenue)
-- **Publishers frustrated** with opaque mediation platforms (Unity/ironSource/MAX)
-
-## Revenue Model
-- **Starter**: 0% (free up to $10K/app/month) - Loss leader for acquisition
-- **Growth**: 2.5% of mediated revenue
-- **Scale**: 2.0% → 1.25% with annual prepay
-- **Enterprise**: 1.0-1.5% custom
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        AUTOMATED SALES ENGINE                                │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────────┐ │
-│  │  PROSPECT    │ →  │   ENRICH &   │ →  │   SCORE &    │ →  │  OUTREACH  │ │
-│  │  DISCOVERY   │    │   VALIDATE   │    │  PRIORITIZE  │    │  SEQUENCE  │ │
-│  └──────────────┘    └──────────────┘    └──────────────┘    └────────────┘ │
-│        ↓                    ↓                   ↓                  ↓        │
-│  • App Store Scrape  • Domain Lookup    • ML Scoring         • Email       │
-│  • GitHub/FOSS       • Company Size     • Intent Signals     • LinkedIn    │
-│  • SensorTower Free  • Tech Stack       • Fit Assessment     • Follow-ups  │
-│  • Public Lists      • Contact Find     • Revenue Est.       • Retargeting │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           DATA STORAGE (PostgreSQL)                          │
-│  prospects │ contacts │ sequences │ touchpoints │ conversions │ analytics   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Data Sources (All Free)
-
-### 1. App Store Discovery
-- **Google Play**: Public search API (no auth required)
-- **Apple App Store**: RSS feeds + lookup API (no auth required)
-- **Alternative stores**: Amazon, Samsung Galaxy Store
-
-### 2. Company Enrichment  
-- **WHOIS**: Domain registration info
-- **DNS/MX**: Email provider detection
-- **GitHub**: SDK usage, tech stack
-- **Crunchbase (limited free)**: Funding, employee count
-- **LinkedIn public profiles**: Job titles, company size
-
-### 3. Contact Discovery
-- **Email patterns**: {first}@domain.com, {first}.{last}@domain.com
-- **Public GitHub profiles**: Developer emails from commits
-- **Hunter.io free tier**: 25 searches/month
-- **DNS MX verification**: Email deliverability check
-
-### 4. Intent Signals
-- **Job postings**: "ad monetization", "mediation", "SDK integration"
-- **GitHub activity**: SDK repos, ad-related issues
-- **App updates**: Frequent monetization changes
-- **Review analysis**: Ad-related complaints
-
-## Components
-
-### 1. ProspectDiscoveryService
-Finds potential customers from public sources.
-
-### 2. LeadEnrichmentService  
-Enriches prospects with company/contact data.
-
-### 3. LeadScoringService
-ML-free scoring using rule-based signals.
-
-### 4. OutreachSequenceService
-Manages email sequences with personalization.
-
-### 5. SalesAnalyticsService
-Tracks pipeline, conversions, and optimizes.
-
-## Deployment
-
-Runs on the Hetzner App Server (46.62.252.96) as a background service:
+## Quick Start (5 minutes)
 
 ```bash
-# 1. Build and deploy (from project root)
-./scripts/ops/deploy-sales-automation.sh --migrate --restart
+# 1. Setup database tables and default sequences
+cd backend
+DATABASE_URL="..." RESEND_API_KEY="..." npx ts-node -P tsconfig.json services/sales-automation/cli.ts setup
 
-# 2. Check service status
-ssh root@46.62.252.96 systemctl status sales-automation
+# 2. Import leads from CSV
+npx ts-node -P tsconfig.json services/sales-automation/cli.ts import leads.csv
 
-# 3. View logs
-ssh root@46.62.252.96 journalctl -u sales-automation -f
+# 3. Enroll contacts in a sequence
+npx ts-node -P tsconfig.json services/sales-automation/cli.ts enroll "Mobile App" new 10
+
+# 4. Send emails (dry-run first!)
+npx ts-node -P tsconfig.json services/sales-automation/cli.ts run --dry-run
+
+# 5. Actually send
+npx ts-node -P tsconfig.json services/sales-automation/cli.ts run
 ```
 
-### CLI Commands
+## What This System ACTUALLY Does
 
-| Command | Description |
-|---------|-------------|
-| `discover` | Run prospect discovery from app stores |
-| `enrich [n]` | Enrich up to n prospects (default 50) |
-| `outreach` | Send scheduled emails |
-| `enroll` | Enroll qualified contacts into sequences |
-| `analytics` | Run daily roll-up |
-| `full` | Run complete cycle |
-| `pipeline` | Show pipeline metrics |
-| `funnel` | Show conversion funnel |
-| `sequences` | Show sequence performance |
-| `trend [days]` | Show daily trend |
-| `daemon` | Run as background service |
+### Reality vs. Theory
 
-**Example:**
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Control Panel UI | ✅ WORKING | Full control from browser |
+| DB-backed Config | ✅ WORKING | Sender settings in sa_config table |
+| CLI Interface | ✅ WORKING | Import, enroll, send, track |
+| Database Tables | ✅ CREATED | sa_contacts, sa_sequences, sa_enrollments, sa_emails, sa_config |
+| Email Sending | ✅ WORKING | Via Resend (3K/month free) |
+| Review Queue | ✅ WORKING | Optional draft approval before sending |
+| Email Verification | ✅ WORKING | Optional requirement for verified contacts |
+| Domain Health Guard | ✅ WORKING | Auto-stops at high bounce rates |
+| Spam Prevention | ✅ WORKING | Pre-flight content check |
+| Default Sequences | ✅ CREATED | 2 sequences ready to use |
+
+### CSV Format
+
+Required column: `email`  
+Optional: `first_name`, `last_name`, `company_name`, `job_title`, `app_name`, `app_downloads`
+
+```csv
+email,first_name,company_name,app_name,app_downloads
+john@company.com,John,Game Studio,Puzzle Master,100K+
+```
+
+### Default Sequences
+
+1. **Mobile App Publisher - Ad Mediation** (3 emails over 8 days)
+   - Day 0: Initial reach out about ad revenue optimization
+   - Day 3: Follow-up with case study
+   - Day 8: Final gentle nudge
+
+2. **Simple Introduction** (2 emails over 4 days)
+   - Day 0: Brief intro
+   - Day 4: Follow-up
+
+### Personalization Variables
+
+Use these in your email templates:
+- `{{first_name}}` - Contact's first name
+- `{{company_name}}` - Company name
+- `{{app_name}}` - App name
+- `{{app_downloads}}` - Download count
+
+## CLI Commands
+
 ```bash
-ssh root@46.62.252.96 'cd /opt/adproject/backend && node dist/src/scripts/salesAutomationCli.js pipeline'
+# Setup
+setup                           # Create tables and default sequences
+
+# Contacts
+import <file.csv>               # Import from CSV
+add <email> [--name "..."]      # Add single contact
+contacts [status]               # List contacts
+
+# Sequences  
+sequences                       # List available sequences
+
+# Outreach
+enroll <sequence> [status] [n]  # Enroll N contacts with status in sequence
+run [--dry-run]                 # Send pending emails
+status                          # Show stats
+
+# Example full workflow
+npx ts-node cli.ts import leads.csv
+npx ts-node cli.ts enroll "Mobile App" new 10
+npx ts-node cli.ts run --dry-run   # Preview
+npx ts-node cli.ts run             # Send!
+npx ts-node cli.ts status          # Check results
 ```
 
-### Tracking Endpoints
+## Environment Variables
 
-Add to Express app:
+```bash
+DATABASE_URL=postgresql://...     # Required
+RESEND_API_KEY=re_...             # Required for sending
+RESEND_WEBHOOK_SECRET=...          # Optional (signature verification)
+SALES_AUTOMATION_ENABLED=true      # Enable autonomous engine
+SALES_AUTOMATION_CRON=*/30 * * * * # Run every 30 minutes
+SALES_AUTOMATION_RUN_ON_STARTUP=false
+SALES_AUTOMATION_DEFAULT_MAILBOX=sales@apexmediation.ee
+SALES_AUTOMATION_MAX_DAILY_EMAILS=100
+SALES_AUTOMATION_SELF_LEARNING_ENABLED=true
+SALES_AUTOMATION_AUTONOMOUS_MODE=true
+```
+
+## Automated Mode (Option B)
+
+The autonomous engine is wired into the backend startup. It uses the main
+sales automation schema created by migrations:
+
+- `041_sales_automation_outbound.sql`
+- `20250609_sales_automation_improvements.sql`
+- `20250610_revolutionary_sales_features.sql`
+
+Once migrations are applied and `SALES_AUTOMATION_ENABLED=true`, the scheduler
+will run the full automation cycle on the configured cron.
+
+## Webhook Setup (for tracking)
+
+Add this route to your Express app:
+
 ```typescript
-import { createSalesTrackingRouter } from './routes/salesTracking';
-app.use('/', createSalesTrackingRouter(pool));
+import { handleResendWebhook } from './services/sales-automation/webhook';
+
+app.post('/api/webhooks/resend', express.raw({ type: 'application/json' }), async (req, res) => {
+  const signature = req.headers['svix-signature'] as string || '';
+  const result = await handleResendWebhook(req.body.toString(), signature);
+  res.status(result.success ? 200 : 400).json(result);
+});
 ```
 
-Endpoints:
-- `GET /track/open/:emailId` - Email open tracking pixel
-- `GET /track/click/:emailId/:linkId?url=...` - Link click redirect
-- `GET /unsubscribe/:contactId` - Unsubscribe page
-- `POST /track/reply` - Reply webhook (from Resend)
-- `POST /track/bounce` - Bounce webhook (from Resend)
+Then configure in Resend dashboard:
+- Webhook URL: `https://api.apexmediation.ee/api/webhooks/resend`
+- Events: email.opened, email.clicked, email.bounced, email.complained
 
-## Scheduling
+---
 
-| Job | Schedule | Description |
-|-----|----------|-------------|
-| Prospect Discovery | Daily 2 AM | Scrape app stores for new prospects |
-| Lead Enrichment | Hourly | Enrich queued prospects |
-| Lead Scoring | Hourly | Score enriched leads |
-| Outreach Send | Every 15 min | Send scheduled emails |
-| Analytics Roll-up | Daily 6 AM | Calculate pipeline metrics |
+## Advanced Services (Need Data First)
 
-## Legal Compliance
+The "revolutionary" services require data to be useful:
 
-- GDPR: Legitimate interest basis for B2B prospecting
-- CAN-SPAM: Unsubscribe link in all emails
-- CCPA: Honor opt-out requests
-- Rate limiting: Respect robots.txt and API limits
+### Domain Health Guard
+Monitors bounce rates and spam complaints. Useful after sending 50+ emails.
+
+### Self-Learning Sequences  
+A/B tests email variants. Needs 100+ sends to have statistical significance.
+
+### Predictive Lead Scoring
+Scores leads based on engagement. Needs historical conversion data.
+
+### Smart Reply Analyzer
+Categorizes replies. Needs incoming replies to analyze.
+
+**Start simple with the CLI → Generate data → Then the advanced services become useful.**
+- Daily sending limits

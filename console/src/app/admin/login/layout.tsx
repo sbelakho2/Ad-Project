@@ -5,5 +5,5 @@
  * access the login page without being authenticated as an operator.
  */
 export default function OperatorLoginLayout({ children }: { children: React.ReactNode }) {
-  return children
+  return <div className="control-plane min-h-screen">{children}</div>
 }

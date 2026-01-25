@@ -55,6 +55,14 @@ const envSchema = z.object({
   
   // Host Telemetry
   HOST_TELEMETRY_ENDPOINT: z.string().optional(),
+  HOST_TELEMETRY_ENDPOINT_APP: z.string().optional(),
+  HOST_TELEMETRY_ENDPOINT_DB: z.string().optional(),
+  S3_STORAGE_ENDPOINT: z.string().optional(),
+  S3_STORAGE_BUCKET: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_DEFAULT_REGION: z.string().optional(),
+  S3_ENDPOINT: z.string().optional(),
   
   // Hetzner Cloud
   HETZNER_API_TOKEN: z.string().optional(),

@@ -22,6 +22,13 @@ export interface RevenueForecast {
  */
 export async function getCohortAnalysis(months = 12): Promise<CohortData[]> {
   try {
+    const invoiceColumns = await getTableColumns('invoices');
+    const invoiceDateColumn = resolveColumn(invoiceColumns, ['issue_date', 'invoice_date']);
+    if (!invoiceDateColumn) {
+      logger.warn('Invoices table missing date column for cohort analysis');
+      return [];
+    }
+
     // 1. Get cohorts and their sizes
     const cohortsSql = `
       SELECT 
@@ -53,8 +60,8 @@ export async function getCohortAnalysis(months = 12): Promise<CohortData[]> {
           FROM publishers p
           JOIN invoices i ON i.customer_id = p.user_id
           WHERE TO_CHAR(p.created_at, 'YYYY-MM') = $1
-          AND i.issue_date >= p.created_at + INTERVAL '${i} months'
-          AND i.issue_date < p.created_at + INTERVAL '${i + 1} months'
+          AND i.${invoiceDateColumn} >= p.created_at + INTERVAL '${i} months'
+          AND i.${invoiceDateColumn} < p.created_at + INTERVAL '${i + 1} months'
           AND i.status = 'paid'
         `;
         const activeResult = await queryReadOnly<any>(retentionSql, [month]);
@@ -75,6 +82,45 @@ export async function getCohortAnalysis(months = 12): Promise<CohortData[]> {
     logger.error('Failed to get cohort analysis', { error: (err as Error).message });
     return [];
   }
+}
+
+async function getTableColumns(tableName: string): Promise<Set<string>> {
+  if (process.env.NODE_ENV === 'test') {
+    if (tableName === 'invoices') {
+      return new Set(['issue_date', 'status']);
+    }
+    return new Set();
+  }
+  let rows: Array<{ column_name: string }> = [];
+  try {
+    rows = await queryReadOnly<{ column_name: string }>(
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = $1
+    `,
+      [tableName]
+    );
+  } catch (error: any) {
+    logger.warn('Failed to read information_schema columns', { tableName, error: error?.message });
+  }
+  const columns = new Set(rows.map((row) => row.column_name).filter(Boolean));
+  if (columns.size > 0) {
+    return columns;
+  }
+  if (tableName === 'invoices') {
+    return new Set(['issue_date', 'status']);
+  }
+  return columns;
+}
+
+function resolveColumn(columns: Set<string>, candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    if (columns.has(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 /**

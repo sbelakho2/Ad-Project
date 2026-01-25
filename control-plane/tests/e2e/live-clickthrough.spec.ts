@@ -210,7 +210,8 @@ async function liveLogin(page: Page) {
   });
 
   await page.waitForURL('**/admin', { timeout: 30_000 })
-  await expect(page.getByRole('heading', { name: /^Control Plane$/i })).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.brand', { hasText: 'APEX CONTROL PLANE' })).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('#view-title')).toHaveText(/dashboard/i, { timeout: 10_000 })
 }
 
 test.describe('Control Plane LIVE — click everything (dummy operator)', () => {
@@ -242,8 +243,27 @@ test.describe('Control Plane LIVE — click everything (dummy operator)', () => 
     expect(serverErrors, serverErrors.join('\n\n')).toHaveLength(0)
 
     // On live we keep this to the operator UI surface and avoid any dangerous actions.
-    await page.goto('/admin', { waitUntil: 'domcontentloaded' })
+    await page.waitForLoadState('domcontentloaded')
     await clickVisibleButtons(page, { rounds: 3, maxClicks: 60, timeBudgetMs: 12_000 })
+
+    await test.step('Sales Automation view renders', async () => {
+      await page.locator('.nav-item[data-view="sales"]').click({ timeout: 5_000 })
+      await expect(page.locator('#sales-contacts-count')).toBeVisible({ timeout: 10_000 })
+    })
+
+    await test.step('System Telemetry view stays logged in', async () => {
+      await page.locator('.nav-item[data-view="telemetry"]').click({ timeout: 5_000 })
+      await expect(page).toHaveURL(/\/admin(#telemetry)?$/)
+      await expect(page.locator('.nav')).toBeVisible({ timeout: 5_000 })
+      await expect(page.locator('#telemetry-content')).not.toHaveText(/Loading/)
+      await expect(page.locator('#telemetry-content')).not.toHaveText(/Failed to load telemetry data/i)
+      await expect(page.locator('#telemetry-content')).toContainText('"timestamp"')
+
+      await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {})
+      await expect(page).toHaveURL(/\/admin(#\w+)?$/)
+      const token = await page.evaluate(() => localStorage.getItem('controlPlaneToken'))
+      expect(token).toBeTruthy()
+    })
 
     // Also exercise internal admin navigation links.
     const adminLinks = page.locator('a[href^="/admin"]')
@@ -274,7 +294,7 @@ test.describe('Control Plane LIVE — click everything (dummy operator)', () => 
       console.warn('Page errors:', pageErrors);
     }
     if (consoleErrors.length > 0) {
-      console.warn('Console errors:', consoleErrors);
+      throw new Error(`Console errors detected:\n\n${consoleErrors.join('\n')}`)
     }
   })
 })

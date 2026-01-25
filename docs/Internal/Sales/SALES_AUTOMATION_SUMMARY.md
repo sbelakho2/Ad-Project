@@ -1,7 +1,23 @@
-# 🎯 Cialdini Sales Automation - Implementation Summary
+# 🎯 Cialdini Sales Automation - Implementation Summary (V1)
 
 **Date:** 2025-11-04  
-**Status:** ✅ Complete and Ready for Deployment
+**Status:** ✅ Complete and Ready for Deployment  
+**Type:** Inbound Trial Nurture (existing signups)
+
+> **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system deployed January 2026
+
+---
+
+## Sales Automation Overview
+
+ApexMediation has **two sales automation systems**:
+
+| System | Purpose | Location | Focus |
+|--------|---------|----------|-------|
+| **V1 (Cialdini)** | Trial nurture | Backend | Convert existing signups |
+| **V2 (Autonomous)** | Outbound prospecting | Control Plane | Find new leads |
+
+This document covers **V1 (Cialdini)** - the psychology-based trial conversion system.
 
 ---
 

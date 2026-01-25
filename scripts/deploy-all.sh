@@ -213,6 +213,7 @@ deploy_console() {
     BACKUP_NAME="console_backup_$DEPLOY_TIMESTAMP"
     log_info "Creating backup: $BACKUP_NAME"
     ssh_cmd "[ -d $DEPLOY_PATH/console_release ] && cp -r $DEPLOY_PATH/console_release $DEPLOY_PATH/$BACKUP_NAME || true"
+    ssh_cmd "ls -1dt $DEPLOY_PATH/console_backup_* 2>/dev/null | tail -n +3 | xargs -r rm -rf"
     
     # 8. Sync standalone to server
     log_info "Syncing console standalone to server..."
@@ -317,6 +318,7 @@ deploy_website() {
     BACKUP_NAME="website_backup_$DEPLOY_TIMESTAMP"
     log_info "Creating backup: $BACKUP_NAME"
     ssh_cmd "[ -d $DEPLOY_PATH/website_release ] && cp -r $DEPLOY_PATH/website_release $DEPLOY_PATH/$BACKUP_NAME || true"
+    ssh_cmd "ls -1dt $DEPLOY_PATH/website_backup_* 2>/dev/null | tail -n +3 | xargs -r rm -rf"
 
     # 7. Sync standalone to server
     log_info "Syncing website standalone to server..."

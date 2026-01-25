@@ -61,6 +61,65 @@ test.describe('Control Plane operator UI — click-through', () => {
       })
     })
 
+    // Mock sales automation APIs (no real DB in test mode)
+    await page.route('**/api/v1/sales/status', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          enabled: false,
+          configured: true,
+          dailyLimit: 50,
+          todaySent: 0,
+          todayRemaining: 50
+        }),
+      })
+    })
+
+    await page.route('**/api/v1/sales/stats', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          contacts: { total: 0, byStatus: {} },
+          enrollments: { total: 0, byStatus: {} },
+          emails: { sent: 0, openRate: 0, clickRate: 0, replyRate: 0 }
+        }),
+      })
+    })
+
+    await page.route('**/api/v1/sales/sequences', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ sequences: [] }),
+      })
+    })
+
+    await page.route('**/api/v1/sales/contacts**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ contacts: [], total: 0 }),
+      })
+    })
+
+    await page.route('**/api/v1/sales/enrollments', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ enrollments: [] }),
+      })
+    })
+
+    await page.route('**/api/v1/sales/emails', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ emails: [] }),
+      })
+    })
+
     // Click-through should accept confirm dialogs (Revoke uses window.confirm).
     page.on('dialog', async (d) => {
       await d.accept().catch(() => {})
@@ -122,7 +181,7 @@ test.describe('Control Plane operator UI — click-through', () => {
     });
 
     await expect(page).toHaveURL(/\/admin\/?(\?|$)/)
-    await expect(page.getByRole('heading', { name: /control plane/i })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /dashboard/i })).toBeVisible()
 
     // If the login JS crashed, fail with the error details.
     expect(
@@ -130,8 +189,8 @@ test.describe('Control Plane operator UI — click-through', () => {
       `pageerrors:\n${pageErrors.join('\n')}\nconsoleErrors:\n${consoleErrors.join('\n')}`
     ).toEqual([])
 
-    // Wait for the devices table to render (driven by JS).
-    await expect(page.getByRole('heading', { name: /trusted devices/i })).toBeVisible()
+    // Wait for system status to show (dashboard is loaded)
+    await expect(page.locator('text=System Online')).toBeVisible({ timeout: 10000 })
 
     // Click all visible buttons first (includes Revoke).
     const buttons = page.locator('button')

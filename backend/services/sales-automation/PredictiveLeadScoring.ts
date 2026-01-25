@@ -104,7 +104,7 @@ export class PredictiveLeadScoring {
     totalScore += engagementSignals.reduce((sum, s) => sum + s.contribution, 0);
 
     // 2. Company signals
-    const companySignals = await this.analyzeCompany(contactData.companyId);
+    const companySignals = await this.analyzeCompany(contactData.company_id as string | null);
     signals.push(...companySignals);
     totalScore += companySignals.reduce((sum, s) => sum + s.contribution, 0);
 

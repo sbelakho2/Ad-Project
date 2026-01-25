@@ -4,7 +4,7 @@ import type { SSAIConfig } from '../../src/ssai/types';
 
 describe('SSAISessionClient (Web)', () => {
   let client: SSAISessionClient;
-  const mockFetch = jest.fn();
+  const mockFetch = jest.fn<typeof fetch>();
   const originalFetch = global.fetch;
 
   const mockConfig: SSAIConfig = {
@@ -45,7 +45,7 @@ describe('SSAISessionClient (Web)', () => {
 
   afterEach(async () => {
     if (client.getSession()) {
-      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) } as unknown as Response);
       await client.endSession();
     }
   });
@@ -54,7 +54,7 @@ describe('SSAISessionClient (Web)', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockSessionResponse),
-    });
+    } as unknown as Response);
 
     const session = await client.createSession(mockConfig);
 
@@ -71,10 +71,10 @@ describe('SSAISessionClient (Web)', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockSessionResponse),
-    });
+    } as unknown as Response);
     await client.createSession(mockConfig);
 
-    mockFetch.mockResolvedValueOnce({ ok: true });
+    mockFetch.mockResolvedValueOnce({ ok: true } as unknown as Response);
 
     // With batching disabled, events are sent immediately.
     client.trackImpression('pod-1', 'slot-1', 'creative-1', 0);
