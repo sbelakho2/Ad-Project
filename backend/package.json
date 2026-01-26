@@ -8,6 +8,7 @@
     "dev:secure": "infisical run --env=development -- nodemon --exec ts-node src/index.ts",
     "build": "tsc && node scripts/copyBuildAssets.js",
     "start": "node dist/src/index.js",
+    "start:smtp": "ts-node src/smtp-server.ts",
     "start:secure": "infisical run --env=production -- node dist/src/index.js",
     "test": "jest -c ./jest.config.cjs --passWithNoTests",
     "test:backend": "jest -c ./jest.config.cjs --passWithNoTests",

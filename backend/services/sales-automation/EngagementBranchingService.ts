@@ -35,6 +35,10 @@ const THRESHOLDS = {
 };
 
 // Branch sequence templates
+// FIXED (Jan 2026): Removed unsupported variables (competitor_app, current_mediation, 
+// estimated_revenue, net_benefit, app_category, ad_format, similar_app, app_name).
+// These variables have no reliable data source and would render as empty strings.
+// Now using only: first_name, company_name (from contact data)
 const BRANCH_SEQUENCES = {
   // For warm but hesitant (opens but no reply)
   warmHesitant: {
@@ -43,38 +47,37 @@ const BRANCH_SEQUENCES = {
     steps: [
       {
         delay: 2,
-        subject: 'Quick thought on {{app_name}}',
+        subject: 'Quick thought for {{company_name}}',
         body: `Hi {{first_name}},
 
 I noticed you've been checking out my previous emails (thanks for reading! 🙂).
 
-I wanted to share a quick win from a similar app - {{competitor_app}} switched from {{current_mediation}} and saw a 23% revenue increase in their first month.
+I wanted to share a quick win - a publisher similar to {{company_name}} saw a meaningful revenue increase in their first month after optimizing their ad stack.
 
-No pressure at all - but if you're even slightly curious, I'd be happy to show you exactly how they did it in a quick 10-minute call. No pitch, just sharing what worked for them.
+No pressure at all - but if you're even slightly curious, I'd be happy to share exactly what worked for them in a quick 10-minute call.
 
 What do you think?
 
 Best,
-Aaron`,
+Aaron
+
+P.S. Reply NO to opt out.`,
       },
       {
         delay: 5,
-        subject: 'Re: Quick thought on {{app_name}}',
+        subject: 'Last note for {{company_name}}',
         body: `Hey {{first_name}},
 
 Last email from me on this (I promise 😅).
 
-Since you seemed at least somewhat interested, I put together a quick breakdown of how ApexMediation could work specifically for {{app_name}}.
+Since you seemed at least somewhat interested, I thought I'd offer to put together a quick analysis of how ApexMediation could help {{company_name}} specifically.
 
-Here's what I found:
-- Your current estimated ad revenue: {{estimated_revenue}}/month
-- Potential increase with better mediation: 15-25%
-- Net gain after our fee (2.5%): {{net_benefit}}/month
-
-Want me to send over the full analysis? Takes 2 minutes to read.
+Want me to send over the details? Takes 2 minutes to read.
 
 Cheers,
-Aaron`,
+Aaron
+
+P.S. Reply NO to opt out.`,
       },
     ],
   },
@@ -86,32 +89,34 @@ Aaron`,
     steps: [
       {
         delay: 1,
-        subject: 'Case study: How {{similar_app}} increased revenue 31%',
+        subject: 'Case study for {{company_name}}',
         body: `Hi {{first_name}},
 
 I noticed you clicked through to learn more (awesome!).
 
-Since you're clearly researching options, I thought you might find this useful - here's exactly how a {{app_category}} app similar to {{app_name}} increased their ad revenue by 31%:
+Since you're clearly researching options, I thought you might find this useful - here's how a similar publisher improved their results:
 
 **The Challenge:**
-- Using ironSource for mediation
+- Using a single ad network
 - Fill rates dropping, eCPM inconsistent
-- No visibility into why
+- Limited visibility into performance
 
 **What Changed:**
-- Switched to ApexMediation's transparent auction
-- Could see exactly which networks performed best
-- Optimized based on real data, not black-box algorithms
+- Added mediation with transparent auction
+- Could see exactly which demand sources performed best
+- Optimized based on real data
 
-**Results (Month 3):**
-- 31% revenue increase
-- 12% better fill rate
+**Results:**
+- Meaningful revenue increase
+- Better fill rates
 - Full transparency into every auction
 
-Would you like me to do a similar analysis for {{app_name}}? I can usually turn it around in 24 hours.
+Would you like me to do a similar analysis for {{company_name}}? I can usually turn it around in 24 hours.
 
 Best,
-Aaron`,
+Aaron
+
+P.S. Reply NO to opt out.`,
       },
     ],
   },
@@ -126,7 +131,7 @@ Aaron`,
         subject: 'Should I stop reaching out?',
         body: `Hi {{first_name}},
 
-I've sent a few emails about how ApexMediation could help {{app_name}} improve ad revenue, but haven't heard back.
+I've sent a few emails about how ApexMediation could help {{company_name}} with ad revenue, but haven't heard back.
 
 Totally get it - you're busy, and maybe the timing isn't right.
 
@@ -153,14 +158,14 @@ P.S. If you do want to chat later, you can always reach us at sales@apexmediatio
     steps: [
       {
         delay: 30,
-        subject: '{{app_name}} - quick update',
+        subject: 'Quick update for {{company_name}}',
         body: `Hey {{first_name}},
 
-It's been a while! I wanted to reach out because we've made some updates that might be relevant for {{app_name}}:
+It's been a while! I wanted to reach out because we've made some updates that might be relevant for {{company_name}}:
 
 **What's new at ApexMediation:**
-- New AI-powered bidfloor optimization (avg +18% eCPM)
-- Added support for {{ad_format}} ads
+- New AI-powered bidfloor optimization
+- Expanded demand partner integrations
 - Simplified SDK integration (now takes <30 mins)
 
 Since you showed interest before, I thought you might want to take another look.
@@ -168,7 +173,9 @@ Since you showed interest before, I thought you might want to take another look.
 Want to see a quick demo of the new features?
 
 Best,
-Aaron`,
+Aaron
+
+P.S. Reply NO to opt out.`,
       },
     ],
   },

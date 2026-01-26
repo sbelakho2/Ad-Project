@@ -735,12 +735,25 @@ References
 - [ ] Test upload/retrieval and verify no accidental deletions.
 
 ## 9. Sales Automation
-### 9.1 Cron Jobs
+
+> **⚠️ Architecture Note (January 2026):** All **Autonomous Sales V2** (outbound prospecting, campaign execution) runs on the **Test Server** (157.90.126.205:4001).
+> The **App Server control-plane is strictly a proxy client**.
+> V1 cron jobs (trial reminders, dunning, usage sync) still run on the **App Server backend** (PM2).
+
+### 9.1 Cron Jobs (V1 - App Server)
 - [ ] Run cron service within docker-compose/system cron on `apex-core-1`.
 - [ ] Verify schedule (minute email queue, hourly usage checks, daily 2 AM Stripe sync, daily 3 AM dunning retries, daily 9 AM trial reminders, monthly 1st usage summaries).
 - [ ] Monitor cron execution (logs/errors/duration) and alert on failures.
 
-### 9.2 Email Templates
+### 9.2 Autonomous Sales (V2 - Test Server)
+- [x] `sales-api` PM2 process running on Test Server (port 4001)
+- [x] `db-tunnel.service` established (Test → App PgBouncer → DB)
+- [x] `sales-api-tunnel.service` established on App Server (localhost:4001 → Test:4001)
+- [x] Control-plane proxy mode active (forwards `/api/autonomous/*` to Test Server)
+- [ ] Monitor campaign execution logs: `./scripts/ops/hetzner_ssh.sh test -- "pm2 logs sales-api --lines 100"`
+- [ ] Verify lead scoring and intent classification working
+
+### 9.3 Email Templates
 - [ ] Review 10+ email templates (design/copy/CTAs) end-to-end.
 - [ ] Test with real email addresses; confirm links and mobile responsiveness.
 - [ ] Plan A/B tests for >100 customers.

@@ -171,6 +171,19 @@ export class SpamPrevention {
       });
     }
 
+    // NEW (Jan 2026): Mobile-specific subject line check
+    // Mobile email clients truncate at ~35 characters
+    // Ensure the key message is in the first 35 chars
+    if (subject.length > 35) {
+      const mobilePreview = subject.substring(0, 32) + '...';
+      issues.push({
+        category: 'formatting',
+        severity: 'medium',
+        message: `Subject truncates on mobile to: "${mobilePreview}"`,
+        fix: 'Put key message (app name, value prop) in first 35 characters',
+      });
+    }
+
     // Check for all caps
     if (subject === subject.toUpperCase() && subject.length > 5) {
       issues.push({
@@ -188,6 +201,17 @@ export class SpamPrevention {
         severity: 'high',
         message: 'Fake reply/forward prefix detected (deceptive practice)',
         fix: 'Remove RE:/FW: - be genuine about first contact',
+      });
+    }
+
+    // NEW (Jan 2026): Check for incomplete subject lines (missing personalization)
+    // e.g., "Free ad revenue audit for" (missing app name)
+    if (/\s+(for|about|re:|regarding)\s*$/i.test(subject)) {
+      issues.push({
+        category: 'formatting',
+        severity: 'critical',
+        message: 'Subject line ends abruptly - likely missing personalization variable',
+        fix: 'Ensure subject line includes the app name or company name',
       });
     }
 

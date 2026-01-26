@@ -1,7 +1,24 @@
 # Autonomous Sales API Reference
 
-**Base URL:** `https://admin.apexmediation.ee/api/autonomous`  
-**Authentication:** Internal use only (Control Plane)
+**App Server Proxy:** `https://admin.apexmediation.ee/api/autonomous` (proxies to test server)  
+**Test Server Direct:** `http://157.90.126.205:4001/api/autonomous` (internal only)  
+**Authentication:** API Key via `X-API-Key` header (or disabled in dev mode)  
+**Last Updated:** January 2026 (v2.6 - Distributed Architecture)
+
+---
+
+## Architecture
+
+> **⚠️ CRITICAL: All sales automation runs on the Test Server.**
+> 
+> The App Server control-plane is strictly a **proxy client**.
+> Requests to `admin.apexmediation.ee/api/autonomous/*` are forwarded to the Test Server via SSH tunnel.
+
+| Component | Server | Port | Role |
+|-----------|--------|------|------|
+| Control Plane | App (46.62.252.96) | 4000 | Proxy only |
+| **Sales API** | **Test (157.90.126.205)** | 4001 | ALL orchestration |
+| Edge Worker | Test (157.90.126.205) | 3500 | ML inference |
 
 ---
 
@@ -9,10 +26,19 @@
 
 The Autonomous Sales API provides programmatic access to the zero-cost outbound sales automation system. It enables:
 
-- Lead discovery from app stores
-- Heuristic lead scoring
+- Lead discovery from app stores with **batch size protection**
+- Heuristic lead scoring with **competitor detection ("Sniper" targeting)**
 - Spintax message generation with Thompson Sampling optimization
 - Email classification using Naive Bayes
+- **Closed-loop feedback** via webhooks (auto-learns from email responses)
+- **Competitor-filtered lead retrieval** for targeted outreach
+
+### System Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_DISCOVER_BATCH` | 10 | Prevents HTTP timeouts during discovery |
+| `MAX_SCORE_BATCH` | 100 | Prevents HTTP timeouts during scoring |
 
 ---
 
@@ -121,15 +147,19 @@ Run discovery job for a source.
 **Request:**
 ```json
 {
-  "sourceId": "uuid"
+  "sourceId": "uuid",
+  "batchSize": 5
 }
 ```
+
+> **Note:** `batchSize` is capped at `MAX_DISCOVER_BATCH` (10) to prevent HTTP timeouts.
+> If you request more, it will be automatically reduced and logged.
 
 **Response:**
 ```json
 {
   "success": true,
-  "discovered": 50,
+  "discovered": 5,
   "source": {
     "id": "uuid",
     "name": "US Games",
@@ -159,18 +189,30 @@ Score contacts using heuristic analysis.
 }
 ```
 
+> **Note:** `limit` is capped at `MAX_SCORE_BATCH` (100) to prevent HTTP timeouts.
+
 **Response:**
 ```json
 {
   "success": true,
   "scored": 100,
   "byTier": {
-    "whale": 12,
-    "qualified": 45,
-    "cold": 43
+    "hot": 5,
+    "warm": 25,
+    "cold": 55,
+    "ice": 15
   }
 }
 ```
+
+**Tier Classification:**
+
+| Tier | Score Range | Description |
+|------|-------------|-------------|
+| `hot` | 70+ | High-value, uses competitor networks |
+| `warm` | 50-69 | Good potential, some positive signals |
+| `cold` | 30-49 | Low signals, worth nurturing |
+| `ice` | <30 | Minimal signals, low priority |
 
 ---
 
@@ -469,6 +511,155 @@ Event types: `open`, `reply`, `bounce`
 
 ---
 
+### Competitor Leads (Sniper Targeting) 🎯
+
+#### GET /competitor-leads
+Get leads using specific competitor networks. **This is the highest-value endpoint** for targeted outreach.
+
+**Query Parameters:**
+- `competitor` (optional): Filter by competitor name (partial match)
+- `tier` (optional): Filter by competitor tier (1, 2, or 3)
+- `minScore` (optional): Minimum overall score (default: 30)
+- `limit` (optional): Max results (default: 50)
+
+**Competitor Tiers:**
+
+| Tier | Networks | Boost | Description |
+|------|----------|-------|-------------|
+| 1 | IronSource, Unity Ads, AppLovin MAX | +45-50 | Direct competitors, highest priority |
+| 2 | Mintegral, Vungle, Chartboost, Fyber, InMobi | +30-35 | Major players, good opportunities |
+| 3 | AdColony, Tapjoy, StartApp, Ogury | +20-25 | Legacy/weaker networks |
+
+**Response:**
+```json
+{
+  "success": true,
+  "leads": [
+    {
+      "id": "uuid",
+      "email": "dev@gamecompany.com",
+      "first_name": "John",
+      "last_name": "Doe",
+      "company_name": "Game Company",
+      "app_name": "PuzzleQuest",
+      "app_genre": "Games",
+      "score": 85,
+      "status": "new",
+      "top_competitor": "IronSource",
+      "competitor_tier": 1,
+      "competitor_domain": "ironsrc.com"
+    }
+  ],
+  "count": 15,
+  "byCompetitor": {
+    "IronSource": [...],
+    "Unity Ads": [...]
+  },
+  "competitorStats": [
+    { "competitor": "IronSource", "count": 8, "avgScore": 82 },
+    { "competitor": "Unity Ads", "count": 7, "avgScore": 78 }
+  ]
+}
+```
+
+**Example Queries:**
+```bash
+# All Tier 1 competitor leads
+GET /competitor-leads?tier=1
+
+# IronSource users with score > 50
+GET /competitor-leads?competitor=ironsource&minScore=50
+
+# Top 20 Unity Ads users
+GET /competitor-leads?competitor=unity&limit=20
+```
+
+---
+
+### Webhooks (Closed-Loop Learning) 🔄
+
+The closed-loop system automatically learns from email responses to optimize subject lines.
+
+#### POST /webhook/email-events
+Generic email events webhook. Updates Thompson Sampler based on email outcomes.
+
+**Supported Events:**
+
+| Event | Bandit Outcome | Description |
+|-------|----------------|-------------|
+| `open` | Success (+1 α) | Email was opened |
+| `click` | Success (+1 α) | Link was clicked |
+| `reply` | Success (+1 α) | User replied |
+| `bounce` | Failure (+1 β) | Email bounced |
+| `unsubscribe` | Failure (+1 β) | User unsubscribed |
+
+**Request:**
+```json
+{
+  "events": [
+    {
+      "messageId": "abc123",
+      "event": "open",
+      "timestamp": "2026-01-25T10:30:00Z",
+      "email": "john@example.com"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "processed": 1,
+  "outcomes": [
+    {
+      "messageId": "abc123",
+      "event": "open",
+      "armId": "uuid",
+      "success": true
+    }
+  ]
+}
+```
+
+#### POST /webhook/sendgrid
+SendGrid Inbound Parse webhook. Processes incoming email replies.
+
+**Setup:** Configure SendGrid MX record to point to:
+```
+https://admin.apexmediation.ee/api/autonomous/webhook/sendgrid
+```
+
+**Automatic Actions:**
+1. Classifies incoming email using Naive Bayes
+2. Links response to original outbound message
+3. Updates Thompson Sampler arm (positive outcome if `INTERESTED`)
+4. Queues for human review if low confidence
+
+**Request (SendGrid format):**
+```json
+{
+  "from": "John Doe <john@example.com>",
+  "to": "sales@apexmediation.ee",
+  "subject": "Re: Quick question about PuzzleQuest",
+  "text": "Sounds interesting! Let's chat...",
+  "html": "<p>Sounds interesting! Let's chat...</p>"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "classification": "INTERESTED",
+  "messageId": "uuid",
+  "banditUpdated": true
+}
+```
+
+---
+
 ## Error Responses
 
 All endpoints return errors in this format:
@@ -489,6 +680,40 @@ Common HTTP status codes:
 ## Rate Limits
 
 No rate limits are currently enforced for internal use.
+Batch size limits (MAX_DISCOVER_BATCH=10, MAX_SCORE_BATCH=100) prevent timeout issues.
+
+---
+
+## Database Tables
+
+The system uses these PostgreSQL tables:
+
+### Core Tables
+| Table | Purpose |
+|-------|---------|
+| `sa_sources` | Lead discovery sources (iTunes, etc.) |
+| `sa_contacts` | Discovered contacts with scoring |
+| `sa_heuristic_scores` | Detailed scoring breakdowns |
+| `sa_scrape_jobs` | Discovery job history |
+
+### Messaging Tables
+| Table | Purpose |
+|-------|---------|
+| `sa_spintax_templates` | Email templates with spintax |
+| `sa_bandit_arms` | Thompson Sampler arms |
+| `sa_outbound_messages` | Sent emails with arm tracking |
+
+### Inbox Tables
+| Table | Purpose |
+|-------|---------|
+| `sa_inbox_messages` | Received email classifications |
+| `sa_email_events` | Webhook events (opens, clicks, etc.) |
+| `sa_bayes_training` | Naive Bayes training data |
+
+### Competitor Tables
+| Table | Purpose |
+|-------|---------|
+| `sa_competitor_detections` | Per-contact competitor tracking |
 
 ---
 
@@ -496,3 +721,4 @@ No rate limits are currently enforced for internal use.
 
 - [Autonomous Sales V2 Full Guide](../Internal/Sales/AUTONOMOUS_SALES_V2.md)
 - [Autonomous Sales V2 Quick Reference](../Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)
+- [Closed Loop System](../Internal/Sales/CLOSED_LOOP_SYSTEM.md)

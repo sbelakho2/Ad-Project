@@ -215,6 +215,29 @@ export class OutreachService {
         
         const subject = this.personalizeContent(step.subject_template, personalizationData);
         const bodyHtml = this.personalizeContent(step.body_template, personalizationData);
+        
+        // LINT: Catch any unresolved {{placeholders}} before sending
+        // This prevents emails with literal "{{variable}}" from reaching recipients
+        const subjectUnresolved = this.findUnresolvedPlaceholders(subject);
+        const bodyUnresolved = this.findUnresolvedPlaceholders(bodyHtml);
+        
+        if (subjectUnresolved.length > 0 || bodyUnresolved.length > 0) {
+          const allUnresolved = [...new Set([...subjectUnresolved, ...bodyUnresolved])];
+          console.warn(`[Outreach] Template lint FAILED for enrollment ${enrollment.id}: unresolved placeholders: ${allUnresolved.join(', ')}`);
+          
+          // Mark enrollment as errored to prevent future send attempts
+          await this.pool.query(`
+            UPDATE outreach_enrollments 
+            SET status = 'error', 
+                updated_at = CURRENT_TIMESTAMP,
+                error_message = $2
+            WHERE id = $1
+          `, [enrollment.id, `Unresolved placeholders: ${allUnresolved.join(', ')}`]);
+          
+          errors++;
+          continue;
+        }
+        
         const bodyText = this.stripHtml(bodyHtml);
         
         // Add tracking pixel
@@ -451,6 +474,23 @@ export class OutreachService {
         AND status IN ('sent', 'delivered', 'opened', 'clicked')
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
+  }
+
+  /**
+   * Find unresolved placeholders in a string
+   * Returns array of placeholder names that weren't replaced (e.g., ["app_name", "estimated_revenue"])
+   * This is the LINT step that prevents sending broken emails
+   */
+  private findUnresolvedPlaceholders(content: string): string[] {
+    const unresolvedPattern = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
+    const matches: string[] = [];
+    let match: RegExpExecArray | null;
+    
+    while ((match = unresolvedPattern.exec(content)) !== null) {
+      matches.push(match[1]);
+    }
+    
+    return matches;
   }
 
   /**

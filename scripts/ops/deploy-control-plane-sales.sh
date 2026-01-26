@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 #
-# Deploy Control Plane with Sales Automation UI
-# ==============================================
-# This script deploys the updated control-plane with sales automation
-# management UI. It also ensures RESEND_API_KEY is properly configured.
+# Deploy Control Plane (Proxy Mode) to App Server
+# ================================================
+# This script deploys the control-plane to the App Server.
+#
+# ⚠️  ARCHITECTURE (January 2026):
+# ⚠️  The Control Plane is now STRICTLY A PROXY CLIENT for sales automation.
+# ⚠️  ALL sales automation work runs on the Test Server (157.90.126.205:4001).
+# ⚠️  This script deploys the PROXY component to App Server only.
+#
+# For deploying sales-api to Test Server, use: deploy-sales-automation.sh
 #
 # Usage: ./scripts/ops/deploy-control-plane-sales.sh
 #
@@ -26,6 +32,16 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ⚠️  SERVER ARCHITECTURE (January 2026):
+# ⚠️  - App Server (46.62.252.96): Control Plane (PROXY MODE), Console, Backend, Website
+# ⚠️  - Test Server (157.90.126.205): sales-api (ALL sales automation), Edge Worker, inbound-smtp
+# ⚠️  - DB Server (77.42.44.35): PostgreSQL (via App Server PgBouncer only)
+# ⚠️
+# ⚠️  This script deploys the PROXY component to App Server only!
+# ⚠️  The control-plane forwards /api/autonomous/* to Test Server via SSH tunnel.
+APP_SERVER_IP="46.62.252.96"
+TEST_SERVER_IP="157.90.126.205"
+
 ssh_cmd() {
     bash "$SSH_SCRIPT" app -- "$1"
 }
@@ -33,6 +49,23 @@ ssh_cmd() {
 log_info "======================================"
 log_info "Deploying Control Plane (Sales Automation)"
 log_info "======================================"
+
+# Validate we're deploying to the correct server
+log_info "Validating deployment target..."
+ACTUAL_IP=$(ssh_cmd "hostname -I | awk '{print \$1}'" 2>/dev/null || echo "unknown")
+if [[ "$ACTUAL_IP" != "$APP_SERVER_IP" ]]; then
+  log_error "═══════════════════════════════════════════════════════════════"
+  log_error "  ⛔ DEPLOYMENT TARGET MISMATCH!"
+  log_error "═══════════════════════════════════════════════════════════════"
+  log_error "  Expected: $APP_SERVER_IP (App Server)"
+  log_error "  Actual:   $ACTUAL_IP"
+  log_error ""
+  log_error "  Control Plane must deploy to App Server only!"
+  log_error "  ML workloads go to Test Server ($TEST_SERVER_IP)"
+  log_error "═══════════════════════════════════════════════════════════════"
+  exit 1
+fi
+log_success "Target validated: App Server ($APP_SERVER_IP)"
 
 # Step 1: Build locally first
 log_info "Building control-plane locally..."
@@ -127,8 +160,15 @@ else
 fi
 
 log_info "======================================"
-log_success "Control Plane Sales Automation deployed!"
+log_success "Control Plane (Proxy Mode) deployed!"
 log_info "======================================"
 log_info ""
 log_info "Access at: https://admin.apexmediation.ee/admin"
-log_info "Sales Automation UI is now available in the sidebar."
+log_info "Sales Automation UI is available in the sidebar."
+log_info ""
+log_info "⚠️  ARCHITECTURE REMINDER:"
+log_info "  - Control Plane is PROXY MODE (forwards /api/autonomous/* to Test Server)"
+log_info "  - sales-api runs on Test Server (157.90.126.205:4001)"
+log_info "  - SSH tunnel: App Server localhost:4001 → Test Server:4001"
+log_info ""
+log_info "To deploy sales-api to Test Server: ./scripts/ops/deploy-sales-automation.sh"

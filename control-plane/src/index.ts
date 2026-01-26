@@ -20,7 +20,9 @@ import { loadConfig } from './config';
 import { logger, logAudit } from './logger';
 import { initializePools, closePools, getReadOnlyPool, queryReadOnly } from './database';
 import routes from './routes';
-import { getOrchestrator } from './services/autonomous-orchestrator';
+import { initializeSalesScheduler, stopSalesScheduler } from './services/sales-scheduler';
+// NOTE: Orchestrator removed - app server is strictly a proxy client
+// All sales automation work runs on test server (157.90.126.205:4001)
 
 // Load and validate configuration
 const config = loadConfig();
@@ -2208,16 +2210,16 @@ async function startServer() {
         serverTime: result.rows[0].time,
       });
 
-      // Initialize Autonomous Sales Orchestrator (pre-loads Naive Bayes model)
-      logger.info('Initializing Autonomous Sales Orchestrator...');
-      try {
-        await getOrchestrator();
-        logger.info('Autonomous Sales Orchestrator initialized successfully');
-      } catch (err) {
-        // Log but don't fail startup - orchestrator can be lazy-initialized later
-        logger.warn('Failed to pre-initialize Autonomous Sales Orchestrator', {
-          error: (err as Error).message,
-        });
+      // Log execution mode
+      if (process.env.SALES_AUTOMATION_ROLE === 'execution') {
+         logger.info('Sales automation EXECUTION mode: handling requests locally');
+         
+         // Start the sales automation scheduler (only in execution mode)
+         initializeSalesScheduler();
+      } else {
+         // App server is strictly a proxy client - all sales automation work
+         // runs on test server via /api/autonomous/* proxy routes
+         logger.info('Sales automation PROXY mode: all requests forwarded to test server');
       }
     }
     
@@ -2244,6 +2246,9 @@ async function startServer() {
     // Graceful shutdown
     const shutdown = async (signal: string) => {
       logger.info(`Received ${signal}, shutting down gracefully...`);
+      
+      // Stop the scheduler first
+      stopSalesScheduler();
       
       server.close(async () => {
         logger.info('HTTP server closed');

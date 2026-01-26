@@ -1,0 +1,457 @@
+[run] ssh -i /Users/sabelakhoua/.ssh/hetzner-db-mac -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=30 -o StrictHostKeyChecking=accept-new root@46.62.252.96 (app) -- /bin/bash --noprofile --norc -c <cmd>
+id,company_name,website,app_name,app_store,app_id,first_name,last_name,job_title,score
+2496ea7c-c793-47eb-b963-db5d19bf252a,"Eyugame Network Technology Co., Ltd",http://www.gogogame.com,,app_store,1471591534,,,,76
+0839c9e6-1c5e-4603-9c81-e72812a5605b,Supercharge Mobile Corp,https://www.superchargemobile.app/,,app_store,1155657778,,,,76
+a6cb39aa-4ec8-450e-a43b-19d8545d1017,"Eyugame Network Technology Co., Ltd",http://www.gogogame.com,,app_store,1426272485,,,,76
+7f141f19-8043-4fd9-bcb8-2ca7ff3c8db7,SEGA CORPORATION,https://www.colorfulstage.com,,app_store,1580044138,,,,75
+e4978e1f-826e-4efa-a045-2ccd17dd84c4,Kooapps,https://www.kooapps.com,,app_store,1027688889,,,,72
+1011e45a-e7b5-486e-8e2b-1a67f82fbfcf,Game Veterans,https://gameveterans.com/,,app_store,1202240058,,,,71
+070ed48c-10a6-4eec-85e8-f653eda9d4cf,"DRIMAGE Co., Ltd",https://rhythmhive.drimage.com/,,app_store,1537758048,,,,70
+471eec50-26c7-44ab-a6e7-8f3607bd8943,Amanotes Pte. Ltd.,https://www.amanotes.com/,,app_store,1443446174,,,,70
+411fd3d5-df52-4f1e-b534-383fefcf56f2,Ai Huynh,https://dashnbeat.netlify.app,,app_store,1508864310,,,,70
+0d95b80b-1597-4910-8067-68c61326fdea,Amanotes Pte. Ltd.,http://amanotes.com,,app_store,1462186961,,,,70
+4722b54f-70f6-432d-843f-74b0fd4bbfdc,Nguyen Thien,https://com-beatslinger-music-game.netlify.app/app-ads.txt,,app_store,6752662891,,,,70
+b047697b-1830-4bd2-9994-a27028cdf51e,Amanotes Pte. Ltd.,http://amanotes.com/,,app_store,1447924266,,,,70
+ea44b51b-0ccc-4c48-8544-1751638f7c47,Kim Nguyen,https://anime-tiles.netlify.app,,app_store,1446874445,,,,70
+9e9bf2d1-5092-49e3-914d-6fcc6c3158e4,Lion Studios,https://lionstudios.cc,,app_store,1532928122,,,,70
+b4d2a290-ec75-4368-8dc7-478093e20db9,"Supercent, Inc.",http://supercent.io,,app_store,6737451718,,,,70
+4a1fddd2-2e45-45fd-895c-b260e4c6de7f,Amanotes Pte. Ltd.,http://amanotes.com,,app_store,6745498566,,,,70
+77c87157-1d57-4d85-a4d7-7a6d38a47697,Amanotes Pte. Ltd.,https://amanotes.com,,app_store,1492267122,,,,70
+cd06ef3b-338f-4ac2-b6f2-6ee6edfbd0b0,Amanotes Pte. Ltd.,https://amanotes.com,,app_store,1493892570,,,,70
+f3e6a05a-55e7-4b4c-8096-f22026d818df,Amanotes Pte. Ltd.,https://www.amanotes.com/,,app_store,1359695238,,,,70
+5ebeeb7c-03c6-4f79-9ffa-fb11ae0b92d0,Doan Le Quyen,https://www.kasimiapps.com,,app_store,1445343575,,,,70
+73d45514-1ee7-42ea-8b03-1cfa976d415c,Amanotes Pte. Ltd.,https://amanotes.com/,,app_store,1344702806,,,,70
+a91bb3e4-87ad-40d7-8dca-4e1fe4d2b6cc,MOBIRIX,https://www.mobirix.com,,app_store,1288430163,,,,68
+28a43a23-a6e7-4d49-a6cf-cde3cd6701c4,MWM,https://musicworldmedia.com/,,app_store,6479046092,,,,68
+80a97bd7-51da-40aa-95e6-4e92812cb6e7,lowiro,http://arcaea.lowiro.com,,app_store,1205999125,,,,51
+8e508575-26d2-4c15-a062-aae6a58d4b52,Mattel163 Limited,https://www.mattel163.com/,,app_store,1463509237,,,,50
+263d9b1f-7187-4a2b-a463-b96c33855bf2,CoolFishGames,https://coolfishgames.com/,,app_store,606190854,,,,50
+8a5ae1b2-ed78-42b0-82cd-edc0b437ac69,Megajogos Entretenimento Ltda,https://www.gamevelvet.com/dominoes-online,,app_store,641797733,,,,50
+c04534b4-e712-4227-830b-490178516ef2,Gameberry Labs,http://gameberrylabs.com,,app_store,1211118856,,,,50
+8ac2196f-5a97-4f81-8a32-9b237cdfb5f8,Voodoo,https://www.voodoo.io/,,app_store,1562817072,,,,50
+a23e15b5-3442-406d-acc0-2af206525b58,Joyvoo Ltd.,http://everybuddygames.com,,app_store,1446723780,,,,50
+676b8e02-94a3-4cdf-b497-02937fc16086,Mille Lacs Corporate Ventures,,,app_store,6478566083,,,,50
+b97b8dc5-ebf0-4721-b286-e95b6c94aacb,Voodoo,http://voodoo.io,,app_store,1291851950,,,,50
+15b018d0-2708-487f-ac6a-abb4c706c89b,HOMA GAMES,https://homagames.com/,,app_store,1478579926,,,,50
+befd067b-24c6-4433-b96d-b12e14df998a,Wildlife Studios,https://wildlifestudios.com/games/sniper-3d/,,app_store,930574573,,,,50
+a7416810-9423-4b43-86ad-ced4eee27e4e,River Game HK Limited,https://www.rivergame.net,,app_store,1479198816,,,,50
+24b52d4f-f161-4078-8066-81a804355d00,Queen Interactive Games,https://queengames.com/,,app_store,1152533846,,,,50
+1fee4463-8c6f-4ed9-a8e2-68c5210962b5,Playrix,https://www.playrix.com/fishdom/index.html,,app_store,664575829,,,,50
+9a8e7fb0-cf34-4333-8803-c5b1e9fdc835,LTGAMES GLOBAL,,,app_store,1512936641,,,,50
+1b42f631-0f8b-47cf-9248-fab95a97a21f,Autumn Games,https://skullgirlsmobile.com/,,app_store,1280762571,,,,50
+a21db9c9-4be3-4701-9456-eeb69120f5a8,Kakao Games Corp.,https://game.kakao.com/games/20258,,app_store,1485526957,,,,50
+5afd036a-1565-46de-acbb-a765d03a5608,Plarium Global Ltd,https://raidshadowlegends.com/,,app_store,1371565796,,,,50
+61eecd92-6b46-4ce3-b06a-31536ccdbffb,Wild Candle Spin LLC,https://www.wildcandlespin.com/,,app_store,6475709488,,,,50
+351e73a1-170f-406b-8bc3-b52b09dba14b,AI Games FZ,https://aigames.ae/,,app_store,1323088931,,,,50
+29955061-a3f6-4b99-b3ba-c934bf01d1c8,Smartronic,https://smartronic.com.tr/,,app_store,6499306754,,,,50
+d648b218-1fbb-4cef-9b12-23489114c8ee,UNICO STUDIO,https://unicostudio.co/,,app_store,1509517244,,,,50
+5c7df992-4023-48f1-a4c3-7762c4faca02,Teos Oyun,https://teosgamestudio.com,,app_store,1526842079,,,,50
+06a2702e-76b5-4472-b86a-4c7df8326b4c,Athena Studio,https://athena.studio,,app_store,1212951043,,,,50
+7ebfd565-bc0a-4911-80c9-3a2f391dad53,"PeopleFun, Inc.",https://www.peoplefun.com,,app_store,1420294918,,,,50
+5fc0eb9e-d4a0-4eb3-8cba-bed3b76d1635,Ateam Entertainment Inc.,https://www.ateam-entertainment.com/en/services/206/,,app_store,968953976,,,,50
+4044c268-602c-4544-aeac-504a6fd07380,Early Morning Studio AB,https://earlymorningstudio.com/vampires-fall-origins/,,app_store,1345626129,,,,50
+de440bab-7d6d-44c2-aaa9-6d06e5016a88,"Lightfox Games, Inc.",https://www.lightfoxgames.com/knights-edge,,app_store,1464249802,,,,50
+2f7b6f64-46f0-4779-b4bb-2b058f857f89,Aviagames Inc.,http://www.pocket7games.com,,app_store,1625671597,,,,50
+91b6551d-8866-4a05-acd0-61a3badd3ab7,Lion Studios,https://lionstudios.cc/,,app_store,1435120620,,,,50
+9ff50d24-01e1-4645-8371-e175bde1b973,HONG KONG YOULOFT TECHNOLOGY LIMITED,http://games.youloft.com,,app_store,1575499299,,,,50
+2e2b8c68-5892-4737-8fdc-f9a7a3109fc1,"Scopely, Inc.",https://www.scopely.com/,,app_store,1541153375,,,,50
+a603b615-402a-4bb9-b9af-21cd3a8e18f5,Doodle Mobile Limited,http://www2.candy-mobile.com,,app_store,1515874052,,,,50
+be6d0c99-32f0-47d3-a3e3-39dd7abd7977,Dream Games,,,app_store,1482155847,,,,50
+e60886b1-235c-408c-8bae-43f9a0f997b9,MYAPPFREE S.R.L.,https://www.ciao.games,,app_store,6473000718,,,,50
+22f8889c-4516-4507-8da9-51cce9fefa4c,Kunpo,http://kunpo.cc,,app_store,1459099626,,,,50
+ad6665b1-9937-4e6e-bb44-016e0523f4b8,Voodoo,https://www.voodoo.io/,,app_store,1466197248,,,,50
+5a859e04-04d3-474a-be05-e377da4a49f4,MondayOFF,http://www.mondayoff.me,,app_store,1633171432,,,,50
+af49072c-8ca0-43f5-a729-b15aaf9098c2,Playbite Games,https://www.playbite.com,,app_store,1522413113,,,,50
+0759486d-590d-4736-9da6-3e5a5637237d,DALS.GameLab,https://dals.games/,,app_store,1519020286,,,,50
+3e8e4306-c1e5-43b1-a3fc-9f15f9612c8f,DoubleTap Software LLC,https://www.doubletapsoftware.com/,,app_store,1086806819,,,,50
+86519f32-a5bd-4792-8a91-78aad75b5aa5,SayGames LTD,https://say.games/,,app_store,1468445666,,,,50
+aa852643-7e45-4686-bdfe-033dee8f62a2,Noodlecake,http://www.noodlecake.com/games/leap-on/,,app_store,1234382160,,,,50
+ced13b65-7ce8-428f-913d-7f65a34e0618,AI Games FZ,https://aigames.ae,,app_store,1354452189,,,,50
+00827fb5-f125-45ac-bc26-3af27c46d98e,AI Games FZ,https://aigames.ae/,,app_store,1446388648,,,,50
+7df981af-538e-487c-a037-b3e0d840bacb,9z Games(HK),https://xgame-ea.q1.com/official/,,app_store,6443814351,,,,50
+e4a3740e-3560-4736-bce1-58fed1d41521,Vintolo Ltd,,,app_store,332184886,,,,50
+8383ea88-adc4-488a-91a6-62fce798e5ed,Pixel Federation Games,https://pixelfederation.com,,app_store,1553443573,,,,50
+c71c92a8-eae8-49b9-9c88-d97d24688bef,Pearl Abyss Corp.,https://www.world.blackdesertm.com,,app_store,1477186880,,,,50
+6408044d-98ba-4cfb-879d-baa919b1e241,"Backbone Labs, Inc",https://backbone.com/,,app_store,1449660663,,,,50
+ea4ead24-230b-4cc7-9ed5-d02999a5c125,Tencent Mobile International Limited,,,app_store,1330123889,,,,50
+64a115c9-74dd-4794-9a9c-3890187317b7,Game Insight,http://www.game-insight.com,,app_store,1179715015,,,,50
+da9a544f-fc8a-4287-9b9a-7568958d2fbb,KRAFTON Inc,https://newstate.pubg.com/,,app_store,1542727626,,,,50
+d5d79196-044e-454c-8069-ca94b7b93ffc,Super Evil Megacorp,http://www.vainglorygame.com,,app_store,671464704,,,,50
+88f061d5-a3be-4cc5-8a0b-5396cd68c084,SMG Studio,https://smgstudio.com/,,app_store,1483542433,,,,50
+670d424b-e624-4588-b927-096c2d5e0b80,Playrion,http://www.airlines-manager.com/#s=49&utm_source=AM2_Mobile&utm_medium=cpc&utm_campaign=iOSv15&utm_content=iOS,,app_store,823481079,,,,50
+1ee200d7-f547-400a-911a-58e62ef9d7e6,Come2Play,https://www.backgammon-live.com,,app_store,739095641,,,,50
+6e318a14-121b-4288-a78e-68e28ad8e716,Miniclip.com,https://www.miniclip.com,,app_store,826523703,,,,50
+60fea5de-9d43-4c54-8248-6aa37b8a5f27,Electronic Arts,http://www.ea.com/iphone,,app_store,974135847,,,,50
+47fd9380-52fa-4efe-804d-5602bc8035b9,Moon Active,https://www.moonactive.com,,app_store,1521236603,,,,50
+e47a5354-1744-4bdb-8202-5a85b6219bd4,Beach Bum Ltd,https://www.bbumgames.com/,,app_store,6469609802,,,,50
+1476d6bb-5dbc-4eb6-a8d6-60387541100a,HOMA GAMES,https://homagames.com/,,app_store,1555745434,,,,50
+ef59cdb1-1961-4594-a9ce-733c0f32ed66,FTY LLC.,https://app.ftyapp.com/privacy/,,app_store,1479973551,,,,50
+54835ce4-90cc-4077-90aa-b049dfe097bc,SayGames LTD,https://say.games/,,app_store,1571487050,,,,50
+99ed7f76-4711-4ec6-9f81-7166b8e05d5a,SOZAP,https://armedheist.com,,app_store,1163705851,,,,50
+43e6fa96-d252-4fda-848c-bdd3205cff55,TOO Dynamic Technologies,https://grnd.game,,app_store,6741001464,,,,50
+95390534-37dc-4481-93d1-f809c3e870a8,"Blitwise Productions, LLC",https://www.blitwise.com,,app_store,311466554,,,,50
+9306edac-ac85-4753-8158-0db1b96aa39d,WINZO US INC.,https://www.winzogames.us,,app_store,6450958097,,,,50
+7ca2f581-2409-4663-b3a3-9c67c0e0b504,M2H B.V.,http://www.m2h.nl/,,app_store,445358235,,,,50
+01f89173-3e25-4bad-840c-8130326e04d0,Mighty Games,https://www.yodo1.com/,,app_store,962993853,,,,50
+753eae47-b744-4e84-98ba-6272e5d1ee60,General Adaptive Apps Pty Ltd,https://generaladaptive.com,,app_store,905852173,,,,50
+376ae79d-a497-4197-a8b9-2bd7e1236d82,SmallStep Dev Team,https://www.smallstepinfo.com/,,app_store,6670789598,,,,50
+8800eed1-4808-4ce1-b11b-2e67f7e2a63a,UNICO STUDIO,https://unicostudio.co/,,app_store,1486214495,,,,50
+a207a454-cd2b-4121-8677-9be0a1a6924d,KidloLand Kids & Toddler Games,http://www.kidloland.com/,,app_store,6751526433,,,,50
+5a5e1028-2cf8-45d1-bde8-11533aaca3cb,SayGames LTD,https://say.games/,,app_store,1543160727,,,,50
+ef8c9c60-70e7-4409-9fb3-2ea0f2ba3181,Lahana Games,https://lahanagames.com,,app_store,1513009813,,,,50
+cb8ee94c-55d4-4747-9b8b-687a56e6bf35,Easybrain Ltd,https://easybrain.com,,app_store,1324604053,,,,50
+c60a4d5b-2036-4b91-93f9-73ef46ad3128,AI Games FZ,https://aigames.ae/,,app_store,1504499700,,,,50
+3a2aefc6-7832-4b4f-92fa-be57249940fd,TapNation,https://tap-nation.io/,,app_store,1549814091,,,,50
+633903f0-1837-436c-b224-0b68a5ed6d84,"Lumos Labs, Inc.",http://www.lumosity.com,,app_store,577232024,,,,50
+834a693e-7289-495f-83f1-de0bf8a7bbd7,Lion Studios,https://lionstudios.cc/,,app_store,1529614832,,,,50
+90caad08-35d9-4f60-9189-38e16c705d48,IVYMOBI LIMITED,http://www.flyyestechnology.com/,,app_store,1590453365,,,,50
+f9a98b22-8222-468f-9110-2018e29ab4ce,GMRD Apps Limited,https://brainimpulse.me/,,app_store,1451295827,,,,50
+2a0ae548-0027-4f33-9fc0-f192f2d6deab,"Wuhan Dobest Information Technology Co, Ltd.",https://pub.wedobest.com.cn,,app_store,1340841589,,,,50
+52fc5e83-25fe-4287-b295-0e528e4e4a86,Rollic Games,http://rollicgames.com/,,app_store,1387897651,,,,50
+c6c63824-cb12-4d00-8efe-1082c907de25,Games Vessel Pte. Ltd.,http://www.gamesvessel.com,,app_store,6478071518,,,,50
+d17a0220-6872-4a44-862e-fe42c6ec7d46,Orbital Nine Games Inc,http://orbitalnine.com/,,app_store,985367692,,,,50
+e1cfd148-66b8-4e48-b6ca-afd7e7cfb5e6,Elektron Labs Inc.,http://mindpalapp.com,,app_store,1457846652,,,,50
+81edc2c2-ecd4-48fc-a9c2-dd942d51d947,Crazy Labs,https://www.crazylabs.com,,app_store,1213354902,,,,50
+15ece707-e07e-4976-bb14-f9e6e2685093,Boombox Games LTD,https://www.boomboxgames.net/,,app_store,1607122287,,,,50
+0acadfff-2393-40c0-b181-f2160d404948,Veraxen Ltd,https://veraxen.com,,app_store,642831690,,,,50
+fa818fdf-c2b7-455e-b8f8-a00a4c9c00d1,KenKen Puzzle,http://www.kenkenpuzzle.com,,app_store,485694706,,,,50
+c27d732d-2429-42e2-b45d-d78247e4ed27,Tripledot Studios,https://www.tripledotstudios.com/,,app_store,1496354836,,,,50
+1f9e55ff-8d4a-4b1b-acbf-345a48b7b622,AI Games FZ,https://aigames.ae/,,app_store,1588862493,,,,50
+ba712fbd-55d2-4c7d-9b68-ecf09c8fd405,Appcelent Studio,https://watersort.com,,app_store,1585297796,,,,50
+e0e48878-b415-4a44-aab9-413d7e90c4fc,Havos,http://www.havos.co.uk,,app_store,678430811,,,,50
+c5f9d8a5-5d8c-4f33-bf86-babd1cad1c6c,Hyper Cats Limited,https://hypercats.studio/,,app_store,1587654970,,,,50
+06213f3e-3306-44af-85a2-5822c2294b49,"Tu Tienda de Uruapan, S.A. de C.V.",,,app_store,6739617429,,,,50
+2b5adf4d-afaa-4400-ae29-ca863b45de50,The Mind Company,https://themindcompany.com/apps/elevate,,app_store,875063456,,,,50
+519edec0-4c5b-4fd5-bd88-f9f919e59cf1,Guru Smart Holding Limited,https://block.gurugame.ai/,,app_store,1519469207,,,,50
+228be163-3f66-4ab1-a82d-52d1d0762455,"Wuhan Dream Space Studio Co., LTD",https://dreamsst.com/,,app_store,1594607267,,,,50
+af66ec61-fd04-43df-83f9-d59b37a9b1b4,Oakever Games,https://oakevergames.com,,app_store,1442749804,,,,50
+18c5c708-de3f-46cd-bf53-386250ec832a,WEBELINX GAMES DOO,https://webelinxgames.com/game/escape-time/,,app_store,1483021623,,,,50
+07844421-d918-41ae-9212-e6b772049da3,Fanatee,https://fanatee.com/,,app_store,1092689152,,,,50
+e6bb8bbd-c6af-4f36-8207-96932b0e1320,Oasis Games LTD,http://www.oasis-studio.fun/,,app_store,6745003362,,,,50
+97818652-e32b-4211-952d-5448c18aef53,Guru Smart Holding Limited,https://sudoku.gurugame.ai/,,app_store,1492978794,,,,50
+4bbfa321-6597-4eee-94bd-e5b607f05a92,Uniqo Lab.,,,app_store,887025430,,,,50
+c209499a-41f1-4993-9800-2ec8394e56bd,SayGames LTD,https://say.games/,,app_store,1524982746,,,,50
+124813af-a5b0-44aa-bb3d-adc01e732b6b,Arcade Puzzle,https://arcadepuzzle.com,,app_store,1559669997,,,,50
+e7279823-42f5-4efe-ab8e-3e6adb78487b,Wisdomlogix Solutions Private Limited,https://braintrickygames.com,,app_store,1523148570,,,,50
+888a67a5-a3ee-44be-9f62-6e044e51ab72,Athena Studio,https://athena.studio,,app_store,972013240,,,,50
+337c75b1-e4c5-48ae-98f3-ceab3277ae92,"MochiBits, LLC",http://www.mochibits.com,,app_store,576395411,,,,50
+187fe981-3ecc-47df-bd26-3bdf2fddfcd3,EYEWIND LIMITED,http://incolor.cc/en/,,app_store,1477841973,,,,50
+74922ac7-aab5-4221-bc79-c3b8d80e3ca0,Metajoy,https://www.metajoy.io,,app_store,1261300725,,,,50
+177397b0-7f51-4670-b802-83434acae72a,Wolflyer,http://anvortexny.com/,,app_store,1550734007,,,,50
+24199bc1-05f9-46a3-873d-357e0038de43,Jochem Bergman,http://234playergames.com,,app_store,1269516792,,,,50
+8765b385-c8c0-45e9-9260-1432d4c7c6a7,Oakever Games,https://oakevergames.com,,app_store,1466197423,,,,50
+6f62942f-a279-4c6f-81aa-bb9c214290e0,Appgeneration Software,http://www.appgeneration.com,,app_store,1525691738,,,,50
+b8f9179d-126f-4e9f-8dfc-4bb9a4ee5b05,Crimson Pine Games,http://www.crimsonpine.com,,app_store,1615539825,,,,50
+f37e4ead-14f4-459b-80a4-0521979e5e13,nerByte GmbH,https://www.nerbyte.com/lepsworld,,app_store,486717857,,,,50
+9fac0f40-d48b-4ad2-9081-bfb203f4c839,Azur Interactive Games Limited,http://www.azurgames.com,,app_store,1197441484,,,,50
+1f134bdb-df47-49cb-8b0d-826f730d8840,Rollic Games,http://rollicgames.com/,,app_store,1532769838,,,,50
+c44aa339-6889-4bc4-ade9-0dce8b56d957,nerByte GmbH,https://www.nerbyte.com/lepsworld3,,app_store,724816878,,,,50
+9884ff94-fab1-4cb7-ae3e-2640dc6d392c,"GHOST STUDIO Co., Limited",https://www.ghoststudio.net/,,app_store,1016431735,,,,50
+4a36a85a-0f4c-435f-b318-2a8e111d372f,Supercell,https://help.supercellsupport.com/brawl-stars/en/,,app_store,1229016807,,,,50
+45e397ae-4341-44d4-8017-1bfb08487e85,PANGO GAMES MOBIL UYGULAMA VE OYUN GELISTIRME TICARET ANONIM SIRKETI,https://www.pangogames.com,,app_store,1439785734,,,,50
+ef6bdecc-2410-4755-b583-03e2d70489d4,King,http://farmheroessaga.com/,,app_store,608206510,,,,50
+cdaff1db-56ff-4c54-80f7-3dc72c029b60,MobilityWare,https://www.mobilityware.com,,app_store,359917414,,,,50
+438cc3a0-2190-4697-a67a-3eea244a97aa,Playtika LTD,https://www.caesarsgames.com,,app_store,603097018,,,,50
+8dd48b67-12d1-43af-a3bf-c46c35dc95f2,Severex,http://severex.io,,app_store,1636821805,,,,50
+0eeb1830-a275-40a8-9fac-f79d9cd7b51a,"Gamincat, Inc.",https://gamincat.com/,,app_store,1091456207,,,,50
+e667d99a-5974-47d7-9a06-e0d470829c6b,Hi Studio Limited,http://www.histudiogames.com,,app_store,1487585438,,,,50
+ffe76aa2-bb10-40d0-b8d6-1fd860e39d6d,Oakever Games,https://www.kidultlovin.com/,,app_store,1532397340,,,,50
+49a8ad39-0ff2-4e4d-a55c-5a074d765da1,"Translimit, Inc.",http://games.translimit.co.jp,,app_store,1004227662,,,,50
+4caf9d9b-d7d6-4d6d-b38c-f1079ae747ce,Thai Nguyen,https://www.meowoi.com,,app_store,1374921656,,,,50
+63b32ea5-4999-4a33-acbc-a358febc615e,Spyke Games,https://www.spykegames.com,,app_store,6443449716,,,,50
+0cf052cf-0a05-409c-bce0-020c943842fb,Game Insight,http://www.game-insight.com,,app_store,495637457,,,,50
+4a83bc21-2156-4841-a250-6fa5d09c3f79,Olleyo Games,https://www.olleyo.com/,,app_store,1635337354,,,,50
+2f5a858a-1001-49e1-a17d-4b6090b41607,"Jam City, Inc.",http://www.jamcity.com/,,app_store,727296976,,,,50
+976a92c4-f44c-42da-a1b4-a149ff207775,AI Games FZ,https://aigames.ae/,,app_store,1534542384,,,,50
+b0bdffe0-c270-49f0-a6c7-1105df62fd35,LIHUHU PTE. LTD.,http://lihuhugames.com,,app_store,6443690726,,,,50
+d1e9d3b7-3bb8-4efa-a131-5ce894058d3a,Playrix,https://www.playrix.com/homescapes/index.html,,app_store,1195621598,,,,50
+00110532-51c8-47bb-8935-0add680b355a,Outplay Entertainment Ltd,http://www.outplay.com,,app_store,836517222,,,,50
+cbe35a51-deef-4b65-9619-7de58e0c44f0,KINGS FORTUNE PTE.LTD.,https://www.kingsfortunegames.com/,,app_store,6444054575,,,,50
+3a62e2b2-3940-41fb-99bf-1a39441fba65,Mojoly Limited,https://mojoly.net/terms,,app_store,1578204014,,,,50
+28c84804-d60d-4bb2-bf71-d1cb8827934c,APPSYOULOVE LTD,https://www.appsyoulove.com/,,app_store,1525211513,,,,50
+3553250d-f427-43d7-9a0a-631d9f2904a2,Codigames,http://codigames.com/portfolio/idle-supermarket-tycoon/,,app_store,1442064951,,,,50
+43ddb33e-b0ac-4df9-b015-34a34cc32013,Sparkling Society Games B.V.,http://www.sparklingsociety.net/,,app_store,1176872889,,,,50
+a03af801-03d6-40b5-af25-9787592b7cc5,BeheFun Games Limited,https://behefun.com/,,app_store,6739124364,,,,50
+1d55d9be-5300-43bb-86ba-765899ed6613,"NewPubCo, Inc",http://newpub.co,,app_store,6451208928,,,,50
+4bacfa71-5ae6-4619-ad5e-88ad9967847f,"Game Circus Studios, LLC",https://gamecircus.com,,app_store,1069160488,,,,50
+8eeffae7-801d-4577-8ea1-633f549be916,PLAYHARD,http://playhardlab.com,,app_store,1609172151,,,,50
+d14e99c8-7c0e-452e-b5a0-9992e2180482,IDSI ARASTIRMA GELISTIRME YAZILIM BILGISAYAR SANAYI VE TICARET LIMITED SIRKETI,http://idsigames.com,,app_store,1622543751,,,,50
+d305b491-842b-418b-91ed-144e2f226a91,Kolibri Games GmbH,https://www.idle-factory-tycoon.com,,app_store,1303389751,,,,50
+6079d3c8-e897-43b7-937c-12f4c3c4f95a,BFK ARASTIRMA GELISTIRME YAZILIM BILGISAYAR SANAYI VE TICARET ANONIM SIRKETI,https://bfkgames.com,,app_store,6479973614,,,,50
+d4fda455-1dd2-4070-916d-29b71ca1d21d,Game Veterans,https://gameveterans.com/,,app_store,1496163515,,,,50
+30eb35ef-b4a2-47c2-82d5-e9a4ece4958b,treeplla Inc.,https://home.treeplla.com,,app_store,6471960010,,,,50
+1ea17360-b21a-4dba-9385-0410df140bac,Adrian Zarzycki,,,app_store,1353429202,,,,50
+01720ef5-26ac-4d9b-b21e-8afd9459bc7b,Appcano LLC,,,app_store,1617755762,,,,50
+5b28ba51-2b8e-40cf-aeb0-fa7b0b31a947,Pazu Games Ltd,https://pazugames.com,,app_store,1482367849,,,,50
+4187a8e9-4bfa-44d0-90ff-dab8df7a8ee1,YEW TECHNOLOGY LIMITED,https://nuclearport.net/,,app_store,1446728841,,,,50
+5cb43166-f884-4df4-aba3-4d3ea5058441,Tellmewow,https://tellmewow.com,,app_store,1375993101,,,,50
+3deed0e2-da77-457b-a01a-536d643b0293,Quadrimind,http://www.quadrimind.com,,app_store,422098340,,,,50
+1a6b5a84-2a36-40fa-8544-e7369391136d,Netmarble Corporation,https://sena.netmarble.com/,,app_store,6479595079,,,,50
+1235ab5a-fb98-4d70-a1b8-6c4bb760c9e4,Aniplex Inc.,http://fate-go.us/,,app_store,1183802626,,,,50
+0908c337-71c7-4a1a-9b93-c075af28b377,JoliYeti Games inc.,http://microrpg.ca,,app_store,1598053040,,,,50
+0beb4bd1-02ee-44af-98b5-efc3d8410946,RPG RAID ROLEPLAYING GAMES LTD,https://knighthoodgame.com/,,app_store,1458762050,,,,50
+9a35de68-3bf1-436e-b3fe-c87b4dac9755,Gamesture Sp. z o.o.,https://gamesture.com,,app_store,1079884680,,,,50
+08b93e68-1606-4036-88e3-92e81dc21333,"Spacetime Studios, LLC",https://www.arcanelegendsgame.com,,app_store,543335870,,,,50
+b67850b3-46ea-41cb-8bd4-4d548685744e,Playa Games GmbH,https://www.playa-games.com/,,app_store,6475306242,,,,50
+e2d8ea2d-3787-4131-978f-121ab0c33d5f,Deca Games EOOD,https://decagames.com,,app_store,431837446,,,,50
+622c39a6-0b5d-4fed-8a94-1f9d17d27d4f,Bandai Namco Entertainment Inc.,https://www.bandainamcoent.co.jp/english/,,app_store,1577316192,,,,50
+c47a2a23-ba0d-4a05-a203-f8b99cff62a2,Swift Games GmbH,https://www.swift-games.com/,,app_store,1608898173,,,,50
+bc34cfc6-0ca3-4b58-9269-8587f8043324,Valas Media,https://valas.media,,app_store,1325166039,,,,50
+674e434e-1f24-4057-994e-02c750e504f4,KURO GAMES,https://wutheringwaves.kurogames.com/en/,,app_store,6475033368,,,,50
+ed44688e-42fd-4537-bfec-78d04c694682,AIDIS Inc.,https://lastcloudia.com/en/,,app_store,1473588527,,,,50
+7488f8a6-5e64-48b4-87d6-9843920bb45f,Megoo Games,https://www.megoogames.com,,app_store,6751641922,,,,50
+d3251d2f-7150-45a4-8851-a2ce13ae263f,NEOWIZ,https://browndust.app/,,app_store,1299021478,,,,50
+39c4405d-3884-4d98-904b-0a937bc7a44a,Mynet Games Inc.,,,app_store,926250095,,,,50
+9d7a6d72-1199-4747-88bb-1c19c7c15751,Flaregames GmbH,https://www.flaregames.com/games/nonstop-knight-2/,,app_store,1444887980,,,,50
+d98f65b6-285c-4704-943c-587d6d24d863,Lilith Games,https://afkarena-official.lilith.com/,,app_store,1375425432,,,,50
+80f7b265-3afd-43ef-ba16-c866b453acef,Sim Companies s.r.o.,https://www.simcompanies.com,,app_store,1502566059,,,,50
+4ad13bca-b3a4-498e-9c7e-f9f56d817321,Denis Sonin,,,app_store,1127804471,,,,50
+79e2b228-3cb9-4860-90ce-29b1161d5de2,Two Desperados,https://www.twodesperados.com,,app_store,1613958816,,,,50
+7d9c3da9-f8d5-4396-91ea-712793c25e61,Texas PFCG Aplicativos Ltda,http://www.texaspfcg.com,,app_store,6741689722,,,,50
+4ed6e4e4-6dd5-4383-821c-f7e92fd0802a,Bimi Boo Kids Learning Games for Toddlers FZ LLC,https://bimiboo.net,,app_store,1544733488,,,,50
+aa42706b-f022-42bc-b380-8bd587942717,"ASOBIMO,Inc.",,,app_store,988683886,,,,50
+7aa1f68f-bd89-4839-96c7-fc63517fa7f8,Imperia Online JSC,https://crush-them-all.com/,,app_store,1153329252,,,,50
+19ab0ba7-76df-41ae-a036-2867b69a8ba3,Playsome Ltd,https://www.friendsanddragons.com/,,app_store,1522259907,,,,50
+cb1e2b3d-d7af-481b-ab09-3c48fa4d2a19,Guru Smart Holding Limited,https://killer-sudoku.gurugame.ai/,,app_store,1549645019,,,,50
+160d3bdf-1b9e-463c-9d43-066f72449c3b,Rivvy,https://rivvy.games,,app_store,6503089848,,,,50
+dc61c5ec-6328-492a-9375-3a9ffd8111b3,Farlight Games,https://afkjourney.farlightgames.com/official/,,app_store,1628970855,,,,50
+c1c515b8-62bc-47e8-ad3e-83e31193bf5e,cookapps,https://www.nstage.io/support/berserker/,,app_store,1635339933,,,,50
+35d123c6-ee21-41a0-aa19-9fe47eadd0e5,Ateam Entertainment Inc.,https://www.ateam-entertainment.com/en/services/199/,,app_store,1078813307,,,,50
+0381cac6-50ca-49cf-988b-3edbc8bcbbfd,NEXON Company,,,app_store,1290086677,,,,50
+d7e0997a-8c7d-4b27-a77e-6d5391d887de,yujiro komine,http://b2.nussygame.com/,,app_store,1141418588,,,,50
+30d77f62-93a0-4bf0-b266-e978076316a5,Bandai Namco Entertainment Inc.,https://www.bandainamcoent.co.jp/english/,,app_store,943690848,,,,50
+1b1dcd45-cadd-4e18-b3fc-42e7d12a6881,Taihe Interactive,https://dl2hmt.newtypegames.com,,app_store,1580670593,,,,50
+68f42fea-12cc-4a3b-ba6c-754323aef976,Nexters Global LTD,http://nextersglobal.com/,,app_store,1158967485,,,,50
+caba3dab-5881-4472-ad6d-6ce06a76391e,Frank Slofstra,https://buildit.games/magicstreets,,app_store,1487310109,,,,50
+a1acd7a7-89f4-47a8-9c52-af2036766343,Century Games Pte. Ltd.,https://www.centurygames.com,,app_store,1561305688,,,,50
+9e07b558-3a85-4254-a8f0-c776d0a413a6,Guru Smart Holding Limited,https://art-puzzle.gurugame.ai/,,app_store,6446246671,,,,50
+64f84335-ecda-40ae-ba55-6ea2712e2b36,Kristanix AS,https://www.kristanix.com/jigsawpuzzleepic/,,app_store,796882776,,,,50
+6f02c8a8-8b50-4de5-822d-d0568644b929,ZiMAD,https://zimad.com/#contact,,app_store,439873467,,,,50
+f619cebb-01af-4fcb-b926-80a9d64e0bef,Solitaire Games Studio,,,app_store,1190624509,,,,50
+1bd42f74-6a1f-4d99-8d9a-971a678291ab,Texas PFCG Aplicativos Ltda,,,app_store,6747733852,,,,50
+0d66ecc7-9d6d-4a54-b78c-d746647d596a,DianDian Interactive Holding,https://amonggods.centurygames.com/,,app_store,1628535474,,,,50
+87b69efa-c0e8-452d-9fa9-0ea34d7019a4,River Game HK Limited,https://www.topheroes.com/en/home.html?viewmode=1,,app_store,6450953550,,,,50
+09c8c745-0512-42e5-812e-1526d3ce3720,Tang Thi Thuy,https://tangthuy.online,,app_store,6743305010,,,,50
+c2b003d4-f452-4541-9171-a5036baa5d4d,Nordcurrent UAB,http://www.nordcurrent.com/games/cooking-fever,,app_store,714796093,,,,50
+78dabd38-30fc-4fd5-8d04-21f5fa8f4f7a,Mobile Gaming Studios,https://www.miniclip.com/,,app_store,1186805817,,,,50
+baf2f5bb-a11d-4a8d-9e02-35b582b12e9d,ZigZaGame Inc.,https://www.facebook.com/NeoMonstersOfficial,,app_store,983143183,,,,50
+ec3223c7-deb0-46cb-9299-01ef11a580bc,宇亮 闫,http://casualmatch3.com/,,app_store,1195770330,,,,50
+e7410a88-5fff-40aa-82d4-84326746ba10,Megajogos Entretenimento Ltda,https://www.gamevelvet.com/cacheta-online,,app_store,1152713468,,,,50
+91aba01c-e34c-4fe8-9d26-4e61f656d563,AI Games FZ,http://azurgames.com,,app_store,1500426312,,,,50
+a8daffd9-6bdd-4efb-91bd-b7e03765f21a,BFG Entertainment Inc.,https://www.bigfishgames.com/,,app_store,685675706,,,,50
+7143e901-8c84-44ee-b637-f2f37914b6f9,Orchid Games,http://www.orchidgames.com,,app_store,1031227432,,,,50
+27d95902-7d2e-41fd-a433-dab92e8a6ffd,Devsisters,https://solitaire-deckedout.com/,,app_store,1153389718,,,,50
+5886843b-2b04-4234-a9fb-0dcd5ff03208,Mobile Gaming Studios,https://www.miniclip.com/,,app_store,6444106776,,,,50
+7274ed41-77ff-44e0-ad27-56592f5aabe3,Easybrain Ltd,https://easybrain.com,,app_store,1491764681,,,,50
+c3eae60b-6689-49d0-a663-c2bc56d95a58,MAG Interactive,https://www.maginteractive.com/,,app_store,708600202,,,,50
+439b3a06-db49-49eb-a7b2-0306a2a20727,Netmarble Corporation,http://l2.netmarble.com,,app_store,1259014919,,,,50
+8f44ea74-9f54-4e12-b93a-e12a6e34110f,A PLUS JAPAN Inc.,https://www.playbpsr.com,,app_store,6744962482,,,,50
+4e6052ce-6152-435b-87ae-95a205dedd5f,Li Xueke,https://starsprite.com,,app_store,1561770761,,,,50
+897c5eba-1d0b-4652-9d7d-7fe166e49d9d,Gram Games,https://www.zynga.com/,,app_store,911793120,,,,50
+ded816ef-b3ac-4a5f-9f7e-296cf07ba2c9,Spyke Games,https://www.spykegames.com,,app_store,6737197130,,,,50
+7eee9415-d479-4ca5-a82c-0775ce052112,Playkot Limited,https://playkot.com/game/aom,,app_store,1175370741,,,,50
+3e23f222-526d-40f5-97ce-b38a4cc72ce8,MOBITEK LIMITED,https://www.puzzlemaster.uk/,,app_store,1494135182,,,,50
+5b823c06-abcf-490f-acf4-aec6c4ae35ae,Kirill Shishkin,,,app_store,429774218,,,,50
+08f3b527-82ac-478c-8b55-b3f773f32142,Muhammad Danish,https://www.genzgamez.com/app-ads.txt,,app_store,6755029472,,,,50
+73a11cbb-bcc6-4fb9-8855-860a3c044cf2,Blue Brain Games,https://thehouseofdavinci.com,,app_store,1331393380,,,,50
+9dadedf9-f8d4-4b10-81a2-cd9df11b0030,UNICO STUDIO,https://unicostudio.co/,,app_store,1618998535,,,,50
+5f96044e-0279-4cb6-988d-b789c7589a36,Wizard Games Inc,http://www.wizardgames.ca,,app_store,1229845277,,,,50
+bea6826c-3a20-4433-a385-5782fc6ed191,Toydium Inc.,https://toydium.co.jp/,,app_store,1570750780,,,,50
+a47f07b1-a2a0-4024-a285-6f1d5f822ec8,"BoomBit, Inc.",http://www.boombit.com/,,app_store,1317268734,,,,50
+94867465-5d72-4d17-a547-ff276f33bc96,NetDragon Websoft Inc,https://comobile.99.com/,,app_store,459012102,,,,50
+fe0883a8-e388-49f2-987d-43571bab57e6,Players Lounge,https://playerslounge.com,,app_store,1474870497,,,,50
+6ebfd4bd-af25-4151-8567-5afd16842a6b,BINGCHUAN NETWORK (HONG KONG) COMPANY LIMITED,https://x-hero.q1.com/,,app_store,1478697636,,,,50
+2d71760e-a79a-4a2b-bd87-5e9b3ca91642,"BUILDING-BLOCKS NETWORK TECHNOLOGY CO.,LIMITED",https://gsupport.37games.com/home?package=com.global.mus.ios,,app_store,6529538542,,,,50
+2ded0a41-d2a7-4f48-8448-1ca7a6576bb1,MondayOFF,http://www.mondayoff.me,,app_store,1566969578,,,,50
+132f424d-008b-4fdd-9891-559f1862e393,JOX Development,https://www.taptapdash.com/,,app_store,1034630958,,,,50
+3afeb424-73d4-4e2a-8c0d-70ec78496790,Alfa Bravo Inc.,http://alfabravo.us,,app_store,1598639131,,,,50
+212ecfc5-333f-426e-b847-749148316dd7,WINR Games Inc.,https://x.com/WINRGames,,app_store,903185352,,,,50
+29750eb4-2fc2-420c-9d10-889e9a8850ec,"Jadu AR, Inc.",https://jadu.ar,,app_store,6443662349,,,,50
+10614721-df71-4501-83a5-2f152db2bdcb,Azur Interactive Games Limited,https://azurgames.com/,,app_store,6480410032,,,,50
+c92ed727-1cc2-4e1c-9c17-0b6a072a2348,Freeplay LLC,https://freeplay.io/,,app_store,6741800156,,,,50
+d85648e9-509e-4186-ba01-fa0b96396a45,SayGames LTD,https://say.games/,,app_store,1552406178,,,,50
+644f3470-5553-4928-bac7-7ec2d0a2bddb,Playgendary Limited,https://newplg.dev/,,app_store,1057889290,,,,50
+0513de59-4bd5-401c-837c-6c830981e1c8,"BoomBit, Inc.",,,app_store,1162024432,,,,50
+83715542-cde2-4ffd-9415-8d86b4ccc9c3,wooga,https://www.wooga.com,,app_store,1215220850,,,,50
+31ccd2a9-a09c-42cc-afb4-246daa0bc67f,Peak Games,https://peak.com,,app_store,6449094229,,,,50
+01bcff29-4ee8-4bdd-bdc9-e5d3f1205dbc,"HIGGS TECHNOLOGY CO., LIMITED",https://www.higgsgamestudio.com/,,app_store,1577533842,,,,50
+02937bc8-2282-422e-af83-6899999d8046,GamoVation,https://www.gamovation.com,,app_store,1640075364,,,,50
+6a065f16-2f14-4b97-85b0-66c55fe60351,Playtika LTD,https://www.bestfiends.com,,app_store,868013618,,,,50
+8e3e852e-d5ec-4032-a1db-0a593ad49aa8,"HIGGS TECHNOLOGY CO., LIMITED",http://higgsgamestudio.com,,app_store,6479984405,,,,50
+10957e86-bbb7-4e99-ad38-0d17afa16d28,Candivore LTD,https://www.candivore.io,,app_store,1138264921,,,,50
+3a02eeab-e72f-48c6-a965-f1355390d178,Peak Games,https://peak.com,,app_store,890378044,,,,50
+f7143c0e-0d2a-41d0-9079-42d6115934bb,Playflux,https://playflux.co/,,app_store,6444056676,,,,50
+95f1a6d1-df14-4d75-88b9-f9ea06f2b38c,Peak Games,https://peak.com,,app_store,1176027022,,,,50
+e67db082-ede5-48bd-bd90-c7e3f314547e,ONESOFT GLOBAL PTE. LTD.,https://falcongames.com/,,app_store,6482849843,,,,50
+6668a3dd-a79b-409a-98a0-01e29f2eb6a4,King,http://candycrushsaga.com/,,app_store,553834731,,,,50
+d33dc33d-8772-4495-b862-797e7989603e,Tripledot Studios,https://www.tripledotstudios.com/,,app_store,1572661625,,,,50
+7fe9bd64-c754-4aef-aad9-00e2d1674257,LIHUHU PTE. LTD.,http://lihuhugames.com,,app_store,1530876832,,,,50
+6a537984-9d12-4469-a697-424123fb3d02,HiPlay,http://app.hiplay4fun.com/,,app_store,6502696816,,,,50
+070f6da2-0f0a-4c5a-9ff4-334e85e50a15,Longwind Studio,https://www.longwind-games.com,,app_store,1531843592,,,,50
+3883a8e6-c356-43fe-a6b9-3fffbf60d40d,Dream Games,,,app_store,1606549505,,,,50
+ddd5e723-67d6-49bc-a382-aae5acf8798f,"Rumbic, Inc.",http://rumbic.com,,app_store,1097505464,,,,50
+e60c80ba-02f7-4bc7-a3c1-d765b8cc43a4,Good Job Games,http://www.goodjobgames.com,,app_store,6479752688,,,,50
+be3f5aaa-30bc-436e-ac4d-5796c3dcfe2f,Easybrain Ltd,https://easybrain.com,,app_store,1452227871,,,,50
+4e2cf320-7157-4447-80e5-71cedb9ca80b,VERTEX GAMES PTE. LTD.,https://d2mtkrho8gflik.cloudfront.net/,,app_store,1558803930,,,,50
+fdcd5ee8-bae2-492a-8d2f-7bc1fd0cf26d,"Jam City, Inc.",https://www.jamcity.com/,,app_store,893393414,,,,50
+2ca66ce2-ad71-4065-9a66-250ff46455ad,Lion Studios Plus,https://lionstudios.cc/,,app_store,1557233964,,,,50
+4c1e0379-970b-46fa-bb83-d0a8a4420a74,SayGames LTD,https://say.games,,app_store,6464049923,,,,50
+8379d18c-c11c-43e2-8b61-22d64b253ad8,"Jam City, Inc.",https://www.jamcity.com/,,app_store,1032443533,,,,50
+f70cd096-e915-4a54-98bb-3c09f5d91097,Ilyon Dynamics Ltd.,https://www.ilyon.net/,,app_store,1571476942,,,,50
+aed75cbc-a9a5-42b5-9aea-0b07f4ab13af,F.O.G.LIMITED,http://foglimited.com/,,app_store,6449081338,,,,50
+18ee88bd-fd1b-4ede-9e8e-35697febac14,Voodoo,https://www.voodoo.io/,,app_store,1618805694,,,,50
+4660cf22-a2a1-4892-9cea-4a6ff985ab37,"Jam City, Inc.",http://www.jamcity.com/,,app_store,1034920425,,,,50
+a77a1818-8051-4c0c-8622-f5a259360686,Peak Games,,,app_store,716513902,,,,50
+e53dc130-f6b8-4b8d-94d7-70884e496216,Easybrain Ltd,https://easybrain.com,,app_store,1545567989,,,,50
+523e3354-7ce6-4e98-9650-95a93f018bdf,Voodoo,http://www.voodoo.io,,app_store,1570641170,,,,50
+6632b83f-e050-4739-9eae-e40d120d72fa,Royal Ark,https://royalarkgames.com/project/,,app_store,6471983323,,,,50
+bee812c8-a6a3-406e-bc76-e3feeb78c747,Funvent Studios DMCC,https://funvent.cc,,app_store,1477300089,,,,50
+aec90481-d169-498e-beed-ef3346dc3f06,Romit Dodhia,https://theholycowstudio.com/,,app_store,1088866155,,,,50
+a7f27db9-8315-4c87-9cde-633493d93d14,Hyper Hippo Publishing Ltd.,https://hyperhippo.com/games/adventure-capitalist/,,app_store,927006017,,,,50
+dd2df1cc-913b-4240-8749-2614916cc8e6,Green Panda Games,http://greenpandagames.com/,,app_store,6445961774,,,,50
+d119f89f-c070-4f49-a17c-1079ca25a637,Reality Games (London) Limited,https://landlordgame.com/,,app_store,950949627,,,,50
+f35c7b09-142b-4a5e-84fe-3e8b458a35f3,NimbleBit LLC,http://nimblebit.com,,app_store,422667065,,,,50
+5067629a-40fe-49a1-b8e9-8714885ec788,Codigames,http://codigames.com/portfolio/hotel-empire-tycoon/,,app_store,1485552989,,,,50
+b1efb4d8-47f4-4586-8a26-0906a0ba1960,肖见 陈,http://cwudv153.com,,app_store,6450442284,,,,50
+c17a1249-81fc-4949-ba9e-6bd7203e6754,Kolibri Games GmbH,https://www.kolibrigames.com/,,app_store,1560178364,,,,50
+9a6022e0-de99-43a9-b5e1-060ad15f6a12,Greenheart Games Pty. Ltd.,http://greenheartgames.com/press/sheet.php?p=game_dev_tycoon,,app_store,1162580001,,,,50
+4bf14323-2abb-4114-a9b2-1c77aab6d19f,Chengdu Warrior Tech Limited,http://loveballs.club/,,app_store,1617250285,,,,50
+fbfaef35-4eb1-4f15-b33b-36969a626d98,Heatherglade Publishing Kft,https://publishgame.com,,app_store,1612163874,,,,50
+fb09a92e-63e5-4c13-9a03-84f9d74df021,Codigames,http://codigames.com,,app_store,1508490923,,,,50
+6683182b-0b26-45ce-a61c-72daa0982995,Sia Ding Shen,http://www.opneon.com,,app_store,1605261462,,,,50
+da4dc0d1-f1e9-4264-9f18-a7d1390e07e2,Alda Games s.r.o.,https://aldagames.com/games/transport-tycoon-empire/,,app_store,1600499589,,,,50
+8cfa1605-f83c-4975-9407-c8749553a6b8,"Supercent, Inc.",https://supercent.io/,,app_store,6473803179,,,,50
+a6861719-1e00-4098-aa53-e07a665d14ba,Codigames,http://codigames.com,,app_store,1606698827,,,,50
+d0829763-5ed1-48ad-bb81-3549199b1a09,Kolibri Games GmbH,https://www.kolibrigames.com/,,app_store,1645281275,,,,50
+7cfd6518-eb97-479f-80e0-3344a315ca7a,Kolibri Games GmbH,https://www.idleminertycoon.com/,,app_store,1116645064,,,,50
+2ee7f8e4-802b-47b6-9c12-a2522bfce3b6,ZeptoLab UK Limited,https://www.zeptolab.com,,app_store,1604391006,,,,50
+a8da8f0a-c972-4e42-a5e7-280ae4c4e2eb,AppQuantum Publishing Ltd,https://appquantum.com/,,app_store,6463128982,,,,50
+d9c2e987-a9b4-4b91-b13e-dd8d350a4b42,魂动天下,http://www.super-mt.com,,app_store,1572989580,,,,50
+bca89395-0c64-4fab-804e-13da22163708,Tapteek,https://tapteek.com,,app_store,1476050435,,,,50
+349c7f12-b8d6-478b-a23c-5c3f9cc2d63e,DianDian Interactive Holding,http://www.centurygames.com/,,app_store,1483009687,,,,50
+67947feb-ab6f-425e-ad0a-15e6f2a3db5c,IsCool Entertainment,http://www.neonplay.com,,app_store,1494686273,,,,50
+e3956072-107d-440b-afaa-61cd305d1b60,Heatherglade Publishing Kft,https://publishgame.com,,app_store,1321606577,,,,50
+74f34b67-83fa-4ee3-aaeb-dd159f206e3d,AppQuantum Publishing Ltd,http://appquantum.com/,,app_store,1510022911,,,,50
+30a45c15-1dc9-4c79-8362-5d56937c7446,By Aliens L.L.C - F.Z,https://www.byaliens.com,,app_store,1262445849,,,,50
+db41ae17-57a4-40a5-9b23-a11c75e408c4,Treetop Crew Oy,https://www.treetopcrew.com,,app_store,1582514877,,,,50
+fa05c795-f4c9-4521-92b0-53b7c47b503f,Codigames,http://codigames.com/portfolio/idle-theme-park-tycoon/,,app_store,1460772578,,,,50
+08685df6-2d1d-4973-b631-5d233e05f064,TIPTOP GAME LIMITED,https://appsinfo-relaxsolitaire.pages.dev,,app_store,6744435737,,,,50
+6797a501-40a7-4b9b-bf82-26e41c10bddc,nerByte GmbH,https://www.nerbyte.com/spider,,app_store,1021946968,,,,50
+3bf8b4c1-f284-4336-a7a1-da3c437cd127,"Project Moon Co., Ltd.",,,app_store,6444112366,,,,50
+0905b9c8-7f0e-400d-894c-db162f24e482,Noxy Games Inc.,https://www.noxygames.com,,app_store,1050535507,,,,50
+8ef5b1ff-8935-4e23-91b1-7164c2b8ddb2,Netmarble Corporation,http://company.netmarble.com/en,,app_store,1475440231,,,,50
+cfeffc41-f94b-48e4-9dfb-5e5bbe1c2a4d,Dang Com,https://bibleios.blogspot.com,,app_store,1638458139,,,,50
+ec6ccdd0-4e94-4571-90c6-2791979afde7,Longwind Studio,https://longwind-games.com,,app_store,1554601502,,,,50
+ffbf8216-455b-4df9-8570-90df54b7b235,Archosaur Games,https://www.archosaur.com,,app_store,1459339898,,,,50
+c82a8f16-ab4a-4f2b-bf3b-b0ced474ac55,PlaySimple Games Pte Ltd,https://playsimple.in,,app_store,1602508478,,,,50
+0fdac62c-7cb9-4b7d-8361-633f33fd834a,By Aliens L.L.C - F.Z,https://www.byaliens.com,,app_store,867654947,,,,50
+ec1b12f3-7182-4084-846f-d943d0877f39,Hitapps Games LTD,https://hitappsgames.com/,,app_store,6463711142,,,,50
+1666a528-d14a-40e5-83b5-691233d1c21d,Z League Inc,https://www.zleague.gg,,app_store,1623418795,,,,50
+e71e91a2-3d37-465c-bbbc-504565bb2f6c,Megajogos Entretenimento Ltda,https://www.gamevelvet.com/truco-online,,app_store,641801046,,,,50
+e630a36e-0b8a-40d0-b8b6-f5fba16d3516,Moreno Maio,https://www.jindoblu.com/,,app_store,1465731199,,,,50
+4863f55c-c8f0-485d-8b36-cf7b2c4177ed,VERTIGOGAMES,https://www.vertigogames.co,,app_store,1467648713,,,,50
+5237b78c-c3b2-46d2-8d16-fdaed5111b22,BlackLight Studio Works,https://ludo.ooo/,,app_store,1314264574,,,,50
+fc15dbb0-2a1a-45ea-8993-b01fec13b0d6,NetDragon Websoft Inc,https://heroes.99.com/en/,,app_store,1173388413,,,,50
+18b1382f-fd33-4416-8a41-838f2c8bb422,Level Infinite,https://sok.proximabeta.com,,app_store,1150318642,,,,50
+dc3c204f-bab1-4f2e-a36e-cb6cae9291da,Yangcheng Liu,https://zombsroyale.io,,app_store,1356882421,,,,50
+7e14dee7-c1cb-4479-b06b-14143d6f3cea,MondayOFF,https://mondayoff.me,,app_store,1621988938,,,,50
+8f7c8812-f8ad-4bae-840e-5dcd4ef6d090,Stanislav Surovtsev,http://bhopjump.com,,app_store,1388252654,,,,50
+dac4cc55-78b6-4633-9102-8a137d5b8710,Moonfrog,http://moonfroglabs.com,,app_store,1267900294,,,,50
+622e1952-bce8-4b91-acf9-829bde0c6fac,Arash Amiri Sani,https://menschcraft.ca,,app_store,1643296977,,,,50
+3eb5a000-f5b8-4897-9f60-40fc7704292e,Real Free Soccer,http://soccer-star-52646070.firebaseapp.com,,app_store,1550945606,,,,50
+2f6a571c-9492-4456-90e3-34136f5fd2c7,Miniclip.com,http://www.miniclip.com/,,app_store,1515251917,,,,50
+ea22cff1-3303-4ba0-a877-d7ab4ea99ccd,Tellmewow,http://tellmewow.com,,app_store,1496783791,,,,50
+d59431ed-158f-4e98-ae77-d40a394f34f9,Gameloft,http://www.gameloft.com,,app_store,978759625,,,,50
+91bef27e-be4d-4f8a-81ac-e963bf22c0c0,EpochalStorm Games S.R.L,http://www.lascopaonline.it,,app_store,1461777990,,,,50
+080e6e23-53f3-4fd2-8eb9-6b24f49fbbc5,Mage Games,https://www.magegames.com/,,app_store,6477293095,,,,50
+b41d31ce-9b7b-4309-a6d4-2de87bd96bbb,Megajogos Entretenimento Ltda,https://www.gamevelvet.com,,app_store,570050950,,,,50
+b3f366b9-52dd-4796-9ba8-c9b4dee3f93a,Ketchapp,,,app_store,1474250308,,,,50
+b630c7d1-f838-4812-8afb-337e06aa7cec,Megajogos Entretenimento Ltda,https://www.gamevelvet.com/tranca-online,,app_store,622640291,,,,50
+3a6c4fbb-0627-42b9-8f3f-d73a44c6e8f9,CrazyGames.com,https://www.crazygames.com/,,app_store,1636658567,,,,50
+b8354a53-5c93-4687-878c-5b50ef8265a8,Voodoo,,,app_store,1171814682,,,,50
+d83a2e29-ad2e-41af-a06e-f0b3045ca2da,AFK Studio,https://toz-app.com/en,,app_store,1476978964,,,,50
+ec69d9dd-8266-4eaf-81bb-a2bea2cc54e3,Metajoy,https://www.metajoy.io,,app_store,1243426580,,,,50
+2d5b4124-556e-42ec-8777-51b604e1ce2f,NetEase Games,,,app_store,1637059453,,,,50
+deb1d261-f802-4a13-a6a9-a23caf4cca2d,"Smilegate Holdings, Inc.",https://www.smilegatemegaport.com/,,app_store,1322399438,,,,50
+0620f5dd-396a-4f40-9bae-f9b6fba48d63,Jagex,http://oldschool.runescape.com/,,app_store,1269648762,,,,50
+28a20874-b4fa-4750-a952-6fcafedf7388,Skystone Games Pte. Ltd.,https://us.skystone.games/,,app_store,6741674823,,,,50
+d3c850ed-c3ad-4106-9a8c-94b0a94e8819,"Bank of Innovation, Inc",https://mememori-game.com/en/,,app_store,1611490041,,,,50
+71577f8e-3fb6-4421-a655-8f8c93e36e93,"Nintendo Co., Ltd.",https://fire-emblem-heroes.com/,,app_store,1181774280,,,,50
+0a878e75-1195-4c5b-9676-dc631fc8c014,COGNOSPHERE PTE. LTD.,https://hsr.hoyoverse.com/home,,app_store,1599719154,,,,50
+e66a592a-5f52-4c31-a358-01f60c66673d,RAGE QUIT GAMES GROUP SP Z O O SPOŁKA KOMANDYTOWA,https://evillands.com,,app_store,1461467958,,,,50
+f218e632-8d9d-4bb6-963f-e6f518f2e0b2,TOWARDS MARS LIMITED,http://www.towardsmars.com,,app_store,1465892600,,,,50
+7ce83224-e041-4570-9c38-7af0e1639460,Small Giant Games,http://www.zynga.com/support/,,app_store,1117841866,,,,50
+034e5e82-0c29-496f-9bc3-9c3cc4ddd8a6,"NextNinja Co.,Ltd.",https://global.grandsummoners.com/,,app_store,1329917539,,,,50
+6dbdf68d-6b61-490d-8e06-6f75e152f102,HABBY,https://habby.com/,,app_store,6448900613,,,,50
+cd3fc2f9-5eed-4f68-9c87-f28f4ce97080,NEOWIZ,https://www.browndust2.com/,,app_store,6450099588,,,,50
+69bdfd1e-2ee9-45f3-8026-3477bb5d1b9c,Tripledot Studios,https://www.tripledotstudios.com/,,app_store,1191435163,,,,50
+fcc87e42-1db3-430b-b90a-b2ce3b84deb0,nerByte GmbH,https://www.nerbyte.com/solitaire,,app_store,1073936461,,,,50
+7c791d26-912d-4ec8-a289-e961294282fa,Doodle Mobile Limited,http://www2.mouse-games.com,,app_store,1476370680,,,,50
+96ed4bde-4301-4c42-a7fa-56f0341ea20f,"GHOST STUDIO Co., Limited",https://www.ghoststudio.net/,,app_store,1066752474,,,,50
+ac872908-b32b-4ee3-8613-163c5221fe56,InfiniteX Limited,https://www.myinfinitex.com/index.html,,app_store,1277486668,,,,50
+e40213be-58fa-4496-87b4-7ab80f86f06f,Guru Smart Holding Limited,https://solitaire.gurugame.ai/,,app_store,1564391515,,,,50
+0542b8b6-53b0-4659-91a6-6bbcfd147e74,BreezePlay,https://breezeplaygame.com,,app_store,6742443145,,,,50
+09e49c1e-a91e-4927-8fbe-bbc8b8f56104,"RED GAMES CO, LLC",https://www.redgames.co/,,app_store,1534193824,,,,50
+b51d14d1-e75d-4f59-94bf-47445e25003f,Solebon LLC,http://apps.solebon.com/,,app_store,287197884,,,,50
+7d2cd58b-741b-461f-93bf-28889daadb7a,MobilityWare,http://www.mobilityware.com,,app_store,284791396,,,,50
+7ad768a8-fc9f-48f0-8c2a-115f8f3eb459,Mobile Flame,http://3d098f2023ccecbb1857359be0ee8f9f-store.appcloudbox.net,,app_store,1191441346,,,,50
+e0bc7fdb-e589-4cbf-bcfd-b23c680c5793,Samfinaco LLC,https://belka-games.com/games/solitare/,,app_store,1500251668,,,,50
+3c535025-fb3e-4a67-86ec-51c7ee1c786a,WePlay Technologies,https://app.weplaygamer.com/,,app_store,1140351199,,,,50
+93e073f8-e217-4cd8-88fb-70f20b583ee3,"Do More Mobile, LLC.",https://maplemedia.io/,,app_store,422515548,,,,50
+5d03b879-60fd-450d-a2a8-a488a7ab354c,"PeopleFun CG, LLC",https://www.peoplefun.com,,app_store,500962489,,,,50
+eacd1aea-8f64-4598-892d-03acdb7937f6,源龙 陈,https://www.solitairegamesol.com,,app_store,6751490665,,,,50
+7f9c9b96-d3a0-4db3-8978-2808064fa310,The Chess Solitaire Sudoku Factory Ltd,https://www.thechesssolitairesudokufactory.com,,app_store,650371821,,,,50
+cb360cb6-a299-4301-9f16-8e8323816eea,EverGreen MLJ Limited,http://hkmlj8288.com.hk/,,app_store,6444895544,,,,50
+587729c6-913d-47f9-b466-fd30c078161e,Ricardo Paiva,https://www.jogodaspalavras.com,,app_store,506153552,,,,50
+16135564-25db-4811-93ac-5793f1aa1c17,Iversoft Solutions,http://iversoftgames.com,,app_store,341089820,,,,50
+c6986276-077c-4ee4-ac7d-a6201f5cee9c,Curated Content,https://dnamobileapps.com,,app_store,1476836651,,,,50
+05b1d966-c889-4e56-865b-429b52e3e841,"NewPubCo, Inc",https://newpub.co,,app_store,1525880838,,,,50
+364092b0-8fcf-4c9d-8c00-4fcb80db3864,Aged Studio Limited,http://www.agedstudio.com,,app_store,1482887935,,,,50
+f3f55f7d-bed7-4996-89b3-f451ac72eef6,GRL Games,http://www.grlgames.net,,app_store,413443169,,,,50
+3f10425e-6c11-405d-a9d2-2c174280e5d4,Hungry Studio,https://www.hungrystudio.com/privacyus.html,,app_store,6464113198,,,,50
+0e5bc67b-df18-4baa-972b-ef5e00ecc509,Murka Contracting Limited,https://murka.com/,,app_store,645704840,,,,50
+0121a826-3578-407b-a6fe-feadeb562e39,Gimica GmbH,https://gimica.com/,,app_store,1667538256,,,,50
+c32cb92c-625a-4c33-af6c-478019f8d479,Digital Smoke LLC,http://www.solitairecity.com/iPhone.shtml,,app_store,283436103,,,,50
+6b60a18a-c19d-476d-ae0a-d8182cbab68f,Veraxen Ltd,https://veraxen.com,,app_store,1616149789,,,,50
+7fedb6c0-3bbb-4b24-81b2-d2b59fbc2919,Flyfox Games,https://www.flyfoxgames.com/,,app_store,6504484379,,,,50
+2983ecad-03c5-44e3-9996-8f2af76bb852,"WONDERFUL ENTERTAINMENT CO., LTD.",https://www.wonderentertain.com,,app_store,6443760633,,,,50
+8c1a7aea-f531-4d4b-aba7-5d79f758b9a1,"Do More Mobile, LLC.",https://maplemedia.io/,,app_store,426438823,,,,50
+d916d9a6-89db-4a6d-8e32-0658132f6141,Felicity Games,https://felicitygames.com,,app_store,6502341990,,,,50
+60b6060a-8cbb-4860-82a2-db058fea6be3,Kosmos Games Ltd,https://kosmos.games,,app_store,1216193188,,,,50
+8c841d78-c182-47ee-b4ac-9021b21036f0,Nightingale Mobile Games,https://www.nightingale-mobile.com/,,app_store,1362998719,,,,50
+4e4f5702-105f-4cf5-b9c2-c844443f6598,MobArts,http://www.mobarts.net,,app_store,483517253,,,,50
+ee0d9b25-4a44-40ab-a5c3-d994ffe1f45d,MobilityWare,http://www.mobilityware.com,,app_store,1275760266,,,,50
+ef492ea4-b67e-4b61-9a42-305f993b9538,Fortuisoft LLC,,,app_store,1632339696,,,,50
+5c90b1ce-841c-4fa8-bbea-b47c656ee731,Yang Li,https://www.firedragongame.com/,,app_store,1557197419,,,,50
+e8b80f23-39dc-4b70-826f-5049cf5f93ea,PI Entertainment Limited,https://piplay.com,,app_store,418794073,,,,50
+b495ea0a-fda4-480f-a1bd-5c9c3a4e6302,Interactive360,https://www.interactive360.info/,,app_store,1244668563,,,,50
+e1bcdf39-f0cc-4920-9f9d-82c3319d05c9,Xiaoxiong Yang,https://solitaireb.backupserver.club/app-ads.txt,,app_store,1490524637,,,,50
+9c8a68fd-b620-4f16-bcbd-5a02694283c8,Easybrain Ltd,https://easybrain.com,,app_store,6612024746,,,,50
+7ece8635-bb6f-43e9-ac35-bf95e94fc5d5,Word Search Games,http://wordsearchgamesinc.com,,app_store,1357802596,,,,50
+32042e83-62ad-45e9-be56-52cd3516600f,Hitapps Games LTD,https://hitappsgames.com/,,app_store,1632915087,,,,50
+86f69069-7106-4370-9ad3-660340bea653,Kooapps,https://www.kooapps.com,,app_store,600674056,,,,50
+812d3d17-236e-4e57-b1b7-e3afdef2e3c6,Tilting Point LLC,http://www.languinisgame.com,,app_store,957031988,,,,50
+7faf76c1-ec75-4a3a-988f-7aed57e82743,Wixot Game,http://www.wixot.com/wordsearch,,app_store,543054341,,,,50
+b72b2147-b02b-4f93-aa37-e2d769006604,Easybrain Ltd,https://easybrain.com,,app_store,6547858927,,,,50
+46670ed5-6bf3-441c-9864-467aa3d1b00d,Oakever Games,https://oakevergames.com,,app_store,1660171117,,,,50
+0e024fc1-d905-4a94-8d07-dac006c0da0d,FUGO BILISIM TEKNOLOJILERI VE YAZILIM TICARET ANONIM SIRKETI,http://www.fugo.com.tr,,app_store,1369521645,,,,50
+5f255cc1-7f7e-45ee-bae6-27191993188d,PlaySimple Games Pte Ltd,https://playsimple.in,,app_store,1269540854,,,,50
+6e88125f-07eb-4b36-8e7f-19dc769e88a2,Blackout Lab SL,https://blackout.barcelona/,,app_store,1479305181,,,,50
+269c7126-c526-4124-a0e8-003dcf0cc35f,Quadrimind,http://www.quadrimind.com,,app_store,635054175,,,,50
+35406cf7-3dfe-4ebb-addf-58fa1eae9f35,PANDAS OF CARIBBEAN LIMITED,https://pandasofcaribbean.com/,,app_store,1606691646,,,,50
+0d5fa4ba-2963-45f5-a9fe-631a23d8fc15,Kontra Dijital Servisler Tic. A.Ş.,https://kontra.net/,,app_store,1600897260,,,,50
+33e69d7e-373b-4586-b9f9-9756c1850b39,iDevMobile Tec.,,,app_store,460428855,,,,50
+ebd28338-c073-4524-aabd-b08df4b8e0d5,Luis Reis,https://master-apps-it.web.app/,,app_store,6468482884,,,,50
+4a1068d5-8dcf-4f47-8061-00a7238ea095,Fanatee,http://fanatee.com,,app_store,687877464,,,,50
+ad211216-83b5-4f36-a603-b5d79a470a04,Bimi Boo Kids Learning Games for Toddlers FZ LLC,https://bimiboo.net,,app_store,1434506514,,,,50
+eac690ef-2f1e-49b3-92b7-cdd4d3fc8808,Socialpoint,https://www.wordlifegame.com/,,app_store,1418492982,,,,50
+8bb1179b-c925-45a6-bcad-c93140ed580b,"Scopely, Inc.",https://www.scopely.com,,app_store,1215933788,,,,50
+ec1c5b48-5092-4ae4-ac11-bd1a14c87b1f,Synaptic Labs,https://www.synapticlabs.uk/,,app_store,806223188,,,,50
+ac2ae473-96ed-4f33-bf05-a842235552f4,FBF Sistemas LTDA,https://www.fbfsistemas.com,,app_store,442227661,,,,50
+2b170db4-f27b-4ca4-9535-038cd29dde11,MALPA GAMES,https://malpagames.com,,app_store,1542930270,,,,50
+6d35ac44-80b1-4020-8aa2-3a2f53a2cd9d,Playvalve S.L.,https://www.playvalve.com/,,app_store,1549726220,,,,50
+962aac5f-3935-44f6-8865-16b47acb274e,MNO GO APPS LTD,https://karfarol.com/,,app_store,1608860892,,,,50
+55394a09-2d6a-4224-9b9e-4a6be7b90830,Vocabulous US Inc.,https://wordwordapp.com/,,app_store,1514581899,,,,50
+ae68e603-6189-48aa-9cf3-68fb0ee91e44,ZenLife Games Pte. Ltd.,https://zenlifegames.com/,,app_store,1226926872,,,,50
+5fdc73eb-0cfd-4426-b394-37718864f5b9,Deusdete Filho,,,app_store,6743015958,,,,50
+6a342560-e596-47b2-8f04-7dea55a07f9b,DPM APPS LP,https://drumpadapps.com,,app_store,1599756543,,,,50

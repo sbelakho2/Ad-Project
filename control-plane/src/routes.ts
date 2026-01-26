@@ -99,8 +99,10 @@ import { queryReadOnly } from './database';
 // Sales Automation
 import * as salesAutomation from './services/sales-automation';
 
-// Autonomous Sales API (v2)
-import autonomousApiRoutes from './routes/autonomous-api';
+// Autonomous Sales API routes
+import autonomousApiProxy from './routes/autonomous-api-proxy';
+import autonomousApiExecution from './routes/autonomous-api';
+import { logger } from './logger';
 
 const router = Router();
 
@@ -1429,11 +1431,23 @@ router.post('/api/v1/sales/contacts/:id/verify', requireOperator, asyncHandler(a
 }));
 
 // ============================================
-// AUTONOMOUS SALES API (V2)
+// AUTONOMOUS SALES API
 // ============================================
 
-// Mount autonomous sales API under /api/autonomous
-// This is the zero-cost AI sales system
-router.use('/api/autonomous', autonomousApiRoutes);
+// Check if we are the execution node (Test Server) or proxy (App Server)
+// Default to proxy mode for safety
+const IS_EXECUTION_NODE = process.env.SALES_AUTOMATION_ROLE === 'execution';
+
+if (IS_EXECUTION_NODE) {
+  // EXECUTION MODE (runs on Test Server)
+  // Mount the real API implementation (orchestrator, spintax, thompson sampling)
+  logger.info('[Autonomous] Mounting EXECUTION routes (Role: execution)');
+  router.use('/api/autonomous', autonomousApiExecution);
+} else {
+  // PROXY MODE (runs on App Server)
+  // Requests are forwarded to Test Server (157.90.126.205:4001)
+  logger.info('[Autonomous] Mounting PROXY routes (Role: proxy)');
+  router.use('/api/autonomous', autonomousApiProxy);
+}
 
 export default router;

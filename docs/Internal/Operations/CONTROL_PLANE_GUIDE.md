@@ -1,7 +1,44 @@
 # Control Plane Operations Guide
 
+**Last Updated:** January 25, 2026
+
 ## Overview
 The ApexMediation Control Plane (`admin.apexmediation.ee`) is the central nerve center for platform operators. It is architected as a separate service with elevated privileges, strictly decoupled from the customer-facing API to ensure maximum security and reliability.
+
+## 🏗️ Sales Automation Architecture
+
+> **⚠️ CRITICAL: The Control Plane on App Server is STRICTLY A PROXY for sales automation.**
+
+| Component | Server | Port | Role |
+|-----------|--------|------|------|
+| Control Plane | App (46.62.252.96) | 4000 | Proxy only - forwards `/api/autonomous/*` to test server |
+| **Sales API** | **Test (157.90.126.205)** | 4001 | **ALL orchestration, spintax, Thompson sampler, scoring** |
+| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (icebreakers, classification) |
+| DB Access | Test→App→DB | 6432 | SSH tunnel through App Server PgBouncer |
+
+### SSH Tunnels (systemd services)
+
+| Service | Server | Purpose |
+|---------|--------|---------|
+| `sales-api-tunnel.service` | App | localhost:4001 → Test:4001 |
+| `edge-tunnel.service` | App | localhost:3500 → Test:3500 |
+| `db-tunnel.service` | Test | localhost:6432 → App:6432 → DB:5432 |
+
+### Checking Sales Automation Health
+
+```bash
+# From App Server (via proxy)
+curl -s http://localhost:4000/api/autonomous/health
+
+# Direct to Test Server (internal)
+./scripts/ops/hetzner_ssh.sh test -- "curl -s http://localhost:4001/api/autonomous/health"
+
+# Check tunnel status on App Server
+./scripts/ops/hetzner_ssh.sh app -- "systemctl status sales-api-tunnel"
+
+# Check Sales API on Test Server
+./scripts/ops/hetzner_ssh.sh test -- "pm2 status sales-api"
+```
 
 ## 🔐 Access & Security
 - **Authentication**: Uses a separate JWT realm for operators. Credentials are not shared with the customer database.

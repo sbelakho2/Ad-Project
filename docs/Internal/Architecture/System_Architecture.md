@@ -1,6 +1,6 @@
 # System Architecture & Maintenance Guide
 
-**Last Updated:** December 17, 2025  
+**Last Updated:** January 25, 2026  
 **Target Audience:** New Engineers, DevOps, System Administrators
 
 ---
@@ -19,14 +19,27 @@ graph TD
         LB -->|:3000| Console[Console (Next.js)]
         LB -->|:3002| Website[Website (Next.js)]
         LB -->|:8080| Backend[Backend API (Node.js)]
-        LB -->|:4000| ControlPlane[Control Plane (Node.js)]
+        LB -->|:4000| ControlPlane[Control Plane - PROXY ONLY]
         
         Backend -->|Read/Write| Redis[Redis Cache]
-        Backend -->|gRPC/HTTP| ML[ML Services]
+        ControlPlane -->|SSH Tunnel :4001| TestServer
+    end
+    
+    subgraph "Test Server (Hetzner)"
+        TestServer[Sales API :4001]
+        TestServer -->|Orchestration| SalesModules[Hunter, Analyst, Spintax, Sampler]
+        EdgeWorker[Edge Worker :3500]
+        EdgeWorker -->|ML Inference| Models[LaMini, DistilBERT]
+        TestServer -->|SSH Tunnel :6432| AppPgBouncer
+    end
+    
+    subgraph "App Server - DB Access"
+        AppPgBouncer[PgBouncer :6432]
     end
     
     subgraph "DB Server (Hetzner)"
         Backend -->|Read/Write| DB[PostgreSQL 16]
+        AppPgBouncer -->|:5432| DB
         ControlPlane -->|Read Only| DB
     end
     
@@ -47,9 +60,39 @@ The production environment runs on Hetzner Cloud using a split-server architectu
 
 | Role | IP Address | OS | Key Services |
 |------|------------|----|--------------|
-| **App Server** | `46.62.252.96` | Ubuntu | Caddy, Backend, Console, Website, Redis, Control Plane |
-| **DB Server** | `77.42.44.35` | Ubuntu | PostgreSQL 16 |
-| **Test Server** | `157.90.126.205` | Ubuntu | Synthetic Load Generators |
+| **App Server** | `46.62.252.96` | Ubuntu | Caddy, Backend, Console, Website, Redis, Control Plane (proxy) |
+| **DB Server** | `77.42.44.35` | Ubuntu | PostgreSQL 16 (NOT directly accessible) |
+| **Test Server** | `157.90.126.205` | Ubuntu | **Sales API**, Edge Worker, ML Models, Synthetic Load Generators |
+
+### 2.2 Sales Automation Architecture
+
+> **⚠️ CRITICAL: App Server runs NO sales automation logic.**
+> 
+> The Control Plane on App Server is strictly a **proxy client**.
+> ALL sales automation work runs on the **Test Server**.
+
+```
+App Server (46.62.252.96)          Test Server (157.90.126.205)
+┌─────────────────────────┐        ┌─────────────────────────┐
+│ Control Plane :4000     │        │ Sales API :4001         │
+│ (PROXY ONLY)            │◄──────►│ - Orchestrator          │
+│                         │ tunnel │ - Thompson Sampler      │
+│ sales-api-tunnel.service│        │ - Spintax Engine        │
+│ localhost:4001→Test:4001│        │ - Hunter, Analyst       │
+└─────────────────────────┘        │ - Clerk                 │
+                                   │                         │
+                                   │ Edge Worker :3500       │
+                                   │ - LaMini-Flan-T5        │
+                                   │ - DistilBERT            │
+                                   │                         │
+                                   │ db-tunnel.service       │
+                                   │ localhost:6432→App:6432 │
+                                   └─────────────────────────┘
+                                              │
+                                              ▼
+                                   DB Server (77.42.44.35)
+                                   └── PostgreSQL :5432
+```
 
 ### 2.2 Directory Structure (Production)
 

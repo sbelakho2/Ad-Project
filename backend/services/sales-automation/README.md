@@ -1,5 +1,13 @@
 # Sales Automation System - ACTUALLY USABLE
 
+> **⚠️ Architecture Note (January 2026):**  
+> This is the **V1 backend sales automation** (trial nurture, sequences, Resend integration) that runs on the **App Server backend**.
+>
+> For **Autonomous Sales V2** (outbound prospecting, Thompson Sampling, Spintax), see:
+> - [AUTONOMOUS_SALES_V2.md](../../../docs/Internal/Sales/AUTONOMOUS_SALES_V2.md) - Full guide
+> - V2 runs on the **Test Server** (157.90.126.205:4001)
+> - The App Server control-plane is strictly a proxy client for V2
+
 ## 🎛️ Control Panel UI (NEW)
 
 **All settings are now editable from the Control Plane UI:**

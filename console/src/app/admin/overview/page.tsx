@@ -19,7 +19,9 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   ExternalLink,
+  ChevronRight,
 } from 'lucide-react'
+import Link from 'next/link'
 import {
   LineChart,
   Line,
@@ -443,6 +445,55 @@ export default function AdminOverviewPage() {
         </div>
       </div>
 
+      {/* Admin Modules */}
+      <div className="bg-white rounded-xl border p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Admin Modules</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <InternalLinkCard
+            title="Sales Automation V1"
+            description="Classic funnel & principle tracking"
+            href="/admin/sales-automation"
+            icon="📈"
+          />
+          <InternalLinkCard
+            title="SSAI Dashboard"
+            description="Server-side ad insertion monitoring"
+            href="/admin/ssai"
+            icon="📺"
+          />
+          <InternalLinkCard
+            title="Health Monitor"
+            description="Service health & RED metrics"
+            href="/admin/health"
+            icon="💚"
+          />
+          <InternalLinkCard
+            title="Infrastructure"
+            description="Server & database management"
+            href="/admin/infrastructure"
+            icon="🏗️"
+          />
+          <InternalLinkCard
+            title="Billing Audit"
+            description="Revenue tracking & audit logs"
+            href="/admin/audit"
+            icon="💰"
+          />
+          <InternalLinkCard
+            title="Value Multipliers"
+            description="Placement value configuration"
+            href="/admin/value-multipliers"
+            icon="⚡"
+          />
+          <InternalLinkCard
+            title="Billing"
+            description="Subscription & invoice management"
+            href="/admin/billing"
+            icon="💳"
+          />
+        </div>
+      </div>
+
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Latency Chart */}
@@ -690,5 +741,33 @@ function ExternalLinkCard({
       </div>
       <ExternalLink className="h-4 w-4 text-gray-400 group-hover:text-primary-500" />
     </a>
+  )
+}
+
+function InternalLinkCard({
+  title,
+  description,
+  href,
+  icon,
+}: {
+  title: string
+  description: string
+  href: string
+  icon: string
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center gap-3 p-4 rounded-lg border hover:bg-gray-50 hover:border-primary-200 transition-colors group"
+    >
+      <span className="text-2xl">{icon}</span>
+      <div className="flex-1">
+        <p className="text-sm font-medium text-gray-900 group-hover:text-primary-600">
+          {title}
+        </p>
+        <p className="text-xs text-gray-500">{description}</p>
+      </div>
+      <ChevronRight className="h-4 w-4 text-gray-400 group-hover:text-primary-500" />
+    </Link>
   )
 }

@@ -1,19 +1,31 @@
 #!/bin/bash
 # deploy-sales-automation.sh
-# Deploys the sales automation system to the Hetzner App Server
+# Deploys the sales automation system (Autonomous Sales V2) to the Hetzner Test Server
+#
+# ⚠️  ARCHITECTURE (January 2026):
+# ⚠️  ALL sales automation runs on the TEST SERVER (157.90.126.205)
+# ⚠️  The App Server control-plane is strictly a proxy client
 #
 # Usage: ./scripts/ops/deploy-sales-automation.sh [--migrate] [--restart]
 #
 # Options:
-#   --migrate   Run database migrations
-#   --restart   Restart the sales-automation service
+#   --migrate   Run database migrations (via db-tunnel)
+#   --restart   Restart the sales-api PM2 process
 
 set -euo pipefail
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ⚠️  SERVER ARCHITECTURE (January 2026):
+# ⚠️  - App Server (46.62.252.96): Backend, Console, Control Plane (PROXY ONLY)
+# ⚠️  - Test Server (157.90.126.205): ALL Sales Automation, Edge Worker, Inbound SMTP
+# ⚠️  - DB Server (77.42.44.35): PostgreSQL (via App Server PgBouncer only)
+# ⚠️
+# ⚠️  Sales Automation deploys to TEST SERVER!
 APP_SERVER="46.62.252.96"
+TEST_SERVER="157.90.126.205"  # ✅ Sales automation runs HERE
 SSH_USER="root"
 REMOTE_PATH="/opt/adproject"
 
@@ -38,88 +50,118 @@ for arg in "$@"; do
   esac
 done
 
-# SSH wrapper
+# SSH wrapper - connect to TEST SERVER
 ssh_run() {
-  ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${APP_SERVER}" "$@"
+  ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${TEST_SERVER}" "$@"
 }
 
-# SCP wrapper
+# SCP wrapper - copy to TEST SERVER
 scp_to() {
-  scp -o StrictHostKeyChecking=accept-new -r "$1" "${SSH_USER}@${APP_SERVER}:$2"
+  scp -o StrictHostKeyChecking=accept-new -r "$1" "${SSH_USER}@${TEST_SERVER}:$2"
 }
 
 echo ""
-echo "🚀 ApexMediation Sales Automation Deployment"
-echo "============================================="
+echo "🚀 ApexMediation Sales Automation Deployment (V2 - Test Server)"
+echo "================================================================"
+echo ""
+echo "⚠️  Architecture: ALL sales automation runs on Test Server"
+echo "⚠️  App Server control-plane is PROXY ONLY"
 echo ""
 
-# 1. Build backend locally
-log_info "Building backend..."
-cd "$PROJECT_ROOT/backend"
+# Validate deployment target
+log_info "Validating deployment target (Test Server: $TEST_SERVER)..."
+ACTUAL_IP=$(ssh_run "hostname -I | awk '{print \$1}'" 2>/dev/null || echo "unknown")
+if [[ "$ACTUAL_IP" != "$TEST_SERVER" && "$ACTUAL_IP" != "157.90.126.205" ]]; then
+  log_error "═══════════════════════════════════════════════════════════════"
+  log_error "  ⛔ DEPLOYMENT TARGET MISMATCH!"
+  log_error "═══════════════════════════════════════════════════════════════"
+  log_error "  Expected: $TEST_SERVER (Test Server)"
+  log_error "  Actual:   $ACTUAL_IP"
+  log_error ""
+  log_error "  Sales Automation V2 must deploy to Test Server!"
+  log_error "  App Server ($APP_SERVER) is PROXY ONLY."
+  log_error "═══════════════════════════════════════════════════════════════"
+  exit 1
+fi
+log_info "Target validated: Test Server ($TEST_SERVER)"
+
+# 1. Build control-plane locally (sales-api is part of control-plane)
+log_info "Building control-plane..."
+cd "$PROJECT_ROOT/control-plane"
 npm run build 2>/dev/null || {
   log_warn "npm run build failed, trying direct tsc..."
   npx tsc --build
 }
 log_info "Build complete"
 
-# 2. Copy sales automation files
-log_info "Copying sales automation files to app server..."
+# 2. Copy control-plane files to Test Server
+log_info "Copying control-plane files to Test Server..."
 
-# Copy compiled CLI
-scp_to "dist/src/scripts/salesAutomationCli.js" "${REMOTE_PATH}/backend/dist/src/scripts/"
+# Copy compiled dist
+scp_to "dist" "${REMOTE_PATH}/control-plane/"
 
-# Copy service files
-scp_to "dist/services/sales-automation" "${REMOTE_PATH}/backend/dist/services/"
-
-# Copy systemd service file
-scp_to "$PROJECT_ROOT/infrastructure/hetzner/sales-automation.service" "/etc/systemd/system/"
+# Copy package files
+scp_to "package.json" "${REMOTE_PATH}/control-plane/"
+scp_to "package-lock.json" "${REMOTE_PATH}/control-plane/"
 
 log_info "Files copied"
 
-# 3. Run migrations if requested
+# 3. Install dependencies on Test Server
+log_info "Installing dependencies on Test Server..."
+ssh_run "cd ${REMOTE_PATH}/control-plane && npm ci --production"
+log_info "Dependencies installed"
+
+# 4. Run migrations if requested (via db-tunnel on Test Server)
 if [ "$MIGRATE" = true ]; then
-  log_info "Running database migrations..."
+  log_info "Running database migrations via db-tunnel..."
   
   # Copy migration file
   scp_to "$PROJECT_ROOT/backend/migrations/041_sales_automation_outbound.sql" "${REMOTE_PATH}/backend/migrations/"
   
-  # Run migration
-  ssh_run "cd ${REMOTE_PATH}/backend && \
-    source ../.env && \
-    psql \"\$DATABASE_URL\" -f migrations/041_sales_automation_outbound.sql"
+  # Run migration via db-tunnel (localhost:6432 → App Server → DB Server)
+  ssh_run "cd ${REMOTE_PATH}/control-plane && \
+    source .env && \
+    psql 'postgres://adproject:\${POSTGRES_PASSWORD}@localhost:6432/adproject?sslmode=disable' \
+      -f ../backend/migrations/041_sales_automation_outbound.sql"
   
   log_info "Migrations complete"
 fi
 
-# 4. Setup and restart service if requested
+# 5. Restart sales-api PM2 process if requested
 if [ "$RESTART" = true ]; then
-  log_info "Setting up systemd service..."
+  log_info "Restarting sales-api PM2 process..."
   
-  ssh_run "systemctl daemon-reload && \
-    systemctl enable sales-automation && \
-    systemctl restart sales-automation"
+  ssh_run "cd ${REMOTE_PATH}/control-plane && \
+    pm2 restart sales-api || pm2 start dist/src/index.js --name sales-api"
   
   # Wait and check status
   sleep 2
-  ssh_run "systemctl status sales-automation --no-pager" || true
+  ssh_run "pm2 status"
   
-  log_info "Service restarted"
+  log_info "PM2 process restarted"
 fi
 
-# 5. Show status
+# 6. Show status
 echo ""
 log_info "Deployment complete! Summary:"
-echo "  - Backend built and copied"
-[ "$MIGRATE" = true ] && echo "  - Database migrations applied"
-[ "$RESTART" = true ] && echo "  - Service restarted"
+echo "  - control-plane built and copied to Test Server"
+[ "$MIGRATE" = true ] && echo "  - Database migrations applied (via db-tunnel)"
+[ "$RESTART" = true ] && echo "  - sales-api PM2 process restarted"
 echo ""
 
 # Show how to check logs
-echo "To check logs:"
-echo "  ssh ${SSH_USER}@${APP_SERVER} journalctl -u sales-automation -f"
+echo "To check logs (Test Server):"
+echo "  ./scripts/ops/hetzner_ssh.sh test -- 'pm2 logs sales-api'"
 echo ""
 
-# Show how to run manually
-echo "To run manually:"
-echo "  ssh ${SSH_USER}@${APP_SERVER} 'cd ${REMOTE_PATH}/backend && node dist/src/scripts/salesAutomationCli.js help'"
+# Show how to verify
+echo "To verify (from local):"
+echo "  ./scripts/ops/hetzner_ssh.sh test -- 'curl -s http://localhost:4001/api/autonomous/health | jq'"
+echo ""
+
+# Show architecture reminder
+echo "⚠️  ARCHITECTURE REMINDER:"
+echo "  - sales-api runs on Test Server (157.90.126.205:4001)"
+echo "  - App Server control-plane is PROXY ONLY (forwards /api/autonomous/*)"
+echo "  - SSH tunnel: App Server localhost:4001 → Test Server:4001"
 echo ""

@@ -62,6 +62,161 @@ export interface SpinResult {
 }
 
 // ============================================================================
+// ICEBREAKER QUALITY SCORING (NEW - Jan 2026)
+// ============================================================================
+
+export interface IcebreakerQualityResult {
+  score: number;           // 0-100
+  issues: string[];        // List of quality issues found
+  passesQualityGate: boolean;  // true if score >= 60
+}
+
+/**
+ * Score the quality of an icebreaker to prevent generic/low-effort messages.
+ * 
+ * CIALDINI PRINCIPLE: Liking requires genuine personalization.
+ * Generic icebreakers ("great app!") destroy trust instantly.
+ * 
+ * @param icebreaker - The icebreaker text to score
+ * @returns Quality score and list of issues
+ */
+export function scoreIcebreakerQuality(icebreaker: string): IcebreakerQualityResult {
+  const issues: string[] = [];
+  let score = 100;
+  
+  if (!icebreaker || icebreaker.trim() === '') {
+    return { score: 0, issues: ['Icebreaker is empty'], passesQualityGate: false };
+  }
+  
+  const trimmed = icebreaker.trim();
+  
+  // Check for overly generic praise - major red flag
+  const genericPatterns = [
+    /\b(great|nice|cool|awesome|amazing|fantastic|wonderful)\s+(app|game|work|job|product)\b/i,
+    /\blove\s+(your|the)\s+(app|game|work)\b/i,
+    /\b(looks?\s+)?interesting\b/i,
+    /\bimpressed\s+by\s+(the|your)\s+(app|work|game)\b/i,
+  ];
+  
+  for (const pattern of genericPatterns) {
+    if (pattern.test(trimmed)) {
+      score -= 30;
+      issues.push('Contains generic praise - not specific enough to feel personal');
+      break; // Only penalize once for generic praise
+    }
+  }
+  
+  // Check for length - too short is suspicious, too long loses attention
+  if (trimmed.length < 30) {
+    score -= 25;
+    issues.push('Too short - needs more specific detail to feel personal');
+  } else if (trimmed.length > 200) {
+    score -= 15;
+    issues.push('Too long - may lose reader attention, trim to key insight');
+  }
+  
+  // Check for specific detail indicators (positive signals)
+  const specificityIndicators = [
+    /\b(feature|update|version|design|growth|revenue|users?|downloads?|ratings?|reviews?)\b/i,
+    /\b(noticed|saw|found|discovered|read\s+about)\b/i,
+    /\b(specific|particular|especially|notably)\b/i,
+    /\b\d+\b/,  // Numbers often indicate specific knowledge
+    /\b(recently|last\s+(week|month|year)|this\s+(week|month|year))\b/i,  // Temporal specificity
+  ];
+  
+  let hasSpecificity = false;
+  for (const pattern of specificityIndicators) {
+    if (pattern.test(trimmed)) {
+      hasSpecificity = true;
+      break;
+    }
+  }
+  
+  if (!hasSpecificity) {
+    score -= 20;
+    issues.push('No specific details mentioned - add feature/metric/event reference');
+  }
+  
+  // Check for question format (engagement driver)
+  const hasQuestion = /\?$/.test(trimmed);
+  if (hasQuestion) {
+    score += 10; // Bonus for engagement
+    // Cap at 100
+    score = Math.min(100, score);
+  }
+  
+  // Check for templated patterns that look automated
+  const automatedPatterns = [
+    /\{\{[^}]+\}\}/,  // Unresolved variables
+    /\[insert.*\]/i,  // Insert placeholders
+    /^I\s+(noticed|came across|saw|found)\s+(your|the)\s+(app|game|company)\s+and\s*$/i,  // Incomplete sentence
+  ];
+  
+  for (const pattern of automatedPatterns) {
+    if (pattern.test(trimmed)) {
+      score -= 40;
+      issues.push('Contains automation artifacts or incomplete sentences');
+      break;
+    }
+  }
+  
+  // Ensure score stays in bounds
+  score = Math.max(0, Math.min(100, score));
+  
+  return {
+    score,
+    issues,
+    passesQualityGate: score >= 60,
+  };
+}
+
+// ============================================================================
+// HTML ENCODING FOR SECURITY (NEW - Jan 2026)
+// ============================================================================
+
+/**
+ * Encode HTML special characters to prevent XSS attacks.
+ * 
+ * SECURITY: User-provided data (names, company names) could contain malicious HTML.
+ * This function ensures all personalization values are safely encoded.
+ * 
+ * @param str - The string to encode
+ * @returns HTML-safe encoded string
+ */
+export function encodeHtml(str: string): string {
+  if (!str) return '';
+  
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Encode a personalization context for safe HTML output.
+ * 
+ * @param context - The context with potentially unsafe values
+ * @returns New context with all string values HTML-encoded
+ */
+export function encodeContextForHtml(context: PersonalizationContext): PersonalizationContext {
+  return {
+    firstName: context.firstName ? encodeHtml(context.firstName) : undefined,
+    lastName: context.lastName ? encodeHtml(context.lastName) : undefined,
+    company: context.company ? encodeHtml(context.company) : undefined,
+    appName: context.appName ? encodeHtml(context.appName) : undefined,
+    appGenre: context.appGenre ? encodeHtml(context.appGenre) : undefined,
+    icebreaker: context.icebreaker ? encodeHtml(context.icebreaker) : undefined,
+    customFields: context.customFields 
+      ? Object.fromEntries(
+          Object.entries(context.customFields).map(([k, v]) => [k, encodeHtml(v)])
+        )
+      : undefined,
+  };
+}
+
+// ============================================================================
 // LEVENSHTEIN DISTANCE (Uniqueness Check)
 // ============================================================================
 
@@ -115,16 +270,32 @@ export function normalizedLevenshtein(str1: string, str2: string): number {
 /**
  * Parse and spin a spintax string.
  * Handles nested braces and random selection.
+ * 
+ * IMPORTANT: This function ONLY processes spintax (choices with |):
+ *   - {option1|option2|option3} → Random choice between options
+ *   - Single-option braces without | are preserved: {single} → {single}
+ *   - Double-brace variables are PRESERVED: {{VAR}} → {{VAR}}
+ * 
+ * Personalization variables ({{VAR}}) are handled separately by personalize().
  */
 export function spin(spintax: string): string {
-  // Find the innermost {options} and replace
-  let result = spintax;
+  // Step 1: Protect double-brace variables by replacing them with placeholders
+  const placeholders: Map<string, string> = new Map();
+  let placeholderIndex = 0;
+  
+  let result = spintax.replace(/\{\{([^{}]+)\}\}/g, (match) => {
+    const placeholder = `__PLACEHOLDER_${placeholderIndex++}__`;
+    placeholders.set(placeholder, match);
+    return placeholder;
+  });
+  
+  // Step 2: Process spintax (only braces containing | for choices)
   let iterations = 0;
   const maxIterations = 100; // Prevent infinite loops
   
   while (result.includes('{') && iterations < maxIterations) {
-    // Find innermost braces (no nested braces inside)
-    const match = result.match(/\{([^{}]+)\}/);
+    // Find innermost braces containing a pipe (actual spintax choices)
+    const match = result.match(/\{([^{}]*\|[^{}]*)\}/);
     if (!match) break;
     
     const options = match[1].split('|');
@@ -135,34 +306,102 @@ export function spin(spintax: string): string {
     iterations++;
   }
   
+  // Step 3: Restore protected double-brace variables
+  for (const [placeholder, original] of placeholders) {
+    result = result.replace(placeholder, original);
+  }
+  
   return result.trim();
 }
 
 /**
  * Apply personalization context to a template.
  * Replaces {{VARIABLE}} placeholders with actual values.
+ * 
+ * Supported variables:
+ *   {{FIRST_NAME}} - Contact's first name (smart fallback based on context)
+ *   {{LAST_NAME}}  - Contact's last name (fallback: "")
+ *   {{COMPANY}}    - Company name (fallback: extracted from email or "your company")
+ *   {{APP_NAME}}   - App name (REQUIRED - if missing, message fails quality gate)
+ *   {{APP_GENRE}}  - App genre/category (fallback: "mobile apps")
+ *   {{ICEBREAKER}} - AI-generated icebreaker (fallback: generic interest line)
+ * 
+ * All matches are case-insensitive.
+ * 
+ * CIALDINI PRINCIPLE: Personalization drives Liking.
+ * Bad personalization (obvious fallbacks) destroys trust instantly.
  */
 export function personalize(template: string, context: PersonalizationContext): string {
   let result = template;
   
-  // Standard replacements
-  result = result.replace(/\{\{FIRST_NAME\}\}/gi, context.firstName || 'there');
-  result = result.replace(/\{\{LAST_NAME\}\}/gi, context.lastName || '');
-  result = result.replace(/\{\{COMPANY\}\}/gi, context.company || 'your company');
-  result = result.replace(/\{\{APP_NAME\}\}/gi, context.appName || 'your app');
-  result = result.replace(/\{\{APP_GENRE\}\}/gi, context.appGenre || 'mobile');
-  result = result.replace(/\{\{ICEBREAKER\}\}/gi, context.icebreaker || '');
+  // Helper to clean and validate values
+  const clean = (val: string | undefined, fallback: string): string => {
+    if (!val || val.trim() === '' || val === 'null' || val === 'undefined') {
+      return fallback;
+    }
+    return val.trim();
+  };
+  
+  // Smart FIRST_NAME fallback: Use context-aware fallback that doesn't scream automation
+  // FIXED: Better handling to avoid awkward "Hi, " with nothing after it
+  const smartFirstNameFallback = (): string => {
+    // If we have app name, we can skip the name entirely - the email will still feel personal
+    // because we're talking about their specific app
+    if (context.appName && context.appName.trim() !== '') {
+      return ''; // Template: "Hi, I noticed {{APP_NAME}}..." works without a name
+    }
+    // If we have company but no app, use 'team' - professional and not robotic
+    // "Hi team," is common in B2B and doesn't feel automated
+    if (context.company && context.company.trim() !== '') {
+      return 'team';
+    }
+    // Last resort: empty string, quality gate will catch if there's no personalization at all
+    return '';
+  };
+  
+  // Smart ICEBREAKER fallback: Generic but still personalized using app/genre
+  const smartIcebreakerFallback = (): string => {
+    if (context.appName && context.appName.trim() !== '') {
+      return `I came across ${context.appName} and was impressed by the execution.`;
+    }
+    if (context.appGenre && context.appGenre.trim() !== '') {
+      return `I've been looking at ${context.appGenre} apps and yours caught my attention.`;
+    }
+    return ''; // No fallback if we have nothing to work with
+  };
+  
+  // Standard replacements (case-insensitive)
+  // FIXED: Removed dangerous fallbacks that triggered quality gate rejection
+  // The quality gate checks for 'your company' and 'your app' as indicators of missing data
+  // Using empty strings allows the quality gate to properly detect missing personalization
+  result = result.replace(/\{\{FIRST_NAME\}\}/gi, clean(context.firstName, smartFirstNameFallback()));
+  result = result.replace(/\{\{LAST_NAME\}\}/gi, clean(context.lastName, ''));
+  // FIXED: Changed from 'your company' to empty string - quality gate will catch missing data
+  result = result.replace(/\{\{COMPANY\}\}/gi, clean(context.company, ''));
+  result = result.replace(/\{\{APP_NAME\}\}/gi, clean(context.appName, '')); // Empty = fails quality gate
+  // FIXED: Changed from 'mobile apps' to empty string - generic fallbacks look robotic
+  result = result.replace(/\{\{APP_GENRE\}\}/gi, clean(context.appGenre, ''));
+  result = result.replace(/\{\{ICEBREAKER\}\}/gi, clean(context.icebreaker, smartIcebreakerFallback()));
   
   // Custom fields
   if (context.customFields) {
     for (const [key, value] of Object.entries(context.customFields)) {
-      const regex = new RegExp(`\\{\\{${key.toUpperCase()}\\}\\}`, 'gi');
-      result = result.replace(regex, value);
+      const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'gi');
+      result = result.replace(regex, clean(value, ''));
     }
   }
   
-  // Clean up double spaces and empty placeholders
-  result = result.replace(/\s+/g, ' ').trim();
+  // Clean up artifacts:
+  // - Multiple consecutive spaces → single space
+  // - Space before punctuation → just punctuation  
+  // - Empty parenthetical content → removed
+  // - Double commas → single comma
+  result = result
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([.,!?;:])/g, '$1')
+    .replace(/\(\s*\)/g, '')
+    .replace(/,\s*,/g, ',')
+    .trim();
   
   return result;
 }
@@ -190,6 +429,27 @@ export function spinAndPersonalize(
 }
 
 /**
+ * Generate a unique spin with personalization, HTML-encoded for safe email output.
+ * 
+ * SECURITY: Use this function when generating HTML emails to prevent XSS attacks
+ * from user-provided data in names, company names, etc.
+ * 
+ * @param subjectSpintax - Subject line with spintax
+ * @param bodySpintax - Body with spintax
+ * @param context - Personalization context (will be HTML-encoded)
+ * @returns SpinResult with HTML-safe subject and body
+ */
+export function spinAndPersonalizeHtml(
+  subjectSpintax: string,
+  bodySpintax: string,
+  context: PersonalizationContext
+): SpinResult {
+  // HTML-encode the context first for security
+  const safeContext = encodeContextForHtml(context);
+  return spinAndPersonalize(subjectSpintax, bodySpintax, safeContext);
+}
+
+/**
  * Simple hash function for variation tracking
  */
 function simpleHash(str: string): string {
@@ -213,7 +473,10 @@ export class SpintaxEngine {
   
   constructor(options?: { maxHistorySize?: number; minDistance?: number }) {
     this.maxHistorySize = options?.maxHistorySize || 50;
-    this.minDistance = options?.minDistance || 10;
+    // FIXED: Increased from 10 to 30 to ensure sufficient uniqueness for spam filters
+    // Original value of 10 was too low - emails with only 10 character differences
+    // are essentially the same to spam filters
+    this.minDistance = options?.minDistance || 30;
   }
   
   /**
@@ -266,6 +529,22 @@ export class SpintaxEngine {
     });
     
     return spinAndPersonalize(subjectSpintax, bodySpintax, context);
+  }
+  
+  /**
+   * Generate a unique message with HTML-encoded context
+   * Use this when the output will be rendered as HTML (email body)
+   * Prevents XSS and ensures special characters display correctly
+   */
+  generateUniqueHtml(
+    subjectSpintax: string,
+    bodySpintax: string,
+    context: PersonalizationContext,
+    maxAttempts = 5
+  ): SpinResult {
+    // HTML-encode the context first for security
+    const safeContext = encodeContextForHtml(context);
+    return this.generateUnique(subjectSpintax, bodySpintax, safeContext, maxAttempts);
   }
   
   /**

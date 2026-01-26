@@ -79,6 +79,12 @@ export interface HunterConfig {
   requestDelayMs?: number;
   maxPagesPerSource?: number;
   userAgent?: string;
+  /** 
+   * Proxy URL for browser requests (e.g., http://user:pass@proxy.example.com:8080)
+   * CRITICAL for production: Google Play will block Hetzner IPs immediately.
+   * Use a residential proxy provider like Bright Data, Smartproxy, or Oxylabs.
+   */
+  proxyUrl?: string;
 }
 
 // ============================================================================
@@ -88,18 +94,40 @@ export interface HunterConfig {
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 let browserInstance: Browser | null = null;
+let currentProxyUrl: string | undefined = undefined;
 
 /**
  * Get or create a shared browser instance
+ * 
+ * NOTE: If proxyUrl changes, browser is recreated with new proxy.
  */
 async function getBrowser(config: HunterConfig): Promise<Browser | null> {
   const playwright = await getPlaywright();
   if (!playwright) return null;
   
+  // If proxy changed, recreate browser
+  if (browserInstance && currentProxyUrl !== config.proxyUrl) {
+    await browserInstance.close();
+    browserInstance = null;
+  }
+  
   if (!browserInstance || !browserInstance.isConnected()) {
-    browserInstance = await playwright.chromium.launch({
+    const launchOptions: { headless: boolean; proxy?: { server: string } } = {
       headless: config.headless ?? true,
-    });
+    };
+    
+    // Add proxy if configured
+    if (config.proxyUrl) {
+      launchOptions.proxy = { server: config.proxyUrl };
+      logger.info('[Hunter] Launching browser with proxy', { 
+        proxyHost: new URL(config.proxyUrl).host 
+      });
+    } else {
+      logger.warn('[Hunter] Launching browser WITHOUT proxy - may get blocked by Google Play');
+    }
+    
+    browserInstance = await playwright.chromium.launch(launchOptions);
+    currentProxyUrl = config.proxyUrl;
   }
   return browserInstance;
 }
@@ -216,6 +244,19 @@ async function scrapeGooglePlayApp(
     const installs = await page.$eval('.ClM7O', el => el.textContent?.trim() || '').catch(() => '');
     const ratingText = await page.$eval('[itemprop="starRating"] [aria-label]', el => el.getAttribute('aria-label') || '').catch(() => '');
     const rating = parseFloat(ratingText.match(/[\d.]+/)?.[0] || '0');
+
+    // Extract Last Updated date
+    const lastUpdatedText = await page.evaluate(() => {
+        const divs = Array.from(document.querySelectorAll('div'));
+        const label = divs.find(d => d.textContent === 'Updated on');
+        return label ? label.nextElementSibling?.textContent?.trim() : '';
+    }).catch(() => '');
+    
+    let lastUpdated: Date | undefined;
+    if (lastUpdatedText) {
+        const parsed = new Date(lastUpdatedText);
+        if (!isNaN(parsed.getTime())) lastUpdated = parsed;
+    }
     
     // Try to find developer email in description or privacy policy
     const developerEmail = await extractDeveloperEmail(page, delayMs);
@@ -240,6 +281,7 @@ async function scrapeGooglePlayApp(
       description: description || undefined,
       installs: installs || undefined,
       rating: rating || undefined,
+      lastUpdated: lastUpdated || undefined,
       scrapedAt: new Date(),
     };
   } catch (err) {
@@ -319,47 +361,139 @@ export async function searchITunesApps(
 }
 
 // ============================================================================
-// APP-ADS.TXT CHECKER
+// APP-ADS.TXT CHECKER (Upgraded with robust URL handling)
 // ============================================================================
 
+/**
+ * Check for app-ads.txt file at a website URL
+ * 
+ * UPGRADES from original implementation:
+ * 1. Tries multiple URL permutations (www vs non-www, http vs https)
+ * 2. Follows redirects up to 3 levels
+ * 3. Distinguishes 404 (no ads.txt) from connection errors (scrape failed)
+ * 4. Logs detailed error context for debugging data quality issues
+ */
 export async function checkAppAdsTxt(
   websiteUrl: string,
   config: HunterConfig = {}
-): Promise<{ hasAdsTxt: boolean; content?: string; adNetworks?: string[] }> {
+): Promise<{ 
+  hasAdsTxt: boolean; 
+  content?: string; 
+  adNetworks?: string[]; 
+  error?: string;
+  attemptedUrls?: string[];
+}> {
   const requestDelay = config.requestDelayMs || 2000;
+  const attemptedUrls: string[] = [];
   
-  try {
-    // Normalize URL
-    let baseUrl = websiteUrl;
-    if (!baseUrl.startsWith('http')) {
-      baseUrl = `https://${baseUrl}`;
+  // Generate URL permutations to try
+  const urlPermutations = generateUrlPermutations(websiteUrl);
+  
+  for (const baseUrl of urlPermutations) {
+    const adsTxtUrl = `${baseUrl}/app-ads.txt`;
+    attemptedUrls.push(adsTxtUrl);
+    
+    try {
+      await delay(requestDelay);
+      
+      const response = await fetch(adsTxtUrl, {
+        headers: { 'User-Agent': DEFAULT_USER_AGENT },
+        redirect: 'follow', // Follow up to 20 redirects (Node.js default)
+      });
+      
+      // 404/410 = No ads.txt (valid signal, not an error)
+      if (response.status === 404 || response.status === 410) {
+        continue; // Try next permutation
+      }
+      
+      // 403 = Blocked by WAF/Cloudflare (interesting signal - active site)
+      if (response.status === 403) {
+        logger.debug('app-ads.txt blocked by WAF', { url: adsTxtUrl });
+        continue;
+      }
+      
+      // Other non-success status
+      if (!response.ok) {
+        logger.debug('app-ads.txt non-success status', { 
+          url: adsTxtUrl, 
+          status: response.status 
+        });
+        continue;
+      }
+      
+      const content = await response.text();
+      
+      // Validate content looks like app-ads.txt (not an HTML error page)
+      if (content.includes('<html') || content.includes('<!DOCTYPE')) {
+        logger.debug('app-ads.txt returned HTML instead of text', { url: adsTxtUrl });
+        continue;
+      }
+      
+      // Parse ad networks from content
+      const adNetworks = extractAdNetworks(content);
+      
+      // Require at least one valid entry to consider it a real ads.txt
+      if (adNetworks.length === 0) {
+        logger.debug('app-ads.txt found but empty/invalid', { url: adsTxtUrl });
+        continue;
+      }
+      
+      return {
+        hasAdsTxt: true,
+        content: content.slice(0, 5000), // Limit size
+        adNetworks,
+        attemptedUrls,
+      };
+      
+    } catch (err) {
+      // Network errors (DNS failure, timeout, connection refused)
+      // Don't treat as "no ads.txt" - treat as scrape failure
+      const errorMessage = (err as Error).message || String(err);
+      logger.debug('app-ads.txt fetch failed', { 
+        url: adsTxtUrl, 
+        error: errorMessage 
+      });
+      
+      // Continue to next permutation
     }
-    const url = new URL(baseUrl);
-    const adsTxtUrl = `${url.protocol}//${url.host}/app-ads.txt`;
-    
-    await delay(requestDelay);
-    
-    const response = await fetch(adsTxtUrl, {
-      headers: { 'User-Agent': DEFAULT_USER_AGENT },
-    });
-    
-    if (!response.ok) {
-      return { hasAdsTxt: false };
-    }
-    
-    const content = await response.text();
-    
-    // Parse ad networks from content
-    const adNetworks = extractAdNetworks(content);
-    
-    return {
-      hasAdsTxt: true,
-      content: content.slice(0, 5000), // Limit size
-      adNetworks,
-    };
-  } catch {
-    return { hasAdsTxt: false };
   }
+  
+  // None of the permutations worked
+  return { 
+    hasAdsTxt: false,
+    attemptedUrls,
+    error: `No valid app-ads.txt found at any URL permutation`,
+  };
+}
+
+/**
+ * Generate URL permutations to try for app-ads.txt
+ * This handles common redirect patterns
+ */
+function generateUrlPermutations(websiteUrl: string): string[] {
+  const permutations: string[] = [];
+  
+  // Clean up input
+  let cleanUrl = websiteUrl.trim().toLowerCase();
+  
+  // Remove trailing slashes and paths
+  cleanUrl = cleanUrl.replace(/\/+$/, '').split('/')[0];
+  
+  // Remove protocol if present
+  cleanUrl = cleanUrl.replace(/^https?:\/\//, '');
+  
+  // Remove www if present (we'll add it back as a permutation)
+  const hasWww = cleanUrl.startsWith('www.');
+  const domainWithoutWww = hasWww ? cleanUrl.substring(4) : cleanUrl;
+  const domainWithWww = hasWww ? cleanUrl : `www.${cleanUrl}`;
+  
+  // Order: https preferred, non-www first (usually canonical)
+  permutations.push(`https://${domainWithoutWww}`);
+  permutations.push(`https://${domainWithWww}`);
+  permutations.push(`http://${domainWithoutWww}`);
+  permutations.push(`http://${domainWithWww}`);
+  
+  return permutations;
 }
 
 function extractAdNetworks(adsTxtContent: string): string[] {
@@ -524,6 +658,7 @@ export async function getSources(): Promise<Array<{
   sourceType: string;
   sourceConfig: Record<string, unknown>;
   active: boolean;
+  last_scraped_at: string | null;
 }>> {
   const rows = await queryReadOnly<{
     id: string;
@@ -533,8 +668,9 @@ export async function getSources(): Promise<Array<{
     category: string | null;
     region: string | null;
     status: string;
+    last_scraped_at: string | null;
   }>(`
-    SELECT id, source_name, source_type, search_query, category, region, status
+    SELECT id, source_name, source_type, search_query, category, region, status, last_scraped_at
     FROM sa_sources
     WHERE status = 'active'
     ORDER BY created_at DESC
@@ -550,6 +686,7 @@ export async function getSources(): Promise<Array<{
       region: row.region,
     },
     active: row.status === 'active',
+    last_scraped_at: row.last_scraped_at,
   }));
 }
 
@@ -683,18 +820,25 @@ export class Hunter {
 
 /**
  * Get sources that need to be scraped
+ * Returns full source configuration needed by worker
  */
 export async function getSourcesDueForScrape(): Promise<Array<{
   id: string;
   sourceName: string;
+  sourceType: string;
+  sourceConfig: Record<string, unknown>;
   scrapeIntervalHours: number;
 }>> {
   const rows = await queryReadOnly<{
     id: string;
     source_name: string;
+    source_type: string;
+    search_query: string | null;
+    category: string | null;
+    region: string | null;
     scrape_interval_hours: number;
   }>(`
-    SELECT id, source_name, scrape_interval_hours
+    SELECT id, source_name, source_type, search_query, category, region, scrape_interval_hours
     FROM sa_sources
     WHERE status = 'active'
       AND (last_scraped_at IS NULL 
@@ -706,6 +850,12 @@ export async function getSourcesDueForScrape(): Promise<Array<{
   return rows.map(row => ({
     id: row.id,
     sourceName: row.source_name || 'Unnamed Source',
-    scrapeIntervalHours: row.scrape_interval_hours,
+    sourceType: row.source_type,
+    sourceConfig: {
+      searchTerm: row.search_query,
+      category: row.category,
+      region: row.region,
+    },
+    scrapeIntervalHours: row.scrape_interval_hours || 24,
   }));
 }

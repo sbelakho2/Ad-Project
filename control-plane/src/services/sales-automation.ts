@@ -151,11 +151,15 @@ interface SpamCheckResult {
 function checkEmailForSpam(subject: string, body: string): SpamCheckResult {
   const issues: string[] = [];
   let score = 100;
-  const fullText = (subject + ' ' + body).toLowerCase();
+  
+  // Use lowercase for word matching (spam triggers are lowercase)
+  const fullTextLower = (subject + ' ' + body).toLowerCase();
+  // Use ORIGINAL text for caps detection (lowercase has no caps!)
+  const fullTextOriginal = subject + ' ' + body;
 
   // Check critical triggers (-15 each)
   for (const trigger of SPAM_TRIGGER_WORDS.critical) {
-    if (fullText.includes(trigger)) {
+    if (fullTextLower.includes(trigger)) {
       issues.push(`Contains spam trigger: "${trigger}"`);
       score -= 15;
     }
@@ -163,21 +167,22 @@ function checkEmailForSpam(subject: string, body: string): SpamCheckResult {
 
   // Check high-risk triggers (-8 each)
   for (const trigger of SPAM_TRIGGER_WORDS.high) {
-    if (fullText.includes(trigger)) {
+    if (fullTextLower.includes(trigger)) {
       issues.push(`Contains promotional word: "${trigger}"`);
       score -= 8;
     }
   }
 
-  // Check excessive caps
-  const capsMatches = fullText.match(/[A-Z]{5,}/g);
+  // Check excessive caps - FIXED: Must check ORIGINAL text, not lowercased!
+  // Previous bug: lowercased text then searched for [A-Z] which never matched
+  const capsMatches = fullTextOriginal.match(/[A-Z]{5,}/g);
   if (capsMatches && capsMatches.length > 0) {
-    issues.push('Contains excessive CAPS');
+    issues.push(`Contains excessive CAPS: ${capsMatches.slice(0, 3).join(', ')}`);
     score -= 10;
   }
 
   // Check excessive punctuation
-  if (/[!?]{2,}/.test(fullText)) {
+  if (/[!?]{2,}/.test(fullTextLower)) {
     issues.push('Contains excessive punctuation (!! or ??)');
     score -= 10;
   }
@@ -1060,28 +1065,65 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
   let skippedSpam = 0;
 
   // =========================================================================
-  // REVOLUTIONARY: Domain Health Check (FIRST - before anything else)
-  // OVERCOMES: "Bounce rate >7% = domain tanks"
+  // DOMAIN HEALTH GUARD (HARD-STOP) - MUST BE FIRST CHECK
+  // 
+  // This is the most critical safety feature. If bounce rate exceeds 7%,
+  // ALL sending is blocked until an operator explicitly overrides.
+  // 
+  // This protects sender reputation which, once damaged, is nearly
+  // impossible to recover. A tanked domain can take 6+ months to rehabilitate.
   // =========================================================================
   const domainHealth = await checkDomainHealth();
+  const config = await getConfig();
   
+  // HARD STOP: Critical health blocks ALL sending
   if (domainHealth.status === 'critical' && !dryRun) {
+    // Log this as an alert-level event
+    logger.error('DOMAIN HEALTH GUARD: Sending BLOCKED', {
+      bounceRate: domainHealth.bounceRate,
+      spamRate: domainHealth.spamRate,
+      totalSent: domainHealth.totalSent,
+      reason: domainHealth.reason,
+    });
+    
     return { 
       processed: 0, 
       sent: 0, 
       skippedSpam: 0,
-      errors: [`DOMAIN HEALTH CRITICAL: ${domainHealth.reason}. Sending BLOCKED to protect reputation.`], 
+      errors: [
+        `🚨 DOMAIN HEALTH CRITICAL: ${domainHealth.reason}`,
+        `Bounce rate: ${domainHealth.bounceRate.toFixed(1)}% (threshold: ${DOMAIN_HEALTH_THRESHOLDS.bounceRate.critical}%)`,
+        `Spam rate: ${domainHealth.spamRate.toFixed(1)}% (threshold: ${DOMAIN_HEALTH_THRESHOLDS.spamRate.critical}%)`,
+        `SENDING IS BLOCKED to protect domain reputation.`,
+        `To resume: 1) Investigate bounces, 2) Clean email list, 3) Operator override required.`,
+      ], 
+      dryRun,
+      domainHealth,
+    };
+  }
+  
+  // Check if operator has configured pause_on_critical_health=false (emergency override)
+  // This should ONLY be used after investigation and cleanup
+  if (domainHealth.status === 'quarantined' && config.pauseOnCriticalHealth !== false && !dryRun) {
+    return {
+      processed: 0,
+      sent: 0,
+      skippedSpam: 0,
+      errors: [
+        `🔒 DOMAIN QUARANTINED: Previous critical health event requires operator review.`,
+        `Set pause_on_critical_health=false in config to override (NOT RECOMMENDED without investigation).`,
+      ],
       dryRun,
       domainHealth,
     };
   }
 
   if (domainHealth.status === 'warning') {
-    errors.push(`⚠️ Domain health warning: ${domainHealth.reason}. Reducing send rate.`);
+    errors.push(`⚠️ Domain health warning: ${domainHealth.reason}. Reducing send rate to protect reputation.`);
   }
 
   // Safety check: System must be explicitly enabled
-  const config = await getConfig();
+  // (config already fetched above for domain health guard)
   const isEnabled = await isSystemEnabled();
   if (!isEnabled && !dryRun) {
     return { processed: 0, sent: 0, skippedSpam: 0, errors: ['Sales automation system is DISABLED. Enable it from the control panel first.'], dryRun, domainHealth };
@@ -1205,12 +1247,22 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
     }
 
     try {
+      // Generate unsubscribe URL for this contact
+      const unsubscribeUrl = `${process.env.PUBLIC_ORIGIN || 'https://admin.apexmediation.ee'}/unsubscribe?contact=${enrollment.contact_id}`;
+      const unsubscribeEmail = config.replyTo || config.fromEmail;
+      
       const result = await resend!.emails.send({
         from: `${config.fromName} <${config.fromEmail}>`,
         to: enrollment.contact_email!,
         subject,
         html: body.replace(/\n/g, '<br>'),
         text: body,
+        // RFC 8058: List-Unsubscribe and List-Unsubscribe-Post headers
+        // These drastically reduce spam complaints by giving recipients an easy opt-out
+        headers: {
+          'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${unsubscribeEmail}?subject=unsubscribe>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
       });
 
       // Record email
@@ -1341,13 +1393,22 @@ export async function approveDraftEmail(emailId: string, approver: string): Prom
       return { success: false, error: 'RESEND_API_KEY not configured' };
     }
 
-    // Send the email
+    // Generate unsubscribe URL for this contact
+    const unsubscribeUrl = `${process.env.PUBLIC_ORIGIN || 'https://admin.apexmediation.ee'}/unsubscribe?contact=${email.contact_id}`;
+    const unsubscribeEmail = config.replyTo || config.fromEmail;
+
+    // Send the email with List-Unsubscribe headers
     const result = await resend.emails.send({
       from: `${config.fromName} <${config.fromEmail}>`,
       to: email.to_email,
       subject: email.subject || '',
       html: (email.body_html || '').replace(/\n/g, '<br>'),
       text: email.body_html || '',
+      // RFC 8058: List-Unsubscribe headers reduce spam complaints
+      headers: {
+        'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${unsubscribeEmail}?subject=unsubscribe>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      },
     });
 
     // Update status to sent

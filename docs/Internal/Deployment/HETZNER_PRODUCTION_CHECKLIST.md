@@ -5,7 +5,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 > **Infrastructure Overview:**  
 > - **App Server:** 46.62.252.96 (apexmediation.ee)  
 > - **DB Server:** 77.42.44.35 (PostgreSQL only - **not directly accessible**, reach via App Server)  
-> - **Test Server:** 157.90.126.205 (continuous synthetic testing; managed and accessed same as app server)  
+> - **Test Server:** 157.90.126.205 (**ML workloads + SDK test harnesses**; managed and accessed same as app server)  
 > - **Customer Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **Operator Domain:** admin.apexmediation.ee (Control Plane - separate from Console)  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<App Server IP>` (DB Server only reachable from App Server)
@@ -17,29 +17,58 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 >
 > **All services run from `/opt/adproject`**. Do NOT deploy to `/var/www` or any other path.
 >
-> | Service | Production Path | Process Manager |
-> |---------|-----------------|-----------------|
-> | Backend | `/opt/adproject/backend` | PM2 |
-> | Console | `/opt/adproject/console` | PM2 |
-> | Website | `/opt/adproject/website` | PM2 |
-> | Control Plane | `/opt/adproject/control-plane` | systemd |
+> | Service | Production Path | Process Manager | Server |
+> |---------|-----------------|-----------------|--------|
+> | Backend | `/opt/adproject/backend` | PM2 | App |
+> | Console | `/opt/adproject/console` | PM2 | App |
+> | Website | `/opt/adproject/website` | PM2 | App |
+> | Control Plane | `/opt/adproject/control-plane` | nohup/systemd | App |
+> | **Sales API** | `/opt/adproject/sales-automation` | PM2 | **Test** |
+> | Edge Worker | `/opt/adproject/control-plane` | systemd | **Test** |
 >
 > **Deployment commands MUST use `/opt/adproject` as the target.**
 
-## Current Production Status (2026-01-03)
+## Current Production Status (2026-01-25)
 
-| Component | Status | Port | Details |
+| Component | Status | Port | Server | Details |
+|-----------|--------|------|--------|--------|
+| Backend API | ✅ Running | 8080 | App | PM2 (Node) |
+| Console Frontend | ✅ Running | 3000 | App | PM2 (Next.js standalone) |
+| Website | ✅ Running | 3002 | App | Marketing site (Grafana uses 3001) |
+| **Control Plane** | ✅ Running | 4000 | App | Systemd service, **PROXY ONLY for sales automation** |
+| **Sales API** | ✅ Running | 4001 | **Test** | PM2 (Node) - **ALL sales automation runs here** |
+| **Edge Worker** | ✅ Running | 3500 | **Test** | ML inference (LaMini-Flan-T5, DistilBERT) |
+| **Sales API Tunnel** | ✅ Running | - | App | SSH tunnel to Test Server:4001 |
+| **Edge Tunnel** | ✅ Running | - | App | SSH tunnel to Test Server:3500 |
+| **DB Tunnel** | ✅ Running | - | **Test** | SSH tunnel to App Server PgBouncer:6432 |
+| PostgreSQL 16 | ✅ Running | 5432 | DB | System service, not Docker |
+| PgBouncer | ✅ Running | 6432 | App | System service |
+| Redis | ✅ Running | 6379 | App | System service, not Docker |
+| Caddy | ✅ Running | 80/443 | App | Auto Let's Encrypt for all domains |
+| Prometheus | ✅ Running | 9090 | App | Monitoring |
+| Grafana | ✅ Running | 3001 | App | Dashboards |
+
+### Sales Automation Architecture (CRITICAL)
+
+> **⚠️ App Server Control Plane is STRICTLY A PROXY for sales automation.**
+> 
+> All sales automation work (orchestration, spintax, scoring, messaging) runs on the **Test Server**.
+> The App Server `/api/autonomous/*` routes simply forward requests to the Test Server via SSH tunnel.
+
+| Component | Server | Port | Purpose |
 |-----------|--------|------|---------|
-| Backend API | ✅ Running | 8080 | PM2 (Node) |
-| Console Frontend | ✅ Running | 3000 | PM2 (Next.js standalone) |
-| Website | ✅ Running | 3002 | Marketing site (Grafana uses 3001) |
-| **Control Plane** | ✅ Running | 4000 | Systemd service, IP-restricted |
-| PostgreSQL 16 | ✅ Running | 5432 | DB Server (system service, not Docker) |
-| PgBouncer | ✅ Running | 6432 | App Server (system service) |
-| Redis | ✅ Running | 6379 | App Server (system service, not Docker) |
-| Caddy | ✅ Running | 80/443 | Auto Let's Encrypt for all domains |
-| Prometheus | ✅ Running | 9090 | Monitoring |
-| Grafana | ✅ Running | 3001 | Dashboards |
+| Control Plane | App | 4000 | Proxy client only - forwards to test server |
+| **Sales API** | **Test** | 4001 | **ALL orchestration, spintax, Thompson sampler** |
+| Edge Worker | Test | 3500 | ML inference (classification, icebreakers) |
+| DB Access | Test→App→DB | 6432 | SSH tunnel through App Server PgBouncer |
+
+**SSH Tunnels (systemd services):**
+
+| Service | Server | Direction |
+|---------|--------|-----------|
+| `sales-api-tunnel.service` | App | localhost:4001 → Test:4001 |
+| `edge-tunnel.service` | App | localhost:3500 → Test:3500 |
+| `db-tunnel.service` | Test | localhost:6432 → App:6432 → DB:5432 |
 
 ### Port Allocation (DO NOT CHANGE WITHOUT UPDATING CADDY)
 
@@ -51,6 +80,107 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | `apexmediation.ee` / `www.apexmediation.ee` | Website | 3002 | PM2 |
 
 > **Rule:** `admin.*` MUST route ONLY to port 4000. Never proxy admin UI paths to the customer console.
+
+---
+
+## 🚨 CRITICAL OPERATIONAL RULES - READ BEFORE ANY CHANGES
+
+> **Incident History:** These rules exist because of real production incidents.
+> Violating them has caused Control Plane outages and login failures.
+
+### ❌ NEVER DO THESE
+
+| Rule # | NEVER DO | Why It Breaks Things |
+|--------|----------|---------------------|
+| 1 | **Modify App Server `.env` files without explicit approval** | Control Plane + backend share config. One wrong edit crashes auth. |
+| 2 | **Change `SALES_API_HOST` to the Test Server IP (157.90.126.205)** | SSH tunnels forward `localhost:4001`→Test. Using IP bypasses tunnel and fails. |
+| 3 | **Deploy Sales API or Edge Worker to App Server** | These run ONLY on Test Server. App Server is proxy-only. |
+| 4 | **Restart control-plane without checking for orphan processes** | `EADDRINUSE` on port 4000 will crash restart. |
+| 5 | **Assume "fixing wiring" means changing hostnames** | Tunnels already exist. Config uses `127.0.0.1` intentionally. |
+| 6 | **Run sales automation orchestration jobs on App Server** | All execution happens on Test Server. App just forwards requests. |
+
+### ✅ ALWAYS DO THESE
+
+| Rule # | ALWAYS DO | How |
+|--------|-----------|-----|
+| 1 | **Verify tunnel services are running before diagnosing connectivity** | `systemctl status sales-api-tunnel edge-tunnel` |
+| 2 | **Check for orphan processes before restarting services** | `lsof -ti :4000 \| xargs -r kill -9` |
+| 3 | **Use `127.0.0.1` for SALES_API_HOST on App Server** | The tunnel handles forwarding to Test Server |
+| 4 | **Test changes on Test Server FIRST** | Sales API + Edge Worker are safely isolated there |
+| 5 | **Read existing `.env` files before making changes** | Understand current config, don't assume |
+| 6 | **Document any manual changes in this runbook** | Future operators need to know what was changed |
+
+### The Tunnel Architecture (MEMORIZE THIS)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         APP SERVER (46.62.252.96)                       │
+│                                                                         │
+│  Control Plane (:4000)                                                  │
+│       │                                                                 │
+│       │ calls SALES_API_HOST=127.0.0.1:4001                            │
+│       │        ↓                                                        │
+│  ┌────┴────────────────────────┐    ┌─────────────────────────────┐   │
+│  │ sales-api-tunnel.service    │    │ edge-tunnel.service         │   │
+│  │ localhost:4001 ──────────── │    │ localhost:3500 ──────────── │   │
+│  └──────────────│──────────────┘    └───────────────│─────────────┘   │
+│                 │ SSH                               │ SSH              │
+└─────────────────│───────────────────────────────────│─────────────────┘
+                  │                                   │
+                  ▼                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        TEST SERVER (157.90.126.205)                     │
+│                                                                         │
+│  ┌──────────────────────────────┐    ┌────────────────────────────┐   │
+│  │ Sales API (PM2)              │    │ Edge Worker (systemd)      │   │
+│  │ Port 4001                    │    │ Port 3500                  │   │
+│  │ ALL orchestration runs here  │    │ ML inference               │   │
+│  └──────────────────────────────┘    └────────────────────────────┘   │
+│                 │                                                      │
+│  ┌──────────────┴──────────────┐                                      │
+│  │ db-tunnel.service           │                                      │
+│  │ localhost:6432 → App:6432   │                                      │
+│  └──────────────│──────────────┘                                      │
+└─────────────────│─────────────────────────────────────────────────────┘
+                  │ SSH
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         DB SERVER (77.42.44.35)                         │
+│  PostgreSQL (:5432)                                                     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Emergency Recovery Commands
+
+**Control Plane won't start (EADDRINUSE):**
+```bash
+ssh root@46.62.252.96 'lsof -ti :4000 | xargs -r kill -9 && systemctl start control-plane'
+```
+
+**Sales automation shows "unhealthy" after config change:**
+```bash
+# First, check what SALES_API_HOST is set to
+ssh root@46.62.252.96 'grep SALES_API_HOST /opt/adproject/control-plane/.env'
+# If it's NOT 127.0.0.1, fix it:
+ssh root@46.62.252.96 'sed -i "s/SALES_API_HOST=.*/SALES_API_HOST=127.0.0.1/" /opt/adproject/control-plane/.env && systemctl restart control-plane'
+```
+
+**Verify tunnels are running:**
+```bash
+ssh root@46.62.252.96 'systemctl status sales-api-tunnel edge-tunnel --no-pager'
+```
+
+**Restart tunnels if needed:**
+```bash
+ssh root@46.62.252.96 'systemctl restart sales-api-tunnel edge-tunnel'
+```
+
+**Check full health status:**
+```bash
+curl -s https://admin.apexmediation.ee/api/autonomous/health | jq .
+```
+
+---
 
 ### Console Security Status (2025-12-17)
 
@@ -267,7 +397,7 @@ If you suspect billing is misconfigured, check backend logs for Stripe config er
 
 ## 1. Infrastructure Architecture
 
-### 1.1 Two-Server Setup
+### 1.1 Three-Server Setup
 
 ```
 ┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
@@ -296,17 +426,25 @@ If you suspect billing is misconfigured, check backend logs for Stripe config er
 │  │  (PM2)  │     │(systemd)│       │
 │  └─────────┘     └─────────┘       │
 │                                    │
-│  ┌─────────────────────────────┐  │
-│  │  Control Plane :4000        │  │
-│  │  (systemd - operator only)  │  │
-│  └─────────────────────────────┘  │
-│                                    │
-│  ┌─────────────────────────────┐  │
-│  │  Monitoring                 │  │
-│  │  - Prometheus :9090         │  │
-│  │  - Grafana :3001            │  │
-│  └─────────────────────────────┘  │
-└────────────────────────────────────┘
+│  ┌─────────────────────────────┐  │      ┌─────────────────────────────────────┐
+│  │  Control Plane :4000        │  │      │         Test Server                 │
+│  │  (systemd - operator only)  │  │      │         157.90.126.205              │
+│  └──────────────┬──────────────┘  │      │         (ML + SDK Harnesses)        │
+│                 │                  │      │                                     │
+│  ┌──────────────┴──────────────┐  │      │  ┌─────────────────────────────┐   │
+│  │  Edge Tunnel (systemd)      │  │      │  │  Edge Worker :3500          │   │
+│  │  localhost:3500 ────────────┼──┼─────►│  │  - LaMini-Flan-T5-248M      │   │
+│  │  (SSH tunnel to Test)       │  │      │  │  - DistilBERT classifier    │   │
+│  └─────────────────────────────┘  │      │  │  - ~900MB RAM               │   │
+│                                    │      │  └─────────────────────────────┘   │
+│  ┌─────────────────────────────┐  │      │                                     │
+│  │  Monitoring                 │  │      │  ┌─────────────────────────────┐   │
+│  │  - Prometheus :9090         │  │      │  │  SDK Test Harnesses         │   │
+│  │  - Grafana :3001            │  │      │  │  - web-sdk-harness          │   │
+│  └─────────────────────────────┘  │      │  │  - ios-tv-api-harness       │   │
+└────────────────────────────────────┘      │  │  - slo-continuous           │   │
+                                            │  └─────────────────────────────┘   │
+                                            └─────────────────────────────────────┘
 ```
 
 ### 1.2 Database Architecture (CRITICAL)
@@ -382,6 +520,65 @@ Database:
 - [x] 139+ tables migrated
 - [x] Backups configured
 
+### 2.3 Test Server (157.90.126.205)
+
+> **Purpose:** Dedicated to **ML workloads**, **SDK test harnesses**, and **Sales Automation execution**. Isolates ML inference and autonomous sales from the production App Server to prevent memory/CPU contention.
+
+> **⚠️ CRITICAL (January 2026):** This server now runs **ALL sales automation work**. The App Server control-plane is strictly a proxy client.
+
+Prerequisites:
+- [x] Ubuntu 24.04 LTS
+- [x] Node.js 20+ installed
+- [x] SSH key access (same key as App Server)
+- [x] Direct SSH access (not via jump host)
+- [x] PostgreSQL access via db-tunnel.service
+
+Services running:
+- [x] **Sales API** (autonomous sales execution on port 4001)
+  - Autonomous Orchestrator (campaign execution)
+  - Spintax Engine (email personalization)
+  - Thompson Sampler (variant optimization)
+  - Lead Scoring & Intent Classification
+  - `sales-api` PM2 process (~600MB RAM)
+- [x] **Edge Worker** (ML inference on port 3500)
+  - LaMini-Flan-T5-248M (icebreaker generation)
+  - DistilBERT (intent classification)
+  - ~900MB RAM usage
+- [x] **Inbound SMTP** (reply processing on port 2525)
+  - `inbound-smtp.service` - Catches reply emails
+- [x] **SDK Test Harnesses** (synthetic traffic)
+  - `web-sdk-harness.service` - Web SDK events
+  - `ios-tv-api-harness.service` - iOS/TV API events  
+  - `slo-continuous.service` - SLO monitoring
+- [x] **DB Tunnel** (database access)
+  - `db-tunnel.service` - SSH tunnel to App Server PgBouncer (localhost:6432 → App:6432)
+
+Connection to App Server:
+- **Sales API Tunnel** (`sales-api-tunnel.service`) on App Server creates SSH tunnel
+  - App Server localhost:4001 → Test Server:4001
+- **Edge Tunnel** (`edge-tunnel.service`) on App Server creates SSH tunnel
+  - App Server localhost:3500 → Test Server:3500
+- Control Plane (App Server) proxies all `/api/autonomous/*` requests via tunnel
+- Tunnels automatically reconnect if connection drops
+
+Test Server Operations (run from local):
+```bash
+# Check sales-api status
+./scripts/ops/hetzner_ssh.sh test -- "pm2 status"
+
+# Check all systemd services
+./scripts/ops/hetzner_ssh.sh test -- "sudo systemctl status db-tunnel.service inbound-smtp.service edge-worker.service"
+
+# View sales-api logs
+./scripts/ops/hetzner_ssh.sh test -- "pm2 logs sales-api --lines 50"
+
+# Restart sales-api
+./scripts/ops/hetzner_ssh.sh test -- "pm2 restart sales-api"
+
+# Verify DB tunnel is working
+./scripts/ops/hetzner_ssh.sh test -- "psql 'postgres://adproject:***@localhost:6432/adproject?sslmode=disable' -c 'SELECT 1'"
+```
+
 ---
 
 ## 3. SSH Access
@@ -418,6 +615,20 @@ These scripts live under `scripts/ops/` in this repo and are designed to be idem
 - `scripts/ops/hetzner_ssh.sh`
   - SSH wrapper for Hetzner app/db/test servers.
   - DB access always goes through the app server (ProxyJump) by design.
+- `scripts/ops/deploy-edge-worker.sh`
+  - Deploys Edge Worker to **Test Server only** (157.90.126.205).
+  - **Refuses to run on App Server** (server validation safeguard).
+  - Rebuilds and restarts edge-worker.service.
+- `scripts/ops/deploy-control-plane-sales.sh`
+  - Deploys Control Plane to **App Server only** (46.62.252.96).
+  - **Refuses to run on Test Server** (server validation safeguard).
+  - Rebuilds and restarts control-plane.service.
+- `scripts/ops/deploy-sales-automation.sh`
+  - Combined deployment: Control Plane to App, Edge Worker to Test.
+  - Orchestrates both deployments with proper validation.
+- `scripts/ops/verify-deployment-architecture.sh`
+  - Verifies services are running on correct servers.
+  - Checks Edge Worker on Test, Control Plane on App.
 - `scripts/ops/hetzner_enable_pitr.sh`
   - Ensures PITR-quality backups on the DB server:
     - Daily physical base backups under `/var/backups/postgresql/base/`
@@ -438,6 +649,9 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
 
 # Database server (via app server jump host)
 ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
+
+# Test server (direct - same key, no jump host needed)
+ssh -i ~/.ssh/hetzner-db-mac root@157.90.126.205
 ```
 
 ---
@@ -505,6 +719,63 @@ redis-cli -a <password>
 
 # Check memory
 redis-cli -a <password> INFO memory
+```
+
+### 4.5 Edge Worker & Tunnel (Test Server ↔ App Server)
+
+The Edge Worker runs on Test Server for ML inference. App Server connects via SSH tunnel.
+
+**On App Server (Edge Tunnel):**
+```bash
+# Check tunnel status
+systemctl status edge-tunnel
+
+# View tunnel logs
+journalctl -u edge-tunnel -n 50 --no-pager
+
+# Restart tunnel
+systemctl restart edge-tunnel
+
+# Test tunnel connectivity
+curl -s http://localhost:3500/health | python3 -m json.tool
+```
+
+**On Test Server (Edge Worker):**
+```bash
+# Check worker status
+./scripts/ops/hetzner_ssh.sh test -- "systemctl status edge-worker --no-pager"
+
+# View worker logs
+./scripts/ops/hetzner_ssh.sh test -- "journalctl -u edge-worker -n 50 --no-pager"
+
+# Restart worker
+./scripts/ops/hetzner_ssh.sh test -- "systemctl restart edge-worker"
+
+# Check health directly
+./scripts/ops/hetzner_ssh.sh test -- "curl -s http://localhost:3500/health | python3 -m json.tool"
+```
+
+**Health Check Response (healthy state):**
+```json
+{
+  "status": "healthy",
+  "models": {
+    "icebreaker": { "loaded": true, "modelName": "Xenova/LaMini-Flan-T5-248M" },
+    "classifier": { "nbTrained": true, "deepModelLoaded": true }
+  }
+}
+```
+
+### 4.6 SDK Test Harnesses (Test Server)
+
+```bash
+# Check all harness services
+./scripts/ops/hetzner_ssh.sh test -- "systemctl status web-sdk-harness ios-tv-api-harness slo-continuous --no-pager"
+
+# View harness logs
+./scripts/ops/hetzner_ssh.sh test -- "journalctl -u web-sdk-harness -n 20 --no-pager"
+./scripts/ops/hetzner_ssh.sh test -- "journalctl -u ios-tv-api-harness -n 20 --no-pager"
+./scripts/ops/hetzner_ssh.sh test -- "journalctl -u slo-continuous -n 20 --no-pager"
 ```
 
 ---

@@ -1,3 +1,22 @@
+# ⚠️ DEPRECATED (January 2026)
+# This service file is NO LONGER USED on the App Server.
+# ALL sales automation now runs on the TEST SERVER (157.90.126.205) as PM2 process.
+#
+# The App Server control-plane is strictly a proxy client that forwards
+# /api/autonomous/* requests to the Test Server via SSH tunnel.
+#
+# For Test Server sales-api setup, see:
+# - docs/Internal/Sales/AUTONOMOUS_SALES_V2.md
+# - docs/Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md
+#
+# To check Test Server sales-api status:
+#   ./scripts/ops/hetzner_ssh.sh test -- "pm2 status"
+#   ./scripts/ops/hetzner_ssh.sh test -- "pm2 logs sales-api --lines 50"
+#
+# -----------------------------------------------------------------------------
+# LEGACY SERVICE DEFINITION (for reference only)
+# -----------------------------------------------------------------------------
+
 [Unit]
 Description=ApexMediation Sales Automation Daemon
 Documentation=https://github.com/apexmediation/ad-project

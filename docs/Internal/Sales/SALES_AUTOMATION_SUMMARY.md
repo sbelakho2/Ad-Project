@@ -4,7 +4,10 @@
 **Status:** ✅ Complete and Ready for Deployment  
 **Type:** Inbound Trial Nurture (existing signups)
 
-> **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system deployed January 2026
+> **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system
+> 
+> **⚠️ Architecture Note (January 2026):** V2 Autonomous Sales runs entirely on the **Test Server** (157.90.126.205:4001).
+> The App Server control-plane is strictly a proxy client for sales automation.
 
 ---
 
@@ -15,7 +18,7 @@ ApexMediation has **two sales automation systems**:
 | System | Purpose | Location | Focus |
 |--------|---------|----------|-------|
 | **V1 (Cialdini)** | Trial nurture | Backend | Convert existing signups |
-| **V2 (Autonomous)** | Outbound prospecting | Control Plane | Find new leads |
+| **V2 (Autonomous)** | Outbound prospecting | **Test Server** (sales-api:4001) | Find new leads |
 
 This document covers **V1 (Cialdini)** - the psychology-based trial conversion system.
 

@@ -1,25 +1,80 @@
 # 🤖 Autonomous Sales System V2
 
 **Date:** January 2026  
-**Status:** ✅ Deployed to Production  
-**Location:** Control Plane (admin.apexmediation.ee)  
-**API Base:** `https://admin.apexmediation.ee/api/autonomous/`
+**Status:** ✅ Deployed to Production (v2.6 - Distributed Architecture)  
+**Test Server API:** `http://157.90.126.205:4001/api/autonomous/` (internal)  
+**App Server Proxy:** `https://admin.apexmediation.ee/api/autonomous/` (proxies to test server)
 
 ---
 
-## 📋 Table of Contents
+## � CRITICAL OPERATIONAL RULES - READ FIRST
+
+> **These rules exist because of past incidents. Violating them WILL break production.**
+
+### ❌ NEVER DO
+
+| Don't | Why |
+|-------|-----|
+| **Modify App Server .env without permission** | App Server runs production services (backend, console, website, control-plane) |
+| **Change `SALES_API_HOST` from `127.0.0.1`** | SSH tunnel already forwards localhost:4001 → Test Server. Changing this breaks the proxy. |
+| **Kill processes on App Server** | Control-plane may appear as orphan process but is managed by systemd |
+| **Touch port 4000, 4001, 3500 config on App Server** | These are tunneled to Test Server - the config is correct as-is |
+| **Run sales automation code on App Server** | App Server is PROXY ONLY. All execution happens on Test Server. |
+
+### ✅ ALWAYS DO
+
+| Do | How |
+|----|-----|
+| **Test Server changes only** | All sales-api, edge-worker, inbound-smtp changes go to Test Server (157.90.126.205) |
+| **Check tunnel health first** | `ssh app 'curl -s http://127.0.0.1:4001/health'` - if this fails, tunnel is down |
+| **Read logs before changing** | `journalctl -u control-plane -n 50` on App Server shows proxy errors |
+| **Verify after restart** | Always check `/api/autonomous/health` returns "healthy" status |
+
+### 🔧 Quick Reference - Server Roles
+
+```
+APP SERVER (46.62.252.96)     TEST SERVER (157.90.126.205)     DB SERVER (77.42.44.35)
+├── control-plane:4000        ├── sales-api:4001 (PM2)         └── PostgreSQL (via tunnel)
+│   └── PROXY ONLY            │   └── ALL EXECUTION
+├── backend (PM2)             ├── edge-worker:3500 (systemd)
+├── console (PM2)             │   └── ML models
+├── website (PM2)             └── inbound-smtp:2525
+└── SSH tunnels to Test       └── db-tunnel to App→DB
+```
+
+### 🛠️ Recovery Commands
+
+```bash
+# If control-plane won't start (EADDRINUSE):
+ssh app 'lsof -ti :4000 | xargs -r kill -9 && systemctl start control-plane'
+
+# If sales automation shows unhealthy - check tunnel:
+ssh app 'curl -s http://127.0.0.1:4001/health'  # Should return {"status":"ok"}
+
+# If tunnel is down, restart it:
+ssh app 'systemctl restart sales-api-tunnel'
+
+# Verify full health:
+ssh app 'curl -s http://localhost:4000/api/autonomous/health'
+```
+
+---
+
+## �📋 Table of Contents
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Core Modules](#core-modules)
-4. [API Reference](#api-reference)
-5. [Database Schema](#database-schema)
-6. [Spintax Templates](#spintax-templates)
-7. [Thompson Sampling](#thompson-sampling)
-8. [Lead Scoring](#lead-scoring)
-9. [Email Classification](#email-classification)
-10. [Operations Guide](#operations-guide)
-11. [Troubleshooting](#troubleshooting)
+4. [Competitor Targeting (Sniper)](#competitor-targeting-sniper)
+5. [Closed-Loop Learning](#closed-loop-learning)
+6. [API Reference](#api-reference)
+7. [Database Schema](#database-schema)
+8. [Spintax Templates](#spintax-templates)
+9. [Thompson Sampling](#thompson-sampling)
+10. [Lead Scoring](#lead-scoring)
+11. [Email Classification](#email-classification)
+12. [Operations Guide](#operations-guide)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -42,9 +97,11 @@ The Autonomous Sales System V2 is a **zero-cost**, self-improving outbound sales
 |------------|--------|-------------|
 | Lead Discovery | Hunter | Scrapes app stores for contacts |
 | Lead Scoring | Analyst | Heuristic scoring (app-ads.txt, genre, etc.) |
+| **Competitor Targeting** | Analyst | "Sniper" mode: detects IronSource, Unity, AppLovin users |
 | Message Personalization | Spintax Engine | {option1\|option2} syntax with uniqueness checks |
 | Subject Line A/B Testing | Thompson Sampler | Multi-armed bandit optimization |
 | Email Classification | Clerk | Naive Bayes + rule-based classification |
+| **Closed-Loop Learning** | Webhooks | Auto-updates Sampler from email responses (Homespun SMTP) |
 | Orchestration | Orchestrator | Coordinates all modules |
 
 ### Comparison to V1 (Cialdini System)
@@ -56,58 +113,207 @@ The Autonomous Sales System V2 is a **zero-cost**, self-improving outbound sales
 | Discovery | Manual/import | Automated scraping |
 | Optimization | Static sequences | Thompson Sampling A/B |
 | External APIs | OpenAI, Resend | None (zero-cost) |
-| Location | Backend | Control Plane |
+| Location | Backend | **Test Server** (App Server is proxy only) |
 
 ---
 
 ## Architecture
 
+### Distributed Deployment (v2.6 - January 2026)
+
+The system uses a **distributed architecture** where the **Test Server runs ALL sales automation work** and the **App Server is strictly a proxy client**:
+
+| Server | IP | Role | Services |
+|--------|-----|------|----------|
+| **App Server** | 46.62.252.96 | **Proxy Client ONLY** | control-plane (port 4000) proxies to test server |
+| **Test Server** | 157.90.126.205 | **Execution Server** | sales-api (port 4001), edge-worker (port 3500), inbound-smtp |
+| **DB Server** | 77.42.44.35 | Database | PostgreSQL (NOT directly accessible) |
+
+> **⚠️ CRITICAL: App Server runs NO sales automation logic.** It is strictly a proxy client.  
+> All orchestration, spintax processing, scoring, and messaging runs on the Test Server.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      CONTROL PLANE (Port 4000)                       │
+│                   APP SERVER (46.62.252.96)                          │
+│                      *** PROXY CLIENT ONLY ***                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   control-plane (Port 4000)                                          │
+│     └── /api/autonomous/* routes → PROXY to Test Server              │
+│     └── NO orchestrator, NO spintax engine, NO sales logic          │
+│                                                                      │
+│   sales-api-tunnel.service (systemd)                                 │
+│     └── SSH tunnel: localhost:4001 → Test Server:4001                │
+│                                                                      │
+│   edge-tunnel.service (systemd)                                      │
+│     └── SSH tunnel: localhost:3500 → Test Server:3500                │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+                            │
+                            │ SSH Tunnels (secure)
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  TEST SERVER (157.90.126.205)                        │
+│                   *** ALL SALES AUTOMATION RUNS HERE ***             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   sales-api (PM2, Port 4001)                                         │
+│     ├── Autonomous Orchestrator                                      │
+│     ├── Thompson Sampler (multi-armed bandit)                        │
+│     ├── Spintax Engine (message personalization)                     │
+│     ├── Hunter (lead discovery)                                      │
+│     ├── Analyst (lead scoring + competitor targeting)                │
+│     └── Clerk (email classification)                                 │
+│                                                                      │
+│   edge-worker.service (systemd, Port 3500)                           │
+│     ├── Icebreaker Engine (LaMini-Flan-T5-248M)                      │
+│     ├── Hybrid Classifier (Naive Bayes + DistilBERT)                 │
+│     ├── Reputation Analyzer                                          │
+│     └── Playwright Scraper                                           │
+│                                                                      │
+│   inbound-smtp.service (systemd, Port 2525)                          │
+│     └── Receives reply emails → POSTs to /webhook/sendgrid          │
+│                                                                      │
+│   db-tunnel.service (systemd)                                        │
+│     └── SSH tunnel: localhost:6432 → App Server PgBouncer:6432       │
+│                                                                      │
+│   Memory: ~1.5GB total (ML models + sales-api)                       │
+│   Authentication: X-API-Key header                                   │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+                            │
+                            │ SSH Tunnel via App Server
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DB SERVER (77.42.44.35)                           │
+│                    *** NOT DIRECTLY ACCESSIBLE ***                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   PostgreSQL 16 (Port 5432)                                          │
+│     └── Only reachable via App Server PgBouncer (6432)               │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Proxy Architecture (App Server)
+
+The App Server control-plane uses a simple proxy router that forwards all `/api/autonomous/*` requests to the Test Server:
+
+```typescript
+// control-plane/src/routes/autonomous-api-proxy.ts
+// App Server is STRICTLY A CLIENT - no sales logic here
+
+const SALES_API_BASE = `http://127.0.0.1:4001`; // via SSH tunnel
+
+async function proxyToTestServer(req, res, path) {
+  const url = `${SALES_API_BASE}/api/autonomous${path}`;
+  const response = await fetch(url, {
+    method: req.method,
+    headers: { 'X-API-Key': SALES_API_KEY, ...req.headers },
+    body: req.body ? JSON.stringify(req.body) : undefined,
+  });
+  res.status(response.status).json(await response.json());
+}
+```
+
+### Sales API Server Architecture (Test Server)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SALES-API (Port 4001)                             │
+│                      Test Server Only                                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │                    Autonomous API Router                      │    │
 │  │              /api/autonomous/*                                │    │
+│  │  Batch limits: MAX_DISCOVER=10, MAX_SCORE=100                 │    │
 │  └─────────────────────────────────────────────────────────────┘    │
-│                              │                                       │
-│                              ▼                                       │
+│         │              │                              ▲              │
+│         │              │                              │              │
+│         │              │                    ┌─────────┴────────┐    │
+│         │              │                    │  WEBHOOKS        │    │
+│         │              │                    │  /webhook/sendgrid│   │
+│         │              │                    │  /webhook/email-  │   │
+│         │              │                    │   events          │   │
+│         │              │                    └──────────────────┘    │
+│         │              ▼                              │              │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │                 AUTONOMOUS ORCHESTRATOR                       │    │
 │  │    Coordinates all modules, manages workflows                 │    │
+│  │    saveOutboundMessage() for closed-loop tracking             │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │         │              │              │              │               │
 │         ▼              ▼              ▼              ▼               │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐        │
 │  │  HUNTER   │  │  ANALYST  │  │  SPINTAX  │  │  CLERK    │        │
 │  │ Discovery │  │  Scoring  │  │  Engine   │  │ Classifier│        │
+│  │           │  │ + SNIPER  │  │           │  │           │        │
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘        │
 │         │              │              │              │               │
 │         │              │              ▼              │               │
 │         │              │       ┌───────────┐        │               │
-│         │              │       │ THOMPSON  │        │               │
-│         │              │       │  SAMPLER  │        │               │
-│         │              │       └───────────┘        │               │
-│         │              │              │              │               │
-│         └──────────────┴──────────────┴──────────────┘               │
+│         │              │       │ THOMPSON  │◄───────┘               │
+│         │              │       │  SAMPLER  │ ← Closed-loop feedback │
+│         │              │       └───────────┘                        │
+│         │              │              │                              │
+│         └──────────────┴──────────────┴──────────────────────────────│
 │                              │                                       │
 │                              ▼                                       │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │                    PostgreSQL Database                        │    │
+│  │              PostgreSQL (via SSH Tunnel to App Server)        │    │
+│  │   DB Tunnel: localhost:6432 → App Server:6432 → DB:5432       │    │
+│  │                                                               │    │
 │  │   sa_sources, sa_contacts, sa_heuristic_scores,              │    │
-│  │   sa_spintax_templates, sa_bandit_arms, sa_inbox_messages    │    │
+│  │   sa_spintax_templates, sa_bandit_arms, sa_inbox_messages,   │    │
+│  │   sa_outbound_messages, sa_email_events,                     │    │
+│  │   sa_competitor_detections                                    │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────────────────────┐
+        │                  CLOSED-LOOP FLOW                       │
+        │                                                         │
+        │  1. Compose: Thompson Sampler picks subject arm         │
+        │  2. Send: saveOutboundMessage() records arm + contact   │
+        │  3. Event: Webhook receives open/click/reply/bounce     │
+        │  4. Learn: recordOutcome(arm, success) updates Sampler  │
+        │  5. Repeat: Next email uses updated probabilities       │
+        │                                                         │
+        └────────────────────────────────────────────────────────┘
 ```
 
 ### File Structure
 
+**Test Server (`/opt/adproject/sales-automation/`):**
+```
+sales-automation/
+├── dist/
+│   └── index.js                   # Sales API server entry point
+├── api.env                        # Environment config
+├── ecosystem.api.config.js        # PM2 config
+└── services/
+    ├── autonomous-orchestrator.js # Main coordinator
+    ├── math/
+    │   └── thompson-sampler.js    # Multi-armed bandit
+    ├── messaging/
+    │   └── spintax-engine.js      # Message personalization
+    ├── discovery/
+    │   ├── hunter.js              # Lead discovery
+    │   └── analyst.js             # Lead scoring
+    └── inbox/
+        └── clerk.js               # Email classification
+```
+
+**App Server (`/opt/adproject/control-plane/`):**
 ```
 control-plane/src/
 ├── routes/
-│   └── autonomous-api.ts          # REST API endpoints
+│   └── autonomous-api-proxy.ts    # PROXY ONLY - forwards to test server
+├── services/
+│   └── (NO sales automation services - proxy mode)
+└── index.ts                       # NO orchestrator initialization
 ├── services/
 │   ├── autonomous-orchestrator.ts # Main coordinator
 │   ├── math/
@@ -178,6 +384,7 @@ runDiscoveryJob(sourceId: string): Promise<DiscoveryResult>
 | Signal | Weight | Max Score | Description |
 |--------|--------|-----------|-------------|
 | `ads_txt_present` | 25% | 100 | Has app-ads.txt file |
+| `competitor_detected` | 20% | 100 | **Uses competitor network (Sniper)** |
 | `ad_network_count` | 15% | 100 | Number of ad networks |
 | `popular_network` | 15% | 100 | Google, Facebook, Unity, etc. |
 | `app_genre_fit` | 10% | 100 | Games > Entertainment > Business |
@@ -189,15 +396,25 @@ runDiscoveryJob(sourceId: string): Promise<DiscoveryResult>
 
 | Tier | Score Range | Description |
 |------|-------------|-------------|
-| `whale` | 70-100 | High-value target, prioritize |
-| `qualified` | 40-69 | Worth pursuing |
-| `cold` | 0-39 | Low priority |
+| `hot` | 70-100 | High-value, often uses competitor networks |
+| `warm` | 50-69 | Good potential, some positive signals |
+| `cold` | 30-49 | Low signals, worth nurturing |
+| `ice` | 0-29 | Minimal signals, lowest priority |
 
 **Key Functions:**
 
 ```typescript
 // Calculate score for a contact
 calculateLeadScore(contact: Contact): LeadScore
+
+// Detect competitors from app-ads.txt content
+detectCompetitorsFromAdsTxt(adsTxtContent: string): DetectedCompetitor[]
+
+// Save competitor detections to database
+saveCompetitorDetectionsFromList(
+  contactId: string, 
+  competitors: DetectedCompetitor[]
+): Promise<void>
 
 // Save score to database
 saveLeadScore(score: LeadScore): Promise<void>
@@ -331,12 +548,116 @@ classifyEmail(params: {
   fromEmail: string;
 }): Promise<ClassificationResult>
 
-// Submit human review
+// Submit human review (also updates Thompson Sampler for closed-loop)
 submitReview(messageId: string, correctCategory: string): Promise<void>
 
 // Get classification stats
 getClassificationStats(): Promise<ClassificationStats>
 ```
+
+---
+
+## Competitor Targeting (Sniper) 🎯
+
+The "Sniper" upgrade enables hyper-targeted outreach to developers already using competitor ad networks.
+
+### Why It Works
+
+Developers using IronSource, Unity Ads, or AppLovin are:
+1. **Already ad-monetizing** (no education needed)
+2. **Familiar with mediation** (faster sales cycle)
+3. **Likely dissatisfied** (or they'd stick with one network)
+
+### Target Competitors
+
+| Tier | Networks | Score Boost | Priority |
+|------|----------|-------------|----------|
+| 1 | IronSource, Unity Ads, AppLovin MAX | +45-50 | Highest |
+| 2 | Mintegral, Vungle, Chartboost, Fyber, InMobi | +30-35 | Medium |
+| 3 | AdColony, Tapjoy, StartApp, Ogury | +20-25 | Lower |
+
+### Detection Flow
+
+```
+1. Hunter scrapes app → gets app-ads.txt URL
+2. Analyst calls detectCompetitorsFromAdsTxt()
+3. Each detected competitor → saved to sa_competitor_detections
+4. Contact flagged: has_competitor=true, top_competitor=<name>
+5. Score boosted by competitor tier boost value
+```
+
+### API Endpoint
+
+```
+GET /api/autonomous/competitor-leads?tier=1&minScore=50
+Response: {
+  "leads": [...],
+  "byCompetitor": { "IronSource": [...], "Unity Ads": [...] },
+  "competitorStats": [{ "competitor": "IronSource", "count": 8, "avgScore": 82 }]
+}
+```
+
+---
+
+## Closed-Loop Learning 🔄
+
+The system automatically learns from email responses to optimize subject lines over time.
+
+### How It Works
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   COMPOSE    │     │    SEND      │     │   WEBHOOK    │
+│              │     │              │     │              │
+│ Thompson     │     │ Save to      │     │ Receive      │
+│ Sampler      │────▶│ sa_outbound_ │────▶│ open/click/  │
+│ picks arm    │     │ messages     │     │ reply/bounce │
+└──────────────┘     └──────────────┘     └──────────────┘
+                                                 │
+                                                 ▼
+                           ┌──────────────────────────────────────┐
+                           │         RECORD OUTCOME               │
+                           │                                      │
+                           │  Open/Click/Reply → recordOutcome(   │
+                           │                      arm, true)      │
+                           │  Bounce/Unsubscribe → recordOutcome( │
+                           │                        arm, false)   │
+                           └──────────────────────────────────────┘
+                                                 │
+                                                 ▼
+                           ┌──────────────────────────────────────┐
+                           │         THOMPSON SAMPLER             │
+                           │                                      │
+                           │  Alpha++ for successes               │
+                           │  Beta++ for failures                 │
+                           │  Next email more likely to use       │
+                           │  winning subject lines               │
+                           └──────────────────────────────────────┘
+```
+
+### Webhook Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/webhook/email-events` | Generic events (works with any ESP) |
+| `/webhook/sendgrid` | Self-hosted Inbound Parse (mimics SendGrid format) |
+
+### Event to Outcome Mapping
+
+| Event | Outcome | Effect on Arm |
+|-------|---------|---------------|
+| `open` | Success | α += 1 |
+| `click` | Success | α += 1 |
+| `reply` | Success | α += 1 |
+| `bounce` | Failure | β += 1 |
+| `unsubscribe` | Failure | β += 1 |
+
+### Key Tables
+
+| Table | Purpose |
+|-------|---------|
+| `sa_outbound_messages` | Tracks sent emails with `subject_arm_id` |
+| `sa_email_events` | Stores webhook events with `outcome_recorded` flag |
 
 ---
 
@@ -457,6 +778,64 @@ POST /feedback
 Body: { "armId": "uuid", "eventType": "open" | "reply" | "bounce" }
 Response: { "success": true }
 ```
+
+### Setup Guide (Zero-Cost Cloudflare Integration)
+
+To enable closed-loop learning for **free** (no monthly fees), we use **Cloudflare Email Workers**. This allows you to receive emails on a subdomain and forward them to the Autonomous System as JSON.
+
+#### Step 1: Choose a Subdomain
+Separate your automation traffic from your main inbox.
+- **Recommended:** `replies.apexmediation.ee` or `sales.apexmediation.ee`
+
+#### Step 2: Configure Cloudflare Email Routing
+1. Go to Cloudflare Dashboard > **Email** > **Email Routing**.
+2. Enable Email Routing (this will maintain the necessary MX records for you).
+3. Create a **Custom Address**: `*@replies.apexmediation.ee` (catch-all).
+
+#### Step 3: Create the Email Worker
+1. Go to **Workers & Pages** > **Create Application** > **Create Worker**.
+2. Name it `sales-reply-parser`.
+3. Paste the following code (uses `postal-mime` to handle the parsing):
+
+```javascript
+import PostalMime from 'postal-mime';
+
+export default {
+  async email(message, env, ctx) {
+    const parser = new PostalMime();
+    const email = await parser.parse(message.raw);
+    
+    // Cloudflare -> SendGrid-format Adapter
+    const payload = {
+      from: message.from,
+      to: message.to,
+      subject: message.headers.get('subject') || '',
+      text: email.text || '',
+      html: email.html || ''
+    };
+
+    // Forward to Control Plane
+    await fetch('https://admin.apexmediation.ee/api/autonomous/webhook/sendgrid', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  }
+};
+```
+
+#### Step 4: Route Email to Worker
+1. Go back to **Email Routing** > **Routes**.
+2. Create a rule:
+   - **Action:** Send to a Worker
+   - **Worker:** `sales-reply-parser`
+   - **Match:** All emails to `replies.apexmediation.ee`
+
+#### Step 5: Verification
+Send an email to `test@replies.apexmediation.ee`.
+1. Cloudflare receives it instantly (zero cost).
+2. Worker parses it and POSTs it to your server.
+3. Check logs: `journalctl -u control-plane -f` → `SendGrid webhook received` (the adapter mimics the format).
 
 ---
 
@@ -595,6 +974,92 @@ CREATE TABLE sa_bayes_training (
   source VARCHAR(50) DEFAULT 'manual',  -- 'manual', 'human_review', 'seed'
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+```
+
+#### sa_outbound_messages (Closed-Loop Tracking)
+Tracks sent emails with Thompson Sampler arm IDs for closed-loop learning.
+
+```sql
+CREATE TABLE sa_outbound_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id UUID NOT NULL REFERENCES sa_contacts(id),
+  
+  -- Content
+  subject TEXT NOT NULL,
+  body_text TEXT NOT NULL,
+  body_html TEXT,
+  
+  -- Thompson Sampler tracking (KEY FOR CLOSED LOOP)
+  subject_arm_id UUID REFERENCES sa_bandit_arms(id),
+  template_id UUID,
+  variation_hash VARCHAR(64),
+  
+  -- Status progression
+  status VARCHAR(20) DEFAULT 'pending',  -- pending → sent → delivered → opened → clicked → replied
+  sent_at TIMESTAMP,
+  delivered_at TIMESTAMP,
+  opened_at TIMESTAMP,
+  clicked_at TIMESTAMP,
+  replied_at TIMESTAMP,
+  
+  -- External tracking
+  message_id VARCHAR(255),  -- SendGrid/Mailgun message ID
+  provider VARCHAR(50),     -- sendgrid, resend, mailgun
+  
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Indexes: contact_id, subject_arm_id, status, sent_at
+```
+
+#### sa_email_events (Webhook Events)
+Stores all webhook events for analytics and debugging.
+
+```sql
+CREATE TABLE sa_email_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  outbound_message_id UUID REFERENCES sa_outbound_messages(id),
+  contact_id UUID REFERENCES sa_contacts(id),
+  
+  -- Event details
+  event_type VARCHAR(50) NOT NULL,  -- open, click, bounce, unsubscribe, reply
+  event_data JSONB DEFAULT '{}',
+  
+  -- Bandit feedback
+  arm_id UUID REFERENCES sa_bandit_arms(id),
+  outcome_recorded BOOLEAN DEFAULT false,
+  
+  -- Source
+  source VARCHAR(50),  -- sendgrid, mailgun, manual, webhook
+  raw_payload JSONB,
+  
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Indexes: outbound_message_id, contact_id, event_type, arm_id
+```
+
+#### sa_competitor_detections (Sniper Targeting)
+Caches detected competitors for quick filtering.
+
+```sql
+CREATE TABLE sa_competitor_detections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id UUID NOT NULL REFERENCES sa_contacts(id),
+  
+  -- Competitor info
+  competitor_domain VARCHAR(255) NOT NULL,
+  competitor_name VARCHAR(100),
+  competitor_tier INTEGER DEFAULT 3,  -- 1=highest priority, 3=lowest
+  
+  -- Detection source
+  detected_in VARCHAR(50) DEFAULT 'app_ads_txt',
+  detection_confidence INTEGER DEFAULT 100,
+  
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  
+  UNIQUE(contact_id, competitor_domain)
+);
+-- Indexes: contact_id, competitor_domain, competitor_tier
 ```
 
 ---

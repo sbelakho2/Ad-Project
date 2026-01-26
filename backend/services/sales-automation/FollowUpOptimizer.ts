@@ -577,12 +577,14 @@ export class FollowUpOptimizer {
   }
 
   private getDefaultSubject(stepNumber: number): string {
+    // FIXED (Jan 2026): Removed fake "Re:" prefix (deceptive practice)
+    // and replaced generic "Quick question" with benefit-oriented subjects
     const subjects: Record<number, string> = {
-      1: '{{company}} - Quick question',
-      2: 'Re: {{company}}',
-      3: 'Thought this might help',
-      4: 'One more thing',
-      5: 'Should I close your file?',
+      1: '{{company}} - ad monetization question',
+      2: 'Following up - {{company}}',
+      3: 'Thought this might help {{company}}',
+      4: 'One more idea for {{company}}',
+      5: 'Closing the loop on {{company}}',
     };
     return subjects[stepNumber] || `Follow-up ${stepNumber}`;
   }

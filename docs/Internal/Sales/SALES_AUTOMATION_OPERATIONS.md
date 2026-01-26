@@ -7,6 +7,10 @@
 
 > **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system with Thompson Sampling, Spintax, and Naive Bayes classification
 
+> **⚠️ Architecture Note (January 2026):** For V1 cron jobs (trial reminders, dunning, usage sync), these still run on the **App Server backend** (PM2).
+> For V2 autonomous sales (outbound prospecting, campaign execution), **ALL work runs on the Test Server** (157.90.126.205:4001).
+> The App Server control-plane is strictly a proxy client for V2.
+
 ---
 
 ## Table of Contents

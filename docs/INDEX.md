@@ -24,15 +24,24 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[Control Plane Guide](./Internal/Operations/CONTROL_PLANE_GUIDE.md)**: Manual for operator tasks, compliance, and analytics.
 - **[Production Readiness](./Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md)**: Pre-flight checklist for live environments.
 - **[Monitoring Infrastructure](./Monitoring/MONITORING_INFRASTRUCTURE.md)**: Prometheus, Grafana, and alerting setup.
-- **[Runbooks](./Runbooks/README.md)**: Operational procedures and incident response.
+- **[Runbooks](./runbooks/)**: Operational procedures and incident response.
+  - **[Sales Automation Operations](./runbooks/SALES_AUTOMATION_OPERATIONS.md)**: ⭐ NEW - Test Server sales-api operations runbook.
+  - **[Rollback](./runbooks/ROLLBACK.md)**: Rollback procedures.
 
 ## ⚖️ Compliance & Business
 - **[Estonian E-Systems](./Internal/Deployment/ESTONIAN_E_SYSTEMS.md)**: Integration with e-government services.
 - **[Data Retention](./DATA_RETENTION_POLICIES.md)**: GDPR and local compliance policies.
 - **[Billing & Tiers](./Developer-Facing/Billing-and-Tiers.md)**: Revenue share models and platform tiers.
 
-## � Sales Automation
-- **[Autonomous Sales V2](./Internal/Sales/AUTONOMOUS_SALES_V2.md)**: Zero-cost outbound prospecting with Thompson Sampling, Spintax, and Naive Bayes classification.- **[Autonomous Sales V2 Quick Ref](./Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)**: Quick reference for V2 operations.- **[Cialdini Sales Strategy](./Internal/Sales/CIALDINI_SALES_STRATEGY.md)**: Psychology-based trial nurture system (V1).
+## 🤖 Sales Automation
+
+> **⚠️ Architecture Note (January 2026):** All sales automation work runs on the **Test Server** (157.90.126.205:4001).
+> The App Server control-plane is strictly a proxy client.
+
+- **[Autonomous Sales V2](./Internal/Sales/AUTONOMOUS_SALES_V2.md)**: Zero-cost outbound prospecting with Thompson Sampling, Spintax, and Naive Bayes classification. Runs on Test Server.
+- **[Autonomous Sales V2 Quick Ref](./Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)**: Quick reference for V2 operations.
+- **[Closed-Loop System](./Internal/Sales/CLOSED_LOOP_SYSTEM.md)**: How webhooks automatically train the Thompson Sampler.
+- **[Cialdini Sales Strategy](./Internal/Sales/CIALDINI_SALES_STRATEGY.md)**: Psychology-based trial nurture system (V1).
 - **[Sales Automation Operations](./Internal/Sales/SALES_AUTOMATION_OPERATIONS.md)**: V1 operations guide.
 - **[Sales Automation Summary](./Internal/Sales/SALES_AUTOMATION_SUMMARY.md)**: V1 implementation overview.
 

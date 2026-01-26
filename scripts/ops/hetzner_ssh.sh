@@ -10,11 +10,27 @@ set -euo pipefail
 #   ./scripts/ops/hetzner_ssh.sh app -- "<remote cmd>"     # Run command on app server
 #   ./scripts/ops/hetzner_ssh.sh db -- "<remote cmd>"      # Run command on db server
 #
-# Hetzner Infrastructure:
+# ============================================================================
+# HETZNER INFRASTRUCTURE ARCHITECTURE
+# ============================================================================
+#
 #   App Server: 46.62.252.96 (apexmediation.ee)
-#   DB Server:  77.42.44.35
+#     ├─ control-plane.service  (Port 4000) - Orchestrator, API
+#     ├─ backend (pm2)          (Port 8080) - Main API
+#     ├─ console (pm2)          (Port 3000) - Admin Console
+#     ├─ website (pm2)          (Port 3001) - Public Website
+#     └─ edge-tunnel.service    - SSH tunnel to Test Server:3500
+#
 #   Test Server: 157.90.126.205
+#     └─ edge-worker.service    (Port 3500) - ML inference (LLM, Classifier)
+#         ⚠️  ALL ML WORKLOADS GO HERE, NOT TO APP SERVER!
+#
+#   DB Server: 77.42.44.35
+#     └─ PostgreSQL + PgBouncer
+#
 #   Domains: apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee
+#
+# ============================================================================
 
 APP_SERVER="46.62.252.96"
 DB_SERVER="77.42.44.35"

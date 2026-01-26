@@ -6,7 +6,50 @@ Infrastructure as Code (IaC) and deployment configurations for the ApexMediation
 
 The platform is designed for ultra-lean operations, targeting low monthly costs while maintaining high availability and global performance.
 
-## 🛠️ Stack
+## �️ Server Architecture (January 2026)
+
+| Server | IP | Role | Services |
+|--------|-----|------|----------|
+| **App Server** | 46.62.252.96 | Production Host | Backend (PM2), Control-Plane, Caddy, PgBouncer |
+| **DB Server** | 77.42.44.35 | Database Host | PostgreSQL (via App Server PgBouncer only) |
+| **Test Server** | 157.90.126.205 | Sales Automation & ML | **sales-api (PM2:4001)**, edge-worker (3500), inbound-smtp (2525) |
+
+### Sales Automation Architecture
+
+> **⚠️ CRITICAL:** All **Autonomous Sales V2** (outbound prospecting, campaign execution) runs on the **Test Server**.
+> The **App Server control-plane is strictly a proxy client** that forwards `/api/autonomous/*` requests to Test Server via SSH tunnel.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      APP SERVER (46.62.252.96)                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ Control-Plane (Port 4000)                                   │    │
+│  │   autonomous-api-proxy.ts → forwards to localhost:4001      │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ sales-api-tunnel.service (systemd)                          │    │
+│  │   localhost:4001 ──SSH──> Test Server:4001                  │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
+                              │ SSH Tunnel
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    TEST SERVER (157.90.126.205)                     │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ sales-api (PM2, Port 4001)                                  │    │
+│  │   - Autonomous Orchestrator                                 │    │
+│  │   - Spintax Engine                                          │    │
+│  │   - Thompson Sampler                                        │    │
+│  │   - Lead Scoring                                            │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │ db-tunnel.service (systemd)                                 │    │
+│  │   localhost:6432 ──SSH──> App Server:6432 ──> DB:5432       │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## �🛠️ Stack
 
 - **Cloud Providers**: Hetzner (Production).
 - **Orchestration**: PM2 + systemd for product services; Docker Compose for monitoring and local development.

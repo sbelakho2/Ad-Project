@@ -1,8 +1,23 @@
 # Control Plane Architecture
 
+**Last Updated:** January 25, 2026
+
 ## Overview
 
 The Control Plane is a **completely separate service** from the customer-facing backend API. It runs on its own hostname (`admin.apexmediation.ee`), uses its own authentication system, and has no shared code with the customer API.
+
+### Sales Automation Architecture
+
+> **⚠️ CRITICAL: The Control Plane on App Server is STRICTLY A PROXY for sales automation.**
+> 
+> All sales automation work (orchestration, spintax, Thompson sampling, scoring) runs on the **Test Server**.
+> The App Server Control Plane forwards `/api/autonomous/*` requests to the Test Server via SSH tunnel.
+
+| Component | Server | Port | Role |
+|-----------|--------|------|------|
+| Control Plane | App (46.62.252.96) | 4000 | **Proxy only** - forwards to test server |
+| **Sales API** | **Test (157.90.126.205)** | 4001 | **ALL orchestration, spintax, scoring** |
+| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (classification) |
 
 ## Critical Separation: Operator vs Customer
 
@@ -58,13 +73,25 @@ The Control Plane is a **completely separate service** from the customer-facing 
 │           ▼                              ▼                              │
 │  ┌──────────────────┐         ┌──────────────────────┐                 │
 │  │ CUSTOMER BACKEND │         │    CONTROL PLANE     │                 │
-│  │     Port 8080    │         │      Port 4000       │                 │
+│  │     Port 8080    │         │   Port 4000 (proxy)  │                 │
 │  │                  │         │                      │                 │
 │  │  - Customer JWT  │         │  - Operator JWT      │                 │
-│  │  - No /admin     │         │                      │                 │
-│  │  - Customer data │         │  - Full telemetry    │                 │
+│  │  - No /admin     │         │  - /api/autonomous/* │                 │
+│  │  - Customer data │         │    → PROXY to Test   │                 │
 │  └────────┬─────────┘         └──────────┬───────────┘                 │
 │           │                              │                              │
+│           │                              │ SSH Tunnel (:4001)          │
+│           │                              ▼                              │
+│           │              ┌───────────────────────────────────┐         │
+│           │              │      TEST SERVER (Sales API)      │         │
+│           │              │         Port 4001                 │         │
+│           │              │  - Autonomous Orchestrator        │         │
+│           │              │  - Thompson Sampler               │         │
+│           │              │  - Spintax Engine                 │         │
+│           │              │  - Hunter, Analyst, Clerk         │         │
+│           │              └───────────────┬───────────────────┘         │
+│           │                              │                              │
+│           │                              │ SSH Tunnel (:6432)          │
 │           ▼                              ▼                              │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                         POSTGRESQL                              │   │
