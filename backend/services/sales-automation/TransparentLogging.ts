@@ -22,7 +22,7 @@ type LogCategory =
   | 'system'
   | 'automation';
 
-interface LogEntry {
+export interface LogEntry {
   id?: string;
   timestamp: Date;
   level: LogLevel;
@@ -36,7 +36,7 @@ interface LogEntry {
   resolution?: string;
 }
 
-interface EmailJourney {
+export interface EmailJourney {
   contactId: string;
   contactEmail: string;
   contactName: string;
@@ -52,7 +52,7 @@ interface JourneyEvent {
   outcome: 'success' | 'warning' | 'error' | 'info';
 }
 
-interface SystemHealth {
+export interface TransparentSystemHealth {
   component: string;
   status: 'healthy' | 'degraded' | 'down';
   lastCheck: Date;
@@ -306,7 +306,7 @@ export class TransparentLogging extends EventEmitter {
     byCategory: Record<string, number>;
     byLevel: Record<string, number>;
     recentErrors: LogEntry[];
-    systemHealth: SystemHealth[];
+    systemHealth: TransparentSystemHealth[];
   }> {
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
@@ -430,7 +430,7 @@ export class TransparentLogging extends EventEmitter {
   /**
    * Record system health check
    */
-  async recordHealthCheck(health: SystemHealth): Promise<void> {
+  async recordHealthCheck(health: TransparentSystemHealth): Promise<void> {
     await this.pool.query(`
       INSERT INTO system_health_history (component, status, message, metrics, checked_at)
       VALUES ($1, $2, $3, $4, $5)

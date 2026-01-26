@@ -6,7 +6,7 @@
 
 import { Pool } from 'pg';
 
-interface DataQualityScore {
+export interface DataQualityScore {
   overall: number;  // 0-100
   components: {
     emailValidity: number;

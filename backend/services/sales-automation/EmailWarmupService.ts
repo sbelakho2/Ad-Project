@@ -20,7 +20,7 @@ interface WarmupPhase {
   coldAllowed: boolean;
 }
 
-interface MailboxStatus {
+export interface MailboxStatus {
   mailbox: string;
   warmupStartDate: Date;
   currentDay: number;

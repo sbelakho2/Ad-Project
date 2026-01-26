@@ -7,7 +7,7 @@
 import { Pool } from 'pg';
 import { EventEmitter } from 'events';
 
-interface SystemHealth {
+export interface SystemHealth {
   overall: 'healthy' | 'degraded' | 'critical';
   components: ComponentHealth[];
   lastCheck: Date;

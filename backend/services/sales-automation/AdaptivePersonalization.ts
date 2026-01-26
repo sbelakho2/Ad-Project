@@ -36,7 +36,7 @@ interface PersonalizationContext {
   };
 }
 
-interface PersonalizedEmail {
+export interface PersonalizedEmail {
   subject: string;
   body: string;
   personalizationScore: number;  // 0-100, how personalized this feels

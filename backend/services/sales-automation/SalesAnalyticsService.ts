@@ -4,7 +4,7 @@
 
 import { Pool } from 'pg';
 
-interface PipelineMetrics {
+export interface PipelineMetrics {
   total_prospects: number;
   total_qualified: number;
   total_contacted: number;
@@ -14,7 +14,7 @@ interface PipelineMetrics {
   pipeline_value_cents: number;
 }
 
-interface SequencePerformance {
+export interface SequencePerformance {
   sequence_id: string;
   sequence_name: string;
   total_enrolled: number;
@@ -23,7 +23,7 @@ interface SequencePerformance {
   conversion_rate: number;
 }
 
-interface DailyMetrics {
+export interface DailyMetrics {
   date: string;
   prospects_discovered: number;
   prospects_qualified: number;
