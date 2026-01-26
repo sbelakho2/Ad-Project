@@ -51,6 +51,8 @@ export interface PersonalizationContext {
   appName?: string;
   appGenre?: string;
   icebreaker?: string;
+  liftPercent?: number;
+  liftRange?: string;
   customFields?: Record<string, string>;
 }
 
@@ -91,8 +93,10 @@ export function scoreIcebreakerQuality(icebreaker: string): IcebreakerQualityRes
   const trimmed = icebreaker.trim();
   
   // Check for overly generic praise - major red flag
+  // IMPROVED: Added check for predicate adjectives ("app is great") and removed specificity falst positives
   const genericPatterns = [
     /\b(great|nice|cool|awesome|amazing|fantastic|wonderful)\s+(app|game|work|job|product)\b/i,
+    /\b(app|game|work|job|service)\s+(is|looks|seems)\s+(great|nice|cool|awesome|amazing|fantastic|wonderful)\b/i,
     /\blove\s+(your|the)\s+(app|game|work)\b/i,
     /\b(looks?\s+)?interesting\b/i,
     /\bimpressed\s+by\s+(the|your)\s+(app|work|game)\b/i,
@@ -116,9 +120,9 @@ export function scoreIcebreakerQuality(icebreaker: string): IcebreakerQualityRes
   }
   
   // Check for specific detail indicators (positive signals)
+  // IMPROVED: Removed "noticed/saw/found" as they are not specific enough on their own
   const specificityIndicators = [
-    /\b(feature|update|version|design|growth|revenue|users?|downloads?|ratings?|reviews?)\b/i,
-    /\b(noticed|saw|found|discovered|read\s+about)\b/i,
+    /\b(feature|update|version|design|growth|revenue|users?|downloads?|ratings?|reviews?|ranking|mechanic|ux|ui|interface)\b/i,
     /\b(specific|particular|especially|notably)\b/i,
     /\b\d+\b/,  // Numbers often indicate specific knowledge
     /\b(recently|last\s+(week|month|year)|this\s+(week|month|year))\b/i,  // Temporal specificity
@@ -208,6 +212,8 @@ export function encodeContextForHtml(context: PersonalizationContext): Personali
     appName: context.appName ? encodeHtml(context.appName) : undefined,
     appGenre: context.appGenre ? encodeHtml(context.appGenre) : undefined,
     icebreaker: context.icebreaker ? encodeHtml(context.icebreaker) : undefined,
+    liftPercent: context.liftPercent, // Numbers don't need HTML encoding
+    liftRange: context.liftRange ? encodeHtml(context.liftRange) : undefined,
     customFields: context.customFields 
       ? Object.fromEntries(
           Object.entries(context.customFields).map(([k, v]) => [k, encodeHtml(v)])
@@ -215,6 +221,57 @@ export function encodeContextForHtml(context: PersonalizationContext): Personali
       : undefined,
   };
 }
+
+// ============================================================================
+// SPINTAX SAFETY HELPERS
+// ============================================================================
+
+const SPINTAX_ESCAPES = {
+  '{': '&#123;',
+  '}': '&#125;',
+  '|': '&#124;'
+};
+
+function escapeSpintax(str: string | undefined): string {
+  if (!str) return '';
+  return str.replace(/[{}\|]/g, m => SPINTAX_ESCAPES[m as keyof typeof SPINTAX_ESCAPES]);
+}
+
+function unescapeSpintax(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/&#123;/g, '{')
+    .replace(/&#125;/g, '}')
+    .replace(/&#124;/g, '|');
+}
+
+/**
+ * Escape context to prevent Spintax Injection (treating user data as spintax choices)
+ */
+function escapeContextForSpintax(context: PersonalizationContext): PersonalizationContext {
+  return {
+    firstName: context.firstName ? escapeSpintax(context.firstName) : undefined,
+    lastName: context.lastName ? escapeSpintax(context.lastName) : undefined,
+    company: context.company ? escapeSpintax(context.company) : undefined,
+    appName: context.appName ? escapeSpintax(context.appName) : undefined,
+    appGenre: context.appGenre ? escapeSpintax(context.appGenre) : undefined,
+    // CRITICAL: See note below. We DO NOT escape icebreaker if it's potentially generated spintax.
+    // However, if the icebreaker comes from an untrusted external source, it should be escaped.
+    // In our architecture, IcebreakerEngine generates it. If IcebreakerEngine returns spintax, we want to allow it.
+    // But if IcebreakerEngine returns "Company | Name", we want to escape it.
+    // DECISION: We will NOT escape icebreaker here, assuming the IcebreakerEngine handles its own safety 
+    // or intends to provide Spintax.
+    icebreaker: context.icebreaker,
+    liftPercent: context.liftPercent, // Numbers don't need escaping
+    liftRange: context.liftRange ? escapeSpintax(context.liftRange) : undefined,
+    customFields: context.customFields 
+      ? Object.fromEntries(
+          Object.entries(context.customFields).map(([k, v]) => [k, escapeSpintax(v)])
+        )
+      : undefined,
+  };
+}
+
 
 // ============================================================================
 // LEVENSHTEIN DISTANCE (Uniqueness Check)
@@ -383,6 +440,13 @@ export function personalize(template: string, context: PersonalizationContext): 
   result = result.replace(/\{\{APP_GENRE\}\}/gi, clean(context.appGenre, ''));
   result = result.replace(/\{\{ICEBREAKER\}\}/gi, clean(context.icebreaker, smartIcebreakerFallback()));
   
+  // LIFT_PERCENT: Truthful Puffery - specific lift estimates based on ad setup analysis
+  // Falls back to generic "15-30%" range if no specific analysis available
+  // This creates Cialdini Authority through specific, defensible numbers
+  const liftFallback = context.liftPercent ? `${context.liftPercent}` : '15-30';
+  result = result.replace(/\{\{LIFT_PERCENT\}\}/gi, liftFallback);
+  result = result.replace(/\{\{LIFT_RANGE\}\}/gi, clean(context.liftRange, '15-30%'));
+  
   // Custom fields
   if (context.customFields) {
     for (const [key, value] of Object.entries(context.customFields)) {
@@ -414,8 +478,19 @@ export function spinAndPersonalize(
   bodySpintax: string,
   context: PersonalizationContext
 ): SpinResult {
-  const subject = personalize(spin(subjectSpintax), context);
-  const body = personalize(spin(bodySpintax), context);
+  // IMPROVED: Personalize FIRST, then Spin.
+  // This allows variables (like {{ICEBREAKER}}) to containing Spintax that gets processed.
+  // We must escape user data to prevent Spintax Injection, but we allow Icebreaker to have spintax.
+  
+  const safeContext = escapeContextForSpintax(context);
+  
+  // 1. Personalize (injects values, potentially with Spintax in icebreaker)
+  const personalizedSubject = personalize(subjectSpintax, safeContext);
+  const personalizedBody = personalize(bodySpintax, safeContext);
+  
+  // 2. Spin (resolves choices, including any injected via icebreaker)
+  const subject = unescapeSpintax(spin(personalizedSubject));
+  const body = unescapeSpintax(spin(personalizedBody));
   
   // Create a hash for tracking this specific variation
   const variationHash = simpleHash(`${subject}|${body}`);

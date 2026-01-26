@@ -203,6 +203,35 @@ describe('SpintaxEngine', () => {
       const result = personalize('Value: {{CUSTOM_VALUE}}', context);
       expect(result).toBe('Value: test123');
     });
+    
+    it('should handle lift percent with specific value', () => {
+      const context: PersonalizationContext = {
+        appName: 'TestApp',
+        liftPercent: 25,
+        liftRange: '20-30%',
+      };
+      
+      const result = personalize(
+        'You could see {{LIFT_PERCENT}}% improvement (range: {{LIFT_RANGE}})',
+        context
+      );
+      
+      expect(result).toBe('You could see 25% improvement (range: 20-30%)');
+    });
+    
+    it('should use fallback range for missing lift percent', () => {
+      const context: PersonalizationContext = {
+        appName: 'TestApp',
+      };
+      
+      const result = personalize(
+        'Typical improvement: {{LIFT_PERCENT}}%',
+        context
+      );
+      
+      // Should use the generic fallback range
+      expect(result).toBe('Typical improvement: 15-30%');
+    });
   });
   
   describe('Levenshtein Distance', () => {

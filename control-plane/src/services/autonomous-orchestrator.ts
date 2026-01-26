@@ -670,6 +670,7 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
     const minScore = options.minScore ?? 50;
     
     // Get contact details with QUALITY GATES
+    // FIXED (Jan 2026): Added lift_percent and lift_range for {{LIFT_PERCENT}} variable support
     const contacts = await queryReadOnly<{
       id: string;
       first_name: string | null;
@@ -680,8 +681,11 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
       icebreaker: string | null;
       email: string | null;
       score: number | null;
+      lift_percent: number | null;
+      lift_range: string | null;
     }>(`
-      SELECT id, first_name, last_name, company_name, app_name, app_genre, icebreaker, email, score
+      SELECT id, first_name, last_name, company_name, app_name, app_genre, 
+             icebreaker, email, score, lift_percent, lift_range
       FROM sa_contacts WHERE id = $1
     `, [contactId]);
     
@@ -755,6 +759,7 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
     }
     
     // Build personalization context
+    // FIXED (Jan 2026): Include lift_percent and lift_range for Truthful Puffery in emails
     const context: PersonalizationContext = {
       firstName: contact.first_name || undefined,
       lastName: contact.last_name || undefined,
@@ -762,6 +767,8 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
       appName: contact.app_name || undefined,
       appGenre: contact.app_genre || undefined,
       icebreaker: contact.icebreaker || undefined,
+      liftPercent: contact.lift_percent || undefined,
+      liftRange: contact.lift_range || undefined,
     };
     
     // Generate unique message with HTML-safe personalization
