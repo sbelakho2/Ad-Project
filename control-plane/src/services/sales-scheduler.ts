@@ -175,10 +175,11 @@ async function runDiscovery(batch: number): Promise<unknown> {
   const port = process.env.PORT || 4001;
   const apiKey = process.env.AUTONOMOUS_API_KEY || '';
   
-  const response = await fetch(`http://localhost:${port}/api/autonomous/jobs`, {
+  // FIXED (Jan 2026): Use correct endpoint /discover instead of non-existent /jobs
+  const response = await fetch(`http://localhost:${port}/api/autonomous/discover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    body: JSON.stringify({ jobType: 'discover', batch }),
+    body: JSON.stringify({ batchSize: batch }),
   });
   
   if (!response.ok) throw new Error(`Discovery failed: ${response.status}`);
@@ -192,10 +193,11 @@ async function runScoring(batch: number): Promise<unknown> {
   const port = process.env.PORT || 4001;
   const apiKey = process.env.AUTONOMOUS_API_KEY || '';
   
-  const response = await fetch(`http://localhost:${port}/api/autonomous/jobs`, {
+  // FIXED (Jan 2026): Use correct endpoint /score instead of non-existent /jobs
+  const response = await fetch(`http://localhost:${port}/api/autonomous/score`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    body: JSON.stringify({ jobType: 'score', batch }),
+    body: JSON.stringify({ batchSize: batch }),
   });
   
   if (!response.ok) throw new Error(`Scoring failed: ${response.status}`);
@@ -209,10 +211,11 @@ async function runEnrichment(batch: number): Promise<unknown> {
   const port = process.env.PORT || 4001;
   const apiKey = process.env.AUTONOMOUS_API_KEY || '';
   
-  const response = await fetch(`http://localhost:${port}/api/autonomous/jobs`, {
+  // FIXED (Jan 2026): Use correct endpoint /enrich instead of non-existent /jobs
+  const response = await fetch(`http://localhost:${port}/api/autonomous/enrich`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-    body: JSON.stringify({ jobType: 'enrich', batch }),
+    body: JSON.stringify({ batchSize: batch }),
   });
   
   if (!response.ok) throw new Error(`Enrichment failed: ${response.status}`);
