@@ -1116,7 +1116,13 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
         body: JSON.stringify({ batchSize: 5 })
       });
       var data = await resp.json();
-      if (data.success && data.job) {
+      // Handle both async (new) and sync (legacy) response formats
+      if (data.success && data.async && data.jobId) {
+        // Async response - job is queued
+        document.getElementById('intel-job-result').innerHTML = 
+          '<span style="color:#10b981;">Discovery job queued (Job ID: ' + data.jobId.slice(0,8) + '...). Running in background.</span>';
+      } else if (data.success && data.job) {
+        // Legacy sync response
         document.getElementById('intel-job-result').innerHTML = 
           '<span style="color:#10b981;">Discovery complete: processed ' + data.job.processed + ' sources, ' + data.job.errors + ' errors</span>';
       } else {
@@ -1138,7 +1144,13 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
         body: JSON.stringify({ batchSize: 100 })
       });
       var data = await resp.json();
-      if (data.success && data.job) {
+      // Handle both async (new) and sync (legacy) response formats
+      if (data.success && data.async && data.jobId) {
+        // Async response - job is queued
+        document.getElementById('intel-job-result').innerHTML = 
+          '<span style="color:#10b981;">Scoring job queued (Job ID: ' + data.jobId.slice(0,8) + '...). Running in background.</span>';
+      } else if (data.success && data.job) {
+        // Legacy sync response
         document.getElementById('intel-job-result').innerHTML = 
           '<span style="color:#10b981;">Scoring complete: processed ' + data.job.processed + ' contacts, ' + data.job.errors + ' errors</span>';
       } else {
