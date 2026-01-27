@@ -28,6 +28,7 @@
  *   POST /api/autonomous/inbox/:id   - Submit review for message
  */
 
+import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { getOrchestrator } from '../services/autonomous-orchestrator';
 import { getActiveArms, createArm, getBanditStats } from '../services/math/thompson-sampler';
@@ -478,27 +479,122 @@ const MAX_SCORE_BATCH = 100;
  * POST /api/autonomous/discover
  * Run a discovery job to find new leads (triggers local orchestrator)
  * 
- * Note: batchSize is capped at MAX_DISCOVER_BATCH to prevent HTTP timeouts.
- * For large batch processing, use external worker or cron job.
+ * ASYNC: Returns immediately with job ID. Job runs in background.
+ * Use GET /api/autonomous/jobs/:id to check status.
+ * 
+ * Note: batchSize is capped at MAX_DISCOVER_BATCH.
  */
 router.post('/discover', async (req: Request, res: Response) => {
   try {
     const requestedBatch = parseInt(req.body.batchSize) || 3;
     const batchSize = Math.min(Math.max(1, requestedBatch), MAX_DISCOVER_BATCH);
+    const async = req.body.async !== false; // Default to async
     
     if (requestedBatch > MAX_DISCOVER_BATCH) {
       logger.warn('Discovery batch size capped', { requested: requestedBatch, capped: batchSize });
     }
     
     const orchestrator = await getOrchestrator();
-    const result = await orchestrator.runDiscoveryJob(batchSize);
     
-    res.json({
-      success: true,
-      job: result,
-    });
+    if (async) {
+      // ASYNC MODE: Create job record and run in background
+      const jobId = crypto.randomUUID();
+      
+      // Insert pending job
+      await queryOperator(`
+        INSERT INTO sa_autonomous_jobs (id, job_type, status, scheduled_at)
+        VALUES ($1, 'discover', 'pending', CURRENT_TIMESTAMP)
+      `, [jobId]);
+      
+      // Fire-and-forget: run job in background
+      setImmediate(async () => {
+        try {
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = $1
+          `, [jobId]);
+          
+          const result = await orchestrator.runDiscoveryJob(batchSize);
+          
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs 
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+          `, [jobId]);
+          
+          logger.info('Background discovery job completed', { jobId, processed: result.processed });
+        } catch (err) {
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE id = $1
+          `, [jobId]);
+          logger.error('Background discovery job failed', { jobId, error: (err as Error).message });
+        }
+      });
+      
+      // Return immediately with job ID
+      res.json({
+        success: true,
+        async: true,
+        jobId,
+        message: 'Discovery job queued. Use GET /api/autonomous/jobs/:id to check status.',
+      });
+    } else {
+      // SYNC MODE: Wait for completion (may timeout for large batches)
+      const result = await orchestrator.runDiscoveryJob(batchSize);
+      res.json({
+        success: true,
+        async: false,
+        job: result,
+      });
+    }
   } catch (err) {
     logger.error('Discovery job failed', { error: (err as Error).message });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
+ * GET /api/autonomous/jobs/:id
+ * Get the status of an async job
+ */
+router.get('/jobs/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    
+    const jobs = await queryReadOnly<{
+      id: string;
+      job_type: string;
+      status: string;
+      started_at: Date | null;
+      completed_at: Date | null;
+      created_at: Date;
+    }>(`
+      SELECT id, job_type, status, started_at, completed_at, created_at
+      FROM sa_autonomous_jobs
+      WHERE id = $1
+    `, [id]);
+    
+    if (jobs.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    
+    const job = jobs[0];
+    res.json({
+      success: true,
+      job: {
+        id: job.id,
+        type: job.job_type,
+        status: job.status,
+        startedAt: job.started_at,
+        completedAt: job.completed_at,
+        createdAt: job.created_at,
+        durationMs: job.started_at && job.completed_at 
+          ? new Date(job.completed_at).getTime() - new Date(job.started_at).getTime() 
+          : null,
+      },
+    });
+  } catch (err) {
+    logger.error('Job status fetch failed', { error: (err as Error).message });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -717,25 +813,73 @@ router.post('/train/seed', async (req: Request, res: Response) => {
  * POST /api/autonomous/score
  * Run a scoring job to evaluate leads
  * 
- * Note: batchSize is capped at MAX_SCORE_BATCH to prevent HTTP timeouts.
- * For large batch processing, use external worker or cron job.
+ * ASYNC: Returns immediately with job ID. Job runs in background.
+ * Use GET /api/autonomous/jobs/:id to check status.
+ * 
+ * Note: batchSize is capped at MAX_SCORE_BATCH.
  */
 router.post('/score', async (req: Request, res: Response) => {
   try {
     const requestedBatch = parseInt(req.body.batchSize) || 50;
     const batchSize = Math.min(Math.max(1, requestedBatch), MAX_SCORE_BATCH);
+    const async = req.body.async !== false; // Default to async
     
     if (requestedBatch > MAX_SCORE_BATCH) {
       logger.warn('Scoring batch size capped', { requested: requestedBatch, capped: batchSize });
     }
     
     const orchestrator = await getOrchestrator();
-    const result = await orchestrator.runScoringJob(batchSize);
     
-    res.json({
-      success: true,
-      job: result,
-    });
+    if (async) {
+      // ASYNC MODE: Create job record and run in background
+      const jobId = crypto.randomUUID();
+      
+      // Insert pending job
+      await queryOperator(`
+        INSERT INTO sa_autonomous_jobs (id, job_type, status, scheduled_at)
+        VALUES ($1, 'score', 'pending', CURRENT_TIMESTAMP)
+      `, [jobId]);
+      
+      // Fire-and-forget: run job in background
+      setImmediate(async () => {
+        try {
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs SET status = 'running', started_at = CURRENT_TIMESTAMP WHERE id = $1
+          `, [jobId]);
+          
+          const result = await orchestrator.runScoringJob(batchSize);
+          
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs 
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+          `, [jobId]);
+          
+          logger.info('Background scoring job completed', { jobId, processed: result.processed });
+        } catch (err) {
+          await queryOperator(`
+            UPDATE sa_autonomous_jobs SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE id = $1
+          `, [jobId]);
+          logger.error('Background scoring job failed', { jobId, error: (err as Error).message });
+        }
+      });
+      
+      // Return immediately with job ID
+      res.json({
+        success: true,
+        async: true,
+        jobId,
+        message: 'Scoring job queued. Use GET /api/autonomous/jobs/:id to check status.',
+      });
+    } else {
+      // SYNC MODE: Wait for completion (may timeout for large batches)
+      const result = await orchestrator.runScoringJob(batchSize);
+      res.json({
+        success: true,
+        async: false,
+        job: result,
+      });
+    }
   } catch (err) {
     logger.error('Scoring job failed', { error: (err as Error).message });
     res.status(500).json({ error: (err as Error).message });
