@@ -124,10 +124,13 @@ export class AutonomousSalesOrchestrator {
     // DOMAIN VALIDATION (after @)
     // =========================================================================
     
-    // Valid TLDs we accept (common ones only)
+    // Valid TLDs we accept (expanded for game studios globally)
     const validTlds = ['com', 'net', 'org', 'io', 'co', 'ee', 'app', 'dev', 'games', 'ai', 
                        'tech', 'xyz', 'info', 'biz', 'us', 'uk', 'de', 'jp', 'cn', 'kr',
-                       'ru', 'br', 'au', 'ca', 'fr', 'it', 'es', 'nl', 'pl', 'sg'];
+                       'ru', 'br', 'au', 'ca', 'fr', 'it', 'es', 'nl', 'pl', 'sg',
+                       'gg', 'tv', 'online', 'studio', 'game', 'fun', 'world', 'zone',
+                       'se', 'fi', 'no', 'dk', 'be', 'at', 'ch', 'cz', 'hu', 'ro',
+                       'th', 'vn', 'id', 'my', 'ph', 'in', 'tw', 'hk', 'ua', 'tr'];
     
     // Check for text AFTER the TLD (e.g., "amanotes.comterms" → reject)
     // Find where the TLD ends and check if there's more text
@@ -189,15 +192,15 @@ export class AutonomousSalesOrchestrator {
       // Test/development domains
       '.test.local', '.example.com', '.localhost', '.local',
       '.test', '.example', '.invalid',
-      // Email service providers (we want business emails, not consumer)
-      '@gmail.com', '@yahoo.com', '@hotmail.com', '@outlook.com',
-      '@aol.com', '@icloud.com', '@mail.com', '@protonmail.com',
-      // Tracking/analytics domains
-      '@sentry.io', '@sentry-next.', '@segment.com',
-      '@mixpanel.com', '@amplitude.com', '@analytics.',
-      // Generic addresses that won't respond
-      'support@', 'info@', 'contact@', 'sales@', 'admin@',
-      'hello@', 'help@', 'feedback@', 'team@', 'office@',
+      // Consumer email providers (we want business emails)
+      // NOTE: Removed gmail, yahoo etc - some legitimate businesses use these
+      // Tracking/analytics domains (these are scraped garbage)
+      '@sentry.io', '@sentry-next.', 'sentry.wixpress.com',
+      '@segment.com', '@mixpanel.com', '@amplitude.com',
+      // Platform build system emails
+      '.wixpress.com', '@wix.com', '@squarespace.com',
+      // NOTE: REMOVED generic prefixes like hello@, contact@, info@
+      // These ARE valid B2B outreach targets for game studios
     ];
     
     for (const pattern of invalidPatterns) {
