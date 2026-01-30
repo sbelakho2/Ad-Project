@@ -43,6 +43,13 @@ router.post('/stripe', async (req: Request, res: Response) => {
     return res.status(400).send('Missing signature');
   }
 
+  // SECURITY: Require webhook secret in production to prevent signature bypass
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error('[Webhook] STRIPE_WEBHOOK_SECRET is not configured');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
   let event: Stripe.Event;
 
   try {
@@ -50,7 +57,7 @@ router.post('/stripe', async (req: Request, res: Response) => {
     event = stripe.webhooks.constructEvent(
       req.body,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET || ''
+      webhookSecret
     );
   } catch (error: any) {
     console.error('[Webhook] Signature verification failed:', error.message);

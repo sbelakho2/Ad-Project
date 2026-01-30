@@ -24,6 +24,7 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import { createLogger, format, transports } from 'winston';
+import crypto from 'crypto';
 
 // Import services
 import { IcebreakerEngine } from './services/icebreaker-engine.js';
@@ -36,7 +37,19 @@ import { PlaywrightScraper } from './services/playwright-scraper.js';
 // ============================================================================
 
 const PORT = parseInt(process.env.EDGE_WORKER_PORT || '3500');
-const API_SECRET = process.env.EDGE_WORKER_SECRET || 'dev-secret-change-me';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// SECURITY: Require explicit secret in production, fail-fast if missing
+const API_SECRET = process.env.EDGE_WORKER_SECRET;
+if (!API_SECRET) {
+  if (IS_PRODUCTION) {
+    console.error('FATAL: EDGE_WORKER_SECRET must be set in production');
+    process.exit(1);
+  }
+  console.warn('WARNING: EDGE_WORKER_SECRET not set - using insecure default (dev only)');
+}
+const EFFECTIVE_SECRET = API_SECRET || 'dev-secret-change-me';
+
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://46.62.252.96:4000';
 
 // ============================================================================
@@ -77,8 +90,18 @@ app.use(express.json({ limit: '10mb' }));
 function authenticate(req: Request, res: Response, next: NextFunction): void {
   const secret = req.headers['x-edge-secret'] as string;
   
-  if (!secret || secret !== API_SECRET) {
-    logger.warn('Unauthorized request', { ip: req.ip, path: req.path });
+  // Use timing-safe comparison to prevent timing attacks
+  if (!secret) {
+    logger.warn('Unauthorized request - missing secret', { ip: req.ip, path: req.path });
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  
+  const secretBuf = Buffer.from(secret);
+  const expectedBuf = Buffer.from(EFFECTIVE_SECRET);
+  
+  if (secretBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(secretBuf, expectedBuf)) {
+    logger.warn('Unauthorized request - invalid secret', { ip: req.ip, path: req.path });
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }

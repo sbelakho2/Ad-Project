@@ -5,6 +5,42 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 
+// Allowed redirect domains for click tracking (prevents open redirect attacks)
+const ALLOWED_REDIRECT_DOMAINS = new Set([
+  'apexmediation.com',
+  'apexmediation.ee',
+  'console.apexmediation.ee',
+  'api.apexmediation.ee',
+]);
+
+/**
+ * Validates that a URL is safe to redirect to.
+ * Only allows HTTPS URLs to known safe domains.
+ */
+function isAllowedRedirectUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // Only allow HTTPS
+    if (parsed.protocol !== 'https:') {
+      return false;
+    }
+    // Check if the domain is in our allowlist
+    const hostname = parsed.hostname.toLowerCase();
+    if (ALLOWED_REDIRECT_DOMAINS.has(hostname)) {
+      return true;
+    }
+    // Check for subdomains of allowed domains
+    for (const domain of ALLOWED_REDIRECT_DOMAINS) {
+      if (hostname.endsWith('.' + domain)) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function createSalesTrackingRouter(pool: Pool): Router {
   const router = Router();
 
@@ -66,6 +102,8 @@ export function createSalesTrackingRouter(pool: Pool): Router {
   /**
    * GET /track/click/:emailId/:linkId
    * Records a link click and redirects to the target URL
+   * 
+   * SECURITY: Only allows redirects to pre-approved domains to prevent open redirect attacks
    */
   router.get('/track/click/:emailId/:linkId', async (req: Request, res: Response) => {
     const { emailId, linkId } = req.params;
@@ -73,6 +111,12 @@ export function createSalesTrackingRouter(pool: Pool): Router {
 
     if (!targetUrl) {
       return res.status(400).send('Missing URL parameter');
+    }
+
+    // SECURITY: Validate redirect URL to prevent open redirect attacks
+    if (!isAllowedRedirectUrl(targetUrl)) {
+      console.warn('Blocked redirect to unsafe URL:', { targetUrl, emailId, linkId });
+      return res.status(400).send('Invalid redirect URL');
     }
 
     try {
@@ -101,7 +145,7 @@ export function createSalesTrackingRouter(pool: Pool): Router {
       console.error('Error tracking click:', error);
     }
 
-    // Redirect to the target URL
+    // Redirect to the validated target URL
     res.redirect(302, targetUrl);
   });
 

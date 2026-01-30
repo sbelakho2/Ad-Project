@@ -8,6 +8,7 @@ import {
   type PlatformTierId,
   resolvePlatformTierId,
 } from '../src/config/platformTiers';
+import { authenticate } from '../src/middleware/auth';
 
 const router = express.Router();
 
@@ -385,9 +386,17 @@ router.get('/portal', async (req: Request, res: Response) => {
  * POST /api/billing/upgrade
  * 
  * Upgrade subscription to higher tier
+ * SECURITY: Requires authentication - uses authenticated user ID
  */
-router.post('/upgrade', async (req: Request, res: Response) => {
-  const { user_id, new_plan } = req.body;
+router.post('/upgrade', authenticate, async (req: Request, res: Response) => {
+  const { new_plan } = req.body;
+  
+  // SECURITY: Use authenticated user ID, not request body
+  const userId = req.user?.userId || req.user?.publisherId;
+  
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
 
   const normalizedPlan = resolvePlatformTierId(new_plan);
 
@@ -402,7 +411,7 @@ router.post('/upgrade', async (req: Request, res: Response) => {
        FROM subscriptions s
        JOIN users u ON s.customer_id = u.id
        WHERE s.customer_id = $1 AND s.status = 'active'`,
-      [user_id]
+      [userId]
     );
 
     if (result.rows.length === 0) {
@@ -457,11 +466,11 @@ router.post('/upgrade', async (req: Request, res: Response) => {
         newPlanConfig.price_cents,
         newPlanConfig.included_impressions,
         newPlanConfig.overage_rate_cents,
-        user_id,
+        userId,
       ]
     );
 
-    console.log(`[Billing] Upgraded ${user_id} from ${currentPlan} to ${normalizedPlan}`);
+    console.log(`[Billing] Upgraded ${userId} from ${currentPlan} to ${normalizedPlan}`);
 
     res.json({
       success: true,
@@ -475,12 +484,18 @@ router.post('/upgrade', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/billing/usage/:user_id
+ * GET /api/billing/usage
  * 
- * Get current usage statistics for user
+ * Get current usage statistics for authenticated user
+ * SECURITY: Requires authentication - users can only view their own usage
  */
-router.get('/usage/:user_id', async (req: Request, res: Response) => {
-  const { user_id } = req.params;
+router.get('/usage', authenticate, async (req: Request, res: Response) => {
+  // SECURITY: Use authenticated user ID only
+  const userId = req.user?.userId || req.user?.publisherId;
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
 
   try {
     // Get current subscription
@@ -488,7 +503,7 @@ router.get('/usage/:user_id', async (req: Request, res: Response) => {
       `SELECT plan_type, included_impressions, current_period_start, current_period_end
        FROM subscriptions
        WHERE customer_id = $1 AND status IN ('trial', 'active')`,
-      [user_id]
+      [userId]
     );
 
     if (subResult.rows.length === 0) {
@@ -509,7 +524,7 @@ router.get('/usage/:user_id', async (req: Request, res: Response) => {
          AND recorded_at <= $3
          AND metric_type = 'impressions'
        GROUP BY metric_type`,
-      [user_id, subscription.current_period_start, subscription.current_period_end]
+      [userId, subscription.current_period_start, subscription.current_period_end]
     );
 
     const totalImpressions = usageResult.rows[0]?.total_impressions || 0;

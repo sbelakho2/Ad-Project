@@ -22,6 +22,9 @@ export interface RevenueForecast {
  */
 export async function getCohortAnalysis(months = 12): Promise<CohortData[]> {
   try {
+    // SECURITY: Validate months is a positive integer to prevent SQL injection
+    const safeMonths = Math.max(1, Math.min(Math.floor(Number(months) || 12), 120));
+    
     const invoiceColumns = await getTableColumns('invoices');
     const invoiceDateColumn = resolveColumn(invoiceColumns, ['issue_date', 'invoice_date']);
     if (!invoiceDateColumn) {
@@ -35,11 +38,11 @@ export async function getCohortAnalysis(months = 12): Promise<CohortData[]> {
         TO_CHAR(created_at, 'YYYY-MM') as cohort_month,
         COUNT(*) as size
       FROM publishers
-      WHERE created_at >= NOW() - INTERVAL '${months} months'
+      WHERE created_at >= NOW() - INTERVAL '1 month' * $1
       GROUP BY 1
       ORDER BY 1 DESC
     `;
-    const cohorts = await queryReadOnly<any>(cohortsSql);
+    const cohorts = await queryReadOnly<any>(cohortsSql, [safeMonths]);
 
     // 2. Get activity per month for each cohort
     // In a real system, 'active' might mean 'sent at least 1 impression'

@@ -6,6 +6,7 @@
  */
 
 import crypto from 'crypto';
+import dns from 'dns/promises';
 
 export interface SessionToken {
   sessionId: string;
@@ -315,6 +316,8 @@ export class SecurityHandler {
    *
    * Validates URL against allowed domains and blocked IP ranges
    * before fetching to prevent SSRF attacks.
+   * 
+   * SECURITY: Resolves DNS and validates resolved IPs to prevent DNS rebinding attacks.
    */
   async safeFetch(
     url: string,
@@ -330,6 +333,15 @@ export class SecurityHandler {
       return {
         success: false,
         error: validation.reason || 'URL validation failed',
+      };
+    }
+
+    // SECURITY: Resolve DNS and validate resolved IP to prevent DNS rebinding attacks
+    const dnsValidation = await this.validateDnsResolution(url);
+    if (!dnsValidation.safe) {
+      return {
+        success: false,
+        error: dnsValidation.reason || 'DNS validation failed',
       };
     }
 
@@ -371,6 +383,58 @@ export class SecurityHandler {
         success: false,
         error: error instanceof Error ? error.message : 'Fetch failed',
       };
+    }
+  }
+
+  /**
+   * Validate DNS resolution to prevent DNS rebinding attacks.
+   * Resolves the hostname and checks if any resolved IP is in private ranges.
+   */
+  private async validateDnsResolution(url: string): Promise<{ safe: boolean; reason?: string }> {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname;
+
+      // Skip DNS lookup for IP addresses
+      if (this.isIpAddress(hostname)) {
+        return { safe: true };
+      }
+
+      // Resolve hostname to IP addresses
+      let addresses: string[] = [];
+      try {
+        const ipv4Addresses = await dns.resolve4(hostname).catch(() => [] as string[]);
+        const ipv6Addresses = await dns.resolve6(hostname).catch(() => [] as string[]);
+        addresses = [...ipv4Addresses, ...ipv6Addresses];
+      } catch {
+        // DNS resolution failed - could be a non-existent domain, allow fetch to fail naturally
+        return { safe: true };
+      }
+
+      // Check if any resolved IP is private
+      for (const ip of addresses) {
+        const normalizedIp = this.normalizeIp(ip);
+        if (this.isPrivateIp(normalizedIp)) {
+          return { 
+            safe: false, 
+            reason: `DNS rebinding attack detected: ${hostname} resolves to private IP ${ip}` 
+          };
+        }
+
+        // Also check against blocked IP ranges
+        for (const range of this.ssrfConfig.blockedIpRanges) {
+          if (this.isIpInRange(normalizedIp, range)) {
+            return { 
+              safe: false, 
+              reason: `DNS rebinding attack detected: ${hostname} resolves to blocked IP ${ip}` 
+            };
+          }
+        }
+      }
+
+      return { safe: true };
+    } catch {
+      return { safe: false, reason: 'Failed to validate DNS resolution' };
     }
   }
 
@@ -506,39 +570,116 @@ export class SecurityHandler {
    */
   private isPrivateIp(ip: string): boolean {
     const privateRanges = [
+      '0.0.0.0/8',      // "This" network
       '10.0.0.0/8',
       '172.16.0.0/12',
       '192.168.0.0/16',
       '127.0.0.0/8',
+      '169.254.0.0/16', // Link-local
+      '100.64.0.0/10',  // Carrier-grade NAT
+      '::1/128',        // IPv6 localhost
+      'fc00::/7',       // IPv6 ULA
+      'fe80::/10',      // IPv6 link-local
     ];
 
     return privateRanges.some((range) => this.isIpInRange(ip, range));
   }
 
   /**
-   * Check if IP is in CIDR range (simplified check).
+   * Check if IP is in CIDR range.
+   * SECURITY: Properly validates CIDR ranges to prevent SSRF bypass via edge-case IPs.
    */
   private isIpInRange(ip: string, cidr: string): boolean {
-    // Simplified check - just check prefix match for now
-    const [rangeIp] = cidr.split('/');
-    const rangeParts = rangeIp.split('.');
-    const ipParts = ip.split('.');
+    const [rangeIp, prefixStr] = cidr.split('/');
+    const prefix = parseInt(prefixStr, 10);
+
+    // Handle IPv6
+    if (rangeIp.includes(':')) {
+      return this.isIpv6InRange(ip, rangeIp, prefix);
+    }
+
+    // IPv4 CIDR check
+    const rangeParts = rangeIp.split('.').map(Number);
+    const ipParts = ip.split('.').map(Number);
 
     if (rangeParts.length !== 4 || ipParts.length !== 4) {
       return false;
     }
 
-    // Check first octet match for /8
-    if (cidr.endsWith('/8')) {
-      return rangeParts[0] === ipParts[0];
+    // Validate IP octets
+    if (ipParts.some(p => isNaN(p) || p < 0 || p > 255)) {
+      return false;
     }
 
-    // Check first two octets for /12 or /16
-    if (cidr.endsWith('/12') || cidr.endsWith('/16')) {
-      return rangeParts[0] === ipParts[0] && rangeParts[1] === ipParts[1];
+    // Convert to 32-bit integers
+    const rangeInt = (rangeParts[0] << 24) | (rangeParts[1] << 16) | (rangeParts[2] << 8) | rangeParts[3];
+    const ipInt = (ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3];
+
+    // Create mask from prefix
+    const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+
+    // Compare masked values (use >>> 0 to ensure unsigned comparison)
+    return ((rangeInt & mask) >>> 0) === ((ipInt & mask) >>> 0);
+  }
+
+  /**
+   * Check if IPv6 address is in CIDR range.
+   */
+  private isIpv6InRange(ip: string, rangeIp: string, prefix: number): boolean {
+    // Normalize IPv6 addresses
+    try {
+      const ipExpanded = this.expandIpv6(ip);
+      const rangeExpanded = this.expandIpv6(rangeIp);
+
+      if (!ipExpanded || !rangeExpanded) return false;
+
+      // Compare prefix bits
+      const ipBits = ipExpanded.split(':').map(h => parseInt(h, 16));
+      const rangeBits = rangeExpanded.split(':').map(h => parseInt(h, 16));
+
+      let bitsToCheck = prefix;
+      for (let i = 0; i < 8 && bitsToCheck > 0; i++) {
+        const segmentBits = Math.min(16, bitsToCheck);
+        const mask = segmentBits === 16 ? 0xFFFF : ((1 << segmentBits) - 1) << (16 - segmentBits);
+        if ((ipBits[i] & mask) !== (rangeBits[i] & mask)) {
+          return false;
+        }
+        bitsToCheck -= 16;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Expand shortened IPv6 address to full form.
+   */
+  private expandIpv6(ip: string): string | null {
+    // Handle IPv4-mapped IPv6
+    if (ip.includes('.')) {
+      const parts = ip.split(':');
+      const ipv4Part = parts.pop()!;
+      const ipv4Octets = ipv4Part.split('.').map(Number);
+      if (ipv4Octets.length !== 4) return null;
+      const hex1 = ((ipv4Octets[0] << 8) | ipv4Octets[1]).toString(16).padStart(4, '0');
+      const hex2 = ((ipv4Octets[2] << 8) | ipv4Octets[3]).toString(16).padStart(4, '0');
+      ip = parts.join(':') + ':' + hex1 + ':' + hex2;
     }
 
-    return false;
+    // Expand :: notation
+    if (ip.includes('::')) {
+      const sides = ip.split('::');
+      const left = sides[0] ? sides[0].split(':') : [];
+      const right = sides[1] ? sides[1].split(':') : [];
+      const missing = 8 - left.length - right.length;
+      const middle = Array(missing).fill('0000');
+      ip = [...left, ...middle, ...right].join(':');
+    }
+
+    const segments = ip.split(':');
+    if (segments.length !== 8) return null;
+    return segments.map(s => s.padStart(4, '0')).join(':');
   }
 
   /**

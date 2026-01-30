@@ -75,12 +75,14 @@ export const checkLockoutStatus = async (email: string): Promise<LockoutStatus> 
     };
   } catch (error) {
     logger.error('Error checking lockout status', { email, error });
-    // Fail open - don't lock out users if DB error
+    // SECURITY: Fail CLOSED on DB errors to prevent lockout bypass
+    // An attacker could cause DB errors to circumvent brute force protection
+    // Better to briefly block legitimate users than allow unlimited attempts
     return {
-      isLocked: false,
-      lockedUntil: null,
-      failedAttempts: 0,
-      remainingAttempts: MAX_FAILED_ATTEMPTS,
+      isLocked: true,
+      lockedUntil: new Date(Date.now() + 60000), // Lock for 1 minute on error
+      failedAttempts: MAX_FAILED_ATTEMPTS,
+      remainingAttempts: 0,
     };
   }
 };

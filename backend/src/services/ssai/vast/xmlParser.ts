@@ -684,3 +684,61 @@ export function validateVMAPStructure(parsed: Record<string, unknown>): VASTWarn
 export default VASTXMLParser;
 
 // MAX_XML_SIZE_BYTES is already exported at declaration
+
+/**
+ * Sanitize HTML resource content to prevent XSS attacks.
+ * SECURITY: This removes dangerous tags and attributes from HTML.
+ * 
+ * @param html - Raw HTML content from VAST HTMLResource
+ * @returns Sanitized HTML string safe for client rendering
+ */
+export function sanitizeHtmlResource(html: string | null | undefined): string | undefined {
+  if (!html) {
+    return undefined;
+  }
+
+  // Dangerous patterns to remove
+  const dangerousPatterns = [
+    // Script tags and content
+    /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
+    // Event handlers
+    /\bon\w+\s*=/gi,
+    // JavaScript URLs
+    /javascript\s*:/gi,
+    // Data URLs (can contain scripts)
+    /data\s*:[^,]*base64/gi,
+    // VBScript (IE)
+    /vbscript\s*:/gi,
+    // Expression (IE)
+    /expression\s*\(/gi,
+    // Import rules
+    /@import/gi,
+    // Object/embed/applet tags
+    /<(object|embed|applet|iframe|frame|frameset|meta|link|base|form|input|button|select|textarea)[^>]*>/gi,
+    /<\/(object|embed|applet|iframe|frame|frameset|meta|link|base|form|input|button|select|textarea)>/gi,
+    // Style tags that could contain expressions
+    /<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi,
+    // SVG with scripts
+    /<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi,
+    // Math with scripts
+    /<math\b[^<]*(?:(?!<\/math>)<[^<]*)*<\/math>/gi,
+    // HTML comments (can contain IE conditional)
+    /<!--[\s\S]*?-->/g,
+    // XML processing instructions
+    /<\?[\s\S]*?\?>/g,
+    // CDATA sections
+    /<!\[CDATA\[[\s\S]*?\]\]>/g,
+  ];
+
+  let sanitized = html;
+  for (const pattern of dangerousPatterns) {
+    sanitized = sanitized.replace(pattern, '');
+  }
+
+  // Remove dangerous attributes from remaining tags
+  // Matches style attributes that might contain expressions
+  sanitized = sanitized.replace(/\sstyle\s*=\s*["'][^"']*expression[^"']*["']/gi, '');
+
+  // Trim and return
+  return sanitized.trim() || undefined;
+}

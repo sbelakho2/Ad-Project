@@ -60,8 +60,13 @@ function authenticateApiKeyOrJwt(req: Request, res: Response, next: () => void):
   const isProduction = process.env.NODE_ENV === 'production';
   
   // Try API Key authentication first (for worker/edge calls)
-  if (apiKey && expectedKey && apiKey === expectedKey) {
-    return next();
+  // Use timing-safe comparison to prevent timing attacks
+  if (apiKey && expectedKey) {
+    const apiKeyBuf = Buffer.from(apiKey);
+    const expectedBuf = Buffer.from(expectedKey);
+    if (apiKeyBuf.length === expectedBuf.length && crypto.timingSafeEqual(apiKeyBuf, expectedBuf)) {
+      return next();
+    }
   }
   
   // Try JWT Bearer token authentication (for dashboard/operator)
@@ -96,6 +101,33 @@ function authenticateApiKeyOrJwt(req: Request, res: Response, next: () => void):
 // PUBLIC TRACKING ENDPOINTS (No auth required - must be before middleware)
 // These endpoints are embedded in emails and must work without API keys
 // ============================================================================
+
+/**
+ * SECURITY: Validate redirect URLs to prevent open redirect attacks.
+ * Only allow redirects to pre-approved domains.
+ */
+const ALLOWED_TRACKING_REDIRECT_DOMAINS = new Set([
+  'apexmediation.ee',
+  'www.apexmediation.ee',
+  'console.apexmediation.ee',
+  'docs.apexmediation.ee',
+  // Add other trusted domains as needed
+]);
+
+function isAllowedTrackingRedirect(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    // Only allow http/https
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return false;
+    }
+    // Check against allowlist
+    const hostname = url.hostname.toLowerCase();
+    return ALLOWED_TRACKING_REDIRECT_DOMAINS.has(hostname);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * GET /api/autonomous/track/:trackingId/open
@@ -165,10 +197,24 @@ router.get('/track/:trackingId/open', async (req: Request, res: Response) => {
  * Click tracking endpoint - records click and redirects
  * 
  * NOTE: No auth required - this is hit by users clicking links in emails
+ * SECURITY: Validates redirect URL to prevent open redirect attacks
  */
 router.get('/track/:trackingId/click/:linkId', async (req: Request, res: Response) => {
   const { trackingId, linkId } = req.params;
-  const destination = req.query.url as string || 'https://apexmediation.ee';
+  const destinationRaw = req.query.url as string || 'https://apexmediation.ee';
+  
+  // SECURITY: Validate redirect URL to prevent open redirect attacks
+  const destination = isAllowedTrackingRedirect(destinationRaw) 
+    ? destinationRaw 
+    : 'https://apexmediation.ee';
+  
+  if (!isAllowedTrackingRedirect(destinationRaw)) {
+    logger.warn('Blocked unsafe tracking redirect', { 
+      trackingId, 
+      linkId, 
+      unsafeUrl: destinationRaw.substring(0, 100) 
+    });
+  }
   
   try {
     const match = trackingId.match(/^track_([^_]+)_/);

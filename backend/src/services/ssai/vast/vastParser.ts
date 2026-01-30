@@ -56,7 +56,7 @@ import {
   FlattenedTracking,
   SSAIReadyCreative,
 } from './types';
-import VASTXMLParser, { validateVASTStructure } from './xmlParser';
+import VASTXMLParser, { validateVASTStructure, sanitizeHtmlResource } from './xmlParser';
 import logger from '../../../utils/logger';
 
 // =============================================================================
@@ -1097,7 +1097,8 @@ export class VASTParser {
     // Resources
     const staticResource = this.parseStaticResource(iconElement.StaticResource);
     const iFrameResource = VASTXMLParser.decodeUrl(VASTXMLParser.getTextContent(iconElement.IFrameResource)) ?? undefined;
-    const htmlResource = VASTXMLParser.getTextContent(iconElement.HTMLResource) ?? undefined;
+    // SECURITY: Sanitize HTML content to prevent XSS
+    const htmlResource = sanitizeHtmlResource(VASTXMLParser.getTextContent(iconElement.HTMLResource));
 
     // Icon clicks
     const iconClicks = this.parseIconClicks(iconElement.IconClicks);
@@ -1240,7 +1241,8 @@ export class VASTParser {
       apiFramework: VASTXMLParser.getAttribute(nlElement, 'apiFramework') ?? undefined,
       staticResource: this.parseStaticResource(nlElement.StaticResource),
       iFrameResource: VASTXMLParser.decodeUrl(VASTXMLParser.getTextContent(nlElement.IFrameResource)) ?? undefined,
-      htmlResource: VASTXMLParser.getTextContent(nlElement.HTMLResource) ?? undefined,
+      // SECURITY: Sanitize HTML content to prevent XSS
+      htmlResource: sanitizeHtmlResource(VASTXMLParser.getTextContent(nlElement.HTMLResource)),
       adParameters: this.parseAdParameters(nlElement.AdParameters),
       nonLinearClickThrough: VASTXMLParser.decodeUrl(VASTXMLParser.getTextContent(nlElement.NonLinearClickThrough)) ?? undefined,
       nonLinearClickTrackings: VASTXMLParser.ensureArray(nlElement.NonLinearClickTracking)
@@ -1303,7 +1305,8 @@ export class VASTParser {
       renderingMode: (VASTXMLParser.getAttribute(cElement, 'renderingMode') as 'default' | 'end-card' | 'concurrent') ?? undefined,
       staticResource: this.parseStaticResource(cElement.StaticResource),
       iFrameResource: VASTXMLParser.decodeUrl(VASTXMLParser.getTextContent(cElement.IFrameResource)) ?? undefined,
-      htmlResource: VASTXMLParser.getTextContent(cElement.HTMLResource) ?? undefined,
+      // SECURITY: Sanitize HTML content to prevent XSS
+      htmlResource: sanitizeHtmlResource(VASTXMLParser.getTextContent(cElement.HTMLResource)),
       adParameters: this.parseAdParameters(cElement.AdParameters),
       altText: VASTXMLParser.getAttribute(cElement, 'altText') ?? undefined,
       companionClickThrough: VASTXMLParser.decodeUrl(VASTXMLParser.getTextContent(cElement.CompanionClickThrough)) ?? undefined,
