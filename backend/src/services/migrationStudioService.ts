@@ -20,6 +20,8 @@ import {
   MappingConfidence,
   MigrationImportSummary,
   MigrationSignedComparison,
+  DryRunSimulationRequest,
+  DryRunSimulationResult,
 } from '../types/migration';
 import { AppError } from '../middleware/errorHandler';
 import logger from '../utils/logger';
@@ -865,6 +867,371 @@ export class MigrationStudioService {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Dry-run simulation: Preview what would happen during activation without making changes
+   * 
+   * This method performs comprehensive pre-flight checks and simulates the activation
+   * to help operators understand the impact before actually starting the experiment.
+   */
+  async simulateActivation(
+    experimentId: string,
+    publisherId: string,
+    data: DryRunSimulationRequest
+  ): Promise<DryRunSimulationResult> {
+    const simulationId = randomUUID();
+    const simulationHours = data.simulation_hours ?? 24;
+    
+    // Fetch experiment details
+    const expResult = await this.pool.query(
+      `SELECT * FROM migration_experiments WHERE id = $1 AND publisher_id = $2`,
+      [experimentId, publisherId]
+    );
+    
+    if (expResult.rows.length === 0) {
+      throw new AppError('Experiment not found', 404);
+    }
+    
+    const experiment = expResult.rows[0];
+    const guardrails = this.parseGuardrails(experiment.guardrails);
+    
+    // Pre-flight checks
+    const preflightChecks: DryRunSimulationResult['preflight']['checks'] = [];
+    
+    // Check 1: Experiment status
+    if (!['draft', 'paused'].includes(experiment.status)) {
+      preflightChecks.push({
+        name: 'experiment_status',
+        status: 'fail',
+        message: `Experiment is in '${experiment.status}' status. Only draft or paused experiments can be activated.`,
+        severity: 'critical',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'experiment_status',
+        status: 'pass',
+        message: `Experiment is in '${experiment.status}' status and can be activated.`,
+        severity: 'info',
+      });
+    }
+    
+    // Check 2: Mirror percent validation
+    if (data.mirror_percent < 0 || data.mirror_percent > 20) {
+      preflightChecks.push({
+        name: 'mirror_percent',
+        status: 'fail',
+        message: `Mirror percent ${data.mirror_percent}% is out of allowed range (0-20%).`,
+        severity: 'critical',
+      });
+    } else if (data.mirror_percent > 10) {
+      preflightChecks.push({
+        name: 'mirror_percent',
+        status: 'warn',
+        message: `Mirror percent ${data.mirror_percent}% is aggressive. Consider starting with 5% or less.`,
+        severity: 'warning',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'mirror_percent',
+        status: 'pass',
+        message: `Mirror percent ${data.mirror_percent}% is within safe range.`,
+        severity: 'info',
+      });
+    }
+    
+    // Fetch mapping information
+    const mappingsResult = await this.pool.query(
+      `SELECT mapping_status, mapping_confidence, incumbent_network, our_adapter_id
+       FROM migration_mappings WHERE experiment_id = $1`,
+      [experimentId]
+    );
+    
+    const mappings = mappingsResult.rows;
+    const confirmedMappings = mappings.filter(m => m.mapping_status === 'confirmed');
+    const pendingMappings = mappings.filter(m => m.mapping_status === 'pending');
+    const skippedMappings = mappings.filter(m => m.mapping_status === 'skipped');
+    const conflictMappings = mappings.filter(m => m.mapping_status === 'conflict');
+    
+    // Check 3: Mapping coverage
+    const coveragePercent = mappings.length > 0 
+      ? (confirmedMappings.length / mappings.length) * 100 
+      : 0;
+    
+    if (confirmedMappings.length === 0) {
+      preflightChecks.push({
+        name: 'mapping_coverage',
+        status: 'fail',
+        message: 'No confirmed mappings. At least one mapping must be confirmed before activation.',
+        severity: 'critical',
+      });
+    } else if (coveragePercent < 50) {
+      preflightChecks.push({
+        name: 'mapping_coverage',
+        status: 'warn',
+        message: `Only ${coveragePercent.toFixed(1)}% of mappings are confirmed. Consider confirming more mappings.`,
+        severity: 'warning',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'mapping_coverage',
+        status: 'pass',
+        message: `${confirmedMappings.length} of ${mappings.length} mappings confirmed (${coveragePercent.toFixed(1)}%).`,
+        severity: 'info',
+      });
+    }
+    
+    // Check 4: Conflicts
+    if (conflictMappings.length > 0) {
+      preflightChecks.push({
+        name: 'mapping_conflicts',
+        status: 'warn',
+        message: `${conflictMappings.length} mapping conflict(s) need resolution.`,
+        severity: 'warning',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'mapping_conflicts',
+        status: 'pass',
+        message: 'No mapping conflicts detected.',
+        severity: 'info',
+      });
+    }
+    
+    // Fetch traffic estimates from recent data
+    const trafficResult = await this.pool.query(
+      `SELECT 
+         COUNT(DISTINCT placement_id) as placements,
+         COUNT(DISTINCT app_id) as apps,
+         SUM(impressions) as total_impressions
+       FROM analytics_impressions
+       WHERE publisher_id = $1
+         AND ts >= NOW() - INTERVAL '24 hours'`,
+      [publisherId]
+    );
+    
+    const trafficData = trafficResult.rows[0];
+    const estimatedDailyRequests = Number(trafficData?.total_impressions || 0);
+    const estimatedSimulationRequests = Math.round(estimatedDailyRequests * (simulationHours / 24));
+    const estimatedTestRequests = Math.round(estimatedSimulationRequests * (data.mirror_percent / 100));
+    
+    // Check 5: Traffic volume
+    if (estimatedDailyRequests === 0) {
+      preflightChecks.push({
+        name: 'traffic_volume',
+        status: 'warn',
+        message: 'No recent traffic data found. Ensure placements are active before activation.',
+        severity: 'warning',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'traffic_volume',
+        status: 'pass',
+        message: `Estimated ${estimatedTestRequests.toLocaleString()} test requests over ${simulationHours} hours.`,
+        severity: 'info',
+      });
+    }
+    
+    // Check 6: Guardrail configuration
+    if (guardrails.latency_budget_ms < 200) {
+      preflightChecks.push({
+        name: 'guardrails_latency',
+        status: 'warn',
+        message: `Latency budget (${guardrails.latency_budget_ms}ms) is aggressive. May trigger false positives.`,
+        severity: 'warning',
+      });
+    } else {
+      preflightChecks.push({
+        name: 'guardrails_latency',
+        status: 'pass',
+        message: `Latency budget set to ${guardrails.latency_budget_ms}ms.`,
+        severity: 'info',
+      });
+    }
+    
+    // Unmapped networks
+    const unmappedNetworks = [...new Set(
+      pendingMappings
+        .filter(m => !m.our_adapter_id)
+        .map(m => m.incumbent_network)
+        .filter(Boolean)
+    )];
+    
+    // Guardrail status assessment
+    const getLatencyStatus = (ms: number): 'conservative' | 'moderate' | 'aggressive' => {
+      if (ms >= 500) return 'conservative';
+      if (ms >= 300) return 'moderate';
+      return 'aggressive';
+    };
+    
+    const getRevenueFloorStatus = (percent: number): 'conservative' | 'moderate' | 'aggressive' => {
+      if (percent >= -5) return 'conservative';
+      if (percent >= -15) return 'moderate';
+      return 'aggressive';
+    };
+    
+    const getErrorRateStatus = (percent: number): 'conservative' | 'moderate' | 'aggressive' => {
+      if (percent <= 1) return 'aggressive';
+      if (percent <= 5) return 'moderate';
+      return 'conservative';
+    };
+    
+    // Estimate time to minimum impressions
+    const hourlyTestRequests = estimatedDailyRequests / 24 * (data.mirror_percent / 100);
+    const timeToMinImpressions = hourlyTestRequests > 0 
+      ? guardrails.min_impressions / hourlyTestRequests 
+      : Infinity;
+    
+    // Risk factors
+    const riskFactors: DryRunSimulationResult['risk_assessment']['risk_factors'] = [];
+    
+    if (data.mirror_percent > 10) {
+      riskFactors.push({
+        factor: 'High traffic percentage',
+        level: 'medium',
+        description: `${data.mirror_percent}% of traffic will be routed through test. Higher risk if issues occur.`,
+        mitigation: 'Consider starting with 5% or less.',
+      });
+    }
+    
+    if (coveragePercent < 80 && confirmedMappings.length > 0) {
+      riskFactors.push({
+        factor: 'Incomplete mappings',
+        level: 'medium',
+        description: `Only ${coveragePercent.toFixed(1)}% of mappings confirmed. Traffic may hit unmapped adapters.`,
+        mitigation: 'Review and confirm remaining mappings before activation.',
+      });
+    }
+    
+    if (conflictMappings.length > 0) {
+      riskFactors.push({
+        factor: 'Unresolved conflicts',
+        level: 'high',
+        description: `${conflictMappings.length} mapping conflicts may cause routing errors.`,
+        mitigation: 'Resolve all conflicts before activation.',
+      });
+    }
+    
+    if (timeToMinImpressions > 24) {
+      riskFactors.push({
+        factor: 'Low traffic volume',
+        level: 'low',
+        description: `May take ${Math.ceil(timeToMinImpressions)} hours to reach minimum impressions for guardrail evaluation.`,
+        mitigation: 'Consider increasing mirror percentage or waiting for higher traffic periods.',
+      });
+    }
+    
+    // Overall risk
+    const highRiskCount = riskFactors.filter(r => r.level === 'high').length;
+    const mediumRiskCount = riskFactors.filter(r => r.level === 'medium').length;
+    const overallRisk: 'low' | 'medium' | 'high' = 
+      highRiskCount > 0 ? 'high' : 
+      mediumRiskCount > 1 ? 'high' :
+      mediumRiskCount > 0 ? 'medium' : 
+      'low';
+    
+    // Recommendations
+    const recommendations: DryRunSimulationResult['recommendations'] = [];
+    
+    if (preflightChecks.some(c => c.status === 'fail')) {
+      recommendations.push({
+        type: 'action',
+        message: 'Address all critical pre-flight check failures before activation.',
+        priority: 'high',
+      });
+    }
+    
+    if (coveragePercent < 100 && pendingMappings.length > 0) {
+      recommendations.push({
+        type: 'action',
+        message: `Review and confirm ${pendingMappings.length} pending mapping(s) for better coverage.`,
+        priority: 'medium',
+      });
+    }
+    
+    if (data.mirror_percent > 5 && experiment.status === 'draft') {
+      recommendations.push({
+        type: 'warning',
+        message: 'Consider starting with 1-5% mirror for initial validation.',
+        priority: 'medium',
+      });
+    }
+    
+    recommendations.push({
+      type: 'info',
+      message: 'Guardrails will automatically pause the experiment if thresholds are exceeded.',
+      priority: 'low',
+    });
+    
+    // Build result
+    const result: DryRunSimulationResult = {
+      simulation_id: simulationId,
+      experiment_id: experimentId,
+      mirror_percent: data.mirror_percent,
+      simulation_hours: simulationHours,
+      timestamp: new Date(),
+      
+      preflight: {
+        passed: !preflightChecks.some(c => c.status === 'fail'),
+        checks: preflightChecks,
+      },
+      
+      traffic_impact: {
+        estimated_total_requests: estimatedSimulationRequests,
+        estimated_test_requests: estimatedTestRequests,
+        estimated_control_requests: estimatedSimulationRequests - estimatedTestRequests,
+        test_percentage: data.mirror_percent,
+        placements_affected: Number(trafficData?.placements || 0),
+        apps_affected: Number(trafficData?.apps || 0),
+      },
+      
+      mapping_readiness: {
+        total_mappings: mappings.length,
+        confirmed_mappings: confirmedMappings.length,
+        pending_mappings: pendingMappings.length,
+        skipped_mappings: skippedMappings.length,
+        conflict_mappings: conflictMappings.length,
+        coverage_percent: coveragePercent,
+        unmapped_networks: unmappedNetworks,
+      },
+      
+      guardrail_review: {
+        latency_budget_ms: guardrails.latency_budget_ms,
+        latency_budget_status: getLatencyStatus(guardrails.latency_budget_ms),
+        revenue_floor_percent: guardrails.revenue_floor_percent,
+        revenue_floor_status: getRevenueFloorStatus(guardrails.revenue_floor_percent),
+        max_error_rate_percent: guardrails.max_error_rate_percent,
+        error_rate_status: getErrorRateStatus(guardrails.max_error_rate_percent),
+        min_impressions: guardrails.min_impressions,
+        estimated_time_to_min_impressions_hours: Math.ceil(timeToMinImpressions),
+      },
+      
+      risk_assessment: {
+        overall_risk: overallRisk,
+        risk_factors: riskFactors,
+      },
+      
+      rollback_plan: {
+        automatic_rollback_enabled: true,
+        rollback_triggers: [
+          `Latency exceeds ${guardrails.latency_budget_ms}ms`,
+          `Revenue drops below ${guardrails.revenue_floor_percent}% floor`,
+          `Error rate exceeds ${guardrails.max_error_rate_percent}%`,
+        ],
+        estimated_rollback_time_seconds: 5,
+      },
+      
+      recommendations,
+    };
+    
+    logger.info('Dry-run simulation completed', {
+      simulationId,
+      experimentId,
+      preflightPassed: result.preflight.passed,
+      overallRisk,
+    });
+    
+    return result;
   }
 
   /**

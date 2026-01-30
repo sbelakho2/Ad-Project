@@ -560,6 +560,24 @@ export function initializeSalesScheduler(): void {
   scheduledTasks.push(healthJob);
   logger.info('[Scheduler] Health check scheduled: every 5 minutes');
   
+  // ======== Safe Mode Update - Every 15 minutes ========
+  // Updates safe mode state based on bounce/complaint rates
+  const safeModeJob = cron.schedule('*/15 * * * *', async () => {
+    await runScheduledJob('safe_mode_update', async () => {
+      const { updateSafeModeState, checkSafeMode } = await import('./suppression-list.js');
+      await updateSafeModeState();
+      const status = await checkSafeMode();
+      return {
+        mode: status.mode,
+        canSend: status.canSend,
+        bounceRate: status.bounceRate,
+        complaintRate: status.complaintRate,
+      };
+    });
+  });
+  scheduledTasks.push(safeModeJob);
+  logger.info('[Scheduler] Safe mode update scheduled: every 15 minutes');
+  
   // ======== Discovery - Every 6 hours ========
   const discoveryJob = cron.schedule('0 */6 * * *', async () => {
     await runScheduledJob('discover', () => runDiscovery(config.discoverBatch));

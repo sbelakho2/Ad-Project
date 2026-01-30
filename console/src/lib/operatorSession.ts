@@ -8,7 +8,9 @@ type OperatorSessionPayload = {
 }
 
 function getOperatorSecret(): string | null {
-  return process.env.OPERATOR_SECRET || process.env.NEXT_PUBLIC_OPERATOR_SECRET || null
+  // SECURITY: Only use server-side OPERATOR_SECRET, never NEXT_PUBLIC_* 
+  // NEXT_PUBLIC_* variables are exposed in client bundles
+  return process.env.OPERATOR_SECRET || null
 }
 
 function base64urlEncode(input: Buffer | string): string {

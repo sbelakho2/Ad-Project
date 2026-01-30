@@ -29,10 +29,17 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
   );
 
   // Basic CSP; allow override via env
+  // Production: Remove 'unsafe-eval' to prevent XSS attacks via eval()
+  // Development: Allow 'unsafe-eval' for debugging/hot-reload scenarios
+  const isProd = process.env.NODE_ENV === 'production';
+  const scriptSrc = isProd
+    ? "script-src 'self' 'unsafe-inline'"  // Production: No unsafe-eval
+    : "script-src 'self' 'unsafe-inline' 'unsafe-eval'"; // Dev: Allow eval
+  
   const csp = process.env.CSP_HEADER ||
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // replace with nonce-based in production UI server
+      scriptSrc,
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data:",
       "connect-src 'self'",

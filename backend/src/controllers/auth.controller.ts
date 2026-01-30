@@ -139,11 +139,13 @@ interface RefreshTokenIssueOptions {
 
 const issueAccessToken = (payload: TokenPayload) => {
   const expiresInSeconds = resolveAccessTokenExpirationSeconds();
+  const jti = randomUUID(); // Unique token ID for blacklisting on logout
   const token = jwt.sign({ ...payload, tokenType: 'access' }, getAccessTokenSecret(), {
     expiresIn: expiresInSeconds,
+    jwtid: jti,
   });
 
-  return { token, expiresInSeconds } as const;
+  return { token, expiresInSeconds, jti } as const;
 };
 
 const issueRefreshToken = async (
@@ -664,7 +666,10 @@ export const me = async (
 };
 
 /**
- * Logout: revoke refresh tokens for user and clear cookies
+ * Logout: revoke refresh tokens for user, blacklist access token, and clear cookies
+ * 
+ * Security enhancement: Access tokens are now blacklisted in Redis with TTL
+ * matching the remaining token validity. This prevents token reuse after logout.
  */
 export const logout = async (
   req: Request,
@@ -672,7 +677,27 @@ export const logout = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const user = (req as any).user as TokenPayload | undefined;
+    const user = (req as any).user as (TokenPayload & { exp?: number }) | undefined;
+    
+    // Blacklist the current access token if it has a JTI
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.substring(7);
+        const decoded = jwt.decode(token) as jwt.JwtPayload | null;
+        if (decoded?.jti && decoded?.exp) {
+          const { blacklistToken, calculateRemainingTtl } = await import('../services/jwtBlacklist.service');
+          const ttl = calculateRemainingTtl(decoded.exp);
+          if (ttl > 0) {
+            await blacklistToken(decoded.jti, ttl);
+          }
+        }
+      } catch (_) {
+        // best-effort blacklisting
+      }
+    }
+    
+    // Revoke refresh tokens
     if (user?.userId) {
       try {
         const { revokeRefreshTokensForUser } = await import('../repositories/refreshTokenRepository');

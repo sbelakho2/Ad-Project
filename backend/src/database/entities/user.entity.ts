@@ -20,6 +20,14 @@ export class User {
   @Column({ type: 'varchar', length: 255, nullable: true })
   lastName?: string | null;
 
+  // Publisher association - links user to their publisher account
+  @Column({ type: 'uuid', nullable: true, name: 'publisher_id' })
+  publisherId?: string | null;
+
+  // RBAC role for access control
+  @Column({ type: 'varchar', length: 50, default: 'publisher' })
+  role!: 'admin' | 'publisher' | 'readonly';
+
   @CreateDateColumn()
   createdAt!: Date;
 

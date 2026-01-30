@@ -219,6 +219,10 @@ const stripeProvider = new StripeProvider();
 export class PayoutLedgerService {
   /**
    * Create double-entry ledger entries for a payout
+   * 
+   * CRITICAL: Uses a database transaction to ensure atomicity.
+   * Both debit and credit entries must succeed together or both fail.
+   * This maintains double-entry accounting integrity.
    */
   async createLedgerEntries(
     payoutId: string,
@@ -227,9 +231,13 @@ export class PayoutLedgerService {
     currency: string,
     provider: PaymentProvider
   ): Promise<{ debitId: string; creditId: string }> {
+    const client = await getClient();
+    
     try {
+      await client.query('BEGIN');
+      
       // Debit entry (money leaving platform)
-      const debitResult = await query<{ id: string }>(
+      const debitResult = await client.query<{ id: string }>(
         `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
          RETURNING id`,
@@ -237,12 +245,14 @@ export class PayoutLedgerService {
       );
 
       // Credit entry (publisher receiving money)
-      const creditResult = await query<{ id: string }>(
+      const creditResult = await client.query<{ id: string }>(
         `INSERT INTO payout_ledger (payout_id, publisher_id, amount, currency, type, provider, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
          RETURNING id`,
         [payoutId, publisherId, amount, currency, 'credit', provider]
       );
+
+      await client.query('COMMIT');
 
       logger.info('Ledger entries created', {
         payoutId,
@@ -255,8 +265,11 @@ export class PayoutLedgerService {
         creditId: creditResult.rows[0].id,
       };
     } catch (error) {
+      await client.query('ROLLBACK');
       logger.error('Failed to create ledger entries', { error, payoutId });
       throw new Error('Ledger entry creation failed');
+    } finally {
+      client.release();
     }
   }
 

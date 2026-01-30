@@ -28,6 +28,7 @@ export interface ISessionStore {
   completePod(sessionId: string, podId: string): Promise<void>;
   getByIdempotencyKey(key: string): Promise<SSAISession | null>;
   getAllSessions(): SSAISession[];
+  getActiveSessions(): SSAISession[];
 }
 
 /**
@@ -314,8 +315,8 @@ export class InMemorySessionStore implements ISessionStore {
   }
 
   /**
-   * Get session count by tenant
-   */
+ * Get session count by tenant
+ */
   getSessionCountByTenant(): Record<string, number> {
     const counts: Record<string, number> = {};
 
@@ -330,5 +331,8 @@ export class InMemorySessionStore implements ISessionStore {
   }
 }
 
-// Export singleton instance
-export const sessionStore = new InMemorySessionStore();
+// Import factory from RedisSessionStore
+import { createSessionStore } from './RedisSessionStore';
+
+// Export singleton instance - uses Redis in production, in-memory otherwise
+export const sessionStore = createSessionStore();

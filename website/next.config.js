@@ -45,8 +45,16 @@ const nextConfig = {
     // Derive optional analytics hosts conditionally (GA / Hotjar disabled by default)
     const enableGA = process.env.NEXT_PUBLIC_ENABLE_GA === 'true'
     const enableHotjar = process.env.NEXT_PUBLIC_ENABLE_HOTJAR === 'true'
+    const isProd = process.env.NODE_ENV === 'production'
 
-    const scriptSrc = ["'self'", "'unsafe-inline'", "'unsafe-eval'"]
+    // CSP script-src: 
+    // - Development: Allow 'unsafe-eval' for hot-reload/debugging
+    // - Production: Remove 'unsafe-eval' to prevent XSS via eval()
+    // Note: 'unsafe-inline' is still needed for Next.js hydration scripts
+    // Future improvement: implement nonce-based CSP via middleware
+    const scriptSrc = isProd 
+      ? ["'self'", "'unsafe-inline'"]  // Production: No unsafe-eval
+      : ["'self'", "'unsafe-inline'", "'unsafe-eval'"]  // Dev: Allow eval for hot-reload
     const connectSrc = ["'self'", 'https:']
     const imgSrc = ["'self'", 'data:', 'https:']
 

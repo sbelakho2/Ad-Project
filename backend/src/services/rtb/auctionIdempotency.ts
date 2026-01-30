@@ -38,10 +38,13 @@ export interface CachedAuctionResult {
 /**
  * Generate a deterministic landscape_id from the auction result
  * This provides a stable identifier for bid landscape export
+ * 
+ * IMPORTANT: This function must be deterministic - same inputs always produce
+ * same output. This is required for idempotency (retries return same landscape ID).
  */
 export function generateLandscapeId(requestId: string, bidId?: string): string {
   const hash = crypto.createHash('sha256')
-    .update(`${requestId}:${bidId || 'no-bid'}:${Date.now()}`)
+    .update(`${requestId}:${bidId || 'no-bid'}`)
     .digest('hex')
     .substring(0, 24);
   return `ls_${hash}`;

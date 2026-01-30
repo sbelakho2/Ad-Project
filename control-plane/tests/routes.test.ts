@@ -14,6 +14,11 @@ jest.mock('../src/auth', () => ({
   requireOperator: (req: any, res: any, next: any) => next(),
   verifyOperatorCredentials: jest.fn(),
   issueOperatorToken: jest.fn(),
+  requireAllowedIP: (req: any, res: any, next: any) => next(),
+  rateLimitLogin: (req: any, res: any, next: any) => next(),
+  recordLoginAttempt: jest.fn(),
+  clearLoginAttempts: jest.fn(),
+  getClientIP: (req: any) => '127.0.0.1',
 }));
 
 // Mock logger

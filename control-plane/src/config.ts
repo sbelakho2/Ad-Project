@@ -16,6 +16,10 @@ const envSchema = z.object({
   OPERATOR_JWT_SECRET: z.string().min(32),
   OPERATOR_SESSION_TTL_HOURS: z.string().default('4'),
   OPERATOR_CREDENTIALS: z.string().optional(), // email:hash pairs
+  
+  // IP Allowlist (CIDR supported, comma-separated)
+  // Example: "10.0.0.0/8,192.168.1.100,203.0.113.50"
+  OPERATOR_IP_ALLOWLIST: z.string().optional(),
 
   // Device approval (2FA for new devices)
   DEVICE_APPROVAL_ENABLED: z.string().default('true'),

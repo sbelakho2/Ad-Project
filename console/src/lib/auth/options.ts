@@ -231,7 +231,18 @@ export const authOptions: NextAuthOptions = {
   // Let NextAuth handle cookie configuration automatically
   // Explicit domain setting can cause issues with __Secure- prefix cookies
   useSecureCookies: process.env.NODE_ENV === 'production',
-  secret: process.env.NEXTAUTH_SECRET || 'development-secret-change-in-production',
+  // SECURITY: Require NEXTAUTH_SECRET in production - never use a fallback
+  // In development, use a dev-only default that's clearly marked
+  secret: (() => {
+    const secret = process.env.NEXTAUTH_SECRET
+    if (!secret && process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'NEXTAUTH_SECRET is required in production. ' +
+        'Generate one with: openssl rand -base64 32'
+      )
+    }
+    return secret || 'dev-only-secret-DO-NOT-USE-IN-PRODUCTION'
+  })(),
   events: {
     async signIn() {
       return

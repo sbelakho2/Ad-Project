@@ -46,31 +46,19 @@ export async function apiKeyAuth(req: Request, res: Response, next: NextFunction
     void apiKeyRepo.update({ id: found.id }, { lastUsedAt: new Date() });
 
     // Attach minimal user context.
-    // NOTE: `User` entity intentionally omits several production columns (publisher_id, role).
-    // When loading `relations: ['user']`, those fields won't be present, so we fetch them explicitly.
+    // The User entity now includes publisherId and role columns, so the JOIN returns everything.
     type ApiRole = 'admin' | 'publisher' | 'readonly';
 
-    let publisherId = '';
-    let role: ApiRole | undefined;
-    let email = (found.user as any)?.email || '';
-    try {
-      const rows = await AppDataSource.query(
-        'SELECT publisher_id AS "publisherId", role, email FROM users WHERE id = $1 LIMIT 1',
-        [found.user.id]
-      );
-      const row = rows?.[0];
-      if (row) {
-        publisherId = String(row.publisherId || '');
-        const maybeRole = String(row.role || '').toLowerCase();
-        role = (maybeRole === 'admin' || maybeRole === 'publisher' || maybeRole === 'readonly') ? (maybeRole as ApiRole) : undefined;
-        email = String(row.email || email);
-      }
-    } catch {
-      // Best-effort; leave publisherId empty if unavailable.
-    }
+    const user = found.user;
+    const publisherId = user.publisherId || '';
+    const maybeRole = (user.role || '').toLowerCase();
+    const role: ApiRole | undefined = (maybeRole === 'admin' || maybeRole === 'publisher' || maybeRole === 'readonly') 
+      ? (maybeRole as ApiRole) 
+      : undefined;
+    const email = user.email || '';
 
     req.user = {
-      userId: found.user.id,
+      userId: user.id,
       publisherId,
       email,
       role,

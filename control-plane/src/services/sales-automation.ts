@@ -1065,7 +1065,27 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
   let skippedSpam = 0;
 
   // =========================================================================
-  // DOMAIN HEALTH GUARD (HARD-STOP) - MUST BE FIRST CHECK
+  // GLOBAL KILL SWITCH CHECK - MUST BE FIRST CHECK
+  // 
+  // Emergency stop for ALL outbound sending across V1 and V2 systems.
+  // If active, immediately abort without any further processing.
+  // =========================================================================
+  const { checkSendsAllowed } = await import('./global-kill-switch.js');
+  const killSwitchCheck = await checkSendsAllowed('v1_outbound');
+  if (!killSwitchCheck.allowed && !dryRun) {
+    const emptyDomainHealth: DomainHealthStatus = { healthy: false, bounceRate: 0, spamRate: 0, totalSent: 0, status: 'quarantined', reason: 'Kill switch active' };
+    return {
+      processed: 0,
+      sent: 0,
+      skippedSpam: 0,
+      errors: [killSwitchCheck.reason || 'Global kill switch is active'],
+      dryRun,
+      domainHealth: emptyDomainHealth,
+    };
+  }
+
+  // =========================================================================
+  // DOMAIN HEALTH GUARD (HARD-STOP) - SECOND CHECK
   // 
   // This is the most critical safety feature. If bounce rate exceeds 7%,
   // ALL sending is blocked until an operator explicitly overrides.
@@ -1187,6 +1207,96 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
         UPDATE sa_enrollments SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1
       `, [enrollment.id], 'Complete enrollment - all steps done');
       continue;
+    }
+
+    // =========================================================================
+    // CRITICAL: Suppression List Check
+    // MUST happen BEFORE any email is sent to prevent:
+    // - Sending to bounced emails (damages reputation)
+    // - Sending to unsubscribed users (legal violation)
+    // - Sending to spam complainers (destroys deliverability)
+    // =========================================================================
+    const { isEmailSuppressed } = await import('./suppression-list.js');
+    const suppressionCheck = await isEmailSuppressed(enrollment.contact_email!);
+    if (suppressionCheck.isSuppressed) {
+      errors.push(`Skipped ${enrollment.contact_email}: ${suppressionCheck.reason || 'Suppressed'}`);
+      
+      // Log activity and mark contact appropriately
+      await write(`
+        INSERT INTO sa_activity_log (contact_id, action, details)
+        VALUES ($1, 'email_suppressed', $2)
+      `, [
+        enrollment.contact_id,
+        JSON.stringify({ 
+          reason: suppressionCheck.reason, 
+          type: suppressionCheck.suppressionType,
+          suppressedAt: suppressionCheck.suppressedAt,
+        }),
+      ], 'Log suppressed email');
+      
+      // Update contact status to prevent future attempts
+      if (suppressionCheck.suppressionType === 'hard_bounce' || 
+          suppressionCheck.suppressionType === 'spam_complaint' ||
+          suppressionCheck.suppressionType === 'unsubscribe' ||
+          suppressionCheck.suppressionType === 'gdpr_erasure') {
+        await write(`
+          UPDATE sa_contacts SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
+        `, [
+          suppressionCheck.suppressionType === 'hard_bounce' ? 'bounced' : 'opted_out',
+          enrollment.contact_id,
+        ], 'Update contact status from suppression');
+      }
+      
+      continue;
+    }
+
+    // =========================================================================
+    // Email Verification: MX Record & Disposable Email Check
+    // Prevents sending to domains that can't receive email
+    // =========================================================================
+    const { verifyEmail } = await import('./email-verification.js');
+    const emailVerification = await verifyEmail(enrollment.contact_email!, {
+      checkMx: true,
+      checkDisposable: true,
+      checkRoleBased: true,
+      blockDisposable: true,
+      blockRoleBased: false, // Warn only
+    });
+    
+    if (!emailVerification.valid) {
+      errors.push(`Skipped ${enrollment.contact_email}: ${emailVerification.errors.join(', ')}`);
+      
+      await write(`
+        INSERT INTO sa_activity_log (contact_id, action, details)
+        VALUES ($1, 'email_verification_failed', $2)
+      `, [
+        enrollment.contact_id,
+        JSON.stringify({ 
+          errors: emailVerification.errors,
+          domain: emailVerification.domain,
+          isDisposable: emailVerification.isDisposable,
+        }),
+      ], 'Log email verification failure');
+      
+      // Mark disposable emails as invalid
+      if (emailVerification.isDisposable) {
+        await write(`
+          UPDATE sa_contacts SET status = 'invalid', updated_at = CURRENT_TIMESTAMP WHERE id = $1
+        `, [enrollment.contact_id], 'Mark disposable email as invalid');
+      }
+      
+      continue;
+    }
+    
+    // Log warning for role-based emails (but still send)
+    if (emailVerification.warnings.length > 0) {
+      await write(`
+        INSERT INTO sa_activity_log (contact_id, action, details)
+        VALUES ($1, 'email_verification_warning', $2)
+      `, [
+        enrollment.contact_id,
+        JSON.stringify({ warnings: emailVerification.warnings }),
+      ], 'Log email verification warning');
     }
 
     const step = steps[currentStep];

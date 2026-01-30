@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Idempotently enforce PITR-quality backups on Hetzner DB server:
-# - Keep ~30h worth of archived WAL (>=24h PITR window)
+# - Keep ~72h worth of archived WAL (3-day PITR window, weekend-safe)
 # - Daily physical base backup
 # - Reduce WAL growth by making staging tables UNLOGGED + enabling wal_compression
 #
@@ -98,10 +98,10 @@ fi
 
 sudo systemctl reload postgresql
 
-echo '== 3) PITR automation (daily base backup + 30h WAL retention) =='
+echo '== 3) PITR automation (daily base backup + 72h WAL retention) =='
 sudo install -d -m 0755 /opt/adproject/ops
 
-KEEP_HOURS="30"
+KEEP_HOURS="72"
 KEEP_MINUTES="$((KEEP_HOURS*60))"
 
 cat <<'SH' | sudo tee /opt/adproject/ops/pitr_basebackup.sh >/dev/null
@@ -139,7 +139,7 @@ cat <<SH | sudo tee /opt/adproject/ops/prune_wal_archives.sh >/dev/null
 #!/usr/bin/env bash
 set -euo pipefail
 WAL_DIR="$WAL_DIR"
-KEEP_HOURS="30"
+KEEP_HOURS="72"
 
 [[ -d "$WAL_DIR" ]] || exit 0
 
@@ -167,7 +167,7 @@ cat <<'CRON' | sudo tee /etc/cron.d/adproject-wal-retention >/dev/null
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Keep ~30h worth of archived WAL for PITR window
+# Keep ~72h worth of archived WAL for PITR window (weekend-safe)
 7 * * * * root /opt/adproject/ops/prune_wal_archives.sh >>/var/log/adproject-wal-retention.log 2>&1
 CRON
 
@@ -182,5 +182,5 @@ select 'archived_count='||archived_count||' failed_count='||failed_count from pg
 select name||'='||setting||' source='||coalesce(sourcefile,'') from pg_settings where name in ('wal_compression','max_wal_size','checkpoint_timeout');
 SQL
 
-echo 'OK: PITR automation ensured (UNLOGGED staging, wal_compression, daily basebackup, 30h WAL retention)'
+echo 'OK: PITR automation ensured (UNLOGGED staging, wal_compression, daily basebackup, 72h WAL retention)'
 BASH

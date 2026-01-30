@@ -19,7 +19,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: 'Missing secret' }, { status: 400 })
   }
 
-  const expected = process.env.OPERATOR_SECRET || process.env.NEXT_PUBLIC_OPERATOR_SECRET
+  // SECURITY: Only use server-side OPERATOR_SECRET, never NEXT_PUBLIC_*
+  // NEXT_PUBLIC_* variables are exposed in client bundles
+  const expected = process.env.OPERATOR_SECRET
   if (!expected) {
     return NextResponse.json(
       { ok: false, error: 'Operator login not configured' },

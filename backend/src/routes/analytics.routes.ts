@@ -74,6 +74,12 @@ router.get('/omsdk-status', authenticateOrApiKey, cache({
   ttl: cacheTTL.medium 
 }), analyticsController.getOmsdkStatus);
 
+// GET /api/v1/analytics/sdk-versions - Get SDK version distribution
+router.get('/sdk-versions', authenticateOrApiKey, cache({
+  ttl: cacheTTL.medium,
+  varyBy: ['query.startDate', 'query.endDate']
+}), analyticsController.getSdkVersions);
+
 export default router;
 
 // ========================================

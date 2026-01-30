@@ -1,6 +1,6 @@
 # Rollback Runbook
 
-**Last Updated:** 2026-01-12  
+**Last Updated:** 2026-01-30  
 **Owner:** DevOps  
 **Approval Required:** On-call lead for production rollback
 
@@ -11,9 +11,10 @@
 1. [Quick Reference](#quick-reference)
 2. [Pre-Rollback Checklist](#pre-rollback-checklist)
 3. [Rollback Procedures](#rollback-procedures)
-4. [Database Rollback](#database-rollback)
-5. [Post-Rollback Verification](#post-rollback-verification)
-6. [Escalation Matrix](#escalation-matrix)
+4. [SSAI/Parser Rollback](#ssaiparser-rollback)
+5. [Database Rollback](#database-rollback)
+6. [Post-Rollback Verification](#post-rollback-verification)
+7. [Escalation Matrix](#escalation-matrix)
 
 ---
 
@@ -165,6 +166,73 @@ curl -s http://localhost:3000 | head -1
 
 ---
 
+## SSAI/Parser Rollback
+
+### Verify SSAI Health
+
+Before rollback, check SSAI component health:
+
+```bash
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+
+# Check SSAI health endpoint
+curl -s http://localhost:8080/api/v1/ssai/health | jq .
+# Expected: {"healthy":true,"components":{...}}
+
+# Check parser-specific metrics
+curl -s http://localhost:8080/metrics | grep ssai_parse
+```
+
+### SSAI-Specific Issues
+
+| Issue | Symptom | Resolution |
+|-------|---------|------------|
+| Parser XSS alert | Security warning in logs | Redeploy from last known safe commit |
+| XXE detection | Entity expansion errors | Verify `processEntities: false` in config |
+| Wrapper timeout | Parse times >30s | Check network connectivity, increase timeout |
+| Memory spike | OOM kills | Check companion limits, restart backend |
+
+### Rollback SSAI Module Only
+
+If only SSAI is affected:
+
+```bash
+# SSH to app server
+ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+cd /opt/adproject
+
+# Identify SSAI-related commits
+git log --oneline --all backend/src/services/ssai/ | head -5
+
+# Checkout specific SSAI files from good commit
+git checkout <good-commit-hash> -- backend/src/services/ssai/vast/
+
+# Rebuild
+cd backend
+npm run build
+
+# Restart backend
+pm2 restart backend
+
+# Verify
+curl -s http://localhost:8080/api/v1/ssai/health | jq .
+```
+
+### Verify VAST/VMAP Parser
+
+After any SSAI rollback:
+
+```bash
+# Run parser tests
+cd /opt/adproject/backend
+npx jest --testPathPattern="vast/__tests__" --silent
+
+# Expected: 66 tests passing
+```
+
+---
+
 ## Database Rollback
 
 ⚠️ **WARNING:** Database rollbacks can cause data loss. Use extreme caution.
@@ -246,6 +314,10 @@ curl -s -X POST http://46.62.252.96:8080/api/v1/rtb/bid \
   -H "X-SDK-Key: ak_test_..." \
   -d '{"placementId":"test","adType":"banner"}' | jq .
 # Expected: bid response
+
+# SSAI health
+curl -s http://46.62.252.96:8080/api/v1/ssai/health | jq .
+# Expected: {"healthy":true,"components":{"redis":{"status":"healthy"},"database":{"status":"healthy"}}}
 ```
 
 ### 3. Container Status

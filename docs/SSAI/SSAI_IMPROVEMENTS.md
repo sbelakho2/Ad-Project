@@ -1,7 +1,7 @@
 # SSAI (Server-Side Ad Insertion) Improvements
 
-> **Document Version:** 1.0.0  
-> **Last Updated:** January 12, 2026  
+> **Document Version:** 1.1.0  
+> **Last Updated:** January 30, 2026  
 > **Status:** Completed / GA  
 > **Scope:** Web SDK + CTV SDKs (tvOS + Android TV) + Backend Services  
 > **Constraint:** Augmentative only - no breaking changes to existing functionality
@@ -11,14 +11,15 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Session & Manifest Service](#1-session--manifest-service)
-3. [Break Signaling & Pod Planning](#2-break-signaling--pod-planning)
-4. [Pod Decisioning](#3-pod-decisioning)
-5. [Stitching & Packaging](#4-stitching--packaging)
-6. [Tracking & Reconciliation](#5-tracking--reconciliation)
-7. [Operability & Reliability](#6-operability--reliability)
-8. [CI E2E Test Matrix](#ci-e2e-test-matrix)
-9. [Implementation Checklist](#implementation-checklist)
+2. [VAST/VMAP Parser](#vast-vmap-parser)
+3. [Session & Manifest Service](#1-session--manifest-service)
+4. [Break Signaling & Pod Planning](#2-break-signaling--pod-planning)
+5. [Pod Decisioning](#3-pod-decisioning)
+6. [Stitching & Packaging](#4-stitching--packaging)
+7. [Tracking & Reconciliation](#5-tracking--reconciliation)
+8. [Operability & Reliability](#6-operability--reliability)
+9. [CI E2E Test Matrix](#ci-e2e-test-matrix)
+10. [Implementation Checklist](#implementation-checklist)
 
 ---
 
@@ -43,6 +44,36 @@ This document defines the complete SSAI implementation roadmap for Apex Mediatio
 | Live | CMAF/fMP4 | tvOS AVPlayer, Web hls.js, Android TV ExoPlayer | Web Shaka, Android TV ExoPlayer |
 | VOD | TS | tvOS AVPlayer, Web hls.js, Android TV ExoPlayer | Web Shaka, Android TV ExoPlayer |
 | VOD | CMAF/fMP4 | tvOS AVPlayer, Web hls.js, Android TV ExoPlayer | Web Shaka, Android TV ExoPlayer |
+
+---
+
+## VAST/VMAP Parser
+
+> Core ad response parsing for VAST 2.0-4.2 and VMAP 1.0-1.0.1
+
+The VAST/VMAP Parser module provides the foundational parsing layer for all SSAI ad responses. For comprehensive documentation, see **[VAST/VMAP Parser Documentation](./VAST_VMAP_PARSER.md)**.
+
+### Quick Reference
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| VAST 2.0-4.2 | ✅ | Full IAB spec compliance |
+| VMAP 1.0-1.0.1 | ✅ | Ad break scheduling |
+| Wrapper Resolution | ✅ | Chain following with depth limits |
+| Security | ✅ | XSS, XXE, DoS protection |
+| SSAI Integration | ✅ | Ready-to-stitch creative extraction |
+
+### Recent Updates (January 2026)
+
+16 security and stability fixes deployed to production:
+- XSS sanitization for all URL outputs
+- XXE prevention at parser level
+- DoS protection (wrapper depth, timeouts, size limits)
+- Race condition fixes in wrapper resolution
+- Memory leak fixes in companion processing
+- Duration validation bounds (0-86,400 seconds)
+
+**Test Status:** 66 tests passing, 75.86% coverage
 
 ---
 

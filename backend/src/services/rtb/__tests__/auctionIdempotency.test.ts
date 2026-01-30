@@ -17,5 +17,19 @@ describe('auctionIdempotency', () => {
       const id = generateLandscapeId('req-123');
       expect(id).toMatch(/^ls_[a-f0-9]{24}$/);
     });
+
+    it('is deterministic - same inputs produce same output', () => {
+      const id1 = generateLandscapeId('req-123', 'bid-456');
+      const id2 = generateLandscapeId('req-123', 'bid-456');
+      const id3 = generateLandscapeId('req-123', 'bid-456');
+      expect(id1).toBe(id2);
+      expect(id2).toBe(id3);
+    });
+
+    it('is deterministic for no-bid case', () => {
+      const id1 = generateLandscapeId('req-123');
+      const id2 = generateLandscapeId('req-123');
+      expect(id1).toBe(id2);
+    });
   });
 });

@@ -274,3 +274,79 @@ export const getImpressionsBreakdown = async (
     impressions: Number.parseInt(r.impressions, 10) || 0,
   }));
 };
+
+/**
+ * SDK Version Distribution
+ * 
+ * Returns the distribution of SDK versions across events for a publisher.
+ * Helps track SDK adoption and identify outdated integrations.
+ */
+export type SdkVersionRow = {
+  sdk_version: string;
+  event_count: number;
+  percentage: number;
+  first_seen: string;
+  last_seen: string;
+};
+
+export const getSdkVersionDistribution = async (
+  publisherId: string,
+  startDate?: string,
+  endDate?: string
+): Promise<SdkVersionRow[]> => {
+  const now = new Date();
+  const end = endDate ? new Date(endDate) : now;
+  const start = startDate ? new Date(startDate) : subDays(end, 30);
+
+  const endSafe = Number.isNaN(end.getTime()) ? now : end;
+  const startSafe = Number.isNaN(start.getTime()) ? subDays(endSafe, 30) : start;
+
+  const result = await runQuery<{
+    sdk_version: string;
+    event_count: string;
+    first_seen: string;
+    last_seen: string;
+  }>(
+    `
+      WITH sdk_stats AS (
+        SELECT
+          COALESCE(meta->>'sdk_version', 'unknown') AS sdk_version,
+          COUNT(*)::bigint AS event_count,
+          MIN(observed_at) AS first_seen,
+          MAX(observed_at) AS last_seen
+        FROM analytics_impressions
+        WHERE publisher_id = $1
+          AND observed_at >= $2
+          AND observed_at < $3
+          AND is_test_mode = false
+        GROUP BY COALESCE(meta->>'sdk_version', 'unknown')
+      ),
+      total AS (
+        SELECT SUM(event_count)::bigint AS total_events FROM sdk_stats
+      )
+      SELECT
+        s.sdk_version,
+        s.event_count::text AS event_count,
+        to_char(s.first_seen, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS first_seen,
+        to_char(s.last_seen, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_seen
+      FROM sdk_stats s, total t
+      ORDER BY s.event_count DESC
+    `,
+    [publisherId, startSafe, endSafe],
+    'ANALYTICS_SDK_VERSION_DISTRIBUTION'
+  );
+
+  // Calculate percentages
+  const totalEvents = result.reduce((sum, r) => sum + (Number.parseInt(r.event_count, 10) || 0), 0);
+
+  return result.map((r) => {
+    const eventCount = Number.parseInt(r.event_count, 10) || 0;
+    return {
+      sdk_version: r.sdk_version || 'unknown',
+      event_count: eventCount,
+      percentage: totalEvents > 0 ? Math.round((eventCount / totalEvents) * 10000) / 100 : 0,
+      first_seen: r.first_seen,
+      last_seen: r.last_seen,
+    };
+  });
+};

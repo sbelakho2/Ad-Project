@@ -353,6 +353,16 @@ export const cacheKeys = {
       `analytics:adapter:${publisherId}:${startDate}:${endDate}`,
   },
   
+  // SSAI session caching
+  ssai: {
+    session: (sessionId: string) =>
+      `ssai:session:${sessionId}`,
+    idempotency: (idempotencyKey: string) =>
+      `ssai:idempotency:${idempotencyKey}`,
+    tenantSession: (tenantId: string, sessionId: string) =>
+      `ssai:tenant:${tenantId}:${sessionId}`,
+  },
+  
   // A/B Testing caching
   abTesting: {
     experiment: (experimentId: string) =>

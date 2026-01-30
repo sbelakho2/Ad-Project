@@ -79,6 +79,7 @@ The service exposes Prometheus metrics at `/metrics` and health checks at `/heal
 - `http_request_duration_seconds`: Request latency histogram.
 - `rtb_auction_latency_seconds`: RTB-specific latency metrics.
 - `fraud_drift_psi`: ML model drift indicators.
+- `ssai_parse_duration_seconds`: VAST/VMAP parsing latency.
 
 ## 🛡️ Security
 
@@ -86,3 +87,31 @@ The service exposes Prometheus metrics at `/metrics` and health checks at `/heal
 - **CORS**: Allowlisted origins for console and main website.
 - **Auth**: JWT-based authentication with refresh token rotation.
 - **Rate Limiting**: Tiered limiting based on publisher plan.
+- **VAST/VMAP Security**: XSS sanitization, XXE prevention, DoS protection. See [VAST/VMAP Parser docs](../docs/SSAI/VAST_VMAP_PARSER.md#security-features).
+
+## 📺 SSAI (Server-Side Ad Insertion)
+
+The backend includes a comprehensive SSAI module for video ad serving:
+
+### VAST/VMAP Parser (`/src/services/ssai/vast`)
+
+Production-ready parser for IAB advertising specifications:
+
+- **Supported Versions**: VAST 2.0-4.2, VMAP 1.0-1.0.1
+- **Features**: Wrapper resolution, tracking aggregation, SSAI-ready creative extraction
+- **Security**: XSS sanitization, XXE prevention, DoS protection (depth limits, timeouts)
+- **Test Coverage**: 66 tests, 75.86% coverage
+
+```typescript
+import { parseVAST, parseVMAP, AdRequestHandler } from '@services/ssai/vast';
+
+// Quick parsing
+const result = await parseVAST(vastXml);
+
+// Full SSAI integration
+const handler = new AdRequestHandler({ contentDuration: 600 });
+const adResult = await handler.processAdResponse(xmlString);
+```
+
+See [VAST/VMAP Parser Documentation](../docs/SSAI/VAST_VMAP_PARSER.md) for full API reference.
+

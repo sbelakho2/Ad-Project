@@ -663,14 +663,23 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
    * - Contact must have app_name OR icebreaker
    * - Score must be >= threshold (default 50)
    */
-  async composeMessage(contactId: string, options: { minScore?: number } = {}): Promise<{
+  async composeMessage(contactId: string, options: { minScore?: number; returnGatingReasons?: boolean } = {}): Promise<{
     subject: string;
     body: string;
     templateId: string;
     subjectArmId: string;
     variationHash: string;
-  } | null> {
+  } | { gatingFailure: true; reasons: string[]; contact?: { score?: number; hasEmail?: boolean; hasCompany?: boolean; hasAppName?: boolean; hasIcebreaker?: boolean } } | null> {
     const minScore = options.minScore ?? 50;
+    const returnReasons = options.returnGatingReasons ?? false;
+    
+    // Helper to return gating failure with reasons (IMPROVEMENT 2)
+    const gatingFailure = (reasons: string[], contactInfo?: { score?: number; hasEmail?: boolean; hasCompany?: boolean; hasAppName?: boolean; hasIcebreaker?: boolean }) => {
+      if (returnReasons) {
+        return { gatingFailure: true as const, reasons, contact: contactInfo };
+      }
+      return null;
+    };
     
     // Get contact details with QUALITY GATES
     // FIXED (Jan 2026): Added lift_percent and lift_range for {{LIFT_PERCENT}} variable support
@@ -694,48 +703,56 @@ async runEnrichmentJob(batchSize = 20): Promise<JobResult> {
     
     if (contacts.length === 0) {
       logger.warn('Contact not found', { contactId });
-      return null;
+      return gatingFailure(['Contact not found']);
     }
     const contact = contacts[0];
     
+    // Collect all gating reasons for better UX
+    const reasons: string[] = [];
+    const hasEmail = !!(contact.email && contact.email.trim());
+    const hasCompany = !!(contact.company_name && contact.company_name.trim() && contact.company_name.toLowerCase() !== 'unknown');
+    const hasAppName = !!(contact.app_name && contact.app_name.trim());
+    const hasIcebreaker = !!(contact.icebreaker && contact.icebreaker.trim());
+    const score = contact.score ?? 0;
+    
     // ====== QUALITY GATE 1: Must have email ======
-    if (!contact.email || contact.email.trim() === '') {
+    if (!hasEmail) {
+      reasons.push('Missing email address');
       logger.warn('Quality gate failed: no email', { contactId });
-      return null;
     }
     
     // ====== QUALITY GATE 2: Must have valid company name ======
-    if (!contact.company_name || contact.company_name.trim() === '' || 
-        contact.company_name.toLowerCase() === 'unknown') {
+    if (!hasCompany) {
+      reasons.push(`Invalid company name: "${contact.company_name || 'empty'}"`);
       logger.warn('Quality gate failed: invalid company name', { 
         contactId, 
         companyName: contact.company_name 
       });
-      return null;
     }
     
     // ====== QUALITY GATE 3: Must have personalization data ======
-    const hasAppName = contact.app_name && contact.app_name.trim() !== '';
-    const hasIcebreaker = contact.icebreaker && contact.icebreaker.trim() !== '';
-    
     if (!hasAppName && !hasIcebreaker) {
+      reasons.push('No personalization data (need app_name or icebreaker)');
       logger.warn('Quality gate failed: no personalization data', { 
         contactId, 
         hasAppName, 
         hasIcebreaker 
       });
-      return null;
     }
     
     // ====== QUALITY GATE 4: Score threshold ======
-    const score = contact.score ?? 0;
     if (score < minScore) {
+      reasons.push(`Score ${score} below threshold ${minScore}`);
       logger.warn('Quality gate failed: score below threshold', { 
         contactId, 
         score, 
         minScore 
       });
-      return null;
+    }
+    
+    // If any gates failed, return reasons
+    if (reasons.length > 0) {
+      return gatingFailure(reasons, { score, hasEmail, hasCompany, hasAppName, hasIcebreaker });
     }
     
     logger.debug('Quality gates passed', { 

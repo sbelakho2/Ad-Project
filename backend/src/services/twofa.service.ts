@@ -10,6 +10,10 @@ import { User } from '../database/entities/user.entity';
 import { AuditTwofa } from '../database/entities/auditTwofa.entity';
 import { aesGcmEncrypt, aesGcmDecrypt, md5_16 } from '../utils/crypto';
 
+// Security: Require encryption in production
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ALLOW_PLAINTEXT_2FA = process.env.ALLOW_PLAINTEXT_2FA === 'true'; // Explicit opt-in for dev/test
+
 type TwofaRepositories = {
   tfaRepository: Repository<TwoFactorAuth>;
   userRepository: Repository<User>;
@@ -113,6 +117,43 @@ const parseBackupCodes = (raw: string | null): string[] => {
 
 const maskSecret = (secret: string) => secret.replace(/.(?=.{4})/g, '*');
 
+/**
+ * Securely retrieve the 2FA secret from a record
+ * 
+ * SECURITY: This function enforces encryption in production.
+ * - If ciphertext exists: decrypt it (throws on failure)
+ * - If plaintext exists: only allowed in dev/test with explicit opt-in
+ * - Otherwise: throws an error
+ */
+function getSecretFromRecord(secretCiphertext: string | null, secret: string | null): string {
+  if (secretCiphertext) {
+    // Encrypted secret - decrypt it
+    try {
+      return aesGcmDecrypt(JSON.parse(secretCiphertext));
+    } catch (e) {
+      // FAIL-CLOSED: Don't fall back to plaintext on decryption failure
+      // This prevents attacks that corrupt ciphertext to force plaintext fallback
+      logger.error('2FA secret decryption failed - possible tampering or key rotation', {
+        error: (e as Error).message,
+      });
+      throw new Error('2FA secret unavailable - re-enrollment may be required');
+    }
+  }
+  
+  // No ciphertext - check for legacy plaintext
+  if (secret) {
+    if (IS_PRODUCTION && !ALLOW_PLAINTEXT_2FA) {
+      // SECURITY: Reject plaintext secrets in production
+      logger.error('SECURITY: Plaintext 2FA secret found in production - this is a security violation');
+      throw new Error('2FA configuration error - contact support');
+    }
+    logger.warn('Using legacy plaintext 2FA secret - migrate to encrypted storage immediately');
+    return secret;
+  }
+  
+  throw new Error('2FA secret not found');
+}
+
 type AuditCtx = { actorEmail?: string | null; ip?: string | null };
 
 async function writeAudit(userId: string, action: 'enroll' | 'enable' | 'regen' | 'disable', ctx?: AuditCtx) {
@@ -155,7 +196,14 @@ export const twofaService = {
         const ct = aesGcmEncrypt(secret);
         tfaRecord = tfaRepository.create({ user, secret: null, secretCiphertext: JSON.stringify(ct), enabled: false, backupCodes: [] });
       } catch (e) {
-        // Fallback to legacy plaintext if APP_KMS_KEY is not configured
+        // SECURITY: In production, encryption is required - fail hard
+        if (IS_PRODUCTION && !ALLOW_PLAINTEXT_2FA) {
+          logger.error('SECURITY: 2FA encryption failed in production - APP_KMS_KEY must be configured', {
+            error: (e as Error).message,
+          });
+          throw new Error('2FA enrollment failed - encryption unavailable');
+        }
+        // Only allow plaintext in dev/test with explicit opt-in
         logger.warn('APP_KMS_KEY not set; storing 2FA secret in legacy plaintext column (dev only).');
         tfaRecord = tfaRepository.create({ user, secret, secretCiphertext: null, enabled: false, backupCodes: [] });
       }
@@ -165,23 +213,25 @@ export const twofaService = {
         const ct = aesGcmEncrypt(tfaRecord.secret);
         tfaRecord.secret = null;
         tfaRecord.secretCiphertext = JSON.stringify(ct);
+        logger.info('2FA secret migrated from plaintext to encrypted storage', { userId });
       } catch (e) {
-        // Keep legacy secret if encryption unavailable
+        // SECURITY: In production, fail the backfill if encryption unavailable
+        if (IS_PRODUCTION && !ALLOW_PLAINTEXT_2FA) {
+          logger.error('SECURITY: 2FA migration failed - cannot encrypt existing secret', {
+            userId,
+            error: (e as Error).message,
+          });
+          throw new Error('2FA enrollment failed - migration required but encryption unavailable');
+        }
+        // In dev/test, continue with legacy secret but log warning
         logger.warn('2FA encryption unavailable; continuing with legacy plaintext secret for this record.');
       }
     }
     
     await tfaRepository.save(tfaRecord);
 
-    let secret: string;
-    try {
-      secret = tfaRecord.secretCiphertext
-        ? aesGcmDecrypt(JSON.parse(tfaRecord.secretCiphertext))
-        : (tfaRecord.secret as string);
-    } catch (e) {
-      // Decryption failed (likely missing key); fall back to legacy secret if present
-      secret = (tfaRecord.secret as string);
-    }
+    // Use secure secret retrieval
+    const secret = getSecretFromRecord(tfaRecord.secretCiphertext, tfaRecord.secret);
 
     const otpauthUrl = authenticator.keyuri(email, issuer, secret);
     const qrDataUrl = await qrcode.toDataURL(otpauthUrl);
@@ -195,14 +245,9 @@ export const twofaService = {
     const tfaRecord = await tfaRepository.findOne({ where: { user: { id: userId } }, relations: ['user'] });
     if (!tfaRecord) throw new Error('No enrollment in progress');
 
-    let secret: string;
-    try {
-      secret = tfaRecord.secretCiphertext
-        ? aesGcmDecrypt(JSON.parse(tfaRecord.secretCiphertext))
-        : (tfaRecord.secret as string);
-    } catch (e) {
-      secret = (tfaRecord.secret as string);
-    }
+    // Use secure secret retrieval - no plaintext fallback
+    const secret = getSecretFromRecord(tfaRecord.secretCiphertext, tfaRecord.secret);
+    
     const ok = authenticator.verify({ token, secret });
     if (!ok) throw new Error('Invalid token');
 
@@ -228,14 +273,19 @@ export const twofaService = {
     const row = await getTwofaRow(userId);
     if (!row) return false;
 
+    // Use secure secret retrieval - no plaintext fallback on decryption failure
     let secret: string;
     try {
-      secret = row.secretCiphertext
-        ? aesGcmDecrypt(JSON.parse(row.secretCiphertext))
-        : (row.secret as string);
+      secret = getSecretFromRecord(row.secretCiphertext, row.secret);
     } catch (e) {
-      secret = (row.secret as string);
+      // If we can't retrieve the secret securely, fail the verification
+      logger.error('2FA verification failed - cannot retrieve secret securely', { 
+        userId, 
+        error: (e as Error).message,
+      });
+      return false;
     }
+    
     if (authenticator.check(code, secret)) return true;
 
     // Backup codes require a write on success; use the ORM entity for updates.

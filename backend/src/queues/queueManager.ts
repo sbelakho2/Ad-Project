@@ -160,10 +160,30 @@ class QueueManagerImpl {
     });
 
     worker.on('failed', (job, error) => {
-      logger.warn('[QueueManager] Job failed', { queueName, jobId: job?.id, error });
+      const maxAttempts = job?.opts.attempts ?? 3;
+      const attemptsMade = job?.attemptsMade ?? 0;
+      const willRetry = attemptsMade < maxAttempts;
+      
+      if (willRetry) {
+        logger.warn('[QueueManager] Job failed, will retry', { 
+          queueName, 
+          jobId: job?.id, 
+          attempt: attemptsMade,
+          maxAttempts,
+          nextRetryIn: job?.opts.backoff ? `exponential delay` : 'immediate',
+          error: error.message 
+        });
+      } else {
+        logger.error('[QueueManager] Job permanently failed, moving to DLQ', { 
+          queueName, 
+          jobId: job?.id, 
+          attemptsMade,
+          error: error.message 
+        });
+      }
       
       // Move permanently failed jobs to Dead Letter Queue
-      if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      if (job && !willRetry) {
         this.moveToDeadLetterQueue(queueName, job, error).catch((dlqError) => {
           logger.error('[QueueManager] Failed to move job to DLQ', { queueName, jobId: job.id, dlqError });
         });
@@ -374,6 +394,12 @@ class QueueManagerImpl {
 
   private normalizeJobOptions(options?: Record<string, unknown>): JobsOptions {
     const defaults: JobsOptions = {
+      // Default retry configuration - prevents immediate DLQ escalation
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000, // Start with 2s, then 4s, then 8s
+      },
       removeOnComplete: { age: 24 * 3600, count: 1000 },
       removeOnFail: { age: 7 * 24 * 3600 },
     };

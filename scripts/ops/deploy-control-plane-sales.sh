@@ -52,7 +52,7 @@ log_info "======================================"
 
 # Validate we're deploying to the correct server
 log_info "Validating deployment target..."
-ACTUAL_IP=$(ssh_cmd "hostname -I | awk '{print \$1}'" 2>/dev/null || echo "unknown")
+ACTUAL_IP=$(ssh_cmd "hostname -I | awk '{print \$1}'" 2>/dev/null | tail -n 1 || echo "unknown")
 if [[ "$ACTUAL_IP" != "$APP_SERVER_IP" ]]; then
   log_error "═══════════════════════════════════════════════════════════════"
   log_error "  ⛔ DEPLOYMENT TARGET MISMATCH!"

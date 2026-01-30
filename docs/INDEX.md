@@ -12,6 +12,7 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[VRA Implementation Summary](./VRA_IMPLEMENTATION_SUMMARY.md)**: High-level summary of VRA fixes and features.
 - **[VRA Technical Specification](./VRA_SPEC.md)**: Deep dive into VRA mechanics and data contracts.
 - **[SSAI Improvements](./SSAI/SSAI_IMPROVEMENTS.md)**: Server-Side Ad Insertion details.
+- **[VAST/VMAP Parser](./SSAI/VAST_VMAP_PARSER.md)**: ⭐ NEW - IAB VAST/VMAP parsing module documentation.
 
 ## 👨‍💻 Developer Resources
 - **[Backend API](./Developer-Facing/README.md)**: API reference and integration guides.
@@ -45,10 +46,13 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[Sales Automation Operations](./Internal/Sales/SALES_AUTOMATION_OPERATIONS.md)**: V1 operations guide.
 - **[Sales Automation Summary](./Internal/Sales/SALES_AUTOMATION_SUMMARY.md)**: V1 implementation overview.
 
-## �📊 Quality Assurance
+## 📊 Quality Assurance
 - **[Live Testing Report](./LIVE_TESTING.md)**: Results from latest live execution cycles.
 - **[User Journey Analysis](./USER_JOURNEY_ANALYSIS.md)**: UX and flow validation.
 - **[Sandbox Execution](./Internal/QA/sandbox-execution/2025-12-08/PROGRESS.md)**: Progress tracking for sandbox verification.
 
+## 🔒 Security
+- **[VAST/VMAP Parser Security](./SSAI/VAST_VMAP_PARSER.md#security-features)**: XSS, XXE, DoS protections in ad parsing.
+
 ---
-*Last updated: 2026-01-25*
+*Last updated: 2026-01-30*

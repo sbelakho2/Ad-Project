@@ -4,6 +4,7 @@ import { AppError } from './errorHandler';
 import logger from '../utils/logger';
 import { isAuthTokenPayload } from '../types/auth';
 import type { AuthTokenPayload } from '../types/auth';
+import { isTokenBlacklisted } from '../services/jwtBlacklist.service';
 
 // Extend Express Request to include user
 declare module 'express-serve-static-core' {
@@ -14,6 +15,11 @@ declare module 'express-serve-static-core' {
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
+ * 
+ * Security features:
+ * - JWT signature verification
+ * - Token expiration validation
+ * - Blacklist checking for invalidated tokens (logout)
  */
 export const authenticate = async (
   req: Request,
@@ -53,6 +59,17 @@ export const authenticate = async (
 
     if (!isAuthTokenPayload(decoded)) {
       throw new AppError('Invalid token payload', 401);
+    }
+
+    // Check if token has been blacklisted (e.g., after logout)
+    // JTI (JWT ID) is stored in the 'jti' claim if present
+    const jti = (decoded as jwt.JwtPayload).jti;
+    if (jti) {
+      const blacklisted = await isTokenBlacklisted(jti);
+      if (blacklisted) {
+        logger.info('Blacklisted token rejected', { jti, userId: decoded.userId });
+        throw new AppError('Token has been invalidated', 401);
+      }
     }
 
     // Attach user to request

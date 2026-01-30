@@ -632,9 +632,13 @@ These scripts live under `scripts/ops/` in this repo and are designed to be idem
 - `scripts/ops/hetzner_enable_pitr.sh`
   - Ensures PITR-quality backups on the DB server:
     - Daily physical base backups under `/var/backups/postgresql/base/`
-    - Enforces archived WAL retention to ~30 hours (>=24h)
+    - Enforces archived WAL retention to **72 hours (3 days)** — weekend-safe for teams without 24/7 on-call
     - WAL growth minimized (UNLOGGED high-churn staging tables + `wal_compression=lz4`)
     - Also reconciles common legacy WAL-prune cron jobs so they do not shorten the PITR window; always verify effective retention.
+- `scripts/ops/prune_s3_wal.sh`
+  - Prunes S3 WAL archives older than retention period (default: **7 days**)
+  - Cron: `/etc/cron.d/adproject-s3-wal-prune` (daily at 5am)
+  - Prevents unbounded S3 storage growth (Hetzner Object Storage pricing increases after 1 TB)
 - `scripts/ops/hetzner_measure_wal_rate.sh`
   - Measures the *true* current WAL generation rate via `pg_stat_wal` delta and shows recent archive churn.
 - `scripts/ops/hetzner_enable_transparency.sh`
@@ -993,9 +997,59 @@ There are two layers of backup automation in production:
 - Ensured by running `scripts/ops/hetzner_enable_pitr.sh` from this repo (idempotent).
 - Output:
   - Base backups: `/var/backups/postgresql/base/base_YYYY-MM-DD.tar.gz` (daily)
-  - Archived WAL: `/var/backups/postgresql/wal/` (target: kept ~30h)
+  - Archived WAL (local): `/mnt/HC_Volume_104191119/postgresql-backups/wal/` (retention: **72 hours**)
+  - Archived WAL (S3): `s3://wal/wal/` at `hel1.your-objectstorage.com` (retention: **7 days**)
 
-> **Important:** Existing cron jobs (e.g. `apex-postgres-backup-retention`) can override WAL retention.
+  ### 7.2.1 S3/Object Storage WAL Archive (Offsite)
+
+  If offsite WAL archiving is enabled, the archive is stored in **S3-compatible Object Storage**.
+
+  **Current endpoint (Hetzner Object Storage):** `https://hel1.your-objectstorage.com`
+
+  **Bucket:** `wal`
+
+  **Purpose:** offsite WAL redundancy to complement on-server PITR retention.
+
+  **Read-only verification (no secrets printed):**
+
+  ```bash
+  # Check bucket exists (requires credentials on DB server)
+  ./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; \
+    AWS_ACCESS_KEY_ID=*** AWS_SECRET_ACCESS_KEY=*** AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url https://hel1.your-objectstorage.com s3api head-bucket --bucket wal"
+  ```
+
+  **Optional listing (safe metadata only):**
+
+  ```bash
+  ./scripts/ops/hetzner_ssh.sh db -- "set -euo pipefail; \
+    AWS_ACCESS_KEY_ID=*** AWS_SECRET_ACCESS_KEY=*** AWS_DEFAULT_REGION=us-east-1 \
+    aws --endpoint-url https://hel1.your-objectstorage.com s3api list-objects-v2 --bucket wal --max-items 10"
+  ```
+
+  > **Note:** Credentials should be stored on the DB server only. Do not place credentials on App/Test servers.
+
+  **S3 WAL Retention (CRITICAL for cost control):**
+
+  S3 WAL is pruned by `/opt/adproject/ops/prune_s3_wal.sh` running daily via cron.
+
+  | Tier | Retention | Storage Est. | Purpose |
+  |------|-----------|--------------|---------|
+  | Local | 72 hours | ~7.5 GB | Fast PITR for recent incidents |
+  | S3 | 7 days | ~17.5 GB | Extended PITR / disaster recovery |
+
+  > **Cost alert:** Hetzner Object Storage pricing increases significantly after **1 TB**.
+  > At ~2.5 GB/day WAL, 7-day retention = ~17.5 GB (safe). Monitor with:
+  > ```bash
+  > ./scripts/ops/hetzner_ssh.sh db -- "source /opt/adproject/ops/s3_archive.env && \
+  >   export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION && \
+  >   aws s3 ls s3://wal/wal/ --endpoint-url \$S3_ENDPOINT --summarize | tail -3"
+  > ```
+
+> **Important:** Multiple cron jobs affect WAL retention. Current active crons:
+> - `/etc/cron.d/adproject-wal-retention` — local 72h prune (hourly)
+> - `/etc/cron.d/adproject-s3-wal-prune` — S3 7-day prune (daily 5am)
+> - `/etc/cron.d/apex-postgres-backup-retention` — legacy, updated to match 72h
 > Always verify the effective prune window after any changes.
 
 Run/verify (recommended):

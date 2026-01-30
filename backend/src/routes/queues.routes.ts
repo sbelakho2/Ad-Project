@@ -316,4 +316,186 @@ router.post('/:queueName/clean', authenticate, async (req: Request, res: Respons
   }
 });
 
+// ============================================
+// DEAD LETTER QUEUE (DLQ) MANAGEMENT
+// ============================================
+
+/**
+ * Get all Dead Letter Queue jobs
+ * GET /api/v1/queues/dlq
+ */
+router.get('/dlq', authenticate, async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 100;
+    const offset = parseInt(req.query.offset as string) || 0;
+    
+    const jobs = await queueManager.getDeadLetterJobs(limit + offset);
+    const paginatedJobs = jobs.slice(offset, offset + limit);
+    
+    res.json({
+      success: true,
+      data: paginatedJobs,
+      meta: {
+        total: jobs.length,
+        limit,
+        offset,
+        hasMore: jobs.length > offset + limit,
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to get DLQ jobs', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get dead letter queue jobs',
+    });
+  }
+});
+
+/**
+ * Get DLQ metrics
+ * GET /api/v1/queues/dlq/metrics
+ */
+router.get('/dlq/metrics', authenticate, async (req: Request, res: Response) => {
+  try {
+    const metrics = await queueManager.getQueueMetrics(QueueName.DEAD_LETTER);
+    
+    res.json({
+      success: true,
+      data: metrics || { waiting: 0, active: 0, completed: 0, failed: 0 },
+    });
+  } catch (error) {
+    logger.error('Failed to get DLQ metrics', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get dead letter queue metrics',
+    });
+  }
+});
+
+/**
+ * Retry a specific DLQ job (reprocess)
+ * POST /api/v1/queues/dlq/:jobId/retry
+ */
+router.post('/dlq/:jobId/retry', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    
+    const success = await queueManager.retryDeadLetterJob(jobId);
+    
+    if (!success) {
+      return res.status(404).json({
+        success: false,
+        error: 'DLQ job not found or could not be retried',
+      });
+    }
+    
+    logger.info('DLQ job retried', { jobId, userId: (req as any).user?.id });
+    
+    res.json({
+      success: true,
+      message: 'Job requeued successfully',
+    });
+  } catch (error) {
+    logger.error('Failed to retry DLQ job', { error, jobId: req.params.jobId });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retry dead letter job',
+    });
+  }
+});
+
+/**
+ * Bulk retry multiple DLQ jobs
+ * POST /api/v1/queues/dlq/retry-bulk
+ */
+router.post('/dlq/retry-bulk', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { jobIds, retryAll } = req.body;
+    
+    let jobsToRetry: string[] = [];
+    
+    if (retryAll) {
+      const allJobs = await queueManager.getDeadLetterJobs(1000);
+      jobsToRetry = allJobs.map((job: any) => job.id);
+    } else if (Array.isArray(jobIds)) {
+      jobsToRetry = jobIds;
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Either jobIds array or retryAll flag is required',
+      });
+    }
+    
+    let retried = 0;
+    let failed = 0;
+    const errors: Array<{ jobId: string; error: string }> = [];
+    
+    for (const jobId of jobsToRetry) {
+      try {
+        const success = await queueManager.retryDeadLetterJob(jobId);
+        if (success) {
+          retried++;
+        } else {
+          failed++;
+          errors.push({ jobId, error: 'Job not found or could not be retried' });
+        }
+      } catch (e) {
+        failed++;
+        errors.push({ jobId, error: (e as Error).message });
+      }
+    }
+    
+    logger.info('DLQ bulk retry completed', { 
+      retried, 
+      failed, 
+      total: jobsToRetry.length,
+      userId: (req as any).user?.id,
+    });
+    
+    res.json({
+      success: true,
+      data: { retried, failed, total: jobsToRetry.length },
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    logger.error('Failed to bulk retry DLQ jobs', { error });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to bulk retry dead letter jobs',
+    });
+  }
+});
+
+/**
+ * Remove (acknowledge/dismiss) a DLQ job
+ * DELETE /api/v1/queues/dlq/:jobId
+ */
+router.delete('/dlq/:jobId', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    
+    const removed = await queueManager.removeJob(QueueName.DEAD_LETTER, jobId);
+    
+    if (!removed) {
+      return res.status(404).json({
+        success: false,
+        error: 'DLQ job not found',
+      });
+    }
+    
+    logger.info('DLQ job removed', { jobId, userId: (req as any).user?.id });
+    
+    res.json({
+      success: true,
+      message: 'DLQ job removed successfully',
+    });
+  } catch (error) {
+    logger.error('Failed to remove DLQ job', { error, jobId: req.params.jobId });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to remove dead letter job',
+    });
+  }
+});
+
 export default router;

@@ -194,13 +194,24 @@ export class AnalyticsService {
   
   private readonly BATCH_SIZE: number;
   private readonly FLUSH_INTERVAL_MS: number;
+  // Maximum buffer size to prevent unbounded memory growth
+  // Events are dropped (oldest first) if buffer exceeds this limit
+  private readonly MAX_BUFFER_SIZE: number;
   private flushInterval: NodeJS.Timeout | null = null;
+
+  // Track dropped events for monitoring
+  private droppedImpressions = 0;
+  private droppedClicks = 0;
+  private droppedRevenue = 0;
 
   private uniqueIndexColumnsCache = new Map<string, ReadonlyArray<ReadonlyArray<string>>>();
 
   constructor(options: AnalyticsServiceOptions = {}) {
     this.BATCH_SIZE = options.batchSize ?? 100;
     this.FLUSH_INTERVAL_MS = options.flushIntervalMs ?? 5000;
+    // Default max buffer: 10,000 events per type
+    // At ~500 bytes/event, this is ~15MB total (3 buffers * 5MB each)
+    this.MAX_BUFFER_SIZE = Number(process.env.ANALYTICS_MAX_BUFFER_SIZE) || 10000;
 
     if (this.FLUSH_INTERVAL_MS > 0) {
       const interval = setInterval(() => {
@@ -210,6 +221,55 @@ export class AnalyticsService {
       interval.unref?.();
       this.flushInterval = interval;
     }
+  }
+
+  /**
+   * Enforce max buffer size by dropping oldest events for a specific buffer
+   * Uses the MAX_BUFFER_SIZE class property
+   */
+  private enforceBufferLimit(bufferType: 'impressions' | 'clicks' | 'revenue'): void {
+    let buffer: unknown[];
+    let droppedCounter: 'droppedImpressions' | 'droppedClicks' | 'droppedRevenue';
+    
+    switch (bufferType) {
+      case 'impressions':
+        buffer = this.impressionBuffer;
+        droppedCounter = 'droppedImpressions';
+        break;
+      case 'clicks':
+        buffer = this.clickBuffer;
+        droppedCounter = 'droppedClicks';
+        break;
+      case 'revenue':
+        buffer = this.revenueBuffer;
+        droppedCounter = 'droppedRevenue';
+        break;
+    }
+    
+    if (buffer.length <= this.MAX_BUFFER_SIZE) return;
+    
+    const overflow = buffer.length - this.MAX_BUFFER_SIZE;
+    // Reassign buffer to the sliced version (keeps newest events)
+    switch (bufferType) {
+      case 'impressions':
+        this.impressionBuffer = this.impressionBuffer.slice(overflow);
+        break;
+      case 'clicks':
+        this.clickBuffer = this.clickBuffer.slice(overflow);
+        break;
+      case 'revenue':
+        this.revenueBuffer = this.revenueBuffer.slice(overflow);
+        break;
+    }
+    
+    this[droppedCounter] += overflow;
+    
+    logger.warn('[AnalyticsService] Buffer overflow, dropped oldest events', {
+      eventType: bufferType,
+      dropped: overflow,
+      totalDropped: this[droppedCounter],
+      maxSize: this.MAX_BUFFER_SIZE,
+    });
   }
 
   private async getTableColumns(tableName: string): Promise<ReadonlySet<string>> {
@@ -247,6 +307,9 @@ export class AnalyticsService {
    * Record an impression event
    */
   async recordImpression(event: ImpressionEventDTO): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('impressions');
+    
     this.impressionBuffer.push(event);
     this.updateBufferGauge('impressions');
     
@@ -259,6 +322,9 @@ export class AnalyticsService {
    * Record impression events in batch
    */
   async recordImpressions(events: ImpressionEventDTO[]): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('impressions');
+    
     for (const ev of events) this.impressionBuffer.push(ev);
     this.updateBufferGauge('impressions');
     
@@ -271,6 +337,9 @@ export class AnalyticsService {
    * Record a click event
    */
   async recordClick(event: ClickEventDTO): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('clicks');
+    
     this.clickBuffer.push(event);
     this.updateBufferGauge('clicks');
     
@@ -283,6 +352,9 @@ export class AnalyticsService {
    * Record click events in batch
    */
   async recordClicks(events: ClickEventDTO[]): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('clicks');
+    
     for (const ev of events) this.clickBuffer.push(ev);
     this.updateBufferGauge('clicks');
     
@@ -295,6 +367,9 @@ export class AnalyticsService {
    * Record a revenue event
    */
   async recordRevenue(event: RevenueEventDTO): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('revenue');
+    
     this.revenueBuffer.push(event);
     this.updateBufferGauge('revenue');
     
@@ -307,6 +382,9 @@ export class AnalyticsService {
    * Record revenue events in batch
    */
   async recordRevenueEvents(events: RevenueEventDTO[]): Promise<void> {
+    // Enforce buffer limit to prevent memory leaks during DB outages
+    this.enforceBufferLimit('revenue');
+    
     for (const ev of events) this.revenueBuffer.push(ev);
     this.updateBufferGauge('revenue');
     
@@ -421,8 +499,20 @@ export class AnalyticsService {
       });
 
       if (!staged) {
-        // Re-add to buffer for retry (avoid spread/unshift which can throw on large batches)
-        this.impressionBuffer = eventsToFlush.concat(this.impressionBuffer);
+        // Re-add to buffer for retry, but respect MAX_BUFFER_SIZE to prevent OOM
+        const combined = eventsToFlush.concat(this.impressionBuffer);
+        if (combined.length > this.MAX_BUFFER_SIZE) {
+          const dropped = combined.length - this.MAX_BUFFER_SIZE;
+          this.droppedImpressions += dropped;
+          logger.warn('Dropping oldest impressions due to buffer limit on re-buffer', {
+            dropped,
+            totalDropped: this.droppedImpressions,
+            maxBufferSize: this.MAX_BUFFER_SIZE,
+          });
+          this.impressionBuffer = combined.slice(-this.MAX_BUFFER_SIZE);
+        } else {
+          this.impressionBuffer = combined;
+        }
         this.updateBufferGauge('impressions');
       }
     } finally {
@@ -521,7 +611,20 @@ export class AnalyticsService {
       });
 
       if (!staged) {
-        this.clickBuffer = eventsToFlush.concat(this.clickBuffer);
+        // Re-add to buffer for retry, but respect MAX_BUFFER_SIZE to prevent OOM
+        const combined = eventsToFlush.concat(this.clickBuffer);
+        if (combined.length > this.MAX_BUFFER_SIZE) {
+          const dropped = combined.length - this.MAX_BUFFER_SIZE;
+          this.droppedClicks += dropped;
+          logger.warn('Dropping oldest clicks due to buffer limit on re-buffer', {
+            dropped,
+            totalDropped: this.droppedClicks,
+            maxBufferSize: this.MAX_BUFFER_SIZE,
+          });
+          this.clickBuffer = combined.slice(-this.MAX_BUFFER_SIZE);
+        } else {
+          this.clickBuffer = combined;
+        }
         this.updateBufferGauge('clicks');
       }
     } finally {
@@ -619,7 +722,20 @@ export class AnalyticsService {
       });
 
       if (!staged) {
-        this.revenueBuffer = eventsToFlush.concat(this.revenueBuffer);
+        // Re-add to buffer for retry, but respect MAX_BUFFER_SIZE to prevent OOM
+        const combined = eventsToFlush.concat(this.revenueBuffer);
+        if (combined.length > this.MAX_BUFFER_SIZE) {
+          const dropped = combined.length - this.MAX_BUFFER_SIZE;
+          this.droppedRevenue += dropped;
+          logger.warn('Dropping oldest revenue events due to buffer limit on re-buffer', {
+            dropped,
+            totalDropped: this.droppedRevenue,
+            maxBufferSize: this.MAX_BUFFER_SIZE,
+          });
+          this.revenueBuffer = combined.slice(-this.MAX_BUFFER_SIZE);
+        } else {
+          this.revenueBuffer = combined;
+        }
         this.updateBufferGauge('revenue');
       }
     } finally {
@@ -657,6 +773,11 @@ export class AnalyticsService {
       clicks: this.clickBuffer.length,
       revenue: this.revenueBuffer.length,
       total: this.impressionBuffer.length + this.clickBuffer.length + this.revenueBuffer.length,
+      maxBufferSize: this.MAX_BUFFER_SIZE,
+      droppedImpressions: this.droppedImpressions,
+      droppedClicks: this.droppedClicks,
+      droppedRevenue: this.droppedRevenue,
+      totalDropped: this.droppedImpressions + this.droppedClicks + this.droppedRevenue,
     };
   }
 

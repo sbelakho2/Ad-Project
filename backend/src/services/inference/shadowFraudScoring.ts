@@ -16,6 +16,8 @@ import { query } from '../../utils/postgres';
 import { selectModelVersion, getModelEndpoint } from '../../utils/mlCanary';
 import { Counter, Histogram, Gauge } from 'prom-client';
 import { sendAlert } from '../alertService';
+import { logPrediction, recordOutcome, type MLPrediction, type PredictionOutcome } from '../fraud/mlPredictionLogger';
+import crypto from 'crypto';
 
 // -----------------------------------------------------
 // Prometheus Metrics for shadow scoring
@@ -179,6 +181,7 @@ function bucketRisk(score: number): 'low' | 'medium' | 'high' | 'critical' {
  */
 export async function scoreShadow(input: ShadowScoreInput): Promise<ShadowScoreResult | null> {
   const scoredAt = new Date();
+  const startTime = Date.now();
   const modelSelection = selectModelVersion(input.requestId, 'fraud_detection');
   
   try {
@@ -201,6 +204,7 @@ export async function scoreShadow(input: ShadowScoreInput): Promise<ShadowScoreR
     }
     
     const riskBucket = bucketRisk(score);
+    const inferenceLatencyMs = Date.now() - startTime;
     
     // Record metrics
     shadowFraudScoreHistogram.observe(
@@ -224,12 +228,59 @@ export async function scoreShadow(input: ShadowScoreInput): Promise<ShadowScoreR
       logger.warn('Failed to log shadow score', { error: err, requestId: input.requestId })
     );
     
+    // Log to ML prediction logger for training feedback loop (async, non-blocking)
+    const predictionId = crypto.randomUUID();
+    const decision: 'allow' | 'flag' | 'block' = 
+      score >= 0.85 ? 'block' : 
+      score >= 0.5 ? 'flag' : 
+      'allow';
+    
+    const mlPrediction: MLPrediction = {
+      predictionId,
+      requestId: input.requestId,
+      modelName: 'fraud_detection',
+      modelVersion: modelSelection.version,
+      rawScore: score,
+      normalizedScore: score, // Already 0-1 normalized
+      threshold: 0.5, // Default threshold
+      decision,
+      confidence: 1 - Math.abs(score - 0.5) * 2, // Higher confidence at extremes
+      features,
+      publisherId: input.publisherId,
+      placementId: input.placementId,
+      deviceFingerprintHash: input.userInfo?.advertisingId,
+      ipHash: input.deviceInfo?.ip,
+      inferenceLatencyMs,
+      timestamp: scoredAt,
+      isCanary: modelSelection.version !== 'stable',
+      experimentId: input.metadata?.experimentId as string | undefined,
+      reasons,
+    };
+    
+    logPrediction(mlPrediction);
+    
     return result;
   } catch (error) {
     shadowFraudScoringTotal.inc({ model_version: modelSelection.version, outcome: 'error' });
     logger.warn('Shadow fraud scoring failed', { error, requestId: input.requestId });
     return null;
   }
+}
+
+/**
+ * Record outcome for a fraud prediction (for training feedback loop)
+ */
+export function recordFraudOutcome(
+  predictionId: string,
+  outcomeType: PredictionOutcome['outcomeType'],
+  outcomeValue?: number
+): void {
+  recordOutcome({
+    predictionId,
+    outcomeType,
+    outcomeTimestamp: new Date(),
+    outcomeValue,
+  });
 }
 
 // -----------------------------------------------------
@@ -405,4 +456,5 @@ export default {
   calculatePSI,
   extractFeatures,
   heuristicScore,
+  recordFraudOutcome,
 };

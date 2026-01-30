@@ -6,9 +6,11 @@ import {
   getAnalyticsTimeSeries,
   getImpressionsBreakdown,
   getPerformanceBreakdown,
+  getSdkVersionDistribution,
 } from '../services/analyticsPipeline';
 import analyticsService from '../services/analyticsService';
 import * as viewabilityService from '../services/viewabilityEvents';
+import * as dataQualityGate from '../services/dataQualityGate';
 import logger from '../utils/logger';
 import config from '../config/index';
 import { queueManager, QueueName } from '../queues/queueManager';
@@ -291,7 +293,7 @@ export const recordImpressions = async (
       return;
     }
 
-    // Validate all events
+    // Schema validation
     const validatedEvents = events.map((event: unknown) => impressionEventSchema.parse(event));
 
     const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
@@ -307,13 +309,28 @@ export const recordImpressions = async (
       }
     }
 
-    // Record events
-    await analyticsService.recordImpressions(validatedEvents);
+    // Data quality gate validation (timestamp, duplicates, revenue sanity)
+    const qualityResult = await dataQualityGate.validateImpressionEvents(validatedEvents);
+    
+    if (qualityResult.validEvents.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'All events rejected by data quality gate',
+        rejectedCount: qualityResult.rejectedCount,
+        reasons: qualityResult.reasons,
+      });
+      return;
+    }
+
+    // Record only valid events
+    await analyticsService.recordImpressions(qualityResult.validEvents);
 
     res.status(202).json({
       success: true,
-      message: `Queued ${validatedEvents.length} impression events`,
-      count: validatedEvents.length,
+      message: `Queued ${qualityResult.validEvents.length} impression events`,
+      count: qualityResult.validEvents.length,
+      rejected: qualityResult.rejectedCount,
+      rejectionReasons: qualityResult.rejectedCount > 0 ? qualityResult.reasons : undefined,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -353,6 +370,7 @@ export const recordClicks = async (
       return;
     }
 
+    // Schema validation
     const validatedEvents = events.map((event: unknown) => clickEventSchema.parse(event));
 
     const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
@@ -368,12 +386,27 @@ export const recordClicks = async (
       }
     }
 
-    await analyticsService.recordClicks(validatedEvents);
+    // Data quality gate validation
+    const qualityResult = await dataQualityGate.validateClickEvents(validatedEvents);
+    
+    if (qualityResult.validEvents.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'All events rejected by data quality gate',
+        rejectedCount: qualityResult.rejectedCount,
+        reasons: qualityResult.reasons,
+      });
+      return;
+    }
+
+    await analyticsService.recordClicks(qualityResult.validEvents);
 
     res.status(202).json({
       success: true,
-      message: `Queued ${validatedEvents.length} click events`,
-      count: validatedEvents.length,
+      message: `Queued ${qualityResult.validEvents.length} click events`,
+      count: qualityResult.validEvents.length,
+      rejected: qualityResult.rejectedCount,
+      rejectionReasons: qualityResult.rejectedCount > 0 ? qualityResult.reasons : undefined,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -413,6 +446,7 @@ export const recordRevenue = async (
       return;
     }
 
+    // Schema validation
     const validatedEvents = events.map((event: unknown) => revenueEventSchema.parse(event));
 
     const sdk = (req as any).sdk as { publisherId: string; appId: string } | undefined;
@@ -428,12 +462,27 @@ export const recordRevenue = async (
       }
     }
 
-    await analyticsService.recordRevenueEvents(validatedEvents);
+    // Data quality gate validation (especially important for revenue events)
+    const qualityResult = await dataQualityGate.validateRevenueEvents(validatedEvents);
+    
+    if (qualityResult.validEvents.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'All events rejected by data quality gate',
+        rejectedCount: qualityResult.rejectedCount,
+        reasons: qualityResult.reasons,
+      });
+      return;
+    }
+
+    await analyticsService.recordRevenueEvents(qualityResult.validEvents);
 
     res.status(202).json({
       success: true,
-      message: `Queued ${validatedEvents.length} revenue events`,
-      count: validatedEvents.length,
+      message: `Queued ${qualityResult.validEvents.length} revenue events`,
+      count: qualityResult.validEvents.length,
+      rejected: qualityResult.rejectedCount,
+      rejectionReasons: qualityResult.rejectedCount > 0 ? qualityResult.reasons : undefined,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -678,5 +727,44 @@ export const getOmsdkStatus = async (
       success: false,
       error: 'Failed to get OMSDK status',
     });
+  }
+};
+
+/**
+ * GET /api/v1/analytics/sdk-versions
+ * Get SDK version distribution for publisher
+ * 
+ * Returns the distribution of SDK versions across events, helping track:
+ * - SDK adoption rates
+ * - Outdated integrations that need updates
+ * - Version rollout progress
+ */
+export const getSdkVersions = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const publisherId = req.user?.publisherId;
+
+    if (!publisherId) {
+      throw new AppError('Missing publisher context', 401);
+    }
+
+    const startDateParam = parseQueryParam(req.query.startDate);
+    const endDateParam = parseQueryParam(req.query.endDate);
+
+    const data = await getSdkVersionDistribution(publisherId, startDateParam, endDateParam);
+
+    res.json({
+      success: true,
+      data: {
+        sdk_versions: data,
+        total_events: data.reduce((sum, r) => sum + r.event_count, 0),
+        unique_versions: data.length,
+      },
+    });
+  } catch (error) {
+    next(error);
   }
 };

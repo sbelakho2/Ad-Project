@@ -889,10 +889,14 @@ router.post('/score', async (req: Request, res: Response) => {
 /**
  * POST /api/autonomous/compose
  * Compose a personalized message for a contact
+ * 
+ * IMPROVEMENT 2: Now returns detailed gating failure reasons when compose fails
+ * Query param: ?showReasons=true to get detailed failure info
  */
 router.post('/compose', async (req: Request, res: Response) => {
   try {
     const { contactId } = req.body;
+    const showReasons = req.query.showReasons === 'true' || req.body.showReasons === true;
     
     if (!contactId) {
       res.status(400).json({ error: 'contactId is required' });
@@ -900,10 +904,21 @@ router.post('/compose', async (req: Request, res: Response) => {
     }
     
     const orchestrator = await getOrchestrator();
-    const message = await orchestrator.composeMessage(contactId);
+    const message = await orchestrator.composeMessage(contactId, { returnGatingReasons: showReasons });
     
     if (!message) {
       res.status(404).json({ error: 'Contact not found or no templates available' });
+      return;
+    }
+    
+    // Check if this is a gating failure response (IMPROVEMENT 2)
+    if ('gatingFailure' in message && message.gatingFailure) {
+      res.status(422).json({ 
+        error: 'Quality gate failed',
+        gatingFailure: true,
+        reasons: message.reasons,
+        contact: message.contact,
+      });
       return;
     }
     
@@ -2395,6 +2410,20 @@ router.post('/send', async (req: Request, res: Response) => {
   try {
     const { messageId, contactId, dryRun = false } = req.body;
     
+    // ====== GLOBAL KILL SWITCH CHECK (MUST BE FIRST) ======
+    if (!dryRun) {
+      const { checkSendsAllowed } = await import('../services/global-kill-switch.js');
+      const killSwitchCheck = await checkSendsAllowed('v2_autonomous');
+      if (!killSwitchCheck.allowed) {
+        res.status(503).json({
+          error: 'Sending blocked',
+          reason: killSwitchCheck.reason,
+          killSwitchActive: true,
+        });
+        return;
+      }
+    }
+    
     // ====== RATE LIMIT CHECK ======
     if (!dryRun) {
       const rateCheck = await sendRateLimiter.canSend();
@@ -2454,6 +2483,56 @@ router.post('/send', async (req: Request, res: Response) => {
     }
     
     const contact = contacts[0];
+    
+    // ====== SUPPRESSION LIST CHECK (UNIFIED) ======
+    const { isEmailSuppressed } = await import('../services/suppression-list.js');
+    const suppressionCheck = await isEmailSuppressed(contact.email);
+    if (suppressionCheck.isSuppressed) {
+      logger.warn('V2 send blocked by suppression list', {
+        contactEmail: contact.email.substring(0, 3) + '***',
+        type: suppressionCheck.suppressionType,
+      });
+      res.status(400).json({
+        error: 'Email is suppressed',
+        reason: suppressionCheck.reason,
+        suppressionType: suppressionCheck.suppressionType,
+      });
+      return;
+    }
+    
+    // ====== SAFE MODE CHECK ======
+    const { checkSafeMode } = await import('../services/suppression-list.js');
+    const safeModeCheck = await checkSafeMode();
+    if (!safeModeCheck.canSend) {
+      logger.warn('V2 send blocked by safe mode', { mode: safeModeCheck.mode });
+      res.status(503).json({
+        error: 'Safe mode active',
+        reason: safeModeCheck.reason,
+        mode: safeModeCheck.mode,
+        retryAfterMinutes: 15,
+      });
+      return;
+    }
+    
+    // ====== SPAM QUALITY GATE ======
+    const { checkEmailForSpam, logSpamCheck } = await import('../services/spam-prevention.js');
+    const spamCheck = checkEmailForSpam(message.subject, message.body_text);
+    logSpamCheck(spamCheck, { system: 'v2', contactEmail: contact.email, messageId: message.id });
+    
+    if (!spamCheck.passesThreshold) {
+      logger.warn('V2 send blocked by spam check', {
+        score: spamCheck.score,
+        issues: spamCheck.issues.slice(0, 3),
+        messageId: message.id,
+      });
+      res.status(400).json({
+        error: 'Email failed spam check',
+        score: spamCheck.score,
+        issues: spamCheck.issues,
+        threshold: 70,
+      });
+      return;
+    }
     
     // Generate tracking ID for open/click tracking
     const trackingId = `track_${message.id}_${Date.now()}`;
@@ -2567,11 +2646,65 @@ router.post('/send', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/autonomous/pending-messages
+ * List pending outbound messages for review
+ */
+router.get('/pending-messages', async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const messages = await queryReadOnly<{
+      id: string;
+      contact_id: string;
+      email: string | null;
+      subject: string;
+      lead_score: number | null;
+      status: string;
+      created_at: string;
+    }>(`
+      SELECT 
+        om.id,
+        om.contact_id,
+        c.email,
+        om.subject,
+        c.score as lead_score,
+        om.status,
+        om.created_at
+      FROM sa_outbound_messages om
+      JOIN sa_contacts c ON c.id = om.contact_id
+      WHERE om.status = 'pending'
+      ORDER BY om.created_at ASC
+      LIMIT $1
+    `, [limit]);
+
+    res.json({
+      success: true,
+      messages,
+      count: messages.length,
+    });
+  } catch (err) {
+    logger.error('Pending messages fetch failed', { error: (err as Error).message });
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/**
  * POST /api/autonomous/send-batch
  * Send multiple pending messages (with rate limiting)
  */
 router.post('/send-batch', async (req: Request, res: Response) => {
   try {
+    // ====== GLOBAL KILL SWITCH CHECK (MUST BE FIRST) ======
+    const { checkSendsAllowed } = await import('../services/global-kill-switch.js');
+    const killSwitchCheck = await checkSendsAllowed('v2_autonomous');
+    if (!killSwitchCheck.allowed) {
+      res.status(503).json({
+        error: 'Sending blocked',
+        reason: killSwitchCheck.reason,
+        killSwitchActive: true,
+      });
+      return;
+    }
+    
     const limit = Math.min(parseInt(req.body.limit) || 10, 50); // Max 50 per batch
     const delayMs = parseInt(req.body.delayMs) || 2000; // 2 second delay between sends
     
@@ -3219,6 +3352,126 @@ router.post('/scheduler/trigger', async (req: Request, res: Response) => {
       error: result.error,
       timestamp: new Date().toISOString(),
     });
+  }
+});
+
+// ============================================================================
+// IMPROVEMENT 3: STANDARDIZED V2 ENDPOINT ALIASES
+// These aliases provide consistent naming patterns for V2 API consumers
+// Implemented as simple redirects to existing endpoints
+// ============================================================================
+
+/**
+ * V2 aliases for consistent endpoint naming
+ * These endpoints are identical to their non-v2 counterparts
+ */
+router.get('/v2/stats', async (req: Request, res: Response) => {
+  try {
+    const orchestrator = await getOrchestrator();
+    const stats = await orchestrator.getSystemStats();
+    res.json({ success: true, stats, _v2Alias: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+router.get('/v2/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    service: 'autonomous-sales-v2',
+    timestamp: new Date().toISOString(),
+    _v2Alias: true,
+  });
+});
+
+router.post('/v2/compose', async (req: Request, res: Response) => {
+  try {
+    const { contactId } = req.body;
+    const showReasons = req.query.showReasons === 'true' || req.body.showReasons === true;
+    
+    if (!contactId) {
+      res.status(400).json({ error: 'contactId is required' });
+      return;
+    }
+    
+    const orchestrator = await getOrchestrator();
+    const message = await orchestrator.composeMessage(contactId, { returnGatingReasons: showReasons });
+    
+    if (!message) {
+      res.status(404).json({ error: 'Contact not found or no templates available' });
+      return;
+    }
+    
+    if ('gatingFailure' in message && message.gatingFailure) {
+      res.status(422).json({ 
+        error: 'Quality gate failed',
+        gatingFailure: true,
+        reasons: message.reasons,
+        contact: message.contact,
+        _v2Alias: true,
+      });
+      return;
+    }
+    
+    res.json({ success: true, message, _v2Alias: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+router.get('/v2/templates', async (req: Request, res: Response) => {
+  try {
+    const templateType = (req.query.type as string) || 'email';
+    const templates = await getTemplates(templateType);
+    res.json({ success: true, templates, _v2Alias: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+router.get('/v2/inbox', async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 50;
+    const offset = parseInt(req.query.offset as string) || 0;
+    const status = (req.query.status as string) || undefined;
+    
+    const messages = await queryReadOnly<{
+      id: string;
+      from_email: string;
+      subject: string;
+      body_preview: string;
+      sentiment: string;
+      received_at: Date;
+    }>(`
+      SELECT id, from_email, subject, LEFT(body, 200) as body_preview, sentiment, received_at
+      FROM sa_inbox
+      ${status ? 'WHERE sentiment = $3' : ''}
+      ORDER BY received_at DESC
+      LIMIT $1 OFFSET $2
+    `, status ? [limit, offset, status] : [limit, offset]);
+    
+    const statsResult = await queryReadOnly<{ total: string; pending_review: string; interested: string; not_interested: string }>(`
+      SELECT 
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE sentiment = 'needs_review') as pending_review,
+        COUNT(*) FILTER (WHERE sentiment = 'interested') as interested,
+        COUNT(*) FILTER (WHERE sentiment = 'not_interested') as not_interested
+      FROM sa_inbox
+    `);
+    
+    res.json({
+      success: true,
+      messages,
+      stats: {
+        total: parseInt(statsResult[0]?.total || '0'),
+        pendingReview: parseInt(statsResult[0]?.pending_review || '0'),
+        interested: parseInt(statsResult[0]?.interested || '0'),
+        notInterested: parseInt(statsResult[0]?.not_interested || '0'),
+      },
+      _v2Alias: true,
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
   }
 });
 

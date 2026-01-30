@@ -407,6 +407,164 @@ export class DunningManagementService {
   }
 
   /**
+   * Check if customer is within grace period and should have full service access
+   * 
+   * Grace period applies when:
+   * 1. Payment has failed but initial grace period hasn't elapsed
+   * 2. Customer is in dunning but hasn't reached max retries
+   * 
+   * During grace period, customers should maintain FULL service access.
+   */
+  async isInGracePeriod(customerId: string): Promise<{
+    inGracePeriod: boolean;
+    gracePeriodEndsAt: Date | null;
+    shouldAllowFullAccess: boolean;
+    reason: string;
+  }> {
+    // Check subscription status
+    const subscription = await db.query(
+      `SELECT status, suspended_at, failed_payment_count, last_payment_failure_at
+       FROM subscriptions 
+       WHERE customer_id = $1`,
+      [customerId]
+    );
+
+    if (subscription.rows.length === 0) {
+      return {
+        inGracePeriod: false,
+        gracePeriodEndsAt: null,
+        shouldAllowFullAccess: false,
+        reason: 'no_subscription',
+      };
+    }
+
+    const sub = subscription.rows[0];
+
+    // Active subscriptions always have full access
+    if (sub.status === 'active') {
+      return {
+        inGracePeriod: false,
+        gracePeriodEndsAt: null,
+        shouldAllowFullAccess: true,
+        reason: 'subscription_active',
+      };
+    }
+
+    // Suspended subscriptions do NOT have access
+    if (sub.status === 'suspended') {
+      return {
+        inGracePeriod: false,
+        gracePeriodEndsAt: null,
+        shouldAllowFullAccess: false,
+        reason: 'subscription_suspended',
+      };
+    }
+
+    // Check for active dunning process (past_due status)
+    const activeDunning = await db.query(
+      `SELECT id, next_retry_at, attempt_number, created_at, status
+       FROM dunning_attempts 
+       WHERE customer_id = $1 
+         AND status IN ('pending', 'retrying')
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [customerId]
+    );
+
+    if (activeDunning.rows.length === 0) {
+      // No active dunning - if past_due without dunning record, this is an edge case
+      if (sub.status === 'past_due') {
+        return {
+          inGracePeriod: true,
+          gracePeriodEndsAt: null,
+          shouldAllowFullAccess: true,
+          reason: 'past_due_no_dunning_record',
+        };
+      }
+      return {
+        inGracePeriod: false,
+        gracePeriodEndsAt: null,
+        shouldAllowFullAccess: true,
+        reason: 'no_active_dunning',
+      };
+    }
+
+    const dunning = activeDunning.rows[0];
+    const attemptNumber = dunning.attempt_number;
+    const nextRetryAt = new Date(dunning.next_retry_at);
+
+    // Calculate grace period end time
+    // Grace period = initial grace period + all retry windows
+    const totalGraceDays = DEFAULT_DUNNING_CONFIG.grace_period_days +
+      DEFAULT_DUNNING_CONFIG.retry_schedule_days.reduce((a, b) => a + b, 0);
+    
+    const dunningCreatedAt = new Date(dunning.created_at);
+    const gracePeriodEndsAt = new Date(dunningCreatedAt);
+    gracePeriodEndsAt.setDate(gracePeriodEndsAt.getDate() + totalGraceDays);
+
+    // If still within retries, customer is in grace period with full access
+    if (attemptNumber < DEFAULT_DUNNING_CONFIG.max_retries) {
+      return {
+        inGracePeriod: true,
+        gracePeriodEndsAt,
+        shouldAllowFullAccess: true,
+        reason: `dunning_attempt_${attemptNumber}_of_${DEFAULT_DUNNING_CONFIG.max_retries}`,
+      };
+    }
+
+    // Max retries reached but not yet suspended (edge case)
+    return {
+      inGracePeriod: false,
+      gracePeriodEndsAt: null,
+      shouldAllowFullAccess: false,
+      reason: 'max_retries_reached',
+    };
+  }
+
+  /**
+   * Check if customer should have API access based on billing status
+   * This is the main method other services should call
+   */
+  async shouldAllowApiAccess(customerId: string): Promise<{
+    allowed: boolean;
+    reason: string;
+    warningMessage?: string;
+    daysUntilSuspension?: number;
+  }> {
+    const gracePeriodStatus = await this.isInGracePeriod(customerId);
+
+    if (gracePeriodStatus.shouldAllowFullAccess) {
+      // Calculate warning message if in grace period
+      let warningMessage: string | undefined;
+      let daysUntilSuspension: number | undefined;
+
+      if (gracePeriodStatus.inGracePeriod && gracePeriodStatus.gracePeriodEndsAt) {
+        const now = new Date();
+        const daysRemaining = Math.ceil(
+          (gracePeriodStatus.gracePeriodEndsAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+        );
+        daysUntilSuspension = Math.max(0, daysRemaining);
+        
+        if (daysUntilSuspension <= 7) {
+          warningMessage = `Your payment is overdue. Service will be suspended in ${daysUntilSuspension} day${daysUntilSuspension === 1 ? '' : 's'} if not resolved.`;
+        }
+      }
+
+      return {
+        allowed: true,
+        reason: gracePeriodStatus.reason,
+        warningMessage,
+        daysUntilSuspension,
+      };
+    }
+
+    return {
+      allowed: false,
+      reason: gracePeriodStatus.reason,
+    };
+  }
+
+  /**
    * Get dunning status for a customer
    */
   async getDunningStatus(customerId: string): Promise<{
@@ -414,6 +572,8 @@ export class DunningManagementService {
     failed_payments: number;
     next_retry_date: Date | null;
     days_until_suspension: number | null;
+    in_grace_period: boolean;
+    grace_period_ends_at: Date | null;
   }> {
     const subscription = await db.query(
       `SELECT failed_payment_count FROM subscriptions WHERE customer_id = $1`,
@@ -426,13 +586,15 @@ export class DunningManagementService {
         failed_payments: 0,
         next_retry_date: null,
         days_until_suspension: null,
+        in_grace_period: false,
+        grace_period_ends_at: null,
       };
     }
 
     const failedPayments = subscription.rows[0].failed_payment_count;
 
     const activeDunning = await db.query(
-      `SELECT next_retry_at, attempt_number 
+      `SELECT next_retry_at, attempt_number, created_at
        FROM dunning_attempts 
        WHERE customer_id = $1 
          AND status IN ('pending', 'retrying')
@@ -447,6 +609,8 @@ export class DunningManagementService {
         failed_payments: failedPayments,
         next_retry_date: null,
         days_until_suspension: null,
+        in_grace_period: false,
+        grace_period_ends_at: null,
       };
     }
 
@@ -461,11 +625,19 @@ export class DunningManagementService {
             .reduce((a, b) => a + b, 0)
         : 0;
 
+    // Calculate grace period end
+    const totalGraceDays = DEFAULT_DUNNING_CONFIG.grace_period_days +
+      DEFAULT_DUNNING_CONFIG.retry_schedule_days.reduce((a, b) => a + b, 0);
+    const gracePeriodEndsAt = new Date(dunning.created_at);
+    gracePeriodEndsAt.setDate(gracePeriodEndsAt.getDate() + totalGraceDays);
+
     return {
       has_active_dunning: true,
       failed_payments: failedPayments,
       next_retry_date: nextRetryDate,
       days_until_suspension: daysUntilSuspension,
+      in_grace_period: attemptsRemaining > 0,
+      grace_period_ends_at: gracePeriodEndsAt,
     };
   }
 

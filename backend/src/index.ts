@@ -48,6 +48,8 @@ import { SchemaGate } from './utils/schemaGate';
 import { initAnalyticsRollupScheduler } from './services/analyticsRollupScheduler';
 import { initMigrationGuardrailScheduler } from './services/migrationGuardrailScheduler';
 import { initBillingScheduler } from './services/billingScheduler';
+import bullBoardRoutes, { initializeBullBoard } from './routes/bullBoard.routes';
+import { authenticate, operatorOnly } from './middleware/auth';
 import { initSalesAutomationScheduler } from './services/salesAutomationScheduler';
 import { spawn } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
@@ -296,6 +298,10 @@ app.use('/docs', swaggerUi.serve, swaggerUi.setup(undefined, { swaggerUrl: '/ope
 
 app.use(`/api/${API_VERSION}`, apiRoutes);
 
+// Bull Board queue monitoring dashboard (operator-only)
+// Accessible at /admin/queues - requires operator credentials
+app.use('/admin/queues', authenticate, operatorOnly(), bullBoardRoutes);
+
 // 404 handler
 app.use((req: Request, res: Response) => {
   res.status(404).json({
@@ -420,6 +426,10 @@ const startServer = async (): Promise<void> => {
       try {
         await initializeQueues();
         logger.info('Job queues enabled');
+        
+        // Initialize Bull Board dashboard after queues are ready
+        initializeBullBoard();
+        logger.info('Bull Board queue dashboard initialized at /admin/queues');
       } catch (error) {
         logger.warn('Job queue initialization failed - background jobs disabled', {
           error: error instanceof Error ? error.message : 'Unknown error',

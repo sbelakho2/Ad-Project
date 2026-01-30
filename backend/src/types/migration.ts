@@ -277,3 +277,87 @@ export interface EvaluateGuardrailsResult {
   shouldPause: boolean;
   violations: string[];
 }
+
+// Dry-run simulation types
+export interface DryRunSimulationRequest {
+  mirror_percent: number;
+  simulation_hours?: number; // Default 24 hours
+}
+
+export interface DryRunSimulationResult {
+  simulation_id: string;
+  experiment_id: string;
+  mirror_percent: number;
+  simulation_hours: number;
+  timestamp: Date;
+  
+  // Pre-flight checks
+  preflight: {
+    passed: boolean;
+    checks: Array<{
+      name: string;
+      status: 'pass' | 'fail' | 'warn';
+      message: string;
+      severity: 'critical' | 'warning' | 'info';
+    }>;
+  };
+  
+  // Estimated traffic impact
+  traffic_impact: {
+    estimated_total_requests: number;
+    estimated_test_requests: number;
+    estimated_control_requests: number;
+    test_percentage: number;
+    placements_affected: number;
+    apps_affected: number;
+  };
+  
+  // Mapping readiness
+  mapping_readiness: {
+    total_mappings: number;
+    confirmed_mappings: number;
+    pending_mappings: number;
+    skipped_mappings: number;
+    conflict_mappings: number;
+    coverage_percent: number;
+    unmapped_networks: string[];
+  };
+  
+  // Guardrail configuration review
+  guardrail_review: {
+    latency_budget_ms: number;
+    latency_budget_status: 'conservative' | 'moderate' | 'aggressive';
+    revenue_floor_percent: number;
+    revenue_floor_status: 'conservative' | 'moderate' | 'aggressive';
+    max_error_rate_percent: number;
+    error_rate_status: 'conservative' | 'moderate' | 'aggressive';
+    min_impressions: number;
+    estimated_time_to_min_impressions_hours: number;
+  };
+  
+  // Risk assessment
+  risk_assessment: {
+    overall_risk: 'low' | 'medium' | 'high';
+    risk_factors: Array<{
+      factor: string;
+      level: 'low' | 'medium' | 'high';
+      description: string;
+      mitigation?: string;
+    }>;
+  };
+  
+  // Rollback plan
+  rollback_plan: {
+    automatic_rollback_enabled: boolean;
+    rollback_triggers: string[];
+    estimated_rollback_time_seconds: number;
+  };
+  
+  // Recommendations
+  recommendations: Array<{
+    type: 'action' | 'warning' | 'info';
+    message: string;
+    priority: 'high' | 'medium' | 'low';
+  }>;
+}
+

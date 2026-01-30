@@ -7,9 +7,11 @@
  *   - Sync results back to Control Plane
  *   - Fetch job configurations
  *   - Report health/status
+ *   - Circuit breaker pattern for resilience
  */
 
 import { Logger } from 'winston';
+import { CircuitBreaker, createCircuitBreaker, CircuitOpenError } from './circuit-breaker';
 
 // ============================================================================
 // TYPES
@@ -63,6 +65,7 @@ export class ControlPlaneClient {
   private timeoutMs: number;
   private retries: number;
   private logger?: Logger;
+  private circuitBreaker: CircuitBreaker;
   
   constructor(config: ControlPlaneConfig, logger?: Logger) {
     this.baseUrl = config.baseUrl.replace(/\/$/, ''); // Remove trailing slash
@@ -70,6 +73,28 @@ export class ControlPlaneClient {
     this.timeoutMs = config.timeoutMs ?? 10000;
     this.retries = config.retries ?? 3;
     this.logger = logger;
+    
+    // Initialize circuit breaker for Control Plane requests
+    this.circuitBreaker = createCircuitBreaker('control-plane', logger, {
+      failureThreshold: 5,      // Open after 5 failures
+      successThreshold: 2,      // Close after 2 successes in half-open
+      resetTimeMs: 30000,       // Try half-open after 30 seconds
+      windowSizeMs: 60000,      // Count failures in 1 minute window
+    });
+  }
+  
+  /**
+   * Get circuit breaker stats for health reporting
+   */
+  getCircuitBreakerStats() {
+    return this.circuitBreaker.getStats();
+  }
+  
+  /**
+   * Check if circuit is allowing requests
+   */
+  isCircuitClosed(): boolean {
+    return this.circuitBreaker.canExecute();
   }
   
   private async request<T>(
@@ -77,6 +102,12 @@ export class ControlPlaneClient {
     path: string,
     body?: unknown
   ): Promise<T> {
+    // Check circuit breaker before making request
+    if (!this.circuitBreaker.canExecute()) {
+      this.logger?.warn(`Circuit breaker open - skipping request to ${path}`);
+      throw new CircuitOpenError('Control Plane circuit breaker is open - service unavailable');
+    }
+    
     const url = `${this.baseUrl}${path}`;
     let lastError: Error | null = null;
     
@@ -102,6 +133,8 @@ export class ControlPlaneClient {
           throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
         
+        // Success - record it and return
+        this.circuitBreaker.recordSuccess();
         return response.json() as Promise<T>;
       } catch (err) {
         lastError = err as Error;
@@ -112,13 +145,17 @@ export class ControlPlaneClient {
           this.logger?.warn(`Request to ${path} failed (attempt ${attempt + 1}): ${(err as Error).message}`);
         }
         
-        // Exponential backoff
+        // Exponential backoff with jitter to prevent thundering herd
         if (attempt < this.retries - 1) {
-          await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+          const baseDelay = Math.pow(2, attempt) * 1000;
+          const jitter = Math.random() * 500; // 0-500ms jitter
+          await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
         }
       }
     }
     
+    // All retries failed - record failure for circuit breaker
+    this.circuitBreaker.recordFailure();
     throw lastError || new Error('Request failed');
   }
   
