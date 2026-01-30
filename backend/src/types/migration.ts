@@ -2,7 +2,16 @@
  * Type definitions for Migration Studio
  */
 
-export type ExperimentStatus = 'draft' | 'active' | 'paused' | 'completed' | 'archived';
+/**
+ * Experiment lifecycle states:
+ * - draft: Initial creation, not yet activated
+ * - active: Running and collecting data
+ * - paused: Temporarily stopped (recoverable, can be resumed)
+ * - completed: Successfully finished migration
+ * - failed: Guardrail kill switch triggered (terminal state, requires re-creation)
+ * - archived: Soft-deleted, kept for audit purposes
+ */
+export type ExperimentStatus = 'draft' | 'active' | 'paused' | 'completed' | 'failed' | 'archived';
 export type ExperimentObjective = 'revenue_comparison' | 'fill_rate' | 'latency';
 export type ExperimentMode = 'shadow' | 'mirroring';
 export type MappingStatus = 'pending' | 'confirmed' | 'skipped' | 'conflict';

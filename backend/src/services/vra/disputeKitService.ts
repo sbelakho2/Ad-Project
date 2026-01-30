@@ -11,6 +11,7 @@ export interface DisputeKitOptions {
   ttlSec?: number;
   dryRun?: boolean;
   storage?: DisputeStorage;
+  publisherId?: string; // REQUIRED in production for tenant isolation
 }
 
 export interface DisputeKitResult {
@@ -161,12 +162,16 @@ function redactCsv(csv: string): string {
  * Shadow-first: with `dryRun` it does not write, and returns a preview only.
  * When a storage is provided (default in-memory), it stores a single JSON payload containing
  * both metadata and embedded CSV evidence for simplicity. This can be swapped for zip later.
+ * 
+ * SECURITY: When publisherId is provided, enforces tenant isolation by verifying
+ * all deltas belong to the requesting publisher.
  */
 export async function buildDisputeKit(deltaIds: string[], opts?: DisputeKitOptions): Promise<DisputeKitResult> {
   const network = (opts?.network || 'unknown').toLowerCase();
   const ttlSec = opts?.ttlSec ?? 3600; // 1 hour default
   const dryRun = opts?.dryRun === true;
   const storage: DisputeStorage | undefined = opts?.storage ?? new MemoryDisputeStorage();
+  const publisherId = opts?.publisherId;
 
   const kitId = `kit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -175,9 +180,9 @@ export async function buildDisputeKit(deltaIds: string[], opts?: DisputeKitOptio
       throw new Error('No delta IDs provided');
     }
 
-    // Fetch delta rows for given evidence IDs
-    const rowsResult = await query<DeltaRow>(
-      `SELECT kind,
+    // SECURITY: Fetch delta rows with tenant isolation when publisherId is provided
+    // This prevents cross-tenant data leakage by ensuring deltas belong to the requesting publisher
+    const baseQuery = `SELECT kind,
               amount::text AS amount,
               currency,
               reason_code,
@@ -186,11 +191,21 @@ export async function buildDisputeKit(deltaIds: string[], opts?: DisputeKitOptio
               evidence_id,
               confidence::text
          FROM recon_deltas
-        WHERE evidence_id = ANY($1::text[])
-        ORDER BY window_start ASC`,
-      [deltaIds]
-    );
+        WHERE evidence_id = ANY($1::text[])`;
+    
+    const queryText = publisherId 
+      ? `${baseQuery} AND publisher_id = $2 ORDER BY window_start ASC`
+      : `${baseQuery} ORDER BY window_start ASC`;
+    const queryParams = publisherId ? [deltaIds, publisherId] : [deltaIds];
+    
+    const rowsResult = await query<DeltaRow>(queryText, queryParams);
     const rows = rowsResult.rows;
+    
+    // SECURITY: If publisherId was provided but no rows match, either the evidence doesn't exist
+    // or it belongs to a different publisher - both should fail to prevent enumeration attacks
+    if (publisherId && rows.length === 0 && deltaIds.length > 0) {
+      throw new Error('No evidence found matching the provided IDs for this publisher');
+    }
 
     // Prepare CSV evidence
     const evidenceCsv = redactCsv(toCsv(rows));

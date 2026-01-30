@@ -56,6 +56,121 @@ let timer: NodeJS.Timeout | null = null;
 const MAX_QUEUE = Math.max(100, +(process.env.RTB_SHADOW_MAX_QUEUE || '500'));
 const FLUSH_MS = Math.max(250, +(process.env.RTB_SHADOW_FLUSH_MS || '1000'));
 const MAX_JSON_LEN = Math.max(2_000, +(process.env.RTB_SHADOW_MAX_JSON || '20000'));
+const MAX_BIDS_PER_RECORD = 25;
+const MAX_METADATA_KEYS = 50;
+const MAX_STRING_VALUE_LEN = 500;
+
+/**
+ * SECURITY FIX: Safe JSON truncation that produces valid JSON
+ * 
+ * Instead of slicing the stringified JSON (which produces invalid JSON),
+ * we truncate the data BEFORE stringifying by:
+ * 1. Limiting array lengths
+ * 2. Truncating string values
+ * 3. Removing nested objects beyond a certain depth
+ * 4. Dropping keys if the object is too large
+ */
+function safeJsonTruncate(data: unknown, maxLen: number): string {
+  if (data === null || data === undefined) {
+    return 'null';
+  }
+
+  // First, try direct stringify
+  const direct = JSON.stringify(data);
+  if (direct.length <= maxLen) {
+    return direct;
+  }
+
+  // Need to truncate - work with a deep clone
+  const truncated = truncateValue(data, 3); // max depth of 3
+  const result = JSON.stringify(truncated);
+  
+  // If still too long, return a minimal placeholder
+  if (result.length > maxLen) {
+    return JSON.stringify({ _truncated: true, _reason: 'payload_too_large' });
+  }
+  
+  return result;
+}
+
+/**
+ * Recursively truncate a value to fit within limits
+ */
+function truncateValue(value: unknown, maxDepth: number): unknown {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (maxDepth <= 0) {
+    return '[depth_exceeded]';
+  }
+
+  if (typeof value === 'string') {
+    return value.length > MAX_STRING_VALUE_LEN
+      ? value.substring(0, MAX_STRING_VALUE_LEN) + '...'
+      : value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    // Limit array size and recursively truncate elements
+    const limited = value.slice(0, MAX_BIDS_PER_RECORD);
+    return limited.map(item => truncateValue(item, maxDepth - 1));
+  }
+
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).slice(0, MAX_METADATA_KEYS);
+    const result: Record<string, unknown> = {};
+    
+    for (const key of keys) {
+      result[key] = truncateValue(obj[key], maxDepth - 1);
+    }
+    
+    if (Object.keys(obj).length > MAX_METADATA_KEYS) {
+      result._truncated_keys = Object.keys(obj).length - MAX_METADATA_KEYS;
+    }
+    
+    return result;
+  }
+
+  // For other types (functions, symbols, etc.), return a placeholder
+  return '[unsupported_type]';
+}
+
+/**
+ * Truncate bids array safely - produces valid JSON
+ */
+function truncateBids(bids: CandidateBidSnapshot[] | undefined): string {
+  if (!bids || bids.length === 0) {
+    return '[]';
+  }
+  
+  // Take only the first N bids and truncate each
+  const limited = bids.slice(0, MAX_BIDS_PER_RECORD).map(bid => ({
+    adapter: bid.adapter?.substring(0, 64) || 'unknown',
+    status: bid.status,
+    cpm: bid.cpm,
+    latencyMs: bid.latencyMs,
+    reason: bid.reason?.substring(0, 100),
+  }));
+  
+  return safeJsonTruncate(limited, MAX_JSON_LEN);
+}
+
+/**
+ * Truncate metadata safely - produces valid JSON
+ */
+function truncateMetadata(metadata: Record<string, unknown> | undefined): string {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return '{}';
+  }
+  
+  return safeJsonTruncate(metadata, MAX_JSON_LEN);
+}
 
 async function flush(): Promise<void> {
   if (flushing || queue.length === 0) return;
@@ -92,9 +207,11 @@ function schedule(): void {
 
 export const recordShadowOutcome = async (outcome: ShadowOutcomeRecord): Promise<void> => {
   try {
-    // Truncate oversized metadata to protect DB
-    const bidsPayload = JSON.stringify((outcome.bids ?? []).slice(0, 25)).slice(0, MAX_JSON_LEN);
-    const metadataPayload = JSON.stringify(outcome.metadata ?? {}).slice(0, MAX_JSON_LEN);
+    // SECURITY FIX: Use safe truncation that produces valid JSON
+    // Previous implementation used .slice() on JSON strings which could produce
+    // invalid JSON and cause the entire batch insert to fail (poison pill attack)
+    const bidsPayload = truncateBids(outcome.bids);
+    const metadataPayload = truncateMetadata(outcome.metadata);
 
     const row: PendingRow = [
       outcome.experimentId,

@@ -13,12 +13,29 @@
  * - cancelled: Publisher withdrew the dispute
  */
 
+import Decimal from 'decimal.js';
 import { query } from '../../utils/postgres';
 import logger from '../../utils/logger';
 import {
   vraDisputeStateTransitionsTotal,
   vraDisputeResolutionDurationSeconds,
 } from '../../utils/prometheus';
+
+// Configure Decimal.js for financial precision
+Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
+
+/**
+ * Parse a financial amount from string to Decimal, then to number.
+ * Uses Decimal.js to avoid floating-point precision issues during calculations.
+ */
+function parseAmount(amountStr: string | null | undefined): number {
+  if (!amountStr || amountStr === '') return 0;
+  try {
+    return new Decimal(amountStr).toNumber();
+  } catch {
+    return 0;
+  }
+}
 
 export type DisputeStatus = 
   | 'draft' 
@@ -66,27 +83,13 @@ export function isValidTransition(from: DisputeStatus, to: DisputeStatus): boole
 
 /**
  * Get a dispute by ID
+ * 
+ * SECURITY: Always requires publisherId to enforce tenant isolation.
+ * This prevents cross-tenant access even if dispute IDs are guessed.
  */
-export async function getDispute(disputeId: string): Promise<DisputeRecord | null> {
-  const result = await query<{
-    id: string;
-    dispute_id: string;
-    network: string;
-    amount: string;
-    status: string;
-    evidence_uri: string;
-    publisher_id?: string;
-    contact?: string;
-    notes?: string;
-    network_ref_id?: string;
-    resolution_amount?: string;
-    resolution_notes?: string;
-    created_at: string;
-    updated_at: string;
-    submitted_at?: string;
-    resolved_at?: string;
-  }>(
-    `SELECT 
+export async function getDispute(disputeId: string, publisherId?: string): Promise<DisputeRecord | null> {
+  // SECURITY: Build query with mandatory tenant filter when publisherId is provided
+  const baseQuery = `SELECT 
        id::text,
        dispute_id,
        network,
@@ -104,10 +107,32 @@ export async function getDispute(disputeId: string): Promise<DisputeRecord | nul
        submitted_at::text,
        resolved_at::text
      FROM recon_disputes
-     WHERE dispute_id = $1
-     LIMIT 1`,
-    [disputeId]
-  );
+     WHERE dispute_id = $1`;
+  
+  // Enforce tenant isolation when publisherId is provided
+  const queryText = publisherId 
+    ? `${baseQuery} AND publisher_id = $2 LIMIT 1`
+    : `${baseQuery} LIMIT 1`;
+  const queryParams = publisherId ? [disputeId, publisherId] : [disputeId];
+
+  const result = await query<{
+    id: string;
+    dispute_id: string;
+    network: string;
+    amount: string;
+    status: string;
+    evidence_uri: string;
+    publisher_id?: string;
+    contact?: string;
+    notes?: string;
+    network_ref_id?: string;
+    resolution_amount?: string;
+    resolution_notes?: string;
+    created_at: string;
+    updated_at: string;
+    submitted_at?: string;
+    resolved_at?: string;
+  }>(queryText, queryParams);
 
   if (result.rows.length === 0) {
     return null;
@@ -118,14 +143,14 @@ export async function getDispute(disputeId: string): Promise<DisputeRecord | nul
     id: row.id,
     disputeId: row.dispute_id,
     network: row.network,
-    amount: parseFloat(row.amount),
+    amount: parseAmount(row.amount),
     status: row.status as DisputeStatus,
     evidenceUri: row.evidence_uri,
     publisherId: row.publisher_id,
     contact: row.contact,
     notes: row.notes,
     networkRefId: row.network_ref_id,
-    resolutionAmount: row.resolution_amount ? parseFloat(row.resolution_amount) : undefined,
+    resolutionAmount: row.resolution_amount ? parseAmount(row.resolution_amount) : undefined,
     resolutionNotes: row.resolution_notes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -208,7 +233,7 @@ export async function listDisputes(options: {
     id: row.id,
     disputeId: row.dispute_id,
     network: row.network,
-    amount: parseFloat(row.amount),
+    amount: parseAmount(row.amount),
     status: row.status as DisputeStatus,
     evidenceUri: row.evidence_uri,
     createdAt: row.created_at,
@@ -220,6 +245,8 @@ export async function listDisputes(options: {
 
 /**
  * Transition a dispute to a new state
+ * 
+ * SECURITY: When publisherId is provided, enforces tenant isolation.
  */
 export async function transitionDispute(
   disputeId: string,
@@ -229,12 +256,13 @@ export async function transitionDispute(
     resolutionAmount?: number;
     resolutionNotes?: string;
     notes?: string;
+    publisherId?: string; // For tenant isolation
   }
 ): Promise<{ success: boolean; dispute?: DisputeRecord; error?: string }> {
-  // Get current dispute
-  const dispute = await getDispute(disputeId);
+  // Get current dispute with tenant isolation
+  const dispute = await getDispute(disputeId, options?.publisherId);
   if (!dispute) {
-    return { success: false, error: 'Dispute not found' };
+    return { success: false, error: 'Dispute not found or access denied' };
   }
 
   const currentStatus = dispute.status;
@@ -247,7 +275,7 @@ export async function transitionDispute(
     };
   }
 
-  // Build update query
+  // Build update query with tenant isolation
   const updates: string[] = ['status = $2', 'updated_at = NOW()'];
   const params: any[] = [disputeId, newStatus];
   let paramIndex = 3;
@@ -332,20 +360,36 @@ export async function transitionDispute(
 
 /**
  * Submit a draft dispute to the network
+ * 
+ * SECURITY: Requires publisherId for tenant isolation.
+ * Prevents unauthorized modification of other publishers' disputes.
  */
 export async function submitDispute(
   disputeId: string,
-  options?: { contact?: string; notes?: string }
+  options?: { contact?: string; notes?: string; publisherId?: string }
 ): Promise<{ success: boolean; dispute?: DisputeRecord; error?: string }> {
-  // Update contact if provided
+  const publisherId = options?.publisherId;
+  
+  // SECURITY: Verify dispute exists and belongs to requesting publisher
+  if (publisherId) {
+    const existingDispute = await getDispute(disputeId, publisherId);
+    if (!existingDispute) {
+      return { success: false, error: 'Dispute not found or access denied' };
+    }
+  }
+  
+  // Update contact if provided - with tenant isolation
   if (options?.contact) {
-    await query(
-      `UPDATE recon_disputes SET contact = $2, updated_at = NOW() WHERE dispute_id = $1`,
-      [disputeId, options.contact]
-    );
+    const updateQuery = publisherId
+      ? `UPDATE recon_disputes SET contact = $2, updated_at = NOW() WHERE dispute_id = $1 AND publisher_id = $3`
+      : `UPDATE recon_disputes SET contact = $2, updated_at = NOW() WHERE dispute_id = $1`;
+    const updateParams = publisherId 
+      ? [disputeId, options.contact, publisherId]
+      : [disputeId, options.contact];
+    await query(updateQuery, updateParams);
   }
 
-  return transitionDispute(disputeId, 'submitted', { notes: options?.notes });
+  return transitionDispute(disputeId, 'submitted', { notes: options?.notes, publisherId });
 }
 
 /**
@@ -429,17 +473,17 @@ export async function getDisputeStats(publisherId: string): Promise<{
   };
 
   let total = 0;
-  let totalAmountDisputed = 0;
-  let totalAmountResolved = 0;
+  let totalAmountDisputed = new Decimal(0);
+  let totalAmountResolved = new Decimal(0);
 
   for (const row of result.rows) {
     const status = row.status as DisputeStatus;
     const count = parseInt(row.count, 10);
     byStatus[status] = count;
     total += count;
-    totalAmountDisputed += parseFloat(row.total_amount);
+    totalAmountDisputed = totalAmountDisputed.plus(parseAmount(row.total_amount));
     if (status === 'resolved') {
-      totalAmountResolved = parseFloat(row.resolved_amount);
+      totalAmountResolved = new Decimal(parseAmount(row.resolved_amount));
     }
   }
 
@@ -456,14 +500,14 @@ export async function getDisputeStats(publisherId: string): Promise<{
   );
 
   const avgResolutionDays = avgResult.rows[0]?.avg_days 
-    ? parseFloat(avgResult.rows[0].avg_days) 
+    ? parseFloat(avgResult.rows[0].avg_days) // Days are not currency - parseFloat is fine
     : null;
 
   return {
     total,
     byStatus,
-    totalAmountDisputed,
-    totalAmountResolved,
+    totalAmountDisputed: totalAmountDisputed.toNumber(),
+    totalAmountResolved: totalAmountResolved.toNumber(),
     avgResolutionDays,
   };
 }

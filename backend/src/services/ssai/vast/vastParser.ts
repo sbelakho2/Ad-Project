@@ -1585,9 +1585,53 @@ export class VASTParser {
   }
 
   /**
+   * Validate URL for safe fetching.
+   * SECURITY: Prevents SSRF via protocol validation and hostname checks.
+   */
+  private validateFetchUrl(url: string): { valid: boolean; reason?: string } {
+    try {
+      const parsed = new URL(url);
+      
+      // Only allow HTTP/HTTPS protocols
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { valid: false, reason: `Invalid protocol: ${parsed.protocol}` };
+      }
+      
+      // Block localhost and internal hostnames
+      const hostname = parsed.hostname.toLowerCase();
+      if (
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname === '::1' ||
+        hostname === '[::1]' ||
+        hostname.endsWith('.local') ||
+        hostname.endsWith('.internal') ||
+        hostname.endsWith('.localhost')
+      ) {
+        return { valid: false, reason: 'Internal hostname not allowed' };
+      }
+      
+      // Block obvious private IP ranges (basic check - full validation in SecurityHandler)
+      if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/.test(hostname)) {
+        return { valid: false, reason: 'Private IP not allowed' };
+      }
+      
+      return { valid: true };
+    } catch {
+      return { valid: false, reason: 'Invalid URL format' };
+    }
+  }
+
+  /**
    * Fetch wrapper VAST document
    */
   private async fetchWrapper(url: string): Promise<string> {
+    // SECURITY: Validate URL before fetching to prevent SSRF
+    const validation = this.validateFetchUrl(url);
+    if (!validation.valid) {
+      throw new Error(`URL validation failed: ${validation.reason}`);
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.config.wrapperTimeoutMs);
 

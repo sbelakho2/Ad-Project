@@ -91,10 +91,25 @@ export default function VraDeltasPage() {
     const v = Number.isFinite(value) ? value : 0;
     let label = 'Low';
     let cls = 'bg-red-100 text-red-800 border-red-200';
-    if (v >= 0.8) { label = 'High'; cls = 'bg-green-100 text-green-800 border-green-200'; }
-    else if (v >= 0.5) { label = 'Medium'; cls = 'bg-yellow-100 text-yellow-800 border-yellow-200'; }
+    let description = 'Unlikely match or significant discrepancy.';
+
+    if (v >= 0.8) { 
+      label = 'High'; 
+      cls = 'bg-green-100 text-green-800 border-green-200';
+      description = 'Very strong match based on multiple keys (Exact ID or high proximity).';
+    }
+    else if (v >= 0.5) { 
+      label = 'Medium'; 
+      cls = 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      description = 'Reasonable match based on time and amount proximity.';
+    }
+
     return (
-      <span aria-label={`confidence ${label}`} title={`confidence ${label} (${v.toFixed(2)})`} className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${cls}`}>
+      <span 
+        aria-label={`confidence ${label}`} 
+        title={`${label} Confidence (${(v * 100).toFixed(0)}%): ${description}`} 
+        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs cursor-help ${cls}`}
+      >
         {label}
       </span>
     );

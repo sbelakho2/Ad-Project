@@ -305,7 +305,9 @@ export default function NetworkSettingsPage() {
                         )}
                       </div>
                       {conn.statusMessage && (
-                        <p className="text-xs text-gray-500 mt-1">{conn.statusMessage}</p>
+                        <p className={`text-xs mt-1 ${conn.status === 'error' ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
+                          {conn.statusMessage}
+                        </p>
                       )}
                     </div>
                   </div>

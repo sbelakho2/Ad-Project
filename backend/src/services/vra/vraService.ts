@@ -42,13 +42,49 @@ async function safeQuery<T extends QueryResultRow = QueryResultRow>(
   }
 }
 
+// Environment variable for intraday buffer (hours). Default: 24 hours to avoid false "Underpay" flags
+// from partially ingested network reports for the current day.
+const INTRADAY_BUFFER_HOURS = Number(process.env.VRA_INTRADAY_BUFFER_HOURS) || 24;
+
+/**
+ * Compute the default VRA overview window with intraday buffer.
+ * 
+ * Rationale: Network statement data (recon_statements_norm) for the current day
+ * is often incomplete until T+1 or later. Including today in the reconciliation
+ * window would show artificial "Underpay" deltas for any expected revenue that
+ * hasn't yet been reported by the network.
+ * 
+ * Default window: [T-8 days midnight UTC, T-1 day midnight UTC]
+ * - 7 full days of data, ending yesterday at midnight UTC
+ * - Configurable via VRA_INTRADAY_BUFFER_HOURS environment variable
+ */
+function getDefaultOverviewWindow(): { from: string; to: string } {
+  const now = new Date();
+  const bufferMs = INTRADAY_BUFFER_HOURS * 60 * 60 * 1000;
+  
+  // End at midnight UTC of (today - buffer), i.e., yesterday at 00:00:00 UTC
+  const toDate = new Date(now.getTime() - bufferMs);
+  toDate.setUTCHours(0, 0, 0, 0);
+  
+  // Start 7 days before that
+  const fromDate = new Date(toDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+  
+  return {
+    from: fromDate.toISOString(),
+    to: toDate.toISOString(),
+  };
+}
+
 export class VraService {
   // Overview aggregates derived from analytics_revenue_events (expected) and recon_statements_norm (paid)
   async getOverview(params: ReconOverviewParams): Promise<ReconOverviewResult> {
     const publisherId = params.publisherId;
     const appId = params.appId;
-    const from = params.from ?? new Date(Date.now() - 7 * 86400000).toISOString();
-    const to = params.to ?? new Date().toISOString();
+    
+    // Use caller-provided dates or apply intraday buffer for defaults
+    const defaultWindow = getDefaultOverviewWindow();
+    const from = params.from ?? defaultWindow.from;
+    const to = params.to ?? defaultWindow.to;
 
     // Get expected revenue from SDK events (analytics_revenue_events is the modern fact table)
     const expectedRows = await safeQuery<{

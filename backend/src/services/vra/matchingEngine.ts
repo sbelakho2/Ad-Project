@@ -65,13 +65,26 @@ const DEFAULTS: Required<MatchingOptions> = {
 };
 
 // Helper: normalized absolute difference in seconds clamped to window
+// Uses flat bonus for same-day events to avoid unfairly penalizing early/late activity
 function timeProximityScore(stmtDateISO: string, expTsISO: string, windowSec: number): number {
-  const stmtMid = Date.parse(stmtDateISO + 'T12:00:00Z'); // day‑level statements: use day center as a heuristic
   const expTs = Date.parse(expTsISO);
-  if (!Number.isFinite(stmtMid) || !Number.isFinite(expTs)) return 0.0;
+  if (!Number.isFinite(expTs)) return 0.0;
+  
+  // Extract calendar date from expected timestamp (UTC)
+  const expDate = new Date(expTs);
+  const expDateISO = `${expDate.getUTCFullYear()}-${String(expDate.getUTCMonth() + 1).padStart(2, '0')}-${String(expDate.getUTCDate()).padStart(2, '0')}`;
+  
+  // Same-day match: flat bonus (no penalty for time-of-day)
+  if (expDateISO === stmtDateISO) {
+    return 1.0; // Perfect score for same calendar day
+  }
+  
+  // Cross-day: calculate distance using statement's midpoint
+  const stmtMid = Date.parse(stmtDateISO + 'T12:00:00Z');
+  if (!Number.isFinite(stmtMid)) return 0.0;
   const dt = Math.abs(expTs - stmtMid) / 1000; // seconds
   const clamped = Math.min(dt, windowSec);
-  return 1.0 - clamped / windowSec; // 1 when within 0s of center, 0 at window edge
+  return Math.max(0, 1.0 - clamped / windowSec); // decay for cross-day events
 }
 
 function amountProximityScore(paidUsd: number | undefined, expectedUsd: number): number {
@@ -103,6 +116,32 @@ export function scoreCandidate(stmt: StatementRowLite, exp: ExpectedRowLite, opt
   return Math.max(0, Math.min(1, score));
 }
 
+/**
+ * Extract the date portion from an ISO timestamp (YYYY-MM-DD)
+ */
+function extractDateFromTs(ts: string): string {
+  // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS..." formats
+  return ts.substring(0, 10);
+}
+
+/**
+ * Build a bucket key for grouping similar rows together.
+ * Uses date + appId for primary bucketing to reduce search space.
+ */
+function buildBucketKey(date: string, appId?: string): string {
+  return `${date}|${appId || '_'}`;
+}
+
+/**
+ * PERFORMANCE OPTIMIZATION: Bucket-based matching algorithm
+ * 
+ * Instead of O(N*M) nested loop, we:
+ * 1. Build a Map of expected rows bucketed by date+appId - O(M)
+ * 2. For each statement, only search its bucket + adjacent day buckets - O(N * k) where k << M
+ * 
+ * This reduces typical complexity from O(N*M) to approximately O(N * log(M)) for sorted data
+ * or O(N * avgBucketSize) which is typically O(N) for well-distributed data.
+ */
 export function matchStatementsToExpected(
   statements: StatementRowLite[],
   expected: ExpectedRowLite[],
@@ -114,6 +153,48 @@ export function matchStatementsToExpected(
   const auto: MatchResult[] = [];
   const review: MatchResult[] = [];
   const unmatched: StatementRowLite[] = [];
+
+  // STEP 1: Build request_id index for O(1) exact-match lookups
+  const exactMatchIndex = new Map<string, ExpectedRowLite>();
+  for (const exp of expected) {
+    if (exp.requestId) {
+      exactMatchIndex.set(exp.requestId, exp);
+    }
+  }
+
+  // STEP 2: Build buckets by date + appId for fuzzy matching
+  // Each bucket contains expected rows that could match statements with that date/appId
+  const buckets = new Map<string, ExpectedRowLite[]>();
+  
+  for (const exp of expected) {
+    const expDate = extractDateFromTs(exp.ts);
+    const appId = exp.appIdHint || '_';
+    
+    // Add to primary bucket
+    const primaryKey = buildBucketKey(expDate, appId);
+    if (!buckets.has(primaryKey)) {
+      buckets.set(primaryKey, []);
+    }
+    buckets.get(primaryKey)!.push(exp);
+    
+    // Also add to wildcard app bucket for cases where appId hint is missing
+    const wildcardKey = buildBucketKey(expDate, '_');
+    if (wildcardKey !== primaryKey) {
+      if (!buckets.has(wildcardKey)) {
+        buckets.set(wildcardKey, []);
+      }
+      buckets.get(wildcardKey)!.push(exp);
+    }
+  }
+
+  // Helper: get adjacent dates for cross-midnight matching
+  function getAdjacentDates(dateStr: string): string[] {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    const prev = new Date(d.getTime() - 86400000);
+    const next = new Date(d.getTime() + 86400000);
+    const format = (dt: Date) => dt.toISOString().substring(0, 10);
+    return [format(prev), dateStr, format(next)];
+  }
 
   // Helper: derive a deterministic tie-break key for an expected row relative to a statement
   const tieKey = (stmt: StatementRowLite, exp: ExpectedRowLite) => {
@@ -139,10 +220,11 @@ export function matchStatementsToExpected(
     return 0;
   };
 
+  // STEP 3: Process each statement using bucket-based candidate lookup
   for (const stmt of statements) {
-    // 0) Exact-key path (requestId short-circuit)
+    // 0) Exact-key path (requestId short-circuit) - O(1) lookup
     if (stmt.requestId) {
-      const expExact = expected.find((e) => e.requestId === stmt.requestId);
+      const expExact = exactMatchIndex.get(stmt.requestId);
       if (expExact) {
         auto.push({ statementId: stmt.statementId, requestId: expExact.requestId, confidence: 1.0, keysUsed: 'exact' });
         try { vraMatchExactTotal.inc(); } catch {}
@@ -150,9 +232,36 @@ export function matchStatementsToExpected(
       }
     }
 
+    // 1) Collect candidates from relevant buckets only (not all expected rows)
+    const candidateBucketKeys = new Set<string>();
+    const dates = getAdjacentDates(stmt.eventDate);
+    
+    for (const date of dates) {
+      // Add buckets for this date with matching appId and wildcard
+      candidateBucketKeys.add(buildBucketKey(date, stmt.appId));
+      candidateBucketKeys.add(buildBucketKey(date, '_'));
+    }
+
+    // Collect unique candidates from all relevant buckets
+    const seenRequestIds = new Set<string>();
+    const candidates: ExpectedRowLite[] = [];
+    
+    for (const key of candidateBucketKeys) {
+      const bucket = buckets.get(key);
+      if (bucket) {
+        for (const exp of bucket) {
+          if (!seenRequestIds.has(exp.requestId)) {
+            seenRequestIds.add(exp.requestId);
+            candidates.push(exp);
+          }
+        }
+      }
+    }
+
     let best: { exp: ExpectedRowLite; score: number; reasons: { time: number; amount: number; unit: number }; key: ReturnType<typeof tieKey> } | null = null;
 
-    for (const exp of expected) {
+    // 2) Score only the candidates from relevant buckets (NOT all expected rows)
+    for (const exp of candidates) {
       // Quick filter: ensure same day window heuristic (expected ts same calendar day as statement date)
       if (!exp.ts.startsWith(stmt.eventDate)) {
         // still allow if within window seconds (for late events crossing midnight)

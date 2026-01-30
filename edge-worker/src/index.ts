@@ -119,6 +119,54 @@ app.use((req, res, next) => {
 });
 
 // ============================================================================
+// URL VALIDATION FOR SCRAPING (SSRF PROTECTION)
+// ============================================================================
+
+/**
+ * Validate URL for safe scraping.
+ * SECURITY: Prevents SSRF via protocol validation and hostname checks.
+ */
+function validateScrapingUrl(url: string): { valid: boolean; reason?: string } {
+  try {
+    const parsed = new URL(url);
+    
+    // Only allow HTTP/HTTPS protocols
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { valid: false, reason: `Invalid protocol: ${parsed.protocol}` };
+    }
+    
+    // Block localhost and internal hostnames
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === '[::1]' ||
+      hostname.endsWith('.local') ||
+      hostname.endsWith('.internal') ||
+      hostname.endsWith('.localhost') ||
+      hostname === '0.0.0.0'
+    ) {
+      return { valid: false, reason: 'Internal hostname not allowed' };
+    }
+    
+    // Block private IP ranges
+    if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.|fc00:|fe80:|::1)/.test(hostname)) {
+      return { valid: false, reason: 'Private IP not allowed' };
+    }
+    
+    // Block metadata endpoints (cloud provider)
+    if (hostname === '169.254.169.254' || hostname === 'metadata.google.internal') {
+      return { valid: false, reason: 'Cloud metadata endpoints not allowed' };
+    }
+    
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: 'Invalid URL format' };
+  }
+}
+
+// ============================================================================
 // SERVICE INSTANCES (Lazy-loaded)
 // ============================================================================
 
@@ -343,6 +391,13 @@ app.post('/scrape/linkedin', async (req: Request, res: Response) => {
       return;
     }
     
+    // SECURITY: Validate URL before scraping
+    const validation = validateScrapingUrl(url);
+    if (!validation.valid) {
+      res.status(400).json({ error: `Invalid URL: ${validation.reason}` });
+      return;
+    }
+    
     const scraper = await getPlaywrightScraper();
     const result = await scraper.scrapeLinkedInProfile(url);
     
@@ -362,6 +417,13 @@ app.post('/scrape/company', async (req: Request, res: Response) => {
       return;
     }
     
+    // SECURITY: Validate URL before scraping
+    const validation = validateScrapingUrl(url);
+    if (!validation.valid) {
+      res.status(400).json({ error: `Invalid URL: ${validation.reason}` });
+      return;
+    }
+    
     const scraper = await getPlaywrightScraper();
     const result = await scraper.scrapeCompanyWebsite(url);
     
@@ -378,6 +440,13 @@ app.post('/scrape/generic', async (req: Request, res: Response) => {
     
     if (!url || !selectors) {
       res.status(400).json({ error: 'url and selectors required' });
+      return;
+    }
+    
+    // SECURITY: Validate URL before scraping
+    const validation = validateScrapingUrl(url);
+    if (!validation.valid) {
+      res.status(400).json({ error: `Invalid URL: ${validation.reason}` });
       return;
     }
     

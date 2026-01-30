@@ -27,9 +27,12 @@ import {
   LogOut,
   Menu,
   X,
+  Scale,
+  Receipt,
+  ClipboardList,
 } from 'lucide-react'
 
-type FeatureFlagKey = 'transparency' | 'billing' | 'migrationStudio'
+type FeatureFlagKey = 'transparency' | 'billing' | 'migrationStudio' | 'vraEnabled'
 type NavBlueprint = {
   key: string
   label: string
@@ -49,6 +52,10 @@ const NAV_BLUEPRINT: NavBlueprint[] = [
   { key: 'analytics', label: 'Analytics', href: '/analytics', icon: TrendingUp },
   { key: 'transparency', label: 'Transparency', href: '/transparency/auctions', icon: Eye, featureFlag: 'transparency', minTier: 'growth' },
   { key: 'fraud', label: 'Fraud Detection', href: '/fraud', icon: ShieldAlert, minTier: 'growth' },
+  // Value Recovery / Reconciliation section
+  { key: 'recon', label: 'Value Recovery', href: '/recon', icon: Scale, featureFlag: 'vraEnabled', minTier: 'growth' },
+  { key: 'recon-disputes', label: 'Disputes', href: '/recon/disputes', icon: Receipt, featureFlag: 'vraEnabled', minTier: 'growth' },
+  { key: 'recon-review', label: 'Review Queue', href: '/recon/review', icon: ClipboardList, featureFlag: 'vraEnabled', minTier: 'growth' },
   { key: 'supply-chain', label: 'Supply Chain', href: '/supply-chain', icon: Link2 },
   { key: 'tool-supply-chain-status', label: 'Supply Chain Status', href: '/tools/supply-chain-status', icon: FileCheck },
   { key: 'tool-app-ads-inspector', label: 'app-ads.txt Inspector', href: '/tools/app-ads-inspector', icon: FileSearch },
@@ -85,6 +92,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
       transparency: featureFallbacks.transparency,
       billing: featureFallbacks.billing,
       migrationStudio: featureFallbacks.migrationStudio,
+      vraEnabled: process.env.NEXT_PUBLIC_VRA_ENABLED === 'true' || true, // Default to enabled for VRA
       ...(features || {}),
     }
   }, [featureFallbacks.billing, featureFallbacks.migrationStudio, featureFallbacks.transparency, features])
@@ -139,6 +147,7 @@ export default function Navigation({ children }: { children: React.ReactNode }) 
     })
     return [
       build('Workspace', ['dashboard', 'placements', 'migration-studio', 'adapters', 'analytics', 'transparency', 'fraud']),
+      build('Finance', ['recon', 'recon-disputes', 'recon-review']),
       build('Tools', ['supply-chain', 'tool-supply-chain-status', 'tool-app-ads-inspector', 'tool-mediation-debugger']),
       build('Settings', ['settings']),
       build('Admin', ['admin']),

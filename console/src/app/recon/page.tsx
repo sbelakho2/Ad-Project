@@ -86,6 +86,9 @@ export default function ReconDashboardPage() {
   }
 
   async function runReconciliation() {
+    const confirmed = window.confirm('Run reconciliation for the last 7 days?');
+    if (!confirmed) return;
+    
     setReconciling(true);
     try {
       const res = await fetch('/api/v1/vra/reconcile', {
@@ -366,34 +369,39 @@ export default function ReconDashboardPage() {
           <p className="text-xs text-gray-500 mb-4">Revenue comparison per network</p>
 
           <div className="space-y-3">
-            {(overview?.byNetwork || []).slice(0, 5).map((net) => {
-              const variance = net.expected - net.paid;
-              const variancePct = net.expected > 0 ? (variance / net.expected) * 100 : 0;
-              const isUnderpay = variance > 0;
-              
-              return (
-                <div key={net.network} className="flex items-center justify-between">
-                  <div>
-                    <span className="font-medium text-sm">{net.network}</span>
-                    <span className="text-xs text-gray-500 ml-2">
-                      ${net.paid.toLocaleString(undefined, { maximumFractionDigits: 0 })} paid
-                    </span>
-                  </div>
-                  <span className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded ${
-                    Math.abs(variancePct) > 5 
-                      ? 'bg-red-100 text-red-700' 
-                      : 'bg-gray-100 text-gray-700'
-                  }`}>
-                    {isUnderpay ? '-' : '+'}${Math.abs(variance).toFixed(2)}
-                    ({variancePct.toFixed(1)}%)
-                  </span>
-                </div>
-              );
-            })}
-            {(!overview?.byNetwork || overview.byNetwork.length === 0) && (
+            {(!overview?.byNetwork || overview.byNetwork.length === 0) ? (
               <p className="text-sm text-gray-500 text-center py-4">
                 No network data available yet. Sync your networks to see variance data.
               </p>
+            ) : (
+              (overview.byNetwork).slice(0, 5).map((net) => {
+                const variance = net.expected - net.paid;
+                const variancePct = net.expected > 0 ? (variance / net.expected) * 100 : 0;
+                const isUnderpay = variance > 0;
+                
+                return (
+                  <Link 
+                    key={net.network} 
+                    href={`/recon/deltas?network=${encodeURIComponent(net.network)}`}
+                    className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    <div>
+                      <span className="font-medium text-sm text-blue-600 hover:underline">{net.network}</span>
+                      <span className="text-xs text-gray-500 ml-2">
+                        ${net.paid.toLocaleString(undefined, { maximumFractionDigits: 0 })} paid
+                      </span>
+                    </div>
+                    <span className={`inline-flex items-center px-2 py-1 text-xs font-medium rounded ${
+                      Math.abs(variancePct) > 5 
+                        ? 'bg-red-100 text-red-700' 
+                        : 'bg-gray-100 text-gray-700'
+                    }`}>
+                      {isUnderpay ? '-' : '+'}${Math.abs(variance).toFixed(2)}
+                      ({variancePct.toFixed(1)}%)
+                    </span>
+                  </Link>
+                );
+              })
             )}
           </div>
           <Link 

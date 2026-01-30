@@ -6,6 +6,7 @@ import { safeInc } from '../../utils/metrics';
 import type { ExperimentArm, ExperimentMode } from '../../types/migration';
 import { signToken } from '../../utils/signing';
 import { recordShadowOutcome, OutcomeStatus, CandidateBidSnapshot } from './shadowRecorder';
+import { verifyExperimentAuth } from './experimentAuthCache';
 import config from '../../config/index';
 import * as breaker from '../../utils/redisCircuitBreaker';
 import { generateLandscapeId } from './auctionIdempotency';
@@ -74,12 +75,55 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
   registerDefaultAdapters();
 
   const requestId = input.requestId || crypto.randomUUID();
-  const migration = input.migration;
-  const mode: ExperimentMode = migration?.mode ?? 'shadow';
+  let migration = input.migration;
+  let mode: ExperimentMode = migration?.mode ?? 'shadow';
   const armLabel = migration ? migration.arm : 'control';
   const metricLabels = { arm: armLabel, exp_id: migration?.experimentId ?? 'none' } as const;
   const decisionStartedAt = Date.now();
   const fraudSettings = await getFraudSettings(input.publisherId);
+
+  // SECURITY FIX: Verify experiment authorization server-side
+  // The SDK cannot be trusted to provide accurate mode/arm claims
+  if (migration) {
+    const authResult = await verifyExperimentAuth(
+      migration.experimentId,
+      input.publisherId,
+      migration.mode
+    );
+
+    if (!authResult.authorized) {
+      logger.warn('Experiment auth rejected', {
+        requestId,
+        experimentId: migration.experimentId,
+        publisherId: input.publisherId,
+        claimedMode: migration.mode,
+        reason: authResult.reason,
+      });
+
+      // For NOT_ACTIVE experiments, treat as if no experiment exists
+      if (authResult.reason === 'NOT_ACTIVE' || authResult.reason === 'NOT_FOUND') {
+        migration = undefined;
+      } else {
+        // For mode mismatch or wrong publisher, reject the request
+        const landscapeId = generateLandscapeId(requestId);
+        return { success: false, landscapeId, reason: `AUTH_${authResult.reason}` };
+      }
+    } else if (authResult.experiment) {
+      // CRITICAL: Override SDK-provided mode with server-authoritative mode
+      // This prevents "mirroring" mode escalation attacks
+      mode = authResult.experiment.mode;
+      
+      // Log if SDK claimed different mode than authorized
+      if (migration.mode && migration.mode !== mode) {
+        logger.info('Overriding SDK-claimed mode with authorized mode', {
+          requestId,
+          experimentId: migration.experimentId,
+          claimedMode: migration.mode,
+          authorizedMode: mode,
+        });
+      }
+    }
+  }
 
   const recordDeadlineHit = (latencyMs: number, meta?: Record<string, unknown>) => {
     try {

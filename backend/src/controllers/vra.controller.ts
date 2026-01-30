@@ -286,6 +286,8 @@ export async function getMonthlyRevenueDigest(req: Request, res: Response) {
  * GET /api/v1/recon/review-queue
  * Returns mid-confidence matches (fuzzy matches between 0.4 and 0.8 confidence) 
  * that need manual review before being finalized.
+ * 
+ * FIXED: Join uses request_id (what matchEngine stores) instead of expected_id (which doesn't exist)
  */
 export async function getReviewQueue(req: Request, res: Response) {
   try {
@@ -308,49 +310,55 @@ export async function getReviewQueue(req: Request, res: Response) {
     }
 
     // Min/max confidence for review queue (fuzzy match range)
-    const minConf = q.min_conf ? parseFloat(q.min_conf) : 0.4;
-    const maxConf = q.max_conf ? parseFloat(q.max_conf) : 0.8;
+    // Note: link_confidence is stored as 0-100 in DB, not 0-1
+    const minConfInput = q.min_conf ? parseFloat(q.min_conf) : 0.4;
+    const maxConfInput = q.max_conf ? parseFloat(q.max_conf) : 0.8;
     
-    if (minConf < 0 || minConf > 1 || maxConf < 0 || maxConf > 1 || minConf >= maxConf) {
+    if (minConfInput < 0 || minConfInput > 1 || maxConfInput < 0 || maxConfInput > 1 || minConfInput >= maxConfInput) {
       return res.status(400).json({ success: false, error: 'Invalid confidence range' });
     }
+    
+    // Convert to percentage scale (0-100) for DB query
+    const minConf = minConfInput * 100;
+    const maxConf = maxConfInput * 100;
 
-    // Query for review items from recon_match with mid-confidence that haven't been reviewed
+    // Query for review items from recon_match_review (review-band matches)
+    // FIXED: Join on request_id which is what the matching engine actually stores
     const offset = (page - 1) * pageSize;
     
     const itemsResult = await query<{
       id: string;
-      expected_id: string;
       statement_id: string;
-      match_confidence: string;
-      match_type: string;
-      discrepancy_usd: string;
-      created_at: string;
-      expected_amount: string;
-      statement_amount: string;
-      network_type: string;
+      request_id: string;
+      link_confidence: string;
+      keys_used: string;
+      reasons: string;
+      matched_at: string;
+      expected_value: string;
+      paid: string;
+      network: string;
       event_date: string;
     }>(
       `SELECT 
-         m.id,
-         m.expected_id,
-         m.statement_id,
-         m.match_confidence::text,
-         m.match_type,
-         m.discrepancy_usd::text,
-         m.created_at::text,
-         COALESCE(e.expected_value, 0)::text AS expected_amount,
-         COALESCE(s.paid, 0)::text AS statement_amount,
-         COALESCE(s.network_type, '') AS network_type,
+         mr.id::text,
+         mr.statement_id,
+         mr.request_id,
+         mr.link_confidence::text,
+         mr.keys_used,
+         COALESCE(mr.reasons::text, '{}') AS reasons,
+         mr.matched_at::text,
+         COALESCE(e.expected_value, 0)::text AS expected_value,
+         COALESCE(s.paid, 0)::text AS paid,
+         COALESCE(s.network, s.network_type, '') AS network,
          COALESCE(s.event_date::text, '') AS event_date
-       FROM recon_match m
-       LEFT JOIN recon_expected e ON e.id = m.expected_id
-       LEFT JOIN recon_statements_norm s ON s.id = m.statement_id
-       WHERE m.publisher_id = $1
-         AND m.match_confidence >= $2
-         AND m.match_confidence <= $3
-         AND m.review_status IS NULL  -- Not yet reviewed
-       ORDER BY m.match_confidence ASC, m.created_at DESC
+       FROM recon_match_review mr
+       LEFT JOIN recon_expected e ON e.request_id = mr.request_id
+       LEFT JOIN recon_statements_norm s ON s.id::text = mr.statement_id OR 
+         (s.app_id || s.ad_unit_id || s.event_date::text = SUBSTRING(mr.statement_id FROM 1 FOR 64))
+       WHERE mr.publisher_id = $1
+         AND mr.link_confidence >= $2
+         AND mr.link_confidence <= $3
+       ORDER BY mr.link_confidence ASC, mr.matched_at DESC
        LIMIT $4 OFFSET $5`,
       [publisherId, minConf, maxConf, pageSize, offset]
     );
@@ -358,11 +366,10 @@ export async function getReviewQueue(req: Request, res: Response) {
     // Get total count
     const countResult = await query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
-       FROM recon_match
+       FROM recon_match_review
        WHERE publisher_id = $1
-         AND match_confidence >= $2
-         AND match_confidence <= $3
-         AND review_status IS NULL`,
+         AND link_confidence >= $2
+         AND link_confidence <= $3`,
       [publisherId, minConf, maxConf]
     );
     
@@ -371,15 +378,15 @@ export async function getReviewQueue(req: Request, res: Response) {
 
     const items = itemsResult.rows.map(row => ({
       id: row.id,
-      expectedId: row.expected_id,
       statementId: row.statement_id,
-      confidence: parseFloat(row.match_confidence),
-      matchType: row.match_type,
-      discrepancyUsd: parseFloat(row.discrepancy_usd || '0'),
-      createdAt: row.created_at,
-      expectedAmount: parseFloat(row.expected_amount),
-      statementAmount: parseFloat(row.statement_amount),
-      networkType: row.network_type,
+      requestId: row.request_id,
+      confidence: parseFloat(row.link_confidence) / 100, // Convert back to 0-1 for API response
+      keysUsed: row.keys_used,
+      reasons: JSON.parse(row.reasons || '{}'),
+      createdAt: row.matched_at,
+      expectedAmount: parseFloat(row.expected_value),
+      statementAmount: parseFloat(row.paid),
+      networkType: row.network,
       eventDate: row.event_date,
     }));
 
@@ -394,8 +401,8 @@ export async function getReviewQueue(req: Request, res: Response) {
           totalPages,
         },
         filters: {
-          minConf,
-          maxConf,
+          minConf: minConfInput,
+          maxConf: maxConfInput,
         },
       },
     });
@@ -567,15 +574,11 @@ export async function getDisputeById(req: Request, res: Response) {
     }
 
     const { id } = req.params;
-    const dispute = await disputeLifecycle.getDispute(id);
+    // SECURITY: Pass publisherId to enforce tenant isolation at query level
+    const dispute = await disputeLifecycle.getDispute(id, publisherId);
 
     if (!dispute) {
       return res.status(404).json({ success: false, error: 'Dispute not found' });
-    }
-
-    // Verify ownership
-    if (dispute.publisherId && dispute.publisherId !== publisherId) {
-      return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
     return res.json({ success: true, data: dispute });
@@ -599,14 +602,10 @@ export async function submitDisputeById(req: Request, res: Response) {
     const { id } = req.params;
     const { contact, notes } = req.body || {};
 
-    const dispute = await disputeLifecycle.getDispute(id);
+    // SECURITY: Pass publisherId to enforce tenant isolation at query level
+    const dispute = await disputeLifecycle.getDispute(id, publisherId);
     if (!dispute) {
       return res.status(404).json({ success: false, error: 'Dispute not found' });
-    }
-
-    // Verify ownership
-    if (dispute.publisherId && dispute.publisherId !== publisherId) {
-      return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
     const result = await disputeLifecycle.submitDispute(id, { contact, notes });
@@ -636,14 +635,10 @@ export async function cancelDisputeById(req: Request, res: Response) {
     const { id } = req.params;
     const { reason } = req.body || {};
 
-    const dispute = await disputeLifecycle.getDispute(id);
+    // SECURITY: Pass publisherId to enforce tenant isolation at query level
+    const dispute = await disputeLifecycle.getDispute(id, publisherId);
     if (!dispute) {
       return res.status(404).json({ success: false, error: 'Dispute not found' });
-    }
-
-    // Verify ownership
-    if (dispute.publisherId && dispute.publisherId !== publisherId) {
-      return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
     const result = await disputeLifecycle.cancelDispute(id, reason);

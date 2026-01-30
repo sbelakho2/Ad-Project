@@ -4,7 +4,17 @@
  */
 
 import { Pool, PoolClient } from 'pg';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
+import {
+  computeStatistics,
+  welchTTest,
+  requiredSampleSize,
+  MIN_SAMPLE_SIZE,
+} from '../utils/migrationStatistics';
+import {
+  hashUserIdentifier,
+  computeAssignmentBucket,
+} from '../utils/privacyHash';
 import {
   MigrationExperiment,
   MigrationMapping,
@@ -1423,6 +1433,9 @@ export class MigrationStudioService {
 
   /**
    * Log assignment decision
+   * 
+   * SECURITY FIX: Uses HMAC-SHA256 with system secret instead of plain SHA256
+   * to prevent rainbow table attacks on user identifiers
    */
   async logAssignment(
     experimentId: string,
@@ -1431,8 +1444,8 @@ export class MigrationStudioService {
     placementId: string,
     metadata?: Record<string, any>
   ): Promise<void> {
-    // Hash user identifier for privacy
-    const hashedUser = createHash('sha256').update(userIdentifier).digest('hex');
+    // Hash user identifier with HMAC for privacy (prevents rainbow table attacks)
+    const hashedUser = hashUserIdentifier(userIdentifier);
 
     await this.pool.query(
       `INSERT INTO migration_events (
@@ -1491,30 +1504,58 @@ export class MigrationStudioService {
       return { shouldPause: false, violations: [] };
     }
 
+      // STATISTICS FIX: Use weighted aggregation to avoid bias from unequal bucket sizes
+      // Previously, simple averages of percentages across buckets with different sample
+      // sizes (peak vs off-peak) produced biased estimates.
       type Aggregation = {
         impressions: number;
         revenueMicros: number;
-        latencies: number[];
-        errors: number[];
+        // For weighted latency percentile estimation
+        latencyValues: Array<{ value: number; weight: number }>;
+        // For weighted error rate
+        errorTotalErrors: number;
+        errorTotalSamples: number;
       };
 
       const aggregate: Record<ExperimentArm, Aggregation> = {
-        control: { impressions: 0, revenueMicros: 0, latencies: [], errors: [] },
-        test: { impressions: 0, revenueMicros: 0, latencies: [], errors: [] },
+        control: { 
+          impressions: 0, 
+          revenueMicros: 0, 
+          latencyValues: [],
+          errorTotalErrors: 0,
+          errorTotalSamples: 0,
+        },
+        test: { 
+          impressions: 0, 
+          revenueMicros: 0, 
+          latencyValues: [],
+          errorTotalErrors: 0,
+          errorTotalSamples: 0,
+        },
       };
 
       for (const snapshot of snapshotsResult.rows) {
         const arm = snapshot.arm as ExperimentArm;
         const bucket = aggregate[arm];
-        bucket.impressions += Number(snapshot.impressions || 0);
+        const snapshotImpressions = Number(snapshot.impressions || 0);
+        
+        bucket.impressions += snapshotImpressions;
         bucket.revenueMicros += Number(snapshot.revenue_micros || 0);
 
-        if (typeof snapshot.latency_p95_ms === 'number') {
-          bucket.latencies.push(snapshot.latency_p95_ms);
+        // Weighted latency: weight by impressions in each bucket
+        if (typeof snapshot.latency_p95_ms === 'number' && snapshotImpressions > 0) {
+          bucket.latencyValues.push({ 
+            value: snapshot.latency_p95_ms, 
+            weight: snapshotImpressions 
+          });
         }
 
-        if (typeof snapshot.error_rate_percent === 'number') {
-          bucket.errors.push(Number(snapshot.error_rate_percent));
+        // Weighted error rate: accumulate actual error counts
+        if (typeof snapshot.error_rate_percent === 'number' && snapshotImpressions > 0) {
+          // Convert percentage back to count for proper aggregation
+          const errorCount = (Number(snapshot.error_rate_percent) / 100) * snapshotImpressions;
+          bucket.errorTotalErrors += errorCount;
+          bucket.errorTotalSamples += snapshotImpressions;
         }
       }
 
@@ -1529,18 +1570,38 @@ export class MigrationStudioService {
         return { shouldPause: false, violations: [] };
       }
 
-      const average = (values: number[]): number | null => {
+      // STATISTICS FIX: Use weighted p95 estimation instead of MAX
+      // MAX of hourly p95s is overly conservative and causes false-positive triggers
+      const weightedP95 = (values: Array<{ value: number; weight: number }>): number | null => {
         if (values.length === 0) return null;
-        return values.reduce((sum, value) => sum + value, 0) / values.length;
+        
+        // Sort by value and find weighted 95th percentile
+        const sorted = [...values].sort((a, b) => a.value - b.value);
+        const totalWeight = sorted.reduce((sum, v) => sum + v.weight, 0);
+        const targetWeight = totalWeight * 0.95;
+        
+        let cumulativeWeight = 0;
+        for (const item of sorted) {
+          cumulativeWeight += item.weight;
+          if (cumulativeWeight >= targetWeight) {
+            return item.value;
+          }
+        }
+        
+        return sorted[sorted.length - 1].value;
       };
 
-      const maxLatency = (values: number[]): number | null => {
-        if (values.length === 0) return null;
-        return Math.max(...values);
+      // Weighted error rate
+      const weightedErrorRate = (totalErrors: number, totalSamples: number): number | null => {
+        if (totalSamples === 0) return null;
+        return (totalErrors / totalSamples) * 100;
       };
 
-      const testLatency = maxLatency(aggregate.test.latencies);
-      const testErrorRate = average(aggregate.test.errors);
+      const testLatency = weightedP95(aggregate.test.latencyValues);
+      const testErrorRate = weightedErrorRate(
+        aggregate.test.errorTotalErrors, 
+        aggregate.test.errorTotalSamples
+      );
       const controlEcpm = aggregate.control.impressions > 0
         ? (aggregate.control.revenueMicros / aggregate.control.impressions) / 1000
         : null;
@@ -1589,16 +1650,22 @@ export class MigrationStudioService {
         if (shouldPause && experimentRow.status === 'active') {
           const eventType = shouldKill ? 'guardrail_kill' : 'guardrail_pause';
           const newMode: ExperimentMode = 'shadow'; // Always revert to shadow mode on guardrail trigger
+          
+          // CRITICAL FIX: 'kill' should set status to 'failed' (terminal state) to prevent
+          // accidental resumption. 'pause' sets status to 'paused' (recoverable).
+          // A 'failed' experiment requires explicit re-creation or admin override to continue.
+          const newStatus = shouldKill ? 'failed' : 'paused';
 
           await client.query(
             `UPDATE migration_experiments
-             SET status = 'paused',
-                 mode = $1,
+             SET status = $1,
+                 mode = $2,
                  paused_at = COALESCE(paused_at, NOW()),
+                 ${shouldKill ? 'completed_at = NOW(),' : ''}
                  last_guardrail_check = NOW(),
                  updated_at = NOW()
-             WHERE id = $2`,
-            [newMode, experimentId]
+             WHERE id = $3`,
+            [newStatus, newMode, experimentId]
           );
 
           await client.query(
@@ -1735,6 +1802,7 @@ export class MigrationStudioService {
       const experiment = this.mapExperiment(experimentResult.rows[0]);
 
       // Get aggregated metrics from snapshots (last 14 days)
+      // STATISTICS FIX: Include sum_squares for proper variance calculation
       const snapshotsResult = await client.query(
         `SELECT 
            arm,
@@ -1743,6 +1811,7 @@ export class MigrationStudioService {
            SUM(impressions) AS total_impressions,
            SUM(fills) AS total_fills,
            SUM(revenue_micros) AS total_revenue_micros,
+           COALESCE(SUM(revenue_sum_squares), 0) AS total_revenue_sum_squares,
            AVG(latency_p50_ms) AS avg_latency_p50,
            AVG(latency_p95_ms) AS avg_latency_p95,
            AVG(latency_p99_ms) AS avg_latency_p99,
@@ -1769,6 +1838,7 @@ export class MigrationStudioService {
           impressions: Number(row.total_impressions || 0),
           fills: Number(row.total_fills || 0),
           revenue_micros: Number(row.total_revenue_micros || 0),
+          revenue_sum_squares: Number(row.total_revenue_sum_squares || 0),
           latency_p50: Number(row.avg_latency_p50 || 0),
           latency_p95: Number(row.avg_latency_p95 || 0),
           latency_p99: Number(row.avg_latency_p99 || 0),
@@ -1814,22 +1884,49 @@ export class MigrationStudioService {
         ? ((control.ivt_rate - test.ivt_rate) / control.ivt_rate) * 100
         : 0;
 
-      // Statistical significance (simplified t-test approximation)
-      // For production, use proper variance calculation from stratified data
-      const controlVariance = control.impressions > 100 ? control.impressions * 0.05 : control.impressions;
-      const testVariance = test.impressions > 100 ? test.impressions * 0.05 : test.impressions;
-      const pooledStdErr = Math.sqrt((controlVariance + testVariance) / 2);
-      const zScore = pooledStdErr > 0 ? Math.abs(testEcpm - controlEcpm) / pooledStdErr : 0;
-      const revenuePvalue = zScore > 1.96 ? 0.01 : 0.10; // Simplified
-      const fillPvalue = zScore > 1.96 ? 0.01 : 0.10;
-      const confident = revenuePvalue < 0.05;
+      // STATISTICS FIX: Use proper Welch's t-test with actual variance
+      // Previous implementation used hardcoded variance (impressions * 0.05) which was invalid
+      const controlStats = computeStatistics(
+        control.impressions,
+        control.revenue_micros,
+        control.revenue_sum_squares || control.revenue_micros * control.revenue_micros / Math.max(1, control.impressions)
+      );
+      const testStats = computeStatistics(
+        test.impressions,
+        test.revenue_micros,
+        test.revenue_sum_squares || test.revenue_micros * test.revenue_micros / Math.max(1, test.impressions)
+      );
+
+      // Perform Welch's t-test for revenue comparison
+      const revenueTest = welchTTest(controlStats, testStats);
+
+      // For fill rate, we use a proportion test (z-test for proportions)
+      const controlFillN = control.impressions;
+      const testFillN = test.impressions;
+      const controlFillP = controlFillN > 0 ? control.fills / controlFillN : 0;
+      const testFillP = testFillN > 0 ? test.fills / testFillN : 0;
+      
+      // Pooled proportion for variance estimate
+      const pooledP = (control.fills + test.fills) / Math.max(1, controlFillN + testFillN);
+      const fillSE = Math.sqrt(pooledP * (1 - pooledP) * (1 / Math.max(1, controlFillN) + 1 / Math.max(1, testFillN)));
+      const fillZ = fillSE > 0 ? Math.abs(testFillP - controlFillP) / fillSE : 0;
+      const fillPvalue = fillZ > 1.96 ? 0.01 : (fillZ > 1.645 ? 0.05 : 0.10);
+
+      // Determine if we have enough data for reliable statistics
+      const hasEnoughData = control.impressions >= MIN_SAMPLE_SIZE && test.impressions >= MIN_SAMPLE_SIZE;
+      const confident = hasEnoughData && revenueTest.isSignificant;
+
+      // Calculate recommended sample size if not yet significant
+      const recommendedSampleSize = !confident && revenueTest.effectSize !== 0
+        ? requiredSampleSize(Math.abs(revenueTest.effectSize))
+        : undefined;
 
       // Projection: if 100% of traffic routed to test
       const totalControlRevenueMicros = control.revenue_micros;
       const projectedRevenueIfAllTest = totalControlRevenueMicros * (1 + revenueUpliftPercent / 100);
       const revenueUpliftMicros = projectedRevenueIfAllTest - totalControlRevenueMicros;
 
-      // Build report
+      // Build report with proper statistical analysis
       const report = {
         experiment,
         period: {
@@ -1845,9 +1942,21 @@ export class MigrationStudioService {
           ivt_reduction_percent: Number(ivtReductionPercent.toFixed(2)),
         },
         statistical_significance: {
-          revenue_pvalue: Number(revenuePvalue.toFixed(4)),
+          // STATISTICS FIX: Use actual p-values from Welch's t-test
+          revenue_pvalue: Number(revenueTest.pValue.toFixed(4)),
           fill_pvalue: Number(fillPvalue.toFixed(4)),
           confident,
+          // Include additional statistical context
+          t_statistic: Number(revenueTest.tStatistic.toFixed(3)),
+          degrees_of_freedom: Number(revenueTest.degreesOfFreedom.toFixed(1)),
+          effect_size: Number(revenueTest.effectSize.toFixed(3)),
+          confidence_interval: {
+            lower: Number(revenueTest.confidenceInterval.lower.toFixed(2)),
+            upper: Number(revenueTest.confidenceInterval.upper.toFixed(2)),
+          },
+          has_enough_data: hasEnoughData,
+          min_sample_size: MIN_SAMPLE_SIZE,
+          recommended_sample_size: recommendedSampleSize,
         },
         projection: {
           if_100_percent_test: {

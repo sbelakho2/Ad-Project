@@ -1,6 +1,10 @@
+import Decimal from 'decimal.js';
 import logger from '../../utils/logger';
 import { query, insertMany } from '../../utils/postgres';
 import { vraReconcileDurationSeconds, vraReconcileRowsTotal } from '../../utils/prometheus';
+
+// Configure Decimal.js for financial precision
+Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
 
 export interface ReconcileParams {
   from: string; // ISO
@@ -27,6 +31,9 @@ const envFloat = (v: string | undefined, d: number) => {
 };
 
 // Read tunables per invocation so tests and operators can adjust without restarts
+// Note: VRA_INTRADAY_BUFFER_HOURS (default 24) is used by vraService.ts for default overview windows.
+// The reconcile function requires explicit from/to params - callers should avoid including
+// today's date to prevent false "Underpay" deltas from partially ingested network reports.
 function readReconTunables() {
   return {
     UNDERPAY_TOL: envFloat(process.env.VRA_UNDERPAY_TOL, 0.02), // 2%
@@ -53,17 +60,18 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
 
   try {
     const { UNDERPAY_TOL, IVT_P95_BAND_PP, FX_BAND_PCT, VIEWABILITY_GAP_PP } = readReconTunables();
-    // 1) Aggregate expected USD in window
+    // 1) Aggregate expected USD in window (use text for precision, then Decimal)
     const expectedRows = await query<{ expected_usd: string }>(
-      `SELECT COALESCE(SUM(expected_value), 0)::float8 AS expected_usd
+      `SELECT COALESCE(SUM(expected_value), 0)::text AS expected_usd
          FROM recon_expected
         WHERE ts >= $1::timestamptz
           AND ts <  $2::timestamptz${publisherFilter(2)}`,
       buildParams([from, to])
     );
-    const expectedUsd = Number(expectedRows.rows[0]?.expected_usd || 0);
+    const expectedUsdDec = new Decimal(expectedRows.rows[0]?.expected_usd || '0');
+    const expectedUsd = expectedUsdDec.toNumber();
 
-    if (expectedUsd <= 0) {
+    if (expectedUsdDec.lte(0)) {
       end();
       return { inserted: 0, deltas: 0, amounts: { expectedUsd: 0, paidUsd: 0, unmatchedUsd: 0, underpayUsd: 0, timingLagUsd: 0 } };
     }
@@ -71,7 +79,7 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     // 2) Aggregate paid USD from analytics_revenue_events for only those request_ids referenced by recon_expected within the window
     // Note: Using same param index for both outer and inner query publisher filters since they use the same value
     const paidRows = await query<{ paid_usd: string }>(
-      `SELECT COALESCE(SUM(revenue_usd), 0)::float8 AS paid_usd
+      `SELECT COALESCE(SUM(revenue_usd), 0)::text AS paid_usd
          FROM analytics_revenue_events r
         WHERE r.observed_at >= $1::timestamptz
           AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics(2)}
@@ -83,11 +91,12 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
           )`,
       buildParams([from, to])
     );
-    const paidUsd = Number(paidRows.rows[0]?.paid_usd || 0);
+    const paidUsdDec = new Decimal(paidRows.rows[0]?.paid_usd || '0');
+    const paidUsd = paidUsdDec.toNumber();
 
     // 3) Unmatched expected (timing lag candidate): expected rows with no paid event in the window
     const unmatchedRows = await query<{ unmatched_usd: string }>(
-      `SELECT COALESCE(SUM(e.expected_value), 0)::float8 AS unmatched_usd
+      `SELECT COALESCE(SUM(e.expected_value), 0)::text AS unmatched_usd
          FROM recon_expected e
         WHERE e.ts >= $1::timestamptz
           AND e.ts <  $2::timestamptz${publisherFilter(2)}
@@ -100,14 +109,18 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
           )`,
       buildParams([from, to])
     );
-    const unmatchedUsd = Number(unmatchedRows.rows[0]?.unmatched_usd || 0);
+    const unmatchedUsdDec = new Decimal(unmatchedRows.rows[0]?.unmatched_usd || '0');
+    const unmatchedUsd = unmatchedUsdDec.toNumber();
 
-    // 4) Classify deltas (coarse aggregate pass)
-    const gap = Math.max(0, expectedUsd - paidUsd);
-    const timingLagUsd = Math.max(0, Math.min(unmatchedUsd, gap));
-    const residualGap = Math.max(0, gap - timingLagUsd);
-    const tolAmount = expectedUsd * UNDERPAY_TOL;
-    const underpayUsd = residualGap > tolAmount ? residualGap : 0;
+    // 4) Classify deltas using Decimal for precision (coarse aggregate pass)
+    const gapDec = Decimal.max(0, expectedUsdDec.minus(paidUsdDec));
+    const timingLagUsdDec = Decimal.max(0, Decimal.min(unmatchedUsdDec, gapDec));
+    const residualGapDec = Decimal.max(0, gapDec.minus(timingLagUsdDec));
+    const tolAmountDec = expectedUsdDec.times(UNDERPAY_TOL);
+    const underpayUsdDec = residualGapDec.gt(tolAmountDec) ? residualGapDec : new Decimal(0);
+    
+    const timingLagUsd = timingLagUsdDec.toNumber();
+    const underpayUsd = underpayUsdDec.toNumber();
 
     const rows: Array<{
       kind: string;
@@ -121,10 +134,10 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     }> = [];
 
     const evidenceBase = `win:${from}..${to}`;
-    if (timingLagUsd > 0) {
+    if (timingLagUsdDec.gt(0)) {
       rows.push({
         kind: 'timing_lag',
-        amount: Number(timingLagUsd.toFixed(6)),
+        amount: Number(timingLagUsdDec.toFixed(6)),
         currency: 'USD',
         reason_code: 'timing_lag_unmatched',
         window_start: from,
@@ -133,10 +146,10 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
         confidence: 0.6,
       });
     }
-    if (underpayUsd > 0) {
+    if (underpayUsdDec.gt(0)) {
       rows.push({
         kind: 'underpay',
-        amount: Number(underpayUsd.toFixed(6)),
+        amount: Number(underpayUsdDec.toFixed(6)),
         currency: 'USD',
         reason_code: 'agg_underpay',
         window_start: from,

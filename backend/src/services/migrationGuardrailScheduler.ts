@@ -79,56 +79,103 @@ export function initMigrationGuardrailScheduler({
   snapshotJob.start();
 
   // === Guardrail Evaluation Job ===
+  // PERFORMANCE FIX: Parallelize experiment evaluations using a worker pool
+  // to prevent a single slow experiment from blocking all others.
+  const CONCURRENCY_LIMIT = Math.max(1, +(process.env.GUARDRAIL_EVAL_CONCURRENCY || '5'));
+  const EVAL_TIMEOUT_MS = Math.max(5000, +(process.env.GUARDRAIL_EVAL_TIMEOUT_MS || '30000'));
+
+  /**
+   * Evaluate a single experiment with timeout protection
+   */
+  const evaluateWithTimeout = async (
+    exp: { id: string; publisher_id: string; name: string }
+  ): Promise<{ success: boolean; paused: boolean; error?: string }> => {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Evaluation timeout')), EVAL_TIMEOUT_MS);
+    });
+
+    try {
+      const result = await Promise.race([
+        studioService.evaluateGuardrails(exp.id, exp.publisher_id, 'automated_scheduler'),
+        timeoutPromise,
+      ]);
+
+      return { success: true, paused: result.shouldPause };
+    } catch (error) {
+      return { 
+        success: false, 
+        paused: false, 
+        error: (error as Error).message 
+      };
+    }
+  };
+
+  /**
+   * Process experiments in parallel batches
+   */
   const runGuardrailEvaluation = async (reason: string): Promise<void> => {
-    logger.info('Migration guardrail evaluation: starting', { reason });
+    logger.info('Migration guardrail evaluation: starting', { reason, concurrency: CONCURRENCY_LIMIT });
+    const startTime = Date.now();
+
     try {
       // Get all active experiments
       const activeExperiments = await pool.query(
         `SELECT id, publisher_id, name FROM migration_experiments WHERE status = 'active'`
       );
 
+      const total = activeExperiments.rows.length;
       let evaluated = 0;
       let paused = 0;
       let errors = 0;
 
-      for (const exp of activeExperiments.rows) {
-        try {
-          const result = await studioService.evaluateGuardrails(
-            exp.id,
-            exp.publisher_id,
-            'automated_scheduler'
-          );
+      // Process in parallel batches
+      const batches: typeof activeExperiments.rows[] = [];
+      for (let i = 0; i < total; i += CONCURRENCY_LIMIT) {
+        batches.push(activeExperiments.rows.slice(i, i + CONCURRENCY_LIMIT));
+      }
 
-          evaluated++;
-          if (result.shouldPause) {
-            paused++;
-            logger.warn('Migration guardrail evaluation: experiment auto-paused', {
+      for (const batch of batches) {
+        // Run batch in parallel
+        const results = await Promise.all(
+          batch.map(exp => evaluateWithTimeout(exp).then(result => ({ exp, result })))
+        );
+
+        for (const { exp, result } of results) {
+          if (result.success) {
+            evaluated++;
+            if (result.paused) {
+              paused++;
+              logger.warn('Migration guardrail evaluation: experiment auto-paused', {
+                experimentId: exp.id,
+                experimentName: exp.name,
+              });
+            }
+          } else {
+            errors++;
+            logger.warn('Migration guardrail evaluation: experiment failed', {
               experimentId: exp.id,
               experimentName: exp.name,
-              violations: result.violations,
+              error: result.error,
             });
           }
-        } catch (error) {
-          errors++;
-          logger.warn('Migration guardrail evaluation: experiment failed', {
-            experimentId: exp.id,
-            experimentName: exp.name,
-            error: (error as Error).message,
-          });
         }
       }
 
+      const durationMs = Date.now() - startTime;
       logger.info('Migration guardrail evaluation: complete', {
         reason,
-        total: activeExperiments.rows.length,
+        total,
         evaluated,
         paused,
         errors,
+        durationMs,
+        avgPerExperiment: total > 0 ? Math.round(durationMs / total) : 0,
       });
     } catch (error) {
       logger.error('Migration guardrail evaluation: critical failure', {
         reason,
         error: (error as Error).message,
+        durationMs: Date.now() - startTime,
       });
     }
   };

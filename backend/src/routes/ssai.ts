@@ -4,6 +4,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { SessionService } from '../services/ssai/session/SessionService';
 import { sessionStore } from '../services/ssai/session/SessionStore';
 import { SSAIHealthCheck } from '../services/ssai/operability/SSAIHealthCheck';
@@ -19,6 +20,27 @@ import type {
 } from '../services/ssai/session/types';
 
 const router = Router();
+
+// SSAI Rate Limiting - Generous limits for video streaming workloads
+// Session creation: 200/min per IP (allows burst of new viewers)
+// Manifest requests: 1000/min per IP (typical HLS/DASH polling is 2-5 req/sec per viewer)
+const ssaiSessionRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: parseInt(process.env.SSAI_SESSION_RATE_LIMIT || '200', 10),
+  keyGenerator: (req: Request) => req.ip || 'unknown',
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many session requests, please try again later' },
+});
+
+const ssaiManifestRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: parseInt(process.env.SSAI_MANIFEST_RATE_LIMIT || '1000', 10),
+  keyGenerator: (req: Request) => req.ip || 'unknown',
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many manifest requests, please try again later' },
+});
 
 // Services
 const sessionService = new SessionService();
@@ -110,7 +132,7 @@ function deviceLabel(deviceType: SSAISession['config']['deviceProfile']['deviceT
 /**
  * Create new SSAI session (SDK-authenticated)
  */
-router.post('/sessions', appApiKeyAuth, async (req: Request, res: Response) => {
+router.post('/sessions', appApiKeyAuth, ssaiSessionRateLimit, async (req: Request, res: Response) => {
   try {
     const body = (req.body ?? {}) as any;
 
@@ -177,8 +199,9 @@ router.post('/sessions', appApiKeyAuth, async (req: Request, res: Response) => {
 
 /**
  * Get session by ID (token required)
+ * High-traffic endpoint - video players poll this for manifest updates
  */
-router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
+router.get('/sessions/:sessionId', ssaiManifestRateLimit, async (req: Request, res: Response) => {
   try {
     const token = typeof req.query.token === 'string' ? req.query.token : undefined;
     if (!token) {

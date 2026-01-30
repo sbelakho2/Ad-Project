@@ -89,15 +89,28 @@ export async function fetchIronSourceSetup(credentials: ConnectorCredentials): P
         }
       ))
       // Map minimal fields; unknown fields are ignored
+      // UNIT HANDLING: ironSource API returns eCPM in dollars (e.g., 2.75 = $2.75)
+      // We convert to cents for internal consistency
       const rows = Array.isArray(res.data) ? res.data : []
-      return rows.slice(0, 100).map((r: any, idx: number) => ({
-        network: 'ironSource',
-        instanceId: String(r.instance_id ?? r.id ?? `is-${idx}`),
-        instanceName: String(r.name ?? 'ironSource Instance'),
-        waterfallPosition: Number(r.position ?? idx + 1) || undefined,
-        ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
-        confidence: 'high',
-      }))
+      return rows.slice(0, 100).map((r: any, idx: number) => {
+        // Prefer explicit ecpm_cents if provided, otherwise convert ecpm from dollars
+        let ecpmCents: number | undefined
+        if (r.ecpm_cents !== undefined && r.ecpm_cents !== null) {
+          ecpmCents = Number(r.ecpm_cents) || undefined
+        } else if (r.ecpm !== undefined && r.ecpm !== null) {
+          // API returns dollars, convert to cents
+          ecpmCents = Math.round(Number(r.ecpm) * 100) || undefined
+        }
+        
+        return {
+          network: 'ironSource',
+          instanceId: String(r.instance_id ?? r.id ?? `is-${idx}`),
+          instanceName: String(r.name ?? 'ironSource Instance'),
+          waterfallPosition: Number(r.position ?? idx + 1) || undefined,
+          ecpmCents,
+          confidence: 'high' as const,
+        }
+      })
     } catch (error: any) {
       // In live mode, propagate errors instead of falling back to sample data
       const status = error.response?.status
@@ -117,7 +130,7 @@ export async function fetchIronSourceSetup(credentials: ConnectorCredentials): P
       instanceId: `is-rv-${base}`,
       instanceName: 'ironSource Rewarded',
       waterfallPosition: 1,
-      ecpmCents: 275,
+      ecpmCents: 275, // $2.75
       confidence: 'high',
     },
     {
@@ -125,7 +138,7 @@ export async function fetchIronSourceSetup(credentials: ConnectorCredentials): P
       instanceId: `is-int-${base}`,
       instanceName: 'ironSource Interstitial',
       waterfallPosition: 2,
-      ecpmCents: 180,
+      ecpmCents: 180, // $1.80
       confidence: 'medium',
     },
   ]
@@ -144,15 +157,28 @@ export async function fetchAppLovinSetup(credentials: ConnectorCredentials): Pro
           params: { account_id: credentials.account_id },
         }
       ))
+      // UNIT HANDLING: AppLovin API returns eCPM in dollars (e.g., 3.20 = $3.20)
+      // We convert to cents for internal consistency
       const rows = Array.isArray(res.data) ? res.data : []
-      return rows.slice(0, 100).map((r: any, idx: number) => ({
-        network: 'AppLovin',
-        instanceId: String(r.unit_id ?? r.id ?? `max-${idx}`),
-        instanceName: String(r.name ?? 'MAX Unit'),
-        waterfallPosition: Number(r.position ?? idx + 1) || undefined,
-        ecpmCents: Number(r.ecpm_cents ?? r.ecpm ?? 0) || undefined,
-        confidence: 'high',
-      }))
+      return rows.slice(0, 100).map((r: any, idx: number) => {
+        // Prefer explicit ecpm_cents if provided, otherwise convert ecpm from dollars
+        let ecpmCents: number | undefined
+        if (r.ecpm_cents !== undefined && r.ecpm_cents !== null) {
+          ecpmCents = Number(r.ecpm_cents) || undefined
+        } else if (r.ecpm !== undefined && r.ecpm !== null) {
+          // API returns dollars, convert to cents
+          ecpmCents = Math.round(Number(r.ecpm) * 100) || undefined
+        }
+        
+        return {
+          network: 'AppLovin',
+          instanceId: String(r.unit_id ?? r.id ?? `max-${idx}`),
+          instanceName: String(r.name ?? 'MAX Unit'),
+          waterfallPosition: Number(r.position ?? idx + 1) || undefined,
+          ecpmCents,
+          confidence: 'high' as const,
+        }
+      })
     } catch (error: any) {
       // In live mode, propagate errors instead of falling back to sample data
       const status = error.response?.status
@@ -171,7 +197,7 @@ export async function fetchAppLovinSetup(credentials: ConnectorCredentials): Pro
       instanceId: `max-v${base}`,
       instanceName: 'MAX Video',
       waterfallPosition: 1,
-      ecpmCents: 320,
+      ecpmCents: 320, // $3.20
       confidence: 'high',
     },
     {
@@ -179,7 +205,7 @@ export async function fetchAppLovinSetup(credentials: ConnectorCredentials): Pro
       instanceId: `max-b${base}`,
       instanceName: 'MAX Banner',
       waterfallPosition: 3,
-      ecpmCents: 95,
+      ecpmCents: 95, // $0.95
       confidence: 'medium',
     },
   ]

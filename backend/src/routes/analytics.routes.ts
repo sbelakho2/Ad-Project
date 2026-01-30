@@ -6,7 +6,7 @@ import { cache, invalidatePublisherCache } from '../middleware/cache';
 import { cacheTTL } from '../utils/redis';
 import * as analyticsController from '../controllers/analytics.controller';
 import { ingestByoSpans, getByoAdapterMetrics, getByoTraces } from '../controllers/byoTelemetry.controller';
-import { authRateLimiter } from '../middleware/redisRateLimiter';
+import { analyticsRateLimiter } from '../middleware/tieredRateLimiter';
 
 const router = Router();
 
@@ -46,22 +46,22 @@ router.get('/buffer-stats', authenticateOrApiKey, cache({
 // Event Ingestion Endpoints (no auth for SDK)
 // ========================================
 // POST /api/v1/analytics/events/impressions - Record impression events
-// SDK ingestion endpoints can be abused; apply rate limit and cache invalidation
-router.post('/events/impressions', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordImpressions);
+// SDK ingestion endpoints: use tiered analytics limits (5,000-500,000/min by tier)
+router.post('/events/impressions', analyticsRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordImpressions);
 
 // POST /api/v1/analytics/events/clicks - Record click events
-router.post('/events/clicks', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordClicks);
+router.post('/events/clicks', analyticsRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordClicks);
 
 // POST /api/v1/analytics/events/revenue - Record revenue events
-router.post('/events/revenue', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordRevenue);
+router.post('/events/revenue', analyticsRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordRevenue);
 
 // POST /api/v1/analytics/events/viewability - Record OMSDK/viewability events (SDK_CHECKS 7.3)
 // Requires app API key auth for security - prevents anonymous event injection
-router.post('/events/viewability', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordViewability);
+router.post('/events/viewability', analyticsRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordViewability);
 
 // POST /api/v1/analytics/events/manifest-parse - Record SSAI manifest parse failures (best-effort)
 // Requires app API key auth for security - prevents anonymous event injection
-router.post('/events/manifest-parse', authRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordManifestParseErrors);
+router.post('/events/manifest-parse', analyticsRateLimiter, appApiKeyAuth, invalidatePublisherCache(), analyticsController.recordManifestParseErrors);
 
 // GET /api/v1/analytics/viewability/:placementId - Get viewability summary for a placement
 router.get('/viewability/:placementId', authenticateOrApiKey, cache({ 
@@ -86,7 +86,7 @@ export default router;
 // BYO Observability (Adapter Spans) Endpoints
 // ========================================
 // POST /api/v1/analytics/byo/spans - Ingest sampled adapter span events from SDK (rate-limited)
-router.post('/byo/spans', authRateLimiter, ingestByoSpans);
+router.post('/byo/spans', analyticsRateLimiter, ingestByoSpans);
 
 // GET /api/v1/analytics/byo/adapter-metrics - Summary metrics (auth required)
 router.get(

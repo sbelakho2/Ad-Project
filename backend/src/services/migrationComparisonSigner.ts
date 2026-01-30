@@ -183,12 +183,20 @@ export function generateSignedComparison(mappings: MigrationMapping[]): Migratio
 
 /**
  * Generate signed comparison for experiment report (from real metrics)
+ * 
+ * UNIT CONVENTIONS for ExperimentReportData:
+ * - control_ecpm_micros / test_ecpm_micros: eCPM in micro-dollars (1 dollar = 1,000,000 micros)
+ * - control_fill_rate / test_fill_rate: Fill rate as PERCENTAGE (0-100), NOT as ratio (0-1)
+ * - control_ivt_rate / test_ivt_rate: IVT rate as percentage (0-100)
+ * - latency values: in milliseconds
  */
 export interface ExperimentReportData {
   experiment_id: string;
   control_ecpm_micros: number;
   test_ecpm_micros: number;
+  /** Fill rate as percentage (0-100), NOT ratio (0-1) */
   control_fill_rate: number;
+  /** Fill rate as percentage (0-100), NOT ratio (0-1) */
   test_fill_rate: number;
   control_latency_p95_ms: number;
   test_latency_p95_ms: number;
@@ -207,8 +215,11 @@ export function generateSignedReportComparison(data: ExperimentReportData): Migr
 
   const controlEcpmCents = data.control_ecpm_micros / 10000; // micros to cents
   const testEcpmCents = data.test_ecpm_micros / 10000;
-  const controlFillPercent = data.control_fill_rate * 100;
-  const testFillPercent = data.test_fill_rate * 100;
+  
+  // BUGFIX: control_fill_rate and test_fill_rate are already percentages (0-100).
+  // Previously this code multiplied by 100 again, causing 100x overestimation (e.g., 5000% for 50% fill).
+  const controlFillPercent = data.control_fill_rate;
+  const testFillPercent = data.test_fill_rate;
 
   // IVT-adjusted eCPM (assumes IVT rate is proportion of invalid traffic)
   const controlIvtAdjustedEcpm = controlEcpmCents * (1 - data.control_ivt_rate / 100);

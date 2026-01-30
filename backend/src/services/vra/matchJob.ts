@@ -25,11 +25,12 @@ type CHExpectedRow = {
 export interface MatchBatchParams {
   from: string; // ISO
   to: string;   // ISO
+  publisherId: string; // REQUIRED: tenant isolation - prevents cross-publisher data mixing
   limitStatements?: number; // default 100k
   limitExpected?: number;   // default 100k
   dryRun?: boolean;
   options?: MatchingOptions;
-  persistReview?: boolean; // when true, persist review-band matches into recon_match_review
+  persistReview?: boolean; // when true, persist review-band matches into recon_match_review (default: true)
 }
 
 function makeStatementId(r: CHStatementRow): string {
@@ -49,6 +50,13 @@ function makeStatementId(r: CHStatementRow): string {
 export async function runMatchingBatch(params: MatchBatchParams): Promise<{ auto: number; review: number; unmatched: number; inserted: number; reviewPersisted: number }> {
   const from = params.from;
   const to = params.to;
+  const publisherId = params.publisherId;
+  
+  // SECURITY: publisherId is REQUIRED for tenant isolation
+  if (!publisherId || typeof publisherId !== 'string' || publisherId.trim() === '') {
+    throw new Error('publisherId is required for tenant isolation - refusing to process cross-tenant batch');
+  }
+  
   const limitStatements = Math.min(Math.max(params.limitStatements ?? 100_000, 1), 1_000_000);
   const limitExpected = Math.min(Math.max(params.limitExpected ?? 100_000, 1), 1_000_000);
   const dryRun = params.dryRun === true;
@@ -63,6 +71,7 @@ export async function runMatchingBatch(params: MatchBatchParams): Promise<{ auto
   };
 
   // Fetch statements (day-granular) and expected (timestamped) in the window
+  // SECURITY: Filter by publisher_id to prevent cross-tenant data contamination
   const stmtRowsResult = await query<CHStatementRow>
     (
       `
@@ -79,10 +88,11 @@ export async function runMatchingBatch(params: MatchBatchParams): Promise<{ auto
       FROM recon_statements_norm
       WHERE event_date >= $1::date
         AND event_date <  $2::date
+        AND publisher_id = $3
       ORDER BY event_date ASC
-      LIMIT $3
+      LIMIT $4
     `,
-      [from, to, limitStatements]
+      [from, to, publisherId, limitStatements]
     );
   const stmtRows = stmtRowsResult.rows;
 
@@ -94,10 +104,11 @@ export async function runMatchingBatch(params: MatchBatchParams): Promise<{ auto
         FROM recon_expected
        WHERE ts >= $1::timestamptz
          AND ts <  $2::timestamptz
+         AND publisher_id = $3
        ORDER BY ts ASC
-       LIMIT $3
+       LIMIT $4
     `,
-    [from, to, limitExpected]
+    [from, to, publisherId, limitExpected]
   );
   const expRows = expRowsResult.rows;
 
@@ -146,8 +157,9 @@ export async function runMatchingBatch(params: MatchBatchParams): Promise<{ auto
     }
   }
 
-  // Optionally persist review-band matches for analyst review
-  if (!dryRun && params.persistReview && review.length > 0) {
+  // Persist review-band matches for analyst review (default: enabled for audit trail)
+  const persistReview = params.persistReview !== false; // default true
+  if (!dryRun && persistReview && review.length > 0) {
     try {
       await insertMany(
         'recon_match_review',

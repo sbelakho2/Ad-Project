@@ -2,8 +2,9 @@
 
 import { useState, useMemo, useId } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import Link from 'next/link'
 import { revenueApi } from '@/lib/api'
-import { BarChart3, TrendingUp, Download, DollarSign, Eye, MousePointer, Zap } from 'lucide-react'
+import { BarChart3, TrendingUp, Download, DollarSign, Eye, MousePointer, Zap, AlertTriangle, ArrowRight, Scale } from 'lucide-react'
 import { formatCurrency, formatNumber, formatPercentage, getLocale } from '@/lib/utils'
 import {
   LineChart,
@@ -368,6 +369,35 @@ export default function AnalyticsPage() {
           </div>
         ) : (
           <div className="card text-sm text-gray-600">No summary data available for the selected period.</div>
+        )}
+
+        {/* Variance Alert - Cross-link to VRA */}
+        {summary && summary.revenueChangePercent !== undefined && Math.abs(summary.revenueChangePercent) > 5 && (
+          <div className="rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 to-orange-50 p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+              <div className="flex items-start gap-3 flex-1">
+                <div className="rounded-lg bg-amber-100 p-2.5 flex-shrink-0">
+                  <AlertTriangle className="h-5 w-5 text-amber-600" aria-hidden={true} />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-amber-900">Revenue Variance Detected</h3>
+                  <p className="mt-1 text-sm text-amber-800">
+                    Your revenue has changed by{' '}
+                    <span className="font-semibold">{formatPercentage(Math.abs(summary.revenueChangePercent))}</span>{' '}
+                    compared to the previous period. This may indicate discrepancies with network reporting.
+                  </p>
+                </div>
+              </div>
+              <Link
+                href={`/recon/deltas?from=${dateRange.startDate}&to=${dateRange.endDate}`}
+                className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-amber-700 transition-colors whitespace-nowrap"
+              >
+                <Scale className="h-4 w-4" />
+                Investigate Discrepancy
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </div>
+          </div>
         )}
 
         {/* Revenue over time */}

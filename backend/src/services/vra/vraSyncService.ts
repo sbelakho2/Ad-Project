@@ -8,6 +8,7 @@
 import { Pool } from 'pg';
 import logger from '../../utils/logger';
 import { NetworkConnectorService, NetworkConnection, NetworkType, ConnectionCredentials } from './networkConnectorService';
+import { reconcileWindow, ReconcileParams, ReconcileResult } from './reconcile';
 
 export interface SyncResult {
   connectionId: string;
@@ -155,6 +156,7 @@ export class VraSyncService {
 
   /**
    * Run reconciliation for a publisher
+   * Delegates core financial calculations to reconcileWindow for precision
    */
   async runReconciliation(
     publisherId: string,
@@ -173,35 +175,31 @@ export class VraSyncService {
     const runId = runResult.rows[0].id;
 
     try {
-      // 1. Get expected revenue from SDK events (using analytics_revenue_events fact table)
-      const expectedResult = await this.pool.query(
-        `SELECT COALESCE(SUM(revenue_usd), 0)::float AS expected_usd,
-                COUNT(DISTINCT metadata->>'request_id')::int AS event_count
-         FROM analytics_revenue_events
-         WHERE publisher_id = $1
-           AND observed_at >= $2 AND observed_at < $3`,
-        [publisherId, windowStart.toISOString(), windowEnd.toISOString()]
-      );
-      const expectedUsd = Number(expectedResult.rows[0]?.expected_usd || 0);
-      const eventCount = Number(expectedResult.rows[0]?.event_count || 0);
+      // Delegate to reconcileWindow for precise financial calculations using Decimal.js
+      const reconResult = await reconcileWindow({
+        from: windowStart.toISOString(),
+        to: windowEnd.toISOString(),
+        publisherId,
+        dryRun: false, // We want deltas persisted
+      });
 
-      // 2. Get paid revenue from network statements
-      const paidResult = await this.pool.query(
-        `SELECT COALESCE(SUM(paid), 0)::float AS paid_usd,
-                COUNT(*)::int AS statement_count
+      // Use reconcileWindow's calculated amounts
+      const expectedUsd = reconResult.amounts.expectedUsd;
+      const paidUsd = reconResult.amounts.paidUsd;
+      const varianceUsd = expectedUsd - paidUsd;
+      const variancePercent = expectedUsd > 0 ? (varianceUsd / expectedUsd) * 100 : 0;
+
+      // Get statement count for coverage calculation
+      const statementResult = await this.pool.query(
+        `SELECT COUNT(*)::int AS statement_count
          FROM recon_statements_norm
          WHERE publisher_id = $1
            AND event_date >= $2::date AND event_date < $3::date`,
         [publisherId, windowStart.toISOString(), windowEnd.toISOString()]
       );
-      const paidUsd = Number(paidResult.rows[0]?.paid_usd || 0);
-      const statementCount = Number(paidResult.rows[0]?.statement_count || 0);
+      const statementCount = Number(statementResult.rows[0]?.statement_count || 0);
 
-      // 3. Calculate variance
-      const varianceUsd = expectedUsd - paidUsd;
-      const variancePercent = expectedUsd > 0 ? (varianceUsd / expectedUsd) * 100 : 0;
-
-      // 4. Calculate coverage (how much of expected has a matching statement)
+      // Calculate coverage (how much of expected has a matching statement)
       const coverageResult = await this.pool.query(
         `SELECT COUNT(DISTINCT re.adapter_name)::int AS networks_with_events,
                 (SELECT COUNT(DISTINCT network_type) FROM recon_statements_norm 
@@ -216,25 +214,16 @@ export class VraSyncService {
         ? (networksWithStatements / networksWithEvents) * 100 
         : (statementCount > 0 ? 100 : 0);
 
-      // 5. Detect and insert deltas
+      // Build delta summary from reconcileWindow results
       const deltasByKind: Record<string, number> = {};
-      let deltasCount = 0;
       const alerts: Array<{ type: string; severity: string; message: string }> = [];
 
-      // Check for significant underpayment (> 2% of expected)
-      if (varianceUsd > expectedUsd * 0.02 && varianceUsd > 10) {
-        const deltaResult = await this.pool.query(
-          `INSERT INTO recon_deltas 
-           (publisher_id, reconciliation_run_id, kind, amount, currency, reason_code, 
-            window_start, window_end, evidence_id, confidence)
-           VALUES ($1, $2, 'underpay', $3, 'USD', 'RECONCILIATION_UNDERPAY', $4, $5, $6, 0.8)
-           ON CONFLICT (evidence_id) DO UPDATE SET amount = EXCLUDED.amount
-           RETURNING id`,
-          [publisherId, runId, varianceUsd, windowStart, windowEnd, `recon-${runId}-underpay`]
-        );
-        deltasByKind['underpay'] = (deltasByKind['underpay'] || 0) + 1;
-        deltasCount++;
-
+      // Count deltas from reconcileWindow (already persisted)
+      if (reconResult.amounts.timingLagUsd > 0) {
+        deltasByKind['timing_lag'] = 1;
+      }
+      if (reconResult.amounts.underpayUsd > 0) {
+        deltasByKind['underpay'] = 1;
         // Create alert for significant underpayment
         if (variancePercent > 5) {
           alerts.push({
@@ -244,20 +233,7 @@ export class VraSyncService {
           });
         }
       }
-
-      // Check for overpayment (negative variance)
-      if (varianceUsd < -expectedUsd * 0.02 && Math.abs(varianceUsd) > 10) {
-        await this.pool.query(
-          `INSERT INTO recon_deltas 
-           (publisher_id, reconciliation_run_id, kind, amount, currency, reason_code, 
-            window_start, window_end, evidence_id, confidence)
-           VALUES ($1, $2, 'overpay', $3, 'USD', 'RECONCILIATION_OVERPAY', $4, $5, $6, 0.8)
-           ON CONFLICT (evidence_id) DO UPDATE SET amount = EXCLUDED.amount`,
-          [publisherId, runId, Math.abs(varianceUsd), windowStart, windowEnd, `recon-${runId}-overpay`]
-        );
-        deltasByKind['overpay'] = (deltasByKind['overpay'] || 0) + 1;
-        deltasCount++;
-      }
+      const deltasCount = reconResult.deltas;
 
       // Check for missing network data
       if (coveragePercent < 80 && networksWithEvents > 0) {

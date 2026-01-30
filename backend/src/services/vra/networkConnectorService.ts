@@ -260,24 +260,20 @@ export class NetworkConnectorService {
       }
     }
 
-    // Encrypt credentials
+    // Encrypt credentials (includes OAuth tokens - never store tokens in plaintext)
     const credJson = JSON.stringify(credentials);
     const { encrypted, iv } = encrypt(credJson);
 
     const result = await this.pool.query(
       `INSERT INTO vra_network_connections 
        (publisher_id, network_type, display_name, credentials_encrypted, credentials_iv,
-        oauth_access_token, oauth_refresh_token, oauth_expires_at,
         network_account_id, network_app_ids, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
        ON CONFLICT (publisher_id, network_type) 
        DO UPDATE SET 
          display_name = EXCLUDED.display_name,
          credentials_encrypted = EXCLUDED.credentials_encrypted,
          credentials_iv = EXCLUDED.credentials_iv,
-         oauth_access_token = EXCLUDED.oauth_access_token,
-         oauth_refresh_token = EXCLUDED.oauth_refresh_token,
-         oauth_expires_at = EXCLUDED.oauth_expires_at,
          network_account_id = EXCLUDED.network_account_id,
          network_app_ids = EXCLUDED.network_app_ids,
          status = 'pending',
@@ -289,9 +285,6 @@ export class NetworkConnectorService {
         displayName || SUPPORTED_NETWORKS[networkType].name,
         encrypted,
         iv,
-        credentials.accessToken || null,
-        credentials.refreshToken || null,
-        credentials.expiresAt || null,
         networkAccountId || credentials.accountId || null,
         JSON.stringify(networkAppIds || []),
       ]
@@ -334,7 +327,7 @@ export class NetworkConnectorService {
    */
   async getCredentials(connectionId: string): Promise<ConnectionCredentials | null> {
     const result = await this.pool.query(
-      `SELECT credentials_encrypted, credentials_iv, oauth_access_token, oauth_refresh_token, oauth_expires_at
+      `SELECT credentials_encrypted, credentials_iv
        FROM vra_network_connections WHERE id = $1`,
       [connectionId]
     );
@@ -353,16 +346,8 @@ export class NetworkConnectorService {
       }
     }
 
-    // Add OAuth tokens
-    if (row.oauth_access_token) {
-      creds.accessToken = row.oauth_access_token;
-    }
-    if (row.oauth_refresh_token) {
-      creds.refreshToken = row.oauth_refresh_token;
-    }
-    if (row.oauth_expires_at) {
-      creds.expiresAt = row.oauth_expires_at;
-    }
+    // SECURITY: OAuth tokens are now only stored in the encrypted credentials blob
+    // No longer reading from plaintext oauth_* columns
 
     return creds;
   }
