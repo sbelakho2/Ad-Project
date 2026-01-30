@@ -45,9 +45,11 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     logger.warn('VRA Reconcile: running without publisherId filter in production - data may span multiple tenants');
   }
 
-  // Build WHERE clause fragment for publisher filtering
-  const publisherFilter = publisherId ? ` AND publisher_id = '${publisherId}'` : '';
-  const publisherFilterAnalytics = publisherId ? ` AND r.publisher_id = '${publisherId}'` : '';
+  // Build parameterized query helpers for publisher filtering (SQL injection safe)
+  const buildParams = (baseParams: unknown[]) => publisherId ? [...baseParams, publisherId] : baseParams;
+  const publisherParamIdx = (baseCount: number) => publisherId ? `$${baseCount + 1}` : null;
+  const publisherFilter = (baseParamCount: number) => publisherId ? ` AND publisher_id = ${publisherParamIdx(baseParamCount)}` : '';
+  const publisherFilterAnalytics = (baseParamCount: number) => publisherId ? ` AND r.publisher_id = ${publisherParamIdx(baseParamCount)}` : '';
 
   try {
     const { UNDERPAY_TOL, IVT_P95_BAND_PP, FX_BAND_PCT, VIEWABILITY_GAP_PP } = readReconTunables();
@@ -56,8 +58,8 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       `SELECT COALESCE(SUM(expected_value), 0)::float8 AS expected_usd
          FROM recon_expected
         WHERE ts >= $1::timestamptz
-          AND ts <  $2::timestamptz${publisherFilter}`,
-      [from, to]
+          AND ts <  $2::timestamptz${publisherFilter(2)}`,
+      buildParams([from, to])
     );
     const expectedUsd = Number(expectedRows.rows[0]?.expected_usd || 0);
 
@@ -67,18 +69,19 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     }
 
     // 2) Aggregate paid USD from analytics_revenue_events for only those request_ids referenced by recon_expected within the window
+    // Note: Using same param index for both outer and inner query publisher filters since they use the same value
     const paidRows = await query<{ paid_usd: string }>(
       `SELECT COALESCE(SUM(revenue_usd), 0)::float8 AS paid_usd
          FROM analytics_revenue_events r
         WHERE r.observed_at >= $1::timestamptz
-          AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics}
+          AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics(2)}
           AND r.metadata->>'request_id' IN (
                 SELECT request_id
                   FROM recon_expected
                  WHERE ts >= $1::timestamptz
-                   AND ts <  $2::timestamptz${publisherFilter}
+                   AND ts <  $2::timestamptz${publisherFilter(2)}
           )`,
-      [from, to]
+      buildParams([from, to])
     );
     const paidUsd = Number(paidRows.rows[0]?.paid_usd || 0);
 
@@ -87,15 +90,15 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       `SELECT COALESCE(SUM(e.expected_value), 0)::float8 AS unmatched_usd
          FROM recon_expected e
         WHERE e.ts >= $1::timestamptz
-          AND e.ts <  $2::timestamptz${publisherFilter}
+          AND e.ts <  $2::timestamptz${publisherFilter(2)}
           AND NOT EXISTS (
                 SELECT 1
                   FROM analytics_revenue_events r
                  WHERE r.metadata->>'request_id' = e.request_id
                    AND r.observed_at >= $1::timestamptz
-                   AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics}
+                   AND r.observed_at <  $2::timestamptz${publisherFilterAnalytics(2)}
           )`,
-      [from, to]
+      buildParams([from, to])
     );
     const unmatchedUsd = Number(unmatchedRows.rows[0]?.unmatched_usd || 0);
 
@@ -146,7 +149,6 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
     // 5) IVT outlier rule (approximation): compare current window IVT% vs 30-day p95 + band
     try {
       const band = Math.max(0, IVT_P95_BAND_PP) / 100; // convert pp -> fraction
-      const publisherFilterStmt = publisherId ? ` AND publisher_id = '${publisherId}'` : '';
       // Baseline p95 over the 30 days before window start
       const baselineRows = await query<{ p95: string; cnt: string }>(
         `WITH daily AS (
@@ -156,12 +158,12 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
                     END AS rate
                FROM recon_statements_norm
               WHERE event_date >= (date($1::timestamptz) - INTERVAL '30 days')
-                AND event_date <  date($1::timestamptz)${publisherFilterStmt}
+                AND event_date <  date($1::timestamptz)${publisherFilter(1)}
               GROUP BY event_date)
          SELECT COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY rate), 0)::float8 AS p95,
                 COUNT(*)::bigint AS cnt
            FROM daily`,
-        [from]
+        buildParams([from])
       );
       const baselineCount = Number(baselineRows.rows[0]?.cnt ?? 0);
       if (baselineCount > 0) {
@@ -172,8 +174,8 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
                   END AS rate
              FROM recon_statements_norm
             WHERE event_date >= date($1::timestamptz)
-              AND event_date <  date($2::timestamptz)${publisherFilterStmt}`,
-          [from, to]
+              AND event_date <  date($2::timestamptz)${publisherFilter(2)}`,
+          buildParams([from, to])
         );
         const currentRate = Number(currentRows.rows[0]?.rate ?? 0);
         if (currentRate > p95 + band) {
@@ -203,9 +205,9 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
            FROM analytics_revenue_events
           WHERE observed_at >= ($1::timestamptz - INTERVAL '30 days')
             AND observed_at <  $1::timestamptz
-            AND revenue_currency <> 'USD'${publisherFilterAnalytics}
+            AND revenue_currency <> 'USD'${publisherFilterAnalytics(1)}
           GROUP BY cur`,
-        [from]
+        buildParams([from])
       );
       const baseMap = new Map<string, number>();
       for (const r of fxBaseline.rows) baseMap.set(r.cur, Number(r.med_rate));
@@ -217,9 +219,9 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
              FROM analytics_revenue_events r
             WHERE r.observed_at >= $1::timestamptz
               AND r.observed_at <  $2::timestamptz
-              AND r.revenue_currency <> 'USD'${publisherFilterAnalytics}
+              AND r.revenue_currency <> 'USD'${publisherFilterAnalytics(2)}
             GROUP BY cur`,
-          [from, to]
+          buildParams([from, to])
         );
         for (const r of fxCurrent.rows) {
           const cur = r.cur;
@@ -266,8 +268,8 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
              ) AS stmt
            FROM recon_expected
           WHERE ts >= $1::timestamptz
-            AND ts <  $2::timestamptz${publisherFilter}`,
-        [from, to]
+            AND ts <  $2::timestamptz${publisherFilter(2)}`,
+        buildParams([from, to])
       );
       const om = Number(rowsView.rows[0]?.om ?? NaN);
       const stmt = Number(rowsView.rows[0]?.stmt ?? NaN);
