@@ -519,7 +519,7 @@ async function reclassifyUnknown(): Promise<{ reclassified: number }> {
       });
       
       if (response.ok) {
-        const result = await response.json();
+        const result = (await response.json()) as { classification?: string };
         if (result.classification && result.classification !== 'UNKNOWN') {
           reclassified++;
         }

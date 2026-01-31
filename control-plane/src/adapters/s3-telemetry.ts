@@ -29,7 +29,7 @@ export async function getS3StorageTelemetry(): Promise<S3StorageTelemetry | null
       throw new Error(`HTTP ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as { bucket?: string; total_bytes?: number; object_count?: number; updated_at?: string };
     return {
       bucket: data.bucket || 'unknown',
       total_bytes: Number(data.total_bytes || 0),
