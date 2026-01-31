@@ -1,5 +1,5 @@
 // services/sales-automation/webhook.ts
-// Webhook handler for Resend events (opens, clicks, bounces)
+// Webhook handler for ApexMail events (opens, clicks, bounces)
 // Deploy this as an API endpoint to receive email tracking data
 // REVOLUTIONARY: Integrated with SmartReplyAnalyzer and DomainHealthGuard
 
@@ -9,7 +9,7 @@ import { SmartReplyAnalyzer } from './SmartReplyAnalyzer';
 import { DomainHealthGuard } from './DomainHealthGuard';
 import { IntentSignalDetector } from './IntentSignalDetector';
 
-interface ResendWebhookPayload {
+interface ApexMailWebhookPayload {
   type: string;
   created_at: string;
   data: {
@@ -31,7 +31,7 @@ interface ResendWebhookPayload {
 }
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || '';
+const APEXMAIL_WEBHOOK_SECRET = process.env.APEXMAIL_WEBHOOK_SECRET || '';
 
 // Singleton database pool to prevent connection exhaustion
 const pool = new Pool({ 
@@ -57,7 +57,7 @@ if (DATABASE_URL) {
 }
 
 /**
- * Verify Resend webhook signature
+ * Verify ApexMail webhook signature
  * SECURITY: Never skip verification - returns false if secret is not configured
  */
 function verifySignature(payload: string, signature: string, secret: string): boolean {
@@ -89,21 +89,21 @@ function verifySignature(payload: string, signature: string, secret: string): bo
 }
 
 /**
- * Process incoming webhook from Resend
+ * Process incoming webhook from ApexMail
  * Call this from your Express/Fastify route handler
  */
-export async function handleResendWebhook(
+export async function handleApexMailWebhook(
   rawBody: string,
   signature: string
 ): Promise<{ success: boolean; message: string }> {
   // Verify signature
-  if (RESEND_WEBHOOK_SECRET && !verifySignature(rawBody, signature, RESEND_WEBHOOK_SECRET)) {
+  if (APEXMAIL_WEBHOOK_SECRET && !verifySignature(rawBody, signature, APEXMAIL_WEBHOOK_SECRET)) {
     return { success: false, message: 'Invalid signature' };
   }
 
   try {
     // Note: pool is now a singleton initialized outside
-    const payload: ResendWebhookPayload = JSON.parse(rawBody);
+    const payload: ApexMailWebhookPayload = JSON.parse(rawBody);
     const messageId = payload.data.email_id;
     const toEmail = payload.data.to[0];
 

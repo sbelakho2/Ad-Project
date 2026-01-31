@@ -1,6 +1,6 @@
 // services/sales-automation/OutreachService.ts
 // Manages automated email outreach sequences
-// Uses ApexMail (self-hosted, replaces Resend)
+// Uses ApexMail (self-hosted)
 
 import { Pool } from 'pg';
 import { getApexMailClient, ApexMailClient } from '../../src/services/apexmail-client';
@@ -18,7 +18,7 @@ const DEFAULT_CONFIG: OutreachConfig = {
   fromEmail: 'sales@apexmediation.ee',
   fromName: 'Aaron from ApexMediation',
   replyTo: 'sales@apexmediation.ee',
-  dailyLimit: 100, // Resend free tier is 3K/month ≈ 100/day
+  dailyLimit: 500, // ApexMail self-hosted - higher limit
   trackingDomain: 'apexmediation.ee',
 };
 
@@ -443,7 +443,7 @@ export class OutreachService {
    * Process email responses (bounces, replies)
    */
   private async processEmailResponses(): Promise<void> {
-    // This would typically be done via Resend webhooks
+    // This is handled via ApexMail webhooks
     // For now, check for any bounced emails
     await this.pool.query(`
       UPDATE sales_contacts 

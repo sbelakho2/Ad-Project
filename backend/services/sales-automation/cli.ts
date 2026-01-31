@@ -4,7 +4,7 @@
 // Usage: npx ts-node cli.ts <command> [options]
 
 import { Pool } from 'pg';
-import { Resend } from 'resend';
+import { ApexMailClient } from '../../src/services/apexmail-client';
 import * as readline from 'readline';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -14,10 +14,10 @@ import * as path from 'path';
 // ============================================================================
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const APEXMAIL_URL = process.env.APEXMAIL_URL || '';
 const DEFAULT_FROM_EMAIL = 'sales@apexmediation.ee';
 const DEFAULT_FROM_NAME = 'Aaron from ApexMediation';
-const DAILY_LIMIT = 100; // Resend free tier: 3K/month ≈ 100/day
+const DAILY_LIMIT = 500; // ApexMail self-hosted - higher limit
 
 // ============================================================================
 // DATABASE SETUP
@@ -192,7 +192,7 @@ Aaron`
 
 class SalesAutomationCLI {
   private pool: Pool;
-  private resend: Resend | null = null;
+  private apexmail: ApexMailClient | null = null;
 
   constructor() {
     if (!DATABASE_URL) {
@@ -201,10 +201,10 @@ class SalesAutomationCLI {
     }
     this.pool = new Pool({ connectionString: DATABASE_URL });
     
-    if (RESEND_API_KEY) {
-      this.resend = new Resend(RESEND_API_KEY);
+    if (APEXMAIL_URL) {
+      this.apexmail = new ApexMailClient();
     } else {
-      console.warn('⚠️  RESEND_API_KEY not set - email sending disabled');
+      console.warn('⚠️  APEXMAIL_URL not set - email sending disabled');
     }
   }
 
@@ -481,8 +481,8 @@ class SalesAutomationCLI {
   async run(dryRun: boolean = false): Promise<void> {
     console.log(`\n🚀 Running outreach cycle${dryRun ? ' (DRY RUN)' : ''}...\n`);
     
-    if (!this.resend && !dryRun) {
-      console.error('❌ RESEND_API_KEY not configured. Use --dry-run to test.');
+    if (!this.apexmail && !dryRun) {
+      console.error('❌ APEXMAIL_URL not configured. Use --dry-run to test.');
       return;
     }
 
@@ -557,12 +557,14 @@ class SalesAutomationCLI {
       }
 
       try {
-        const result = await this.resend!.emails.send({
-          from: `${DEFAULT_FROM_NAME} <${DEFAULT_FROM_EMAIL}>`,
+        const result = await this.apexmail!.send({
+          from: DEFAULT_FROM_EMAIL,
+          fromName: DEFAULT_FROM_NAME,
           to: enrollment.email,
           subject: subject,
           html: body.replace(/\n/g, '<br>'),
           text: body,
+          category: 'marketing',
         });
 
         // Record email
@@ -576,7 +578,7 @@ class SalesAutomationCLI {
           DEFAULT_FROM_EMAIL,
           subject,
           body,
-          result.data?.id || null,
+          result.emailId || null,
           currentStep + 1
         ]);
 
@@ -692,7 +694,7 @@ class SalesAutomationCLI {
   }
 
   // ==========================================================================
-  // WEBHOOK HANDLER (for Resend events)
+  // WEBHOOK HANDLER (for ApexMail events)
   // ==========================================================================
 
   async handleWebhook(eventType: string, data: any): Promise<void> {
@@ -931,7 +933,7 @@ CSV Format:
 
 Environment Variables:
   DATABASE_URL      PostgreSQL connection string (required)
-  RESEND_API_KEY    Resend API key for sending emails
+  APEXMAIL_URL      ApexMail API URL for sending emails
 `);
 }
 

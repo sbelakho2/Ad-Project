@@ -5,7 +5,7 @@ import { invoiceService } from '../services/invoiceService';
 import { Pool, PoolClient } from 'pg';
 import { dunningManagementService } from '../../services/billing/DunningManagementService';
 // REVOLUTIONARY: Import sales automation webhook handler
-import { handleResendWebhook, processReply } from '../../services/sales-automation/webhook';
+import { handleApexMailWebhook, processReply } from '../../services/sales-automation/webhook';
 
 const router = Router();
 
@@ -532,51 +532,51 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription): Pro
 }
 
 // ============================================================================
-// REVOLUTIONARY: RESEND WEBHOOK (Sales Automation)
+// REVOLUTIONARY: APEXMAIL WEBHOOK (Sales Automation)
 // Handles email opens, clicks, bounces, and spam complaints
 // OVERCOMES: "No feedback loop", "Domain tanks without warning"
 // ============================================================================
 
 /**
- * POST /api/v1/webhooks/resend
- * Handle Resend email events (opens, clicks, bounces, spam complaints)
+ * POST /api/v1/webhooks/apexmail
+ * Handle ApexMail email events (opens, clicks, bounces, spam complaints)
  * 
- * Note: This endpoint receives raw JSON from Resend
- * Configure in Resend Dashboard:
- *   URL: https://api.apexmediation.ee/api/v1/webhooks/resend
+ * Note: This endpoint receives raw JSON from ApexMail
+ * Configure in ApexMail:
+ *   URL: https://api.apexmediation.ee/api/v1/webhooks/apexmail
  *   Events: email.delivered, email.opened, email.clicked, email.bounced, email.complained
  */
-router.post('/resend', async (req: Request, res: Response) => {
+router.post('/apexmail', async (req: Request, res: Response) => {
   try {
-    const signature = req.headers['svix-signature'] as string || '';
+    const signature = req.headers['x-apexmail-signature'] as string || '';
     const rawBody = Buffer.isBuffer(req.body)
       ? req.body.toString('utf8')
       : typeof req.body === 'string'
         ? req.body
         : JSON.stringify(req.body ?? {});
     
-    const result = await handleResendWebhook(rawBody, signature);
+    const result = await handleApexMailWebhook(rawBody, signature);
     
     if (result.success) {
-      logger.info('Resend webhook processed', { message: result.message });
+      logger.info('ApexMail webhook processed', { message: result.message });
       return res.status(200).json(result);
     } else {
-      logger.warn('Resend webhook failed', { message: result.message });
+      logger.warn('ApexMail webhook failed', { message: result.message });
       return res.status(400).json(result);
     }
   } catch (error) {
-    logger.error('Resend webhook error', { error: error instanceof Error ? error.message : 'Unknown' });
+    logger.error('ApexMail webhook error', { error: error instanceof Error ? error.message : 'Unknown' });
     return res.status(500).json({ success: false, message: 'Internal error' });
   }
 });
 
 /**
- * POST /api/v1/webhooks/resend/reply
- * Handle incoming email replies (via forwarding or Resend inbound)
+ * POST /api/v1/webhooks/apexmail/reply
+ * Handle incoming email replies (via ApexMail inbound)
  * 
  * REVOLUTIONARY: Uses SmartReplyAnalyzer to categorize replies
  */
-router.post('/resend/reply', async (req: Request, res: Response) => {
+router.post('/apexmail/reply', async (req: Request, res: Response) => {
   try {
     // P1 Fix #7: Safe JSON parsing with try-catch
     let payload: { from?: string; subject?: string; body?: string } | null = null;
@@ -587,7 +587,7 @@ router.post('/resend/reply', async (req: Request, res: Response) => {
           ? JSON.parse(req.body)
           : req.body;
     } catch (parseError) {
-      logger.warn('Invalid JSON in resend/reply webhook', { error: parseError });
+      logger.warn('Invalid JSON in apexmail/reply webhook', { error: parseError });
       return res.status(400).json({ success: false, message: 'Invalid JSON payload' });
     }
 

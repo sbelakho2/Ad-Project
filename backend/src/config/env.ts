@@ -78,9 +78,9 @@ const envSchema = z.object({
   SEB_BANK_BIC: z.string().optional(),
   SEB_BANK_ADDRESS: z.string().optional(),
   
-  // External Services - Email
-  RESEND_API_KEY: z.string().startsWith('re_', 'RESEND_API_KEY must start with re_').optional(),
-  RESEND_WEBHOOK_SECRET: z.string().optional(),
+  // External Services - Email (ApexMail)
+  APEXMAIL_URL: z.string().url().optional(),
+  APEXMAIL_API_KEY: z.string().optional(),
   
   // External Services - AI
   OPENAI_API_KEY: z.string().startsWith('sk-', 'OPENAI_API_KEY must start with sk-').optional(),
