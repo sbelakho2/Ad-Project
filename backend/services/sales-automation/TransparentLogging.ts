@@ -415,13 +415,14 @@ export class TransparentLogging extends EventEmitter {
       params.push(filters.until);
     }
 
-    const limit = filters.limit || 100;
+    const limit = Math.min(Math.max(filters.limit || 100, 1), 1000);
+    params.push(limit);
 
     const result = await this.pool.query(`
       SELECT * FROM automation_logs
       WHERE ${conditions.join(' AND ')}
       ORDER BY timestamp DESC
-      LIMIT ${limit}
+      LIMIT $${paramIndex}
     `, params);
 
     return result.rows;

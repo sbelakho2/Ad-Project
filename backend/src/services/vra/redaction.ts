@@ -69,12 +69,12 @@ const REDACTION_PATTERNS: Array<{ pattern: RegExp; replacement: string | ((match
   // ─────────────────────────────────────────────────────────────────────────────
   
   // Stripe keys (live and test)
-  { pattern: /sk_live_[A-Za-z0-9]{24,}/g, replacement: 'sk_live_[REDACTED]' },
-  { pattern: /sk_test_[A-Za-z0-9]{24,}/g, replacement: 'sk_test_[REDACTED]' },
-  { pattern: /pk_live_[A-Za-z0-9]{24,}/g, replacement: 'pk_live_[REDACTED]' },
-  { pattern: /pk_test_[A-Za-z0-9]{24,}/g, replacement: 'pk_test_[REDACTED]' },
-  { pattern: /rk_live_[A-Za-z0-9]{24,}/g, replacement: 'rk_live_[REDACTED]' },
-  { pattern: /rk_test_[A-Za-z0-9]{24,}/g, replacement: 'rk_test_[REDACTED]' },
+  { pattern: /sk_live_[A-Za-z0-9]{6,}/g, replacement: 'sk_live_[REDACTED]' },
+  { pattern: /sk_test_[A-Za-z0-9]{6,}/g, replacement: 'sk_test_[REDACTED]' },
+  { pattern: /pk_live_[A-Za-z0-9]{6,}/g, replacement: 'pk_live_[REDACTED]' },
+  { pattern: /pk_test_[A-Za-z0-9]{6,}/g, replacement: 'pk_test_[REDACTED]' },
+  { pattern: /rk_live_[A-Za-z0-9]{6,}/g, replacement: 'rk_live_[REDACTED]' },
+  { pattern: /rk_test_[A-Za-z0-9]{6,}/g, replacement: 'rk_test_[REDACTED]' },
   
   // AWS keys
   { pattern: /AKIA[0-9A-Z]{16}/g, replacement: '[REDACTED_AWS_KEY]' },
@@ -91,7 +91,7 @@ const REDACTION_PATTERNS: Array<{ pattern: RegExp; replacement: string | ((match
   { pattern: /xox[baprs]-[0-9]{10,}-[A-Za-z0-9-]+/g, replacement: '[REDACTED_SLACK_TOKEN]' },
   
   // SendGrid API keys
-  { pattern: /SG\.[A-Za-z0-9_-]{22,}\.[A-Za-z0-9_-]{43,}/g, replacement: '[REDACTED_SENDGRID_KEY]' },
+  { pattern: /SG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{32,}/g, replacement: '[REDACTED_SENDGRID_KEY]' },
   
   // Twilio keys
   { pattern: /SK[0-9a-f]{32}/g, replacement: '[REDACTED_TWILIO_KEY]' },
@@ -106,7 +106,7 @@ const REDACTION_PATTERNS: Array<{ pattern: RegExp; replacement: string | ((match
   
   // Bearer tokens in headers
   { pattern: /(authorization"?\s*:\s*")Bearer\s+[^"\s]+/gi, replacement: '$1Bearer [REDACTED]' },
-  { pattern: /Bearer\s+[A-Za-z0-9._~+\/-]{20,}/g, replacement: 'Bearer [REDACTED]' },
+  { pattern: /Bearer\s+[A-Za-z0-9._~+\/-]{6,}/g, replacement: 'Bearer [REDACTED]' },
   
   // OAuth tokens in query strings
   { pattern: /((?:access_token|id_token|refresh_token|token)=)[A-Za-z0-9._-]+/gi, replacement: '$1[REDACTED]' },

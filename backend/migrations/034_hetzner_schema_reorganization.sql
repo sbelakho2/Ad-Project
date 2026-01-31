@@ -824,35 +824,74 @@ BEGIN
         requests, fills, impressions, clicks, revenue, fill_rate, ctr, ecpm
     )
     SELECT
-        i.tenant_id,
-        i.app_id,
-        i.placement_id,
-        i.adapter_id,
-        i.country,
-        i.platform,
-        date_trunc('hour', i.created_at) as hour,
-        0 as requests, -- Would need to join with ad_requests
-        0 as fills,
-        COUNT(*) as impressions,
-        COALESCE(c.click_count, 0) as clicks,
-        SUM(i.revenue) as revenue,
-        0 as fill_rate,
-        CASE WHEN COUNT(*) > 0 THEN COALESCE(c.click_count, 0)::DECIMAL / COUNT(*) ELSE 0 END as ctr,
-        CASE WHEN COUNT(*) > 0 THEN SUM(i.revenue) * 1000 / COUNT(*) ELSE 0 END as ecpm
-    FROM events.impressions i
-    LEFT JOIN (
-        SELECT impression_id, COUNT(*) as click_count
-        FROM events.clicks
-        WHERE created_at >= p_hour AND created_at < p_hour + INTERVAL '1 hour'
-        GROUP BY impression_id
-    ) c ON c.impression_id = i.id
-    WHERE i.created_at >= p_hour AND i.created_at < p_hour + INTERVAL '1 hour'
-    GROUP BY i.tenant_id, i.app_id, i.placement_id, i.adapter_id, i.country, i.platform, date_trunc('hour', i.created_at)
+        tenant_id, app_id, placement_id, adapter_id, country, platform, hour,
+        requests, fills, impressions, clicks, revenue,
+        CASE WHEN requests > 0 THEN fills::DECIMAL / requests ELSE 0 END as fill_rate,
+        CASE WHEN impressions > 0 THEN clicks::DECIMAL / impressions ELSE 0 END as ctr,
+        CASE WHEN impressions > 0 THEN revenue * 1000 / impressions ELSE 0 END as ecpm
+    FROM (
+        SELECT
+            tenant_id, app_id, placement_id, adapter_id, country, platform, hour,
+            SUM(requests) as requests,
+            SUM(fills) as fills,
+            SUM(impressions) as impressions,
+            SUM(clicks) as clicks,
+            SUM(revenue) as revenue
+        FROM (
+            -- Adapter requests and fills from bid_responses
+            SELECT 
+                r.tenant_id, r.app_id, r.placement_id, b.adapter_id, r.country, r.platform, 
+                date_trunc('hour', b.created_at) as hour,
+                COUNT(*)::bigint as requests,
+                COUNT(CASE WHEN b.bid_price > 0 THEN 1 END)::bigint as fills,
+                0::bigint as impressions,
+                0::bigint as clicks,
+                0::decimal as revenue
+            FROM events.bid_responses b
+            JOIN events.ad_requests r ON r.id = b.request_id
+            WHERE b.created_at >= p_hour AND b.created_at < p_hour + INTERVAL '1 hour'
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+
+            UNION ALL
+
+            -- Impressions and revenue
+            SELECT 
+                tenant_id, app_id, placement_id, adapter_id, country, platform,
+                date_trunc('hour', created_at) as hour,
+                0 as requests,
+                0 as fills,
+                COUNT(*) as impressions,
+                0 as clicks,
+                SUM(revenue) as revenue
+            FROM events.impressions
+            WHERE created_at >= p_hour AND created_at < p_hour + INTERVAL '1 hour'
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+
+            UNION ALL
+
+            -- Clicks
+            SELECT 
+                tenant_id, app_id, placement_id, adapter_id, country, platform,
+                date_trunc('hour', created_at) as hour,
+                0 as requests,
+                0 as fills,
+                0 as impressions,
+                COUNT(*) as clicks,
+                0 as revenue
+            FROM events.clicks
+            WHERE created_at >= p_hour AND created_at < p_hour + INTERVAL '1 hour'
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+        ) combined
+        GROUP BY tenant_id, app_id, placement_id, adapter_id, country, platform, hour
+    ) final
     ON CONFLICT (tenant_id, app_id, placement_id, adapter_id, country, platform, hour)
     DO UPDATE SET
+        requests = EXCLUDED.requests,
+        fills = EXCLUDED.fills,
         impressions = EXCLUDED.impressions,
         clicks = EXCLUDED.clicks,
         revenue = EXCLUDED.revenue,
+        fill_rate = EXCLUDED.fill_rate,
         ctr = EXCLUDED.ctr,
         ecpm = EXCLUDED.ecpm,
         updated_at = NOW();

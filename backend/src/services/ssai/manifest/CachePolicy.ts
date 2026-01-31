@@ -382,7 +382,13 @@ export class CachePolicy {
     expiresAt?: Date
   ): string {
     const crypto = require('crypto');
-    const secret = process.env.SSAI_URL_SECRET || 'ssai-secret-key';
+    // SECURITY: Require SSAI_URL_SECRET in production (P1 Fix #1)
+    const secret = process.env.SSAI_URL_SECRET;
+    if (!secret && process.env.NODE_ENV === 'production') {
+      throw new Error('SSAI_URL_SECRET must be set in production');
+    }
+    const signingSecret = secret || 'dev-url-secret-not-for-production';
+    
     const data = [
       path,
       sessionId,
@@ -390,7 +396,7 @@ export class CachePolicy {
     ].join(':');
 
     return crypto
-      .createHmac('sha256', secret)
+      .createHmac('sha256', signingSecret)
       .update(data)
       .digest('hex')
       .substring(0, 16); // Truncate for URL friendliness

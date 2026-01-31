@@ -450,7 +450,9 @@ export function personalize(template: string, context: PersonalizationContext): 
   // Custom fields
   if (context.customFields) {
     for (const [key, value] of Object.entries(context.customFields)) {
-      const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'gi');
+      // Escape regex special characters in key to prevent ReDoS
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`\\{\\{${escapedKey}\\}\\}`, 'gi');
       result = result.replace(regex, clean(value, ''));
     }
   }

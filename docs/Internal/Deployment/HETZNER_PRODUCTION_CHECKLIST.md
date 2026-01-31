@@ -35,14 +35,11 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Backend API | ✅ Running | 8080 | App | PM2 (Node) |
 | Console Frontend | ✅ Running | 3000 | App | PM2 (Next.js standalone) |
 | Website | ✅ Running | 3002 | App | Marketing site (Grafana uses 3001) |
-| **Control Plane** | ✅ Running | 4000 | App | Systemd service, **PROXY ONLY for sales automation** |
+| **Control Plane** | ✅ Running | 4000 | App | Refactored modular controllers |
 | **Sales API** | ✅ Running | 4001 | **Test** | PM2 (Node) - **ALL sales automation runs here** |
-| **Edge Worker** | ✅ Running | 3500 | **Test** | ML inference (LaMini-Flan-T5, DistilBERT) |
-| **Sales API Tunnel** | ✅ Running | - | App | SSH tunnel to Test Server:4001 |
-| **Edge Tunnel** | ✅ Running | - | App | SSH tunnel to Test Server:3500 |
-| **DB Tunnel** | ✅ Running | - | **Test** | SSH tunnel to App Server PgBouncer:6432 |
-| PostgreSQL 16 | ✅ Running | 5432 | DB | System service, not Docker |
-| PgBouncer | ✅ Running | 6432 | App | System service |
+| **Edge Worker** | ✅ Running | 3500 | **Test** | ML inference (ONNX 9-Dim, DistilBERT) |
+| **ApexTunnel** | ✅ Running | 51820 | **All** | P2P Mesh Networking (Noise/Ed25519) |
+| PostgreSQL 16 | ✅ Running | 5432 | DB | System service with BRIN/HLL extensions |
 | Redis | ✅ Running | 6379 | App | System service, not Docker |
 | Caddy | ✅ Running | 80/443 | App | Auto Let's Encrypt for all domains |
 | Prometheus | ✅ Running | 9090 | App | Monitoring |
@@ -50,25 +47,23 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 
 ### Sales Automation Architecture (CRITICAL)
 
-> **⚠️ App Server Control Plane is STRICTLY A PROXY for sales automation.**
-> 
+> **⚠️ The Control Plane uses ApexTunnel for cross-server communication.**
+
 > All sales automation work (orchestration, spintax, scoring, messaging) runs on the **Test Server**.
-> The App Server `/api/autonomous/*` routes simply forward requests to the Test Server via SSH tunnel.
+> ApexTunnel provides a low-latency, mutually authenticated P2P mesh between nodes.
 
 | Component | Server | Port | Purpose |
 |-----------|--------|------|---------|
-| Control Plane | App | 4000 | Proxy client only - forwards to test server |
+| Control Plane | App | 4000 | Refactored controllers |
 | **Sales API** | **Test** | 4001 | **ALL orchestration, spintax, Thompson sampler** |
-| Edge Worker | Test | 3500 | ML inference (classification, icebreakers) |
-| DB Access | Test→App→DB | 6432 | SSH tunnel through App Server PgBouncer |
+| Edge Worker | Test | 3500 | ML inference (ONNX 9-Dim, classification) |
+| DB Access | Test→DB | 5432 | Direct P2P connectivity via ApexTunnel |
 
-**SSH Tunnels (systemd services):**
+**ApexTunnel Connectivity:**
 
-| Service | Server | Direction |
-|---------|--------|-----------|
-| `sales-api-tunnel.service` | App | localhost:4001 → Test:4001 |
-| `edge-tunnel.service` | App | localhost:3500 → Test:3500 |
-| `db-tunnel.service` | Test | localhost:6432 → App:6432 → DB:5432 |
+| Service | Protocol | Identity | Purpose |
+|---------|----------|----------|---------|
+| `apextunnel.service` | Noise / UDP | Ed25519 | Secure P2P Mesh Overlay |
 
 ### Port Allocation (DO NOT CHANGE WITHOUT UPDATING CADDY)
 
@@ -93,60 +88,55 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Rule # | NEVER DO | Why It Breaks Things |
 |--------|----------|---------------------|
 | 1 | **Modify App Server `.env` files without explicit approval** | Control Plane + backend share config. One wrong edit crashes auth. |
-| 2 | **Change `SALES_API_HOST` to the Test Server IP (157.90.126.205)** | SSH tunnels forward `localhost:4001`→Test. Using IP bypasses tunnel and fails. |
-| 3 | **Deploy Sales API or Edge Worker to App Server** | These run ONLY on Test Server. App Server is proxy-only. |
+| 2 | **Change `SALES_API_HOST` to the Test Server IP (157.90.126.205)** | ApexTunnel handles internal routing. Using external IP bypasses mesh. |
+| 3 | **Deploy Sales API or Edge Worker to App Server** | These run ONLY on Test Server. |
 | 4 | **Restart control-plane without checking for orphan processes** | `EADDRINUSE` on port 4000 will crash restart. |
-| 5 | **Assume "fixing wiring" means changing hostnames** | Tunnels already exist. Config uses `127.0.0.1` intentionally. |
-| 6 | **Run sales automation orchestration jobs on App Server** | All execution happens on Test Server. App just forwards requests. |
+| 5 | **Assume "fixing wiring" means changing hostnames** | ApexTunnel resolves internal nodes. |
+| 6 | **Run sales automation orchestration jobs on App Server** | All execution happens on Test Server. |
 
 ### ✅ ALWAYS DO THESE
 
 | Rule # | ALWAYS DO | How |
 |--------|-----------|-----|
-| 1 | **Verify tunnel services are running before diagnosing connectivity** | `systemctl status sales-api-tunnel edge-tunnel` |
+| 1 | **Verify ApexTunnel status before diagnosing connectivity** | `systemctl status apextunnel` |
 | 2 | **Check for orphan processes before restarting services** | `lsof -ti :4000 \| xargs -r kill -9` |
-| 3 | **Use `127.0.0.1` for SALES_API_HOST on App Server** | The tunnel handles forwarding to Test Server |
+| 3 | **Use Internal P2P IP for SALES_API_HOST on App Server** | ApexTunnel provides `10.0.0.x` addresses |
 | 4 | **Test changes on Test Server FIRST** | Sales API + Edge Worker are safely isolated there |
-| 5 | **Read existing `.env` files before making changes** | Understand current config, don't assume |
-| 6 | **Document any manual changes in this runbook** | Future operators need to know what was changed |
+| 5 | **Read existing `.env` files before making changes** | Understand current config |
+| 6 | **Document any manual changes in this runbook** | Future operators need to know |
 
-### The Tunnel Architecture (MEMORIZE THIS)
+### The ApexTunnel Architecture (MEMORIZE THIS)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         APP SERVER (46.62.252.96)                       │
 │                                                                         │
-│  Control Plane (:4000)                                                  │
+│  [Control Plane] (Port 4000)                                            │
 │       │                                                                 │
-│       │ calls SALES_API_HOST=127.0.0.1:4001                            │
-│       │        ↓                                                        │
-│  ┌────┴────────────────────────┐    ┌─────────────────────────────┐   │
-│  │ sales-api-tunnel.service    │    │ edge-tunnel.service         │   │
-│  │ localhost:4001 ──────────── │    │ localhost:3500 ──────────── │   │
-│  └──────────────│──────────────┘    └───────────────│─────────────┘   │
-│                 │ SSH                               │ SSH              │
-└─────────────────│───────────────────────────────────│─────────────────┘
-                  │                                   │
-                  ▼                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        TEST SERVER (157.90.126.205)                     │
+│       ▼                                                                 │
+│  [ApexTunnel] (P2P Mesh) ◄────────────────────────────────────────┐     │
+└───────┬───────────────────────────────────────────────────────────│─────┘
+        │                                                           │
+        │ P2P (UDP/Noise)                                           │
+        │                                                           │
+┌───────▼───────────────────────────────────────────────────────────│─────┐
+│                        TEST SERVER (157.90.126.205)               │     │
+│                                                                   │     │
+│  [ApexTunnel] ◄───────────────────────────────────────────┐       │     │
+│       │                                                   │       │     │
+│       ▼                                                   │       │     │
+│  [Sales API] (Port 4001)                                  │       │     │
+│  [Edge Worker] (Port 3500)                                │       │     │
+└───────────────────────────────────────────────────────────│───────┘     │
+                                                            │             │
+                                                            │             │
+┌───────────────────────────────────────────────────────────▼─────────────┐
+│                        DB SERVER (77.42.44.35)                          │
 │                                                                         │
-│  ┌──────────────────────────────┐    ┌────────────────────────────┐   │
-│  │ Sales API (PM2)              │    │ Edge Worker (systemd)      │   │
-│  │ Port 4001                    │    │ Port 3500                  │   │
-│  │ ALL orchestration runs here  │    │ ML inference               │   │
-│  └──────────────────────────────┘    └────────────────────────────┘   │
-│                 │                                                      │
-│  ┌──────────────┴──────────────┐                                      │
-│  │ db-tunnel.service           │                                      │
-│  │ localhost:6432 → App:6432   │                                      │
-│  └──────────────│──────────────┘                                      │
-└─────────────────│─────────────────────────────────────────────────────┘
-                  │ SSH
-                  ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DB SERVER (77.42.44.35)                         │
-│  PostgreSQL (:5432)                                                     │
+│  [ApexTunnel] ◄─────────────────────────────────────────────────────────┘
+│       │
+│       ▼
+│  [PostgreSQL] (Port 5432)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

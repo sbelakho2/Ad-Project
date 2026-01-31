@@ -8,7 +8,8 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[Project Status](./Internal/Deployment/PROJECT_STATUS.md)**: Current delivery snapshot and readiness report.
 
 ## 🏗️ Architecture
-- **[System Architecture](./Architecture/enhanced_ad_stack_srs_v2_0.md)**: High-level design and SRS.
+- **[System Architecture](./Internal/Architecture/enhanced_ad_stack_srs_v2_0.md)**: High-level design and SRS.
+- **[Migration Studio](./Internal/Features/MigrationStudio/README.md)**: Side-by-side migration simulator and cryptographically signed lift reports.
 - **[VRA Implementation Summary](./VRA_IMPLEMENTATION_SUMMARY.md)**: High-level summary of VRA fixes and features.
 - **[VRA Technical Specification](./VRA_SPEC.md)**: Deep dive into VRA mechanics and data contracts.
 - **[SSAI Improvements](./SSAI/SSAI_IMPROVEMENTS.md)**: Server-Side Ad Insertion details.
@@ -36,8 +37,8 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 
 ## 🤖 Sales Automation
 
-> **⚠️ Architecture Note (January 2026):** All sales automation work runs on the **Test Server** (157.90.126.205:4001).
-> The App Server control-plane is strictly a proxy client.
+> **⚠️ Architecture Note (January 2026):** All sales automation work runs on the **Test Server** (157.90.126.205:4001) connected via **ApexTunnel (P2P Mesh)**.
+> The Control Plane on App Server uses a modularized controller architecture for orchestration.
 
 - **[Autonomous Sales V2](./Internal/Sales/AUTONOMOUS_SALES_V2.md)**: Zero-cost outbound prospecting with Thompson Sampling, Spintax, and Naive Bayes classification. Runs on Test Server.
 - **[Autonomous Sales V2 Quick Ref](./Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)**: Quick reference for V2 operations.
@@ -55,4 +56,4 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[VAST/VMAP Parser Security](./SSAI/VAST_VMAP_PARSER.md#security-features)**: XSS, XXE, DoS protections in ad parsing.
 
 ---
-*Last updated: 2026-01-30*
+*Last updated: 2026-01-31*

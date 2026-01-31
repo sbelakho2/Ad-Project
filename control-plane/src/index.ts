@@ -15,12 +15,15 @@ import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
 
 import { loadConfig } from './config';
 import { logger, logAudit } from './logger';
 import { initializePools, closePools, getReadOnlyPool, queryReadOnly } from './database';
 import routes from './routes';
 import { initializeSalesScheduler, stopSalesScheduler } from './services/sales-scheduler';
+import { ensureCsrfCookie, validateCsrfToken, CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from './csrf';
 // NOTE: Orchestrator removed - app server is strictly a proxy client
 // All sales automation work runs on test server (157.90.126.205:4001)
 
@@ -33,7 +36,7 @@ const app = express();
 // SECURITY MIDDLEWARE
 // ============================================
 
-// Helmet for security headers
+// Helmet for security headers (P1 Fix #6: Enhanced security headers)
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -44,11 +47,17 @@ app.use(helmet({
       imgSrc: ["'self'", 'data:'],
     },
   },
+  crossOriginOpenerPolicy: { policy: 'same-origin' },
+  crossOriginResourcePolicy: { policy: 'same-origin' },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   hsts: {
     maxAge: 31536000,
     includeSubDomains: true,
     preload: true,
   },
+  xssFilter: true,
+  noSniff: true,
+  frameguard: { action: 'deny' },
 }));
 
 // CORS - only allow same origin (admin.* subdomain)
@@ -57,8 +66,48 @@ app.use(cors({
   credentials: true,
 }));
 
+// Cookie parsing for CSRF tokens
+app.use(cookieParser());
+
 // Trust proxy for accurate IP detection behind Caddy/nginx
 app.set('trust proxy', true);
+
+// ============================================
+// RATE LIMITING (P1 Security Fix #2)
+// ============================================
+
+// Global rate limiter - protects all control-plane endpoints
+// Control-plane is operator-only, so limits are reasonable but protective
+const globalRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // 500 requests per 15-minute window per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many requests',
+    message: 'Rate limit exceeded for control-plane API',
+    retryAfterMinutes: 15,
+  },
+  skip: (req: Request) => {
+    // Skip health checks to avoid counting monitoring traffic
+    return req.path === '/health' || req.path === '/health/ready';
+  },
+});
+
+app.use(globalRateLimiter);
+
+// Strict rate limiter for sensitive operations (dangerous actions)
+export const sensitiveOperationRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // 10 dangerous operations per hour
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many sensitive operations',
+    message: 'Rate limit exceeded for dangerous operations. Wait before retrying.',
+    retryAfterMinutes: 60,
+  },
+});
 
 // ============================================
 // STANDARD MIDDLEWARE
@@ -69,6 +118,57 @@ app.use(compression());
 
 // JSON body parsing
 app.use(express.json({ limit: '1mb' }));
+
+// ============================================
+// CSRF PROTECTION
+// ============================================
+
+// Ensure CSRF cookie is set on all HTML page loads
+app.use(ensureCsrfCookie);
+
+// Validate CSRF token on all state-changing requests
+// Exempt API routes that use bearer token auth (already protected)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const stateMutatingMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
+  
+  // Skip CSRF for safe methods
+  if (!stateMutatingMethods.includes(req.method)) {
+    return next();
+  }
+  
+  // Skip CSRF for API routes that use Authorization header (bearer token auth)
+  // These are already protected by verifying the JWT token
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+  
+  // Skip CSRF for ApexMail API calls with valid internal API key
+  // This allows service-to-service communication without CSRF tokens
+  const apexMailKey = req.headers['x-apexmail-key'] as string | undefined;
+  const expectedKey = process.env.APEXMAIL_API_KEY;
+  if (
+    req.path.startsWith('/api/apexmail/') && 
+    apexMailKey && 
+    expectedKey && 
+    apexMailKey === expectedKey
+  ) {
+    return next();
+  }
+  
+  // Skip CSRF for ApexMail API calls from localhost (internal service calls)
+  // This is safe because the service is only exposed on localhost/internal network
+  const clientIp = req.ip || req.socket.remoteAddress || '';
+  if (
+    req.path.startsWith('/api/apexmail/') && 
+    (clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1')
+  ) {
+    return next();
+  }
+  
+  // Apply CSRF validation for cookie-based auth (form submissions, etc)
+  return validateCsrfToken(req, res, next);
+});
 
 // ============================================
 // MINIMAL OPERATOR UI (same-origin)
@@ -1080,6 +1180,18 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
   var submit = document.getElementById('submit');
   if (!form || !errorEl || !submit) return;
 
+  // CSRF token extraction from cookie
+  function getCsrfToken() {
+    var cookies = document.cookie.split(';');
+    for (var i = 0; i < cookies.length; i++) {
+      var cookie = cookies[i].trim();
+      if (cookie.indexOf('__Host-csrf=') === 0) {
+        return cookie.substring('__Host-csrf='.length);
+      }
+    }
+    return '';
+  }
+
   function setError(msg) {
     errorEl.textContent = msg;
     errorEl.style.display = msg ? 'block' : 'none';
@@ -1126,10 +1238,14 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
       var password = document.getElementById('password').value;
       var deviceId = getOrCreateDeviceId();
       var deviceLabel = (navigator && navigator.userAgent) ? String(navigator.userAgent).slice(0, 120) : undefined;
+      var csrfToken = getCsrfToken();
 
       var resp = await fetch('/api/v1/auth/login', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 
+          'content-type': 'application/json',
+          'x-csrf-token': csrfToken
+        },
         body: JSON.stringify({ username: username, password: password, deviceId: deviceId, deviceLabel: deviceLabel }),
       });
 
@@ -1164,6 +1280,16 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
   res.setHeader('pragma', 'no-cache');
   res.setHeader('expires', '0');
   res.status(200).send(`
+// SECURITY: HTML escaping function to prevent XSS (P0 Fix #13)
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 (function () {
   // IMPROVEMENT 4: Error boundary - catch and display JS errors gracefully
   window.onerror = function(message, source, lineno, colno, error) {
@@ -1236,6 +1362,18 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
     switchView(hash || 'dashboard', { skipHash: true });
   });
 
+  // CSRF token extraction from cookie
+  function getCsrfToken() {
+    var cookies = document.cookie.split(';');
+    for (var i = 0; i < cookies.length; i++) {
+      var cookie = cookies[i].trim();
+      if (cookie.indexOf('__Host-csrf=') === 0) {
+        return cookie.substring('__Host-csrf='.length);
+      }
+    }
+    return '';
+  }
+
   async function apiFetch(path, opts) {
     var token = localStorage.getItem('controlPlaneToken');
     if (!token) {
@@ -1244,6 +1382,7 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
     }
     var headers = (opts && opts.headers) ? opts.headers : {};
     headers.Authorization = 'Bearer ' + token;
+    headers['x-csrf-token'] = getCsrfToken();
     if (opts && opts.body && !headers['content-type']) {
       headers['content-type'] = 'application/json';
     }
@@ -1580,10 +1719,11 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
       }
       var html = logs.map(function(log) {
         var time = new Date(log.created_at).toLocaleString();
+        // SECURITY: Escape user-controlled content (P0 Fix #13)
         return '<div style="padding: 4px 0; border-bottom: 1px solid var(--rams-line);">' +
-          '<span style="color: var(--rams-muted);">' + time + '</span> ' +
-          '<span style="color: var(--rams-orange);">' + log.action + '</span>: ' +
-          log.details + ' <span style="color: var(--rams-muted);">by ' + (log.actor || 'system') + '</span></div>';
+          '<span style="color: var(--rams-muted);">' + escapeHtml(time) + '</span> ' +
+          '<span style="color: var(--rams-orange);">' + escapeHtml(log.action) + '</span>: ' +
+          escapeHtml(log.details) + ' <span style="color: var(--rams-muted);">by ' + escapeHtml(log.actor || 'system') + '</span></div>';
       }).join('');
       document.getElementById('control-audit-log').innerHTML = html;
     } catch(e) {
@@ -1607,7 +1747,8 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
       var html = '<table><thead><tr><th>Email</th><th>Type</th><th>Reason</th><th>Added</th></tr></thead><tbody>';
       list.forEach(function(entry) {
         var time = new Date(entry.created_at).toLocaleDateString();
-        html += '<tr><td>' + entry.email + '</td><td><span class="pill">' + entry.suppression_type + '</span></td><td>' + (entry.reason || '-') + '</td><td>' + time + '</td></tr>';
+        // SECURITY: Escape user-controlled content (P0 Fix #13)
+        html += '<tr><td>' + escapeHtml(entry.email) + '</td><td><span class="pill">' + escapeHtml(entry.suppression_type) + '</span></td><td>' + escapeHtml(entry.reason || '-') + '</td><td>' + escapeHtml(time) + '</td></tr>';
       });
       html += '</tbody></table>';
       document.getElementById('suppression-list-table').innerHTML = html;
@@ -1661,7 +1802,8 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
       } else {
         var html = '<table><thead><tr><th>Name</th><th>Subject</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
         templates.forEach(function(t) {
-          html += '<tr><td>' + (t.name || '-') + '</td><td>' + (t.subject || t.subjectSpintax || '-') + '</td><td><span class="pill ' + (t.active ? 'pill-success' : 'pill-warning') + '">' + (t.active ? 'Active' : 'Paused') + '</span></td><td><button class="btn" data-sales-action="edit-template" data-template-id="' + t.id + '">Edit</button></td></tr>';
+          // SECURITY: Escape user-controlled content (P0 Fix #13)
+          html += '<tr><td>' + escapeHtml(t.name || '-') + '</td><td>' + escapeHtml(t.subject || t.subjectSpintax || '-') + '</td><td><span class="pill ' + (t.active ? 'pill-success' : 'pill-warning') + '">' + (t.active ? 'Active' : 'Paused') + '</span></td><td><button class="btn" data-sales-action="edit-template" data-template-id="' + escapeHtml(t.id) + '">Edit</button></td></tr>';
         });
         html += '</tbody></table>';
         document.getElementById('v2-templates-table').innerHTML = html;
@@ -1680,7 +1822,8 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
         var html = '<table><thead><tr><th>Recipient</th><th>Subject</th><th>Score</th><th>Queued</th></tr></thead><tbody>';
         pending.forEach(function(m) {
           var time = new Date(m.created_at || m.queued_at).toLocaleString();
-          html += '<tr><td>' + (m.email || m.to_email || '-') + '</td><td>' + (m.subject || '-') + '</td><td>' + (m.lead_score || m.score || '-') + '</td><td>' + time + '</td></tr>';
+          // SECURITY: Escape user-controlled content (P0 Fix #13)
+          html += '<tr><td>' + escapeHtml(m.email || m.to_email || '-') + '</td><td>' + escapeHtml(m.subject || '-') + '</td><td>' + escapeHtml(m.lead_score || m.score || '-') + '</td><td>' + escapeHtml(time) + '</td></tr>';
         });
         html += '</tbody></table>';
         document.getElementById('v2-pending-messages').innerHTML = html;
@@ -1794,7 +1937,8 @@ app.get('/static/admin-dashboard.js', (req: Request, res: Response) => {
         (skipped ? ' <span style="color: var(--rams-muted);">Skipped: ' + skipped + ' missing email/app data.</span>' : '');
       loadV2Messaging();
     } catch (e) {
-      resultEl.innerHTML = '<span style="color: var(--rams-red);">Compose error: ' + e.message + '</span>';
+      // SECURITY: Escape error message (P0 Fix #13)
+      resultEl.innerHTML = '<span style="color: var(--rams-red);">Compose error: ' + escapeHtml(e.message) + '</span>';
     }
   }
 

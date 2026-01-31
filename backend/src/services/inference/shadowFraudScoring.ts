@@ -297,10 +297,23 @@ async function callMLInference(
   const timeout = setTimeout(() => controller.abort(), 100); // 100ms max
   
   try {
+    // Map extracted features to the names expected by the ML service
+    const payload = {
+      auction_bid_count: features['bid_count'] || 0,
+      ctit_seconds: features['ctit_seconds'] || 0,
+      is_tor: features['is_tor'] || 0,
+      is_cloud: features['is_cloud'] || 0,
+      is_vpn: features['is_vpn'] || 0,
+      is_bad_asn: features['is_bad_asn'] || 0,
+      is_bogon: features['is_bogon'] || 0,
+      omsdk_viewable_ratio: features['omsdk_viewable_ratio'] || 0,
+      auction_win_ecpm: features['winning_cpm'] || 0,
+    };
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ features }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     
@@ -368,21 +381,45 @@ interface PSIResult {
 }
 
 /**
- * Calculate Population Stability Index between training and production distributions
- * PSI > 0.1 indicates moderate shift, > 0.25 indicates significant drift
+ * Calculate Population Stability Index between baseline and current distributions.
+ * PSI > 0.1 indicates moderate shift, > 0.25 indicates significant drift.
  */
 export async function calculatePSI(modelVersion: string, windowHours: number = 24): Promise<PSIResult> {
-  // Expected distribution from training (stored baseline)
-  const expectedDistribution: Record<string, number> = {
-    low: 0.7,      // 70% low risk in training
-    medium: 0.2,   // 20% medium risk
-    high: 0.08,    // 8% high risk
-    critical: 0.02 // 2% critical risk
-  };
-  
   try {
-    // Get actual distribution from production
-    const result = await query(
+    // 1. Get baseline distribution (last 7 days, excluding the current window)
+    const baselineResult = await query(
+      `SELECT 
+        risk_bucket, 
+        COUNT(*)::float / NULLIF(SUM(COUNT(*)) OVER (), 0) as proportion
+       FROM shadow_fraud_scores
+       WHERE model_version = $1
+         AND scored_at >= NOW() - INTERVAL '7 days'
+         AND scored_at < NOW() - INTERVAL '1 hour' * $2
+       GROUP BY risk_bucket`,
+      [modelVersion, windowHours]
+    );
+
+    // Fallback if not enough baseline data: use a more uniform (but safe) distribution
+    // or the standard distribution if it's the very first run
+    const defaultBaseline: Record<string, number> = {
+      low: 0.7, medium: 0.2, high: 0.08, critical: 0.02
+    };
+
+    const expectedDistribution: Record<string, number> = { ...defaultBaseline };
+    if (baselineResult.rows.length > 0) {
+      // Initialize with small epsilon to avoid log(0)
+      expectedDistribution.low = 0.001;
+      expectedDistribution.medium = 0.001;
+      expectedDistribution.high = 0.001;
+      expectedDistribution.critical = 0.001;
+      
+      for (const row of baselineResult.rows) {
+        expectedDistribution[row.risk_bucket as string] = parseFloat(row.proportion as string) || 0.001;
+      }
+    }
+    
+    // 2. Get actual distribution from current window
+    const currentResult = await query(
       `SELECT 
         risk_bucket, 
         COUNT(*)::float / NULLIF(SUM(COUNT(*)) OVER (), 0) as proportion
@@ -397,7 +434,7 @@ export async function calculatePSI(modelVersion: string, windowHours: number = 2
       low: 0, medium: 0, high: 0, critical: 0
     };
     
-    for (const row of result.rows) {
+    for (const row of currentResult.rows) {
       actualDistribution[row.risk_bucket as string] = parseFloat(row.proportion as string) || 0;
     }
     

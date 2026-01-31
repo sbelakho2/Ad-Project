@@ -1,9 +1,16 @@
 // Send fresh test email - creates new enrollment
 const fetch = require('node-fetch').default;
 
-const BASE_URL = 'https://admin.apexmediation.ee';
-const USERNAME = 'operator';
-const PASSWORD = '&&Pw20354491';
+// SECURITY: Use environment variables for credentials (P1 Fix #1)
+const BASE_URL = process.env.CONTROL_PLANE_URL || 'https://admin.apexmediation.ee';
+const USERNAME = process.env.OPERATOR_USERNAME;
+const PASSWORD = process.env.OPERATOR_PASSWORD;
+
+if (!USERNAME || !PASSWORD) {
+  console.error('ERROR: OPERATOR_USERNAME and OPERATOR_PASSWORD environment variables are required');
+  console.error('Usage: OPERATOR_USERNAME=xxx OPERATOR_PASSWORD=xxx node send-fresh-email.js');
+  process.exit(1);
+}
 
 async function main() {
   console.log('1. Logging in...');

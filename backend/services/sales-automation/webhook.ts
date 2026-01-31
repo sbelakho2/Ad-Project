@@ -33,6 +33,18 @@ interface ResendWebhookPayload {
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const RESEND_WEBHOOK_SECRET = process.env.RESEND_WEBHOOK_SECRET || '';
 
+// Singleton database pool to prevent connection exhaustion
+const pool = new Pool({ 
+  connectionString: DATABASE_URL,
+  max: 20, // Limit connections to prevent OOM/exhaustion
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+pool.on('error', (err) => {
+  console.error('[Webhook] Unexpected database pool error', err);
+});
+
 // REVOLUTIONARY: Initialize smart services
 let replyAnalyzer: SmartReplyAnalyzer | null = null;
 let domainHealthGuard: DomainHealthGuard | null = null;
@@ -46,15 +58,33 @@ if (DATABASE_URL) {
 
 /**
  * Verify Resend webhook signature
+ * SECURITY: Never skip verification - returns false if secret is not configured
  */
 function verifySignature(payload: string, signature: string, secret: string): boolean {
-  if (!secret) return true; // Skip verification if no secret configured
+  // SECURITY FIX: Never accept empty secret - fail closed
+  if (!secret || secret.trim() === '') {
+    console.error('[Webhook] CRITICAL: verifySignature called with empty secret - rejecting');
+    return false;
+  }
+  
+  // SECURITY: Validate signature format
+  if (!signature || !signature.startsWith('sha256=')) {
+    console.warn('[Webhook] Invalid signature format');
+    return false;
+  }
   
   const hmac = crypto.createHmac('sha256', secret);
   const digest = hmac.update(payload).digest('hex');
+  
+  // SECURITY: Use constant-time comparison to prevent timing attacks
+  const expectedSig = `sha256=${digest}`;
+  if (signature.length !== expectedSig.length) {
+    return false;
+  }
+  
   return crypto.timingSafeEqual(
     Buffer.from(signature),
-    Buffer.from(`sha256=${digest}`)
+    Buffer.from(expectedSig)
   );
 }
 
@@ -71,10 +101,9 @@ export async function handleResendWebhook(
     return { success: false, message: 'Invalid signature' };
   }
 
-  const payload: ResendWebhookPayload = JSON.parse(rawBody);
-  const pool = new Pool({ connectionString: DATABASE_URL });
-
   try {
+    // Note: pool is now a singleton initialized outside
+    const payload: ResendWebhookPayload = JSON.parse(rawBody);
     const messageId = payload.data.email_id;
     const toEmail = payload.data.to[0];
 
@@ -244,7 +273,7 @@ export async function handleResendWebhook(
     console.error('[Webhook] Error:', error);
     return { success: false, message: String(error) };
   } finally {
-    await pool.end();
+    // Note: Do NOT call pool.end() here as we use a singleton pool
   }
 }
 
@@ -291,8 +320,6 @@ export async function processReply(
   sentiment?: string;
   suggestedAction?: string;
 }> {
-  const pool = new Pool({ connectionString: DATABASE_URL });
-
   try {
     // Find contact by email
     const contactResult = await pool.query(
@@ -414,11 +441,9 @@ export async function processReply(
       }
     }
     
-    console.log(`[Reply] From: ${fromEmail}, Category: ${category}, Sentiment: ${sentiment}, Action: ${suggestedAction}`);
-    
     return { success: true, contactId: contact.id, category, sentiment, suggestedAction };
   } finally {
-    await pool.end();
+    // Note: Do NOT call pool.end() here as we use a singleton pool
   }
 }
 

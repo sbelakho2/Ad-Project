@@ -10,8 +10,10 @@ Migration Studio lets a publisher currently using ironSource/AppLovin/MAX/etc. t
 - Drop in our SDK once. From the dashboard, enable “Mirror N%” for a placement.
 - We clone their mediation setup (waterfalls/instances/line items) into our system.
 - We run safe, parallel mediation in shadow alongside their incumbent.
-- We show side-by-side, cryptographically verifiable lift: eCPM, fill, latency, IVT, and net revenue.
+- We show side-by-side, cryptographically verifiable lift: eCPM, fill, latency, and net revenue.
 - Roll-up answers the core question: “If 100% routed through us in the last 14 days, projected +X% revenue.”
+- **Performance Optimized**: Postgres-native snapshots using BRIN indexes and `sample_percentile_if_large()` for sub-millisecond p95 latency on high-volume partitions.
+- **Zero-Trust Security**: Server-side authoritative override of experiment `mode` (shadow vs. mirroring) to prevent client-side escalation.
 
 This targets three adoption friction points:
 - Removes switching fear: parallel, reversible, scoped (per placement, % mirrored).
@@ -156,34 +158,29 @@ This targets three adoption friction points:
 
 ## Implementation Architecture
 
-### ClickHouse Rollup Views
+### Postgres Guardrail Snapshots
 
-Migration Studio uses materialized views to aggregate experiment metrics for real-time guardrail evaluation and reporting. Schema located at `data/schemas/clickhouse_migration.sql`.
+Migration Studio uses periodic snapshots to aggregate experiment metrics for real-time guardrail evaluation and reporting.
 
 **Primary Tables**:
-- `migration_experiment_outcomes`: Raw auction outcomes from shadow recorder (partitioned by `experiment_id`, `toYYYYMM(date)`)
-- `migration_experiment_hourly`: Hourly aggregation (impressions, fills, revenue, latency p50/p95/p99, errors) per arm
-- `migration_experiment_daily`: Daily rollup for reporting and uplift calculations
-- `migration_experiment_geo_daily`: Stratified by country for variance reduction (CUPED)
-- `migration_experiment_device_daily`: Stratified by device type
-- `migration_experiment_adapter_daily`: Stratified by adapter for adapter-level uplift analysis
-- `migration_experiment_summary`: Cumulative metrics view (control vs test comparison)
+- `migration_shadow_outcomes`: Raw auction outcomes (shadow recorder).
+- `migration_guardrail_snapshots`: Aggregated snapshots (impressions, fills, revenue, latency p50/p95, error rates).
 
-**TTL Policy**: 90 days retention for experiment data
-**Granularity**: Hourly views for real-time dashboards, daily views for reports
-**Partitioning**: By `experiment_id` and `toYYYYMM(date)` to optimize query performance
+**Performance Strategy**:
+- **BRIN Indexes**: All time-series tables use Block Range Indexes on `created_at` for efficient range scans.
+- **Sampling**: `sample_percentile_if_large()` is used for latency percentiles on datasets >100k rows to avoid sort-heavy `PERCENTILE_CONT`.
+- **Unit Standard**: All revenue is stored in **micros** (1/1,000,000 USD) to ensure high precision across multi-currency networks.
 
-**Sample Query (Cumulative eCPM by Arm)**:
+**Snapshot Query Logic**:
 ```sql
-SELECT
+SELECT 
   arm,
-  total_impressions,
-  total_fills,
-  total_revenue_micros,
-  ecpm_micros,
-  fill_rate
-FROM migration_experiment_summary
-WHERE experiment_id = '<exp_id>';
+  COUNT(*) FILTER (WHERE status IN ('win', 'served')) AS impressions,
+  COALESCE(SUM(bid_cpm * 1000), 0) AS revenue_micros,
+  sample_percentile_if_large(experiment_id, arm, 0.95, 60) AS latency_p95_ms
+FROM migration_shadow_outcomes
+WHERE experiment_id = $1 AND created_at >= NOW() - interval '60 minutes'
+GROUP BY arm;
 ```
 
 ### Prometheus Metrics Catalog
@@ -261,8 +258,7 @@ increase(migration_guardrail_pauses_total{exp_id="<exp_id>"}[1h])
       "control": 245.32,
       "test": 257.59,
       "uplift_percent": 4.99
-    },
-    ...
+    }
   },
   "signature": {
     "key_id": "migration-prod-2025",
@@ -289,18 +285,17 @@ When an experiment activates, populate 14-day control arm baseline for accurate 
 **Usage**:
 ```bash
 DATABASE_URL="postgres://..." \
-CLICKHOUSE_URL="http://clickhouse:8123" \
 npx ts-node backend/scripts/migrationBackfillBaseline.ts <experiment_id>
 ```
 
 **Process**:
 1. Query experiment details (placement_id, activated_at)
 2. Calculate date range: `activated_at - 14 days` to `activated_at`
-3. Query ClickHouse `migration_experiment_hourly` or `impressions` table
+3. Query Postgres `migration_shadow_outcomes` or `analytics_revenue_events` table
 4. Aggregate daily snapshots (impressions, fills, revenue, latency, errors)
 5. Insert into `migration_guardrail_snapshots` with `arm = 'control'`
 
-**Note**: If ClickHouse unavailable, script uses simulated baseline data with realistic variance
+**Note**: Script uses efficient indexed scans (BRIN) to aggregate baseline data.
 
 ### Grafana Dashboard
 

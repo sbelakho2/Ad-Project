@@ -85,14 +85,15 @@ export async function verifyExperimentAuth(
 
     return validateCachedAuth(auth, publisherId, claimedMode);
   } catch (error) {
-    logger.warn('Experiment auth verification failed, allowing fail-open', {
+    logger.error('Experiment auth verification failed (DB/Cache Error)', {
       experimentId,
       publisherId,
       error: (error as Error).message,
     });
-    // Fail-open to avoid blocking legitimate traffic on cache/db errors
-    // This is a trade-off: we prioritize availability over strict security
-    return { authorized: true, reason: 'CACHE_ERROR' };
+    // FAIL-SAFE: Return authorized: false with CACHE_ERROR.
+    // The orchestrator should handle this by disabling the experiment for this request
+    // rather than allowing potentially unauthorized mirroring.
+    return { authorized: false, reason: 'CACHE_ERROR' };
   }
 }
 

@@ -1,5 +1,6 @@
 """Fraud inference service with authenticated scoring and RED metrics."""
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -11,6 +12,7 @@ import sys
 import time
 import warnings
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
@@ -19,6 +21,12 @@ from typing import Any, Dict, List, Optional
 import joblib
 import numpy as np
 import onnxruntime as ort
+
+# Thread pool for running ONNX inference with timeout
+INFERENCE_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("INFERENCE_THREADS", "4")))
+
+# Inference timeout in seconds (prevent hanging on malformed inputs)
+INFERENCE_TIMEOUT_SECONDS = float(os.getenv("INFERENCE_TIMEOUT_SECONDS", "5.0"))
 
 
 def _ensure_python_multipart() -> None:
@@ -853,9 +861,21 @@ async def score_fraud(
         # Prepare input features
         features = transform_features(payload)
         
-        # Run inference
-        # We expect inputs: x_num, x_cat
-        outputs = state.model.run(None, features)
+        # Run inference with timeout to prevent hanging on malformed inputs
+        # Uses thread pool executor for non-blocking timeout support
+        loop = asyncio.get_event_loop()
+        try:
+            outputs = await asyncio.wait_for(
+                loop.run_in_executor(INFERENCE_EXECUTOR, lambda: state.model.run(None, features)),
+                timeout=INFERENCE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            ERROR_COUNT.labels(endpoint="/v1/score", error_type="InferenceTimeout", tenant=tenant).inc()
+            logger.error(f"Inference timeout after {INFERENCE_TIMEOUT_SECONDS}s for tenant {tenant}")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Inference timeout exceeded ({INFERENCE_TIMEOUT_SECONDS}s)"
+            )
         
         # Extract fraud probability
         if len(outputs[0].shape) > 1 and outputs[0].shape[1] > 1:
@@ -878,6 +898,8 @@ async def score_fraud(
             shadow_decision=shadow_decision,
         )
     
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Inference error: {e}")
         ERROR_COUNT.labels(endpoint="/v1/score", error_type=type(e).__name__, tenant=tenant).inc()
@@ -915,8 +937,24 @@ async def score_fraud_batch(
         x_num_batch = np.vstack([t["x_num"] for t in transformed_list])
         x_cat_batch = np.vstack([t["x_cat"] for t in transformed_list])
         
-        # Batch inference
-        outputs = state.model.run(None, {"x_num": x_num_batch, "x_cat": x_cat_batch})
+        # Batch inference with timeout (scale timeout with batch size)
+        batch_timeout = INFERENCE_TIMEOUT_SECONDS * (1 + len(features_list) / 100)
+        loop = asyncio.get_event_loop()
+        try:
+            outputs = await asyncio.wait_for(
+                loop.run_in_executor(
+                    INFERENCE_EXECUTOR,
+                    lambda: state.model.run(None, {"x_num": x_num_batch, "x_cat": x_cat_batch})
+                ),
+                timeout=batch_timeout
+            )
+        except asyncio.TimeoutError:
+            ERROR_COUNT.labels(endpoint="/v1/score/batch", error_type="InferenceTimeout", tenant=tenant).inc()
+            logger.error(f"Batch inference timeout after {batch_timeout:.1f}s for {len(features_list)} items, tenant {tenant}")
+            raise HTTPException(
+                status_code=504,
+                detail=f"Batch inference timeout exceeded ({batch_timeout:.1f}s)"
+            )
         
         # Extract scores
         if len(outputs[0].shape) > 1 and outputs[0].shape[1] > 1:
@@ -947,6 +985,8 @@ async def score_fraud_batch(
 
         return results
     
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Batch inference error: {e}")
         ERROR_COUNT.labels(endpoint="/v1/score/batch", error_type=type(e).__name__, tenant=tenant).inc()

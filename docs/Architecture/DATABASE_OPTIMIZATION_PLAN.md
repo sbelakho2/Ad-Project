@@ -81,6 +81,19 @@ These are created by migration `backend/migrations/postgres/20251201_150500_anal
 
 * **`idx_analytics_impressions_event_id`**: This random UUID index is expensive to maintain. If it's only used for deduplication during ingestion, consider alternatives. If used for lookups, keep it.
 
+### E. ClickHouse-Free High-Volume Strategy (Highest Priority)
+
+**Problem**: Removing ClickHouse requires Postgres to handle 10x higher ingestion and query loads for RTB and Migration Studio.
+**Solution**: Use specialized Postgres features for ad-tech time-series data.
+
+1. **BRIN Indexes**: Replace B-Tree with Block Range Indexes on `observed_at` columns. 
+   - *Impact*: 99% smaller index size; lightning-fast range scans on sequential data.
+2. **HyperLogLog (HLL)**: Use `postgresql-hll` for unique user counts (UVs).
+   - *Impact*: Sub-millisecond cardinality estimation vs. expensive `COUNT(DISTINCT)`.
+3. **T-Digest**: Use for p95/p99 latency calculations.
+   - *Impact*: $O(1)$ percentile approximations vs. $O(N \log N)$ full sorts.
+4. **Partition Pruning**: Ensure all Migration Studio snapshots use `observed_at` in the `WHERE` clause to trigger partition exclusion.
+
 ---
 
 ## 3. Implementation Plan

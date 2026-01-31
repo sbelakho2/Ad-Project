@@ -153,3 +153,38 @@ export function validateBoolean(
     400
   );
 }
+
+/**
+ * Validate file path to prevent path traversal attacks (P1 Fix #8)
+ * Ensures path doesn't escape the base directory
+ * @throws AppError with 400 status if path traversal detected
+ */
+export function validateSafePath(
+  userPath: string,
+  baseDir: string,
+  fieldName: string
+): string {
+  const path = require('path');
+  
+  // Reject obvious path traversal patterns
+  if (userPath.includes('..') || userPath.includes('\0')) {
+    throw new AppError(
+      `Invalid ${fieldName}: path traversal detected`,
+      400
+    );
+  }
+  
+  // Resolve and normalize the path
+  const resolved = path.resolve(baseDir, userPath);
+  const normalizedBase = path.resolve(baseDir);
+  
+  // Ensure resolved path stays within base directory
+  if (!resolved.startsWith(normalizedBase + path.sep) && resolved !== normalizedBase) {
+    throw new AppError(
+      `Invalid ${fieldName}: path escapes allowed directory`,
+      400
+    );
+  }
+  
+  return resolved;
+}

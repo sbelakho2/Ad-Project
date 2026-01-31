@@ -15,12 +15,12 @@
  * - Review Queue: Optional draft state before sending
  */
 
-import { Resend } from 'resend';
-import { queryReadOnly, queryOperator } from '../database';
+import { queryReadOnly, queryOperator, getOperatorPool } from '../database';
 import { logger } from '../logger';
+import { getApexMail } from './apexmail';
 
-// Initialize Resend with API key from environment
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+// Use ApexMail service (singleton)
+const apexmail = getApexMail(getOperatorPool());
 
 // Fallback defaults (used if DB config not available)
 const FALLBACK_FROM_EMAIL = 'sales@apexmediation.ee';
@@ -1499,27 +1499,26 @@ export async function approveDraftEmail(emailId: string, approver: string): Prom
     const email = emails[0];
     const config = await getConfig();
 
-    if (!resend) {
-      return { success: false, error: 'RESEND_API_KEY not configured' };
-    }
-
-    // Generate unsubscribe URL for this contact
-    const unsubscribeUrl = `${process.env.PUBLIC_ORIGIN || 'https://admin.apexmediation.ee'}/unsubscribe?contact=${email.contact_id}`;
-    const unsubscribeEmail = config.replyTo || config.fromEmail;
-
-    // Send the email with List-Unsubscribe headers
-    const result = await resend.emails.send({
-      from: `${config.fromName} <${config.fromEmail}>`,
+    // Send via ApexMail
+    const result = await apexmail.send({
+      from: config.fromEmail,
+      fromName: config.fromName,
+      replyTo: config.replyTo,
       to: email.to_email,
       subject: email.subject || '',
       html: (email.body_html || '').replace(/\n/g, '<br>'),
       text: email.body_html || '',
-      // RFC 8058: List-Unsubscribe headers reduce spam complaints
-      headers: {
-        'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${unsubscribeEmail}?subject=unsubscribe>`,
-        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-      },
+      category: 'marketing',
+      priority: 2, // High priority for manual approval
+      trackOpens: true,
+      trackClicks: true,
+      entityType: 'sa_email',
+      entityId: emailId,
     });
+
+    if (!result.success) {
+      return { success: false, error: result.error || 'ApexMail delivery failed' };
+    }
 
     // Update status to sent
     await write(`
@@ -1530,7 +1529,7 @@ export async function approveDraftEmail(emailId: string, approver: string): Prom
           approved_at = CURRENT_TIMESTAMP,
           approved_by = $3
       WHERE id = $1
-    `, [emailId, result.data?.id || null, approver], 'Approve and send draft email');
+    `, [emailId, result.messageId || result.emailId || null, approver], 'Approve and send draft email');
 
     // Update enrollment step if exists
     if (email.enrollment_id) {
@@ -1640,7 +1639,9 @@ function guessFirstName(email: string): string {
 function applyPersonalization(template: string, data: Record<string, string>): string {
   let result = template;
   for (const [key, value] of Object.entries(data)) {
-    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value || '');
+    // Escape regex special characters in key to prevent ReDoS
+    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(new RegExp(`{{${escapedKey}}}`, 'g'), value || '');
   }
   return result;
 }

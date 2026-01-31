@@ -100,11 +100,11 @@ export async function runAuction(input: AuctionInput, baseUrl: string): Promise<
         reason: authResult.reason,
       });
 
-      // For NOT_ACTIVE experiments, treat as if no experiment exists
-      if (authResult.reason === 'NOT_ACTIVE' || authResult.reason === 'NOT_FOUND') {
+      // FAIL-SAFE: For status or infra issues, disable experiment but continue auction
+      if (['NOT_ACTIVE', 'NOT_FOUND', 'CACHE_ERROR'].includes(authResult.reason || '')) {
         migration = undefined;
       } else {
-        // For mode mismatch or wrong publisher, reject the request
+        // For mode mismatch or wrong publisher, reject the request (potential attack)
         const landscapeId = generateLandscapeId(requestId);
         return { success: false, landscapeId, reason: `AUTH_${authResult.reason}` };
       }

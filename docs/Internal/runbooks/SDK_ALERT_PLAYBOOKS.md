@@ -427,6 +427,31 @@ This document provides actionable runbooks for responding to SDK-related alerts 
 
 ---
 
+## Migration Studio Alerts
+
+### ALERT: migration_signal_loss
+**Severity**: CRIT
+**Description**: Experiment signals (`experimentId`/`arm`) missing from RTB requests despite being configured in the dashboard.
+**Diagnosis**:
+1. Check `AuctionClient.kt` or `AuctionClient.swift` for signal propagation logic.
+2. Verify SDK version (Protocol Parity FIX required).
+3. Check `experimentAuthCache.ts` in Backend; confirm `verifyExperimentAuth` is not failing-open.
+**Remediation**:
+1. Force SDK update for the affected publisher.
+2. Check if the publisher's placement is correctly mapped in `migration_experiments` table.
+
+### ALERT: migration_guardrail_violation
+**Severity**: WARN / CRIT (Auto-Pause)
+**Description**: Experiment arm is violating configured guardrails (e.g., latency >2x baseline or error rate >5%).
+**Diagnosis**:
+1. Check `MigrationGuardrailScheduler.ts` logs for violation reason.
+2. Review side-by-side snapshots in Migration Studio dashboard.
+**Remediation**:
+1. The system should auto-pause (mirroring → shadow).
+2. If auto-pause failed, manually archive the experiment.
+
+---
+
 ## Platform-Specific Alerts
 
 ### iOS

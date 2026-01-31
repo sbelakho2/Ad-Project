@@ -82,11 +82,22 @@ ACTIVE_MODELS = Gauge("ml_active_models", "Number of currently loaded models")
 
 
 class FraudDetectionRequest(BaseModel):
-    user_id: str
-    ip_address: str
-    user_agent: str
-    impressions_24h: int = Field(ge=0)
-    clicks_24h: int = Field(ge=0)
+    user_id: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    # Features required by ONNX model (9 dimensions)
+    auction_bid_count: int = Field(0, ge=0)
+    ctit_seconds: float = Field(0.0, ge=0.0)
+    is_tor: float = Field(0.0, ge=0.0, le=1.0)
+    is_cloud: float = Field(0.0, ge=0.0, le=1.0)
+    is_vpn: float = Field(0.0, ge=0.0, le=1.0)
+    is_bad_asn: float = Field(0.0, ge=0.0, le=1.0)
+    is_bogon: float = Field(0.0, ge=0.0, le=1.0)
+    omsdk_viewable_ratio: float = Field(0.0, ge=0.0, le=1.0)
+    auction_win_ecpm: float = Field(0.0, ge=0.0)
+    # Legacy fields
+    impressions_24h: Optional[int] = 0
+    clicks_24h: Optional[int] = 0
     app_id: Optional[str] = None
     device_info: Optional[Dict[str, Any]] = None
 
@@ -579,7 +590,17 @@ async def predict_fraud(
 
     def handler():
         handle = require_model("fraud_detection")
-        features = np.array([[payload.impressions_24h, payload.clicks_24h]], dtype=np.float32)
+        features = np.array([[
+            payload.auction_bid_count,
+            payload.ctit_seconds,
+            payload.is_tor,
+            payload.is_cloud,
+            payload.is_vpn,
+            payload.is_bad_asn,
+            payload.is_bogon,
+            payload.omsdk_viewable_ratio,
+            payload.auction_win_ecpm
+        ]], dtype=np.float32)
         score = run_session(handle, features)
         source = "onnx" if score is not None else "heuristic"
         fraud_score = score if score is not None else fraud_heuristic_score(payload)

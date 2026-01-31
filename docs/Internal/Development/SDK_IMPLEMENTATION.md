@@ -95,6 +95,19 @@ Completed implementation of core SDK functionality across Android, iOS, and Unit
 - **Revenue Tracking**: Real-time eCPM from MAX platform
 - **Thread Safety**: AtomicBoolean for initialization state
 
+### Unified RTB Protocol & Migration Studio ✅
+
+All SDKs (Android, iOS, Unity) have been updated to support the unified camelCase RTB protocol and Migration Studio signals.
+
+#### 1. Unified Protocol (camelCase)
+- **Standardized Keys**: `requestId`, `placementId`, `adFormat` are now consistent across all platforms.
+- **Backend Parity**: Backend Zod schemas use aliases to support both legacy snake_case (during transition) and new camelCase.
+
+#### 2. Migration Studio Integration
+- **Signal Propagation**: SDKs now correctly forward `experimentId` and `arm` labels in RTB requests.
+- **Authoritative Override**: Backend performs server-side verification of `mode` (shadow/mirroring) to prevent client-side escalation.
+- **Privacy Hashing**: User identifiers are hashed using salted HMAC-SHA256 before transmission.
+
 ### Architecture Highlights
 
 #### Thread Model

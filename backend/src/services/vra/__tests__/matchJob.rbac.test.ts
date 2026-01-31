@@ -34,13 +34,13 @@ describe('VRA Matching Job — RO posture (dry-run vs write)', () => {
   });
 
   it('does not write when dryRun=true', async () => {
-    const res = await runMatchingBatch({ from: '2025-11-01T00:00:00Z', to: '2025-11-02T00:00:00Z', dryRun: true });
+    const res = await runMatchingBatch({ from: '2025-11-01T00:00:00Z', to: '2025-11-02T00:00:00Z', dryRun: true, publisherId: 'pub-1' });
     expect(res.inserted).toBe(0);
     expect(insertMany).not.toHaveBeenCalled();
   });
 
   it('writes to recon_match when dryRun=false and auto matches exist', async () => {
-    const res = await runMatchingBatch({ from: '2025-11-01T00:00:00Z', to: '2025-11-02T00:00:00Z', dryRun: false });
+    const res = await runMatchingBatch({ from: '2025-11-01T00:00:00Z', to: '2025-11-02T00:00:00Z', dryRun: false, publisherId: 'pub-1' });
     // Depending on scoring config, there should be at least an attempt to insert
     expect(insertMany).toHaveBeenCalled();
   });

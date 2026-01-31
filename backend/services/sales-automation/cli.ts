@@ -798,7 +798,9 @@ class SalesAutomationCLI {
   private applyPersonalization(template: string, data: Record<string, string>): string {
     let result = template;
     for (const [key, value] of Object.entries(data)) {
-      result = result.replace(new RegExp(`{{${key}}}`, 'g'), value || '');
+      // Escape regex special characters in key to prevent ReDoS
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      result = result.replace(new RegExp(`{{${escapedKey}}}`, 'g'), value || '');
     }
     return result;
   }

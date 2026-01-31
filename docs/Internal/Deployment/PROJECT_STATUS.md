@@ -51,5 +51,6 @@ Each archived file now contains a short preface that links back here and restate
 ## Change Log
 | Date | Change |
 | --- | --- |
+| 2026-01-31 | Final documentation sweep. Updated Architecture (ApexTunnel, ClickHouse-free Postgres), Migration Studio (Security/Performance), VRA (Full Outer Join/Isolation), SDK (Protocol Parity), and ML (Feature Sync/PSI Monitoring) to reflect current production reality. |
 | 2026-01-12 | Comprehensive documentation sweep. Updated all major guides (VRA, SSAI, SDKs, Testing, Monitoring, Runbooks) to reflect GA status and Jan 2026 reality. |
 | 2025-11-18 | Created canonical status doc, retired duplicate completion reports, aligned cross-links per FIX-10. Updated delivery snapshot to reflect completed FIX-07/08/09 (quality, infrastructure, automation). |

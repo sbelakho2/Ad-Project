@@ -363,17 +363,15 @@ class AuctionClient(
         val rand = (0..999_999).random()
         val reqId = "android-$now-$rand"
         val deviceInfo = mapOf(
-            "os" to "android",
-            "os_version" to (Build.VERSION.RELEASE ?: ""),
-            "make" to (Build.MANUFACTURER ?: ""),
+            "platform" to "android",
+            "osVersion" to (Build.VERSION.RELEASE ?: ""),
             "model" to (Build.MODEL ?: ""),
-            "screen_width" to 0,
-            "screen_height" to 0,
+            "make" to (Build.MANUFACTURER ?: ""),
+            "screenWidth" to 0,
+            "screenHeight" to 0,
             "language" to Locale.getDefault().language,
             "timezone" to java.util.TimeZone.getDefault().id,
-            "connection_type" to "unknown",
-            "ip" to "",
-            "user_agent" to "",
+            "connectionType" to "unknown",
         )
         val limitAdTracking = consent?.limitAdTracking == true
         val userInfo = mutableMapOf<String, Any?>(
@@ -401,15 +399,15 @@ class AuctionClient(
         val sdkVersion = try { com.rivalapexmediation.sdk.BuildConfig.SDK_VERSION } catch (_: Throwable) { "0.0.0" }
 
         return mapOf(
-            "request_id" to reqId,
-            "app_id" to opts.publisherId,
-            "placement_id" to opts.placementId,
-            "ad_type" to "interstitial",
-            "device_info" to deviceInfo,
-            "user_info" to userInfo,
-            "floor_cpm" to (opts.floorCpm ?: 0.0),
-            "timeout_ms" to opts.timeoutMs,
-            "auction_type" to opts.auctionType,
+            "requestId" to reqId,
+            "placementId" to opts.placementId,
+            "adFormat" to "interstitial",
+            "device" to deviceInfo,
+            "user" to userInfo,
+            "app" to mapOf("id" to opts.publisherId),
+            "floorCpm" to (opts.floorCpm ?: 0.0),
+            "timeoutMs" to opts.timeoutMs,
+            "auctionType" to opts.auctionType,
             "adapters" to adapters,
             "metadata" to baseMeta,
             "meta" to mapOf(

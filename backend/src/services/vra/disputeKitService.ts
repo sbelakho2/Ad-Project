@@ -58,8 +58,20 @@ export class FileSystemDisputeStorage implements DisputeStorage {
   }
 
   async putObject(key: string, bytes: Buffer | string, _contentType: string, _ttlSec?: number): Promise<string> {
+    // P1 Fix #8: Validate key to prevent path traversal
+    if (key.includes('..') || key.includes('\0')) {
+      throw new Error('Invalid storage key: path traversal detected');
+    }
+    
     const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
     const full = path.resolve(this.baseDir, key);
+    
+    // Ensure resolved path stays within baseDir
+    const normalizedBase = path.resolve(this.baseDir);
+    if (!full.startsWith(normalizedBase + path.sep) && full !== normalizedBase) {
+      throw new Error('Invalid storage key: path escapes allowed directory');
+    }
+    
     const dir = path.dirname(full);
     await this.ensureDir(dir);
     await fsp.writeFile(full, buf);

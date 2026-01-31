@@ -49,7 +49,43 @@ export const UserSchema = z.object({
 }).partial();
 
 export const AuctionRequestSchema = z.object({
-  body: z.object({
+  body: z.preprocess((val: any) => {
+    const body = { ...val };
+    
+    // Alias placement_id -> placementId
+    if (body.placement_id && !body.placementId) {
+      body.placementId = body.placement_id;
+    }
+    
+    // Alias ad_type / adType -> adFormat
+    if ((body.ad_type || body.adType) && !body.adFormat) {
+      body.adFormat = body.ad_type || body.adType;
+    }
+    
+    // Alias app_id -> app.id
+    if (body.app_id && !body.app?.id) {
+      body.app = { ...body.app, id: body.app_id };
+    }
+
+    // Alias device_info -> device
+    if (body.device_info && !body.device) {
+      body.device = body.device_info;
+    }
+
+    // Alias user_info -> user
+    if (body.user_info && !body.user) {
+      body.user = body.user_info;
+    }
+
+    // Normalize device fields
+    if (body.device) {
+      if (body.device.os_version && !body.device.osVersion) {
+        body.device.osVersion = body.device.os_version;
+      }
+    }
+
+    return body;
+  }, z.object({
     requestId: z.string().uuid().optional().default(() => crypto.randomUUID?.() || '00000000-0000-0000-0000-000000000000'),
     placementId: z.string().min(1),
     adFormat: z.enum(['banner', 'interstitial', 'rewarded', 'native']),
@@ -59,7 +95,7 @@ export const AuctionRequestSchema = z.object({
     app: AppSchema.optional(),
     consent: ConsentSchema.optional(),
     signal: AuctionSignalSchema.optional(),
-  })
+  }))
 });
 
 export type AuctionRequestBody = z.infer<typeof AuctionRequestSchema>['body'];

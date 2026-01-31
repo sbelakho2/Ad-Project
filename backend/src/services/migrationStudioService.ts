@@ -1413,6 +1413,7 @@ export class MigrationStudioService {
 
   /**
    * Deterministic assignment: hash(user, placement, seed) < mirror_percent → test
+   * Uses computeAssignmentBucket for consistent and secure bucketing.
    */
   assignArm(
     userIdentifier: string,
@@ -1420,15 +1421,8 @@ export class MigrationStudioService {
     seed: string,
     mirrorPercent: number
   ): ExperimentArm {
-    const hash = createHash('sha256')
-      .update(`${userIdentifier}:${placementId}:${seed}`)
-      .digest('hex');
-
-    // Take first 8 hex chars and convert to percentage (0-100)
-    const hashInt = parseInt(hash.substring(0, 8), 16);
-    const percentage = (hashInt % 100) / 100; // 0.00 to 0.99
-
-    return percentage < (mirrorPercent / 100) ? 'test' : 'control';
+    const bucket = computeAssignmentBucket(userIdentifier, placementId, seed);
+    return bucket < mirrorPercent ? 'test' : 'control';
   }
 
   /**

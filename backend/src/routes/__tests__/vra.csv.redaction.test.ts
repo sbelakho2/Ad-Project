@@ -88,7 +88,7 @@ describe('VRA CSV export — redaction of reason_code', () => {
     const l2 = lines[2];
     expect(l2).toContain('fx_mismatch,0.000000,USD');
     expect(l2).toContain('sk_test_[REDACTED]');
-    expect(l2).toContain('[REDACTED_NUMERIC]');
+    expect(l2).toMatch(/\[REDACTED_(NUMERIC|CARD)\]/);
     expect(l2.split(',').length).toBe(8);
 
     // Third data line: raw JWT should be redacted; amount formatted 0.000000

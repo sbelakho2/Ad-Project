@@ -40,10 +40,6 @@ type EncryptedConsentPayload =
       value: string
     }
 
-const CONSENT_ENCRYPTION_KEY = process.env.NEXT_PUBLIC_CONSENT_ENCRYPTION_KEY ?? ''
-const CONSENT_ENCRYPTION_KEY_ID = process.env.NEXT_PUBLIC_CONSENT_ENCRYPTION_KEY_ID ?? 'default-consent-key'
-const CONSENT_ENCRYPTION_ALGO = 'AES-GCM'
-
 const toggleFieldNames = ['gdprEnabled', 'ccpaEnabled', 'coppaMode', 'autoBlock', 'euTrafficOnly'] as const
 
 const slugifyCategory = (value: string) =>
@@ -60,68 +56,35 @@ const formatCategoryLabel = (slug: string) =>
     .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
     .join(' ') || slug.toUpperCase()
 
-const hasWebCryptoSupport = () => typeof window !== 'undefined' && !!window.crypto?.subtle
-
-const arrayBufferToBase64 = (buffer: ArrayBuffer | Uint8Array) => {
-  if (typeof window === 'undefined') {
-    throw new Error('Base64 encoding is only supported in the browser environment.')
-  }
-
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
-  let binary = ''
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte)
-  })
-  return window.btoa(binary)
-}
-
-const base64ToUint8Array = (value: string) => {
-  if (typeof window === 'undefined') {
-    throw new Error('Base64 decoding is only supported in the browser environment.')
-  }
-  const binary = window.atob(value)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes
-}
-
+/**
+ * Encrypt consent value via server-side API
+ * 
+ * Security: The encryption key is never exposed to the client.
+ * The API route at /api/consent/encrypt handles encryption server-side.
+ */
 const encryptConsentValue = async (value: string): Promise<EncryptedConsentPayload> => {
   if (!value) {
     return { mode: 'fallback', value: '' }
   }
 
-  if (!hasWebCryptoSupport() || !CONSENT_ENCRYPTION_KEY) {
-    return { mode: 'fallback', value }
-  }
-
   try {
-    const keyBytes = base64ToUint8Array(CONSENT_ENCRYPTION_KEY)
-    const cryptoKey = await window.crypto.subtle.importKey(
-      'raw',
-      keyBytes,
-      { name: CONSENT_ENCRYPTION_ALGO },
-      false,
-      ['encrypt']
-    )
-    const iv = window.crypto.getRandomValues(new Uint8Array(12))
-    const encoder = new TextEncoder()
-    const cipherBuffer = await window.crypto.subtle.encrypt(
-      { name: CONSENT_ENCRYPTION_ALGO, iv },
-      cryptoKey,
-      encoder.encode(value)
-    )
+    const response = await fetch('/api/consent/encrypt', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ value }),
+    })
 
-    return {
-      mode: 'encrypted',
-      algorithm: 'AES-GCM',
-      cipherText: arrayBufferToBase64(cipherBuffer),
-      iv: arrayBufferToBase64(iv),
-      keyId: CONSENT_ENCRYPTION_KEY_ID,
+    if (!response.ok) {
+      console.warn('Server-side encryption failed, using fallback')
+      return { mode: 'fallback', value }
     }
+
+    const result = await response.json()
+    return result as EncryptedConsentPayload
   } catch (error) {
-    console.warn('Failed to encrypt consent string. Falling back to plaintext payload.', error)
+    console.warn('Failed to encrypt consent string via API. Falling back to plaintext.', error)
     return { mode: 'fallback', value }
   }
 }

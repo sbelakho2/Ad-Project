@@ -578,11 +578,18 @@ router.post('/resend', async (req: Request, res: Response) => {
  */
 router.post('/resend/reply', async (req: Request, res: Response) => {
   try {
-    const payload = Buffer.isBuffer(req.body)
-      ? JSON.parse(req.body.toString('utf8'))
-      : typeof req.body === 'string'
-        ? JSON.parse(req.body)
-        : req.body;
+    // P1 Fix #7: Safe JSON parsing with try-catch
+    let payload: { from?: string; subject?: string; body?: string } | null = null;
+    try {
+      payload = Buffer.isBuffer(req.body)
+        ? JSON.parse(req.body.toString('utf8'))
+        : typeof req.body === 'string'
+          ? JSON.parse(req.body)
+          : req.body;
+    } catch (parseError) {
+      logger.warn('Invalid JSON in resend/reply webhook', { error: parseError });
+      return res.status(400).json({ success: false, message: 'Invalid JSON payload' });
+    }
 
     const { from, subject, body } = payload || {};
     

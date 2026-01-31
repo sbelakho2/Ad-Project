@@ -450,8 +450,13 @@ export class SKAdNetworkService {
       .map(([key, value]) => `${key}=${value}`)
       .join('&');
 
-    const secret = process.env.SKADNETWORK_SECRET || 'dev-secret-key';
-    return crypto.createHmac('sha256', secret).update(dataString).digest('base64');
+    // SECURITY: Require SKADNETWORK_SECRET in production (P1 Fix #1)
+    const secret = process.env.SKADNETWORK_SECRET;
+    if (!secret && process.env.NODE_ENV === 'production') {
+      throw new Error('SKADNETWORK_SECRET must be set in production');
+    }
+    const signingSecret = secret || 'dev-skadnetwork-secret-not-for-production';
+    return crypto.createHmac('sha256', signingSecret).update(dataString).digest('base64');
   }
 
   private async verifyPostbackSignature(

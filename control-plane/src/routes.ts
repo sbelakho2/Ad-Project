@@ -96,7 +96,7 @@ import { getBusinessOverview } from './services/business-analytics';
 import { getCohortAnalysis, getRevenueForecast } from './services/advanced-analytics';
 import { processBankStatement, confirmReconciliation } from './services/reconciliation';
 import { getImpersonationLink } from './adapters/backend-api';
-import { queryReadOnly } from './database';
+import { queryReadOnly, getOperatorPool } from './database';
 
 // Sales Automation
 import * as salesAutomation from './services/sales-automation';
@@ -105,6 +105,9 @@ import * as salesAutomation from './services/sales-automation';
 import autonomousApiProxy from './routes/autonomous-api-proxy';
 import autonomousApiExecution from './routes/autonomous-api';
 import { logger } from './logger';
+
+// ApexMail - Self-hosted email service (EXECUTION mode only)
+import { createApexMailRouter } from './routes/apexmail-api';
 
 const router = Router();
 
@@ -149,14 +152,20 @@ router.get('/health', (req: Request, res: Response) => {
  * JS Integrity check - verifies served JavaScript parses correctly
  * IMPROVEMENT 1: Runtime check to catch template string escaping bugs
  * Call this after deployment to verify UI won't be broken
+ * 
+ * SECURITY NOTE: new Function() is used ONLY for syntax validation of
+ * hardcoded test strings. NEVER pass user input to this function as it
+ * would allow arbitrary code execution.
  */
 router.get('/health/js', asyncHandler(async (req: Request, res: Response) => {
   const checks: { name: string; status: 'ok' | 'error'; error?: string }[] = [];
   
   // Helper to test JS syntax
+  // SECURITY: Only use with HARDCODED strings - NEVER with user input!
   function testJsSyntax(name: string, js: string): void {
     try {
       // Use Function constructor to test parse (doesn't execute)
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
       new Function(js);
       checks.push({ name, status: 'ok' });
     } catch (err) {
@@ -1513,5 +1522,20 @@ if (IS_EXECUTION_NODE) {
 
 // Sales Controls API (available on both nodes)
 router.use('/api/sales-controls', salesControlsRouter);
+
+// ============================================
+// APEXMAIL EMAIL SERVICE (EXECUTION mode only - Test Server)
+// ============================================
+if (IS_EXECUTION_NODE) {
+  // Mount ApexMail routes on Test Server only
+  // These provide self-hosted email functionality replacing Resend
+  const pool = getOperatorPool();
+  if (pool) {
+    logger.info('[ApexMail] Mounting routes on EXECUTION node');
+    router.use('/api/apexmail', createApexMailRouter(pool));
+  } else {
+    logger.warn('[ApexMail] Pool not available, routes not mounted');
+  }
+}
 
 export default router;

@@ -62,19 +62,28 @@ router.get('/billing/audit', async (req: Request, res: Response, next: NextFunct
 
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
 
+    // Add LIMIT and OFFSET as parameterized values to prevent SQL injection
+    params.push(limit);
+    const limitParam = params.length;
+    params.push(offset);
+    const offsetParam = params.length;
+
     // Use actual table columns: id, event_type, actor, customer_id, data, ip_address, user_agent, created_at
     const sql = `
       SELECT id, customer_id as organization_id, event_type, data as metadata, created_at
       FROM billing_audit
       ${where}
       ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
+      LIMIT $${limitParam} OFFSET $${offsetParam}
     `;
     const countSql = `SELECT COUNT(1) AS count FROM billing_audit ${where}`;
 
+    // Count query uses all params except LIMIT/OFFSET
+    const countParams = params.slice(0, -2);
+
     const [rowsResult, countResult] = await Promise.all([
       query(sql, params),
-      query(countSql, params),
+      query(countSql, countParams),
     ]);
 
     const total = parseInt(String((countResult.rows[0] as any)?.count || 0), 10) || 0;

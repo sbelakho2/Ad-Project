@@ -14,6 +14,51 @@ export interface PixelResult {
   error?: string;
 }
 
+/**
+ * SECURITY: Validate URL to prevent SSRF attacks
+ * P0 Fix #12: Comprehensive URL validation for pixel firing
+ */
+function validatePixelUrl(url: string): { valid: boolean; reason?: string } {
+  try {
+    const parsed = new URL(url);
+    
+    // Only allow HTTP/HTTPS
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { valid: false, reason: 'Invalid protocol' };
+    }
+    
+    const hostname = parsed.hostname.toLowerCase();
+    
+    // Block internal hostnames
+    const blocked = [
+      'localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0',
+      '169.254.169.254', 'metadata.google.internal', '100.100.100.200',
+      'kubernetes', 'kubernetes.default', 'docker', 'host.docker.internal',
+    ];
+    if (blocked.includes(hostname)) {
+      return { valid: false, reason: 'Internal hostname not allowed' };
+    }
+    
+    // Block internal TLDs
+    const blockedSuffixes = ['.local', '.internal', '.localhost', '.lan', '.cluster.local'];
+    if (blockedSuffixes.some(suffix => hostname.endsWith(suffix))) {
+      return { valid: false, reason: 'Internal TLD not allowed' };
+    }
+    
+    // Block private IP ranges
+    const privatePatterns = [
+      /^10\./, /^172\.(1[6-9]|2[0-9]|3[01])\./, /^192\.168\./, /^169\.254\./, /^127\./,
+    ];
+    if (privatePatterns.some(p => p.test(hostname))) {
+      return { valid: false, reason: 'Private IP not allowed' };
+    }
+    
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: 'Invalid URL format' };
+  }
+}
+
 export class EventTracker {
   private readonly config: EventTrackerConfig;
 
@@ -36,6 +81,12 @@ export class EventTracker {
 
   async firePixel(url: string, macros: Record<string, string> = {}): Promise<PixelResult> {
     const expandedUrl = this.expandMacros(url, macros);
+
+    // SECURITY: Validate URL before fetching (P0 Fix #12)
+    const validation = validatePixelUrl(expandedUrl);
+    if (!validation.valid) {
+      return { success: false, error: `URL validation failed: ${validation.reason}` };
+    }
 
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
       try {

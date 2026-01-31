@@ -159,7 +159,31 @@ function tryEd25519VerifyHex(messageHex: string, signatureHex: string): boolean 
   }
 }
 
-export async function issueDailyRoot(day: string, opts?: { dryRun?: boolean }): Promise<{ day: string; root: string; sig?: string; keyId?: string; coveragePct: number; written: boolean }>
+/**
+ * AUDIT HARDENING: Track proof strength
+ * 
+ * A "strong" proof uses the receipt_hash from the network/platform (cryptographically signed).
+ * A "weak" proof falls back to sha256(request_id) when receipt_hash is missing.
+ * 
+ * Weak proofs are technically forgeable since the platform controls request_ids.
+ * This distinction is critical for audit transparency.
+ */
+export interface ProofStrengthMetrics {
+  total: number;
+  strongProofs: number;     // Used actual receipt_hash
+  weakProofs: number;       // Fell back to sha256(request_id)
+  strengthPct: number;      // Percentage of strong proofs
+}
+
+export async function issueDailyRoot(day: string, opts?: { dryRun?: boolean }): Promise<{ 
+  day: string; 
+  root: string; 
+  sig?: string; 
+  keyId?: string; 
+  coveragePct: number; 
+  proofStrength: ProofStrengthMetrics;
+  written: boolean;
+}>
 {
   const end = vraProofsIssuanceDurationSeconds.startTimer();
   const dryRun = opts?.dryRun === true;
@@ -171,10 +195,38 @@ export async function issueDailyRoot(day: string, opts?: { dryRun?: boolean }): 
     );
     const rows = rowsResult.rows;
     const total = rows.length;
+    
+    // AUDIT HARDENING: Track which proofs are strong vs weak
+    let strongProofs = 0;
+    let weakProofs = 0;
+    const weakRequestIds: string[] = []; // Track for potential flagging
+    
     // Convert to hashes — prefer receipt_hash, fallback to sha256(request_id)
-    const hashes = rows.map((r) => (r.receipt_hash && /^[0-9a-fA-F]+$/.test(r.receipt_hash) ? r.receipt_hash : sha256Hex(r.request_id)));
+    const hashes = rows.map((r) => {
+      if (r.receipt_hash && /^[0-9a-fA-F]+$/.test(r.receipt_hash)) {
+        strongProofs++;
+        return r.receipt_hash;
+      } else {
+        weakProofs++;
+        // Track weak proofs for audit trail (limit to avoid memory issues)
+        if (weakRequestIds.length < 1000) {
+          weakRequestIds.push(r.request_id);
+        }
+        return sha256Hex(r.request_id);
+      }
+    });
+    
     const included = hashes.length;
     const coveragePct = total > 0 ? (included / total) * 100 : 0;
+    const strengthPct = total > 0 ? (strongProofs / total) * 100 : 100;
+    
+    const proofStrength: ProofStrengthMetrics = {
+      total,
+      strongProofs,
+      weakProofs,
+      strengthPct,
+    };
+    
     const root = computeMerkleRoot(hashes);
     const messageHex = sha256Hex(Buffer.from(`daily_root:${day}:${root}`));
     const signResult = signWithCurrentKey(messageHex);
@@ -182,32 +234,55 @@ export async function issueDailyRoot(day: string, opts?: { dryRun?: boolean }): 
     const keyId = signResult?.keyId;
 
     try { vraProofsCoveragePct.set({ day }, Number(coveragePct.toFixed(2))); } catch {}
+    
+    // Log warning if proof strength is below threshold
+    if (strengthPct < 95 && total > 0) {
+      logger.warn('VRA Proofs: Low proof strength detected', {
+        day,
+        total,
+        strongProofs,
+        weakProofs,
+        strengthPct: strengthPct.toFixed(1),
+        sampleWeakIds: weakRequestIds.slice(0, 10), // Log sample for debugging
+      });
+    }
 
     if (!dryRun) {
-      // Insert with key_id for rotation tracking (column may not exist in older schemas)
+      // Insert with key_id and proof strength metrics for audit trail
       try {
         await insertMany(
           'proofs_daily_roots',
-          ['day', 'merkle_root', 'sig', 'key_id'],
-          [[day, root, sig, keyId || '']],
+          ['day', 'merkle_root', 'sig', 'key_id', 'strong_proofs', 'weak_proofs', 'strength_pct'],
+          [[day, root, sig, keyId || '', strongProofs, weakProofs, Number(strengthPct.toFixed(2))]],
           { onConflictColumns: ['day'], ignoreConflicts: true }
         );
       } catch {
-        // Fallback to legacy columns if key_id doesn't exist
-        await insertMany(
-          'proofs_daily_roots',
-          ['day', 'merkle_root', 'sig'],
-          [[day, root, sig]],
-          { onConflictColumns: ['day'], ignoreConflicts: true }
-        );
+        // Fallback to legacy columns if new columns don't exist
+        try {
+          await insertMany(
+            'proofs_daily_roots',
+            ['day', 'merkle_root', 'sig', 'key_id'],
+            [[day, root, sig, keyId || '']],
+            { onConflictColumns: ['day'], ignoreConflicts: true }
+          );
+        } catch {
+          // Final fallback to legacy columns
+          await insertMany(
+            'proofs_daily_roots',
+            ['day', 'merkle_root', 'sig'],
+            [[day, root, sig]],
+            { onConflictColumns: ['day'], ignoreConflicts: true }
+          );
+        }
       }
     }
     end();
-    return { day, root, sig, keyId, coveragePct, written: !dryRun };
+    return { day, root, sig, keyId, coveragePct, proofStrength, written: !dryRun };
   } catch (e) {
     end();
     logger.warn('VRA Proofs: failed to issue daily root', { day, error: (e as Error).message });
-    return { day, root: sha256Hex(''), coveragePct: 0, written: false } as any;
+    const emptyStrength: ProofStrengthMetrics = { total: 0, strongProofs: 0, weakProofs: 0, strengthPct: 100 };
+    return { day, root: sha256Hex(''), coveragePct: 0, proofStrength: emptyStrength, written: false };
   }
 }
 
@@ -216,8 +291,12 @@ export async function issueMonthlyDigest(month: string, opts?: { dryRun?: boolea
   const end = vraProofsIssuanceDurationSeconds.startTimer();
   const dryRun = opts?.dryRun === true;
   try {
-    const rootsResult = await query<CHDailyRootRow>(
-      `SELECT to_char(day, 'YYYY-MM-DD') AS day, merkle_root
+    // Fetch daily roots with their proof strength metrics (if available)
+    const rootsResult = await query<{ day: string; merkle_root: string; strong_proofs?: number; weak_proofs?: number; strength_pct?: number }>(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS day, merkle_root, 
+              COALESCE(strong_proofs, 0) AS strong_proofs,
+              COALESCE(weak_proofs, 0) AS weak_proofs,
+              COALESCE(strength_pct, 100) AS strength_pct
          FROM proofs_daily_roots
         WHERE to_char(day, 'YYYY-MM') = $1
         ORDER BY day ASC`,
@@ -226,37 +305,70 @@ export async function issueMonthlyDigest(month: string, opts?: { dryRun?: boolea
     const roots = rootsResult.rows;
     const rootList = roots.map((r) => r.merkle_root);
     const digest = computeMerkleRoot(rootList);
-    const coveragePct = roots.length > 0 ? 100 : 0; // simplistic until we track expected days
+    const coveragePct = roots.length > 0 ? 100 : 0;
+    
+    // Aggregate proof strength across the month
+    const totalStrong = roots.reduce((sum, r) => sum + (Number(r.strong_proofs) || 0), 0);
+    const totalWeak = roots.reduce((sum, r) => sum + (Number(r.weak_proofs) || 0), 0);
+    const total = totalStrong + totalWeak;
+    const avgStrengthPct = total > 0 ? (totalStrong / total) * 100 : 100;
+    
+    // Generate notes about proof strength for audit transparency
+    const notes = avgStrengthPct < 95 && total > 0
+      ? `Warning: ${totalWeak} of ${total} proofs (${(100 - avgStrengthPct).toFixed(1)}%) used request_id fallback instead of receipt_hash. These proofs are technically forgeable.`
+      : '';
+    
     const messageHex = sha256Hex(Buffer.from(`monthly_digest:${month}:${digest}`));
     const signResult = signWithCurrentKey(messageHex);
     const sig = signResult?.sig || '';
     const keyId = signResult?.keyId;
     
     if (!dryRun) {
-      // Insert with key_id for rotation tracking (column may not exist in older schemas)
+      // Insert with proof strength metrics for audit trail
       try {
         await insertMany(
           'proofs_monthly_digest',
-          ['month', 'digest', 'sig', 'key_id', 'coverage_pct', 'notes'],
-          [[month, digest, sig, keyId || '', Number(coveragePct.toFixed(2)), '']],
+          ['month', 'digest', 'sig', 'key_id', 'coverage_pct', 'strong_proofs', 'weak_proofs', 'strength_pct', 'notes'],
+          [[month, digest, sig, keyId || '', Number(coveragePct.toFixed(2)), totalStrong, totalWeak, Number(avgStrengthPct.toFixed(2)), notes]],
           { onConflictColumns: ['month'], ignoreConflicts: true }
         );
       } catch {
-        // Fallback to legacy columns if key_id doesn't exist
-        await insertMany(
-          'proofs_monthly_digest',
-          ['month', 'digest', 'sig', 'coverage_pct', 'notes'],
-          [[month, digest, sig, Number(coveragePct.toFixed(2)), '']],
-          { onConflictColumns: ['month'], ignoreConflicts: true }
-        );
+        // Fallback to legacy columns if new columns don't exist
+        try {
+          await insertMany(
+            'proofs_monthly_digest',
+            ['month', 'digest', 'sig', 'key_id', 'coverage_pct', 'notes'],
+            [[month, digest, sig, keyId || '', Number(coveragePct.toFixed(2)), notes]],
+            { onConflictColumns: ['month'], ignoreConflicts: true }
+          );
+        } catch {
+          // Final fallback
+          await insertMany(
+            'proofs_monthly_digest',
+            ['month', 'digest', 'sig', 'coverage_pct', 'notes'],
+            [[month, digest, sig, Number(coveragePct.toFixed(2)), notes]],
+            { onConflictColumns: ['month'], ignoreConflicts: true }
+          );
+        }
       }
     }
+    
+    // Log warning for low proof strength months
+    if (avgStrengthPct < 95 && total > 0) {
+      logger.warn('VRA Proofs: Monthly digest has low proof strength', {
+        month,
+        totalStrong,
+        totalWeak,
+        strengthPct: avgStrengthPct.toFixed(1),
+      });
+    }
+    
     end();
     return { month, digest, sig, keyId, coveragePct, written: !dryRun };
   } catch (e) {
     end();
     logger.warn('VRA Proofs: failed to issue monthly digest', { month, error: (e as Error).message });
-    return { month, digest: sha256Hex(''), coveragePct: 0, written: false } as any;
+    return { month, digest: sha256Hex(''), coveragePct: 0, written: false } as { month: string; digest: string; sig?: string; keyId?: string; coveragePct: number; written: boolean };
   }
 }
 

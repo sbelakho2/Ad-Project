@@ -374,10 +374,95 @@ export class PaymentProcessor {
     return false;
   }
 
+  // SECURITY: Payout validation constants (P0 Fix #11)
+  private static readonly MIN_PAYOUT_AMOUNT = 10; // Minimum $10 payout
+  private static readonly MAX_PAYOUT_AMOUNT = 50000; // Maximum $50,000 per payout
+  private static readonly VALID_CURRENCIES = new Set(['USD', 'EUR', 'GBP', 'CAD', 'AUD']);
+
+  /**
+   * Validate payout request
+   * SECURITY: P0 Fix #11 - Comprehensive payout amount validation
+   */
+  private validatePayoutRequest(request: PayoutRequest): { valid: boolean; error?: string } {
+    // Validate amount is a finite number
+    if (!Number.isFinite(request.amount)) {
+      logger.warn('Payout rejected: invalid amount type', {
+        payoutId: request.payoutId,
+        amount: request.amount,
+      });
+      return { valid: false, error: 'Invalid amount format' };
+    }
+
+    // Validate amount is positive
+    if (request.amount <= 0) {
+      logger.warn('Payout rejected: non-positive amount', {
+        payoutId: request.payoutId,
+        publisherId: request.publisherId,
+        amount: request.amount,
+      });
+      return { valid: false, error: 'Amount must be greater than zero' };
+    }
+
+    // Validate minimum payout threshold
+    if (request.amount < PaymentProcessor.MIN_PAYOUT_AMOUNT) {
+      logger.warn('Payout rejected: below minimum threshold', {
+        payoutId: request.payoutId,
+        publisherId: request.publisherId,
+        amount: request.amount,
+        minimum: PaymentProcessor.MIN_PAYOUT_AMOUNT,
+      });
+      return { valid: false, error: `Amount below minimum payout threshold ($${PaymentProcessor.MIN_PAYOUT_AMOUNT})` };
+    }
+
+    // Validate maximum payout limit
+    if (request.amount > PaymentProcessor.MAX_PAYOUT_AMOUNT) {
+      logger.warn('Payout rejected: exceeds maximum limit', {
+        payoutId: request.payoutId,
+        publisherId: request.publisherId,
+        amount: request.amount,
+        maximum: PaymentProcessor.MAX_PAYOUT_AMOUNT,
+      });
+      return { valid: false, error: `Amount exceeds maximum payout limit ($${PaymentProcessor.MAX_PAYOUT_AMOUNT})` };
+    }
+
+    // Validate decimal precision (max 2 decimal places to prevent floating point attacks)
+    const decimalParts = request.amount.toString().split('.');
+    if (decimalParts.length > 1 && decimalParts[1].length > 2) {
+      logger.warn('Payout rejected: excessive decimal precision', {
+        payoutId: request.payoutId,
+        publisherId: request.publisherId,
+        amount: request.amount,
+      });
+      return { valid: false, error: 'Amount must have at most 2 decimal places' };
+    }
+
+    // Validate currency
+    if (!PaymentProcessor.VALID_CURRENCIES.has(request.currency?.toUpperCase())) {
+      logger.warn('Payout rejected: invalid currency', {
+        payoutId: request.payoutId,
+        currency: request.currency,
+      });
+      return { valid: false, error: 'Invalid or unsupported currency' };
+    }
+
+    return { valid: true };
+  }
+
   /**
    * Process payout via Stripe
    */
   async processPayout(request: PayoutRequest): Promise<PayoutResult> {
+    // SECURITY: Validate payout request first (P0 Fix #11)
+    const validation = this.validatePayoutRequest(request);
+    if (!validation.valid) {
+      return {
+        success: false,
+        provider: 'stripe',
+        error: validation.error,
+        retryable: false,
+      };
+    }
+
     // Simple per-publisher rate limiter to avoid bursts
     if (this.isRateLimited(request.publisherId)) {
       logger.warn('Payout rate limit exceeded for publisher', { publisherId: request.publisherId });

@@ -89,8 +89,32 @@ func (del *DoubleEntryLedger) RecordRevenue(ctx context.Context, publisherID str
 }
 
 // RecordPayout records payout (debit from publisher balance)
+// CRITICAL: Uses distributed lock to prevent race conditions in concurrent payout requests
 func (del *DoubleEntryLedger) RecordPayout(ctx context.Context, publisherID string, amount decimal.Decimal, currency, payoutID string) error {
-	// Check sufficient balance
+	// Acquire distributed lock to prevent race condition
+	lockKey := fmt.Sprintf("lock:payout:%s:%s", publisherID, currency)
+	lockValue := fmt.Sprintf("%s:%d", payoutID, time.Now().UnixNano())
+	lockTTL := 30 * time.Second
+
+	// Try to acquire lock with NX (only set if not exists)
+	acquired, err := del.redis.SetNX(ctx, lockKey, lockValue, lockTTL).Result()
+	if err != nil {
+		return fmt.Errorf("failed to acquire payout lock: %w", err)
+	}
+	if !acquired {
+		return fmt.Errorf("payout already in progress for publisher %s", publisherID)
+	}
+
+	// Ensure lock is released when done
+	defer func() {
+		// Only release if we still hold the lock (compare value to prevent releasing someone else's lock)
+		currentVal, err := del.redis.Get(ctx, lockKey).Result()
+		if err == nil && currentVal == lockValue {
+			del.redis.Del(ctx, lockKey)
+		}
+	}()
+
+	// Check sufficient balance (now protected by lock)
 	balance, err := del.GetBalance(ctx, publisherID, currency)
 	if err != nil {
 		return err
@@ -290,21 +314,63 @@ func (po *PaymentOrchestrator) GetPayableAmount(ctx context.Context, publisherID
 }
 
 // InitiatePayout initiates a payout to publisher
-func (po *PaymentOrchestrator) InitiatePayout(ctx context.Context, publisherID string, amount decimal.Decimal) (string, error) {
+// The race condition protection is now in RecordPayout via distributed lock
+// SECURITY: Added currency parameter override and additional validation (P0 Fix #11)
+func (po *PaymentOrchestrator) InitiatePayout(ctx context.Context, publisherID string, amount decimal.Decimal, currency string) (string, error) {
+	// SECURITY: Validate amount is positive
+	if amount.LessThanOrEqual(decimal.Zero) {
+		return "", fmt.Errorf("payout amount must be positive, got %s", amount)
+	}
+
+	// SECURITY: Define maximum payout limit to prevent fraud
+	maxPayout := decimal.NewFromFloat(50000.0)
+	if amount.GreaterThan(maxPayout) {
+		log.WithFields(log.Fields{
+			"publisher_id": publisherID,
+			"amount":       amount.String(),
+			"max":          maxPayout.String(),
+		}).Warn("Payout rejected: exceeds maximum limit")
+		return "", fmt.Errorf("payout amount %s exceeds maximum limit %s", amount, maxPayout)
+	}
+
+	// SECURITY: Validate precision (max 2 decimal places)
+	truncated := amount.Truncate(2)
+	if !amount.Equal(truncated) {
+		return "", fmt.Errorf("payout amount must have at most 2 decimal places")
+	}
+
 	// Get payment terms
 	terms, err := po.getPaymentTerms(ctx, publisherID)
 	if err != nil {
 		return "", err
 	}
 
-	// Create payout record
+	// Use provided currency or fall back to terms currency
+	payoutCurrency := currency
+	if payoutCurrency == "" {
+		payoutCurrency = terms.Currency
+	}
+
+	// Validate minimum payout amount
+	if amount.LessThan(terms.MinimumPayout) {
+		return "", fmt.Errorf("payout amount %s is below minimum %s", amount, terms.MinimumPayout)
+	}
+
+	// Create payout record with unique ID
 	payoutID := fmt.Sprintf("payout_%s_%d", publisherID, time.Now().UnixNano())
 
+	// Record in ledger FIRST (this has the distributed lock for race condition protection)
+	// If this fails, we don't create any payout record
+	if err := po.ledger.RecordPayout(ctx, publisherID, amount, payoutCurrency, payoutID); err != nil {
+		return "", fmt.Errorf("failed to record payout in ledger: %w", err)
+	}
+
+	// Only after successful ledger debit, create the payout record
 	payout := map[string]interface{}{
 		"id":           payoutID,
 		"publisher_id": publisherID,
 		"amount":       amount.String(),
-		"currency":     terms.Currency,
+		"currency":     payoutCurrency,
 		"method":       terms.PaymentMethod,
 		"status":       "pending",
 		"created_at":   time.Now().Unix(),
@@ -314,15 +380,13 @@ func (po *PaymentOrchestrator) InitiatePayout(ctx context.Context, publisherID s
 	data, _ := json.Marshal(payout)
 	key := fmt.Sprintf("payout:%s", payoutID)
 	if err := po.redis.Set(ctx, key, data, 0).Err(); err != nil {
-		return "", err
+		// Payout record failed but ledger was already debited
+		// This is a critical error - log for manual reconciliation
+		log.WithError(err).WithField("payout_id", payoutID).Error("CRITICAL: Ledger debited but payout record failed to save - manual reconciliation needed")
+		return "", fmt.Errorf("failed to save payout record (ledger already debited - needs reconciliation): %w", err)
 	}
 
-	// Record in ledger
-	if err := po.ledger.RecordPayout(ctx, publisherID, amount, terms.Currency, payoutID); err != nil {
-		return "", err
-	}
-
-	// Process payout based on method
+	// Process payout based on method (async)
 	go po.processPayout(context.Background(), payoutID, terms)
 
 	return payoutID, nil

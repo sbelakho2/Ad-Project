@@ -415,10 +415,13 @@ export class BeaconManager {
     // Custom macros from context
     if (context?.macros) {
       for (const [key, value] of Object.entries(context.macros)) {
+        // Escape regex special characters in key to prevent ReDoS
+        const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        
         const patterns = [
-          new RegExp(`\\[${key}\\]`, 'gi'),
-          new RegExp(`\\{${key}\\}`, 'gi'),
-          new RegExp(`%5B${key}%5D`, 'gi'), // URL-encoded
+          new RegExp(`\\[${escapedKey}\\]`, 'gi'),
+          new RegExp(`\\{${escapedKey}\\}`, 'gi'),
+          new RegExp(`%5B${escapedKey}%5D`, 'gi'), // URL-encoded
         ];
 
         for (const pattern of patterns) {

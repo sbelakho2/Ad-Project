@@ -7,34 +7,34 @@ The ApexMediation Control Plane (`admin.apexmediation.ee`) is the central nerve 
 
 ## 🏗️ Sales Automation Architecture
 
-> **⚠️ CRITICAL: The Control Plane on App Server is STRICTLY A PROXY for sales automation.**
+> **⚠️ CRITICAL: The Control Plane on App Server is modularized and uses ApexTunnel for cross-server communication.**
 
 | Component | Server | Port | Role |
 |-----------|--------|------|------|
-| Control Plane | App (46.62.252.96) | 4000 | Proxy only - forwards `/api/autonomous/*` to test server |
+| Control Plane | App (46.62.252.96) | 4000 | Refactored modular controllers |
 | **Sales API** | **Test (157.90.126.205)** | 4001 | **ALL orchestration, spintax, Thompson sampler, scoring** |
-| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (icebreakers, classification) |
-| DB Access | Test→App→DB | 6432 | SSH tunnel through App Server PgBouncer |
+| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (ONNX 9-Dim, classification) |
+| DB Access | Test→DB | 5432 | Direct P2P connectivity via ApexTunnel |
 
-### SSH Tunnels (systemd services)
+### ApexTunnel (P2P Mesh Networking)
 
 | Service | Server | Purpose |
 |---------|--------|---------|
-| `sales-api-tunnel.service` | App | localhost:4001 → Test:4001 |
-| `edge-tunnel.service` | App | localhost:3500 → Test:3500 |
-| `db-tunnel.service` | Test | localhost:6432 → App:6432 → DB:5432 |
+| `apextunnel.service` | All Nodes | P2P encrypted mesh replacing legacy SSH tunnels |
+| Identity | Ed25519 | Mutual auth using `APEX_CONFIG_SIGNING_KEY` |
+| Protocol | Noise (UDP) | Low-latency, high-availability P2P connectivity |
 
 ### Checking Sales Automation Health
 
 ```bash
-# From App Server (via proxy)
+# From App Server (via ApexTunnel)
 curl -s http://localhost:4000/api/autonomous/health
 
-# Direct to Test Server (internal)
-./scripts/ops/hetzner_ssh.sh test -- "curl -s http://localhost:4001/api/autonomous/health"
+# Direct to Test Server (internal P2P IP)
+curl -s http://10.0.0.3:4001/api/autonomous/health
 
-# Check tunnel status on App Server
-./scripts/ops/hetzner_ssh.sh app -- "systemctl status sales-api-tunnel"
+# Check ApexTunnel status
+./scripts/ops/hetzner_ssh.sh app -- "systemctl status apextunnel"
 
 # Check Sales API on Test Server
 ./scripts/ops/hetzner_ssh.sh test -- "pm2 status sales-api"
@@ -69,6 +69,7 @@ Located under the **Compliance** tab.
 ### Core Performance
 - **Real-Time Volume**: Monitor Impressions and Revenue (USD) with WoW (Week-over-Week) and DoD (Day-over-Day) delta tracking.
 - **Active footprint**: Real-time count of active publishers and VRA experiments.
+- **Fraud Drift**: Dynamic PSI monitoring for 9-dimensional ML feature shapes. Alerts on distribution shifts vs. 7-day baseline.
 
 ### CEO Metrics
 - **Runway**: Estimated months of operation remaining based on current bank balances and 90-day average burn rate.

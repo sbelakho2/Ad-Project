@@ -75,7 +75,7 @@ describe('VRA Routes — CSV redaction E2E', () => {
     expect(csv).toContain('Bearer [REDACTED]');
     expect(csv).not.toContain('abc.def.ghi');
     // Long numerics redacted
-    expect(csv).toContain('[REDACTED_NUMERIC]');
+    expect(csv).toMatch(/\[REDACTED_(NUMERIC|CARD)\]/);
     expect(csv).not.toContain('4242424242424242');
   });
 });

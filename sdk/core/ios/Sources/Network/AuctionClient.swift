@@ -203,7 +203,7 @@ public final class AuctionClient {
     private func buildRequestBody(placementId: String, adType: String, correlationId: String) -> [String: Any] {
         var body: [String: Any] = [
             "placementId": placementId,
-            "adType": adType,
+            "adFormat": adType,
             "device": deviceInfo(),
             "app": appInfo(),
             "meta": [

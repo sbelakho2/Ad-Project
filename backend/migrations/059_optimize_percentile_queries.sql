@@ -147,17 +147,19 @@ BEGIN
       AND latency_ms IS NOT NULL;
     
     IF v_count > p_sample_threshold THEN
-        -- Use sampling (TABLESAMPLE BERNOULLI) for large datasets
-        -- Sample ~10% of data
+        -- SECURITY FIX: Avoid TABLESAMPLE BERNOULLI on multi-tenant tables.
+        -- TABLESAMPLE samples the base table BEFORE filtering, which leads to 0 rows
+        -- for small experiments. Instead, we use random() filtering after the index-based scan.
         SELECT PERCENTILE_CONT(p_percentile) WITHIN GROUP (ORDER BY latency_ms)
         INTO v_result
         FROM (
             SELECT latency_ms
-            FROM migration_shadow_outcomes TABLESAMPLE BERNOULLI(10)
+            FROM migration_shadow_outcomes
             WHERE experiment_id = p_experiment_id
               AND arm = p_arm
               AND created_at >= NOW() - (p_window_minutes || ' minutes')::interval
               AND latency_ms IS NOT NULL
+              AND random() < 0.1 -- Sample ~10% of the filtered results
         ) sampled;
     ELSE
         -- Exact percentile for smaller datasets

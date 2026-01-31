@@ -30,7 +30,9 @@ export class I18n {
   private formatString(value: string, params?: Record<string, string | number>) {
     if (!params) return value
     return Object.entries(params).reduce((str, [param, val]) => {
-      return str.replace(new RegExp(`{${param}}`, 'g'), String(val))
+      // Escape regex special characters in param to prevent ReDoS
+      const escapedParam = param.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return str.replace(new RegExp(`{${escapedParam}}`, 'g'), String(val))
     }, value)
   }
 

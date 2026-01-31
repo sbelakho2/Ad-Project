@@ -197,12 +197,15 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
     messageId,
   });
 
-  // Log the verification/reset URL for easy access in development
-  if (options.data.verificationUrl) {
-    logger.info(`📧 Verification URL: ${options.data.verificationUrl}`);
-  }
-  if (options.data.resetUrl) {
-    logger.info(`📧 Password Reset URL: ${options.data.resetUrl}`);
+  // Log the verification/reset URL ONLY in development for debugging
+  // P2 Fix #1: Never log sensitive URLs in production
+  if (process.env.NODE_ENV !== 'production') {
+    if (options.data.verificationUrl) {
+      logger.info(`📧 Verification URL: ${options.data.verificationUrl}`);
+    }
+    if (options.data.resetUrl) {
+      logger.info(`📧 Password Reset URL: ${options.data.resetUrl}`);
+    }
   }
 
   return { success: true, messageId };

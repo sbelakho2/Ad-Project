@@ -78,10 +78,10 @@ Our platform directly addresses each failure point with demonstrable technical s
           │  └─────────────────────────────────────────┘   │
           │                                                  │
           │  ┌─────────────────────────────────────────┐   │
-          │  │    Fraud & Quality Engine (Go/ML)       │   │
-          │  │  • Click-Level Validation               │   │
-          │  │  • Device Fingerprinting               │   │
-          │  │  • Behavioral Analysis                 │   │
+          │  │    Fraud & Quality Engine (Python/ML)  │   │
+          │  │  • 9-Dim Feature Vector Synchronized   │   │
+          │  │  • Dynamic PSI Rolling Baseline        │   │
+          │  │  • Behavioral Analysis (ONNX)          │   │
           │  │  • GIVT/SIVT Detection                 │   │
           │  └─────────────────────────────────────────┘   │
           └──────────────────────────────────────────────────┘
@@ -89,8 +89,8 @@ Our platform directly addresses each failure point with demonstrable technical s
                     ┌────────────▼────────────┐
                     │   Data Infrastructure   │
                     │                         │
-                    │ • ClickHouse (RTB)     │
-                    │ • BigQuery (Analytics)  │
+                    │ • Postgres (BRIN/HLL)   │
+                    │ • T-Digest (p95 Latency) │
                     │ • S3/GCS (Archives)    │
                     │ • Pub/Sub (Streaming)  │
                     └─────────────────────────┘
@@ -115,6 +115,18 @@ Our platform directly addresses each failure point with demonstrable technical s
 - Weekly payouts with same-day emergency withdrawals
 - Transparent ledger with line-item visibility
 - Automatic failover between payment rails
+
+**4. ApexTunnel (P2P Mesh Networking)**
+- Custom P2P overlay network replacing fragile SSH tunnels
+- Noise Protocol Framework for authenticated encryption
+- Ed25519 node identity based on APEX_CONFIG_SIGNING_KEY
+- UDP Hole Punching for NAT traversal and automatic relay failover
+
+**5. Migration Studio & VRA Trust**
+- Server-side authoritative signal overrides (Anti-SDK Escalation)
+- Full Outer Join reconciliation (Zero Revenue Leakage)
+- BRIN-indexed time-series snapshots for sub-second analysis
+- HMAC-SHA256 salted privacy for all user identifiers
 
 ---
 

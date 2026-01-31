@@ -159,6 +159,29 @@ export async function reconcileWindow(params: ReconcileParams): Promise<Reconcil
       });
     }
 
+    // 4.1) Granular Discrepancy Detection (Masking Fix)
+    // Identifies individual requests where paid != expected, even if aggregate gap is small.
+    if (!dryRun) {
+      try {
+        await query(
+          `INSERT INTO vra_granular_discrepancies (publisher_id, request_id, network_type, expected_value, paid_value)
+           SELECT e.publisher_id, e.request_id, e.network_type, e.expected_value, COALESCE(r.revenue_usd, 0)
+             FROM recon_expected e
+             LEFT JOIN analytics_revenue_events r ON r.metadata->>'request_id' = e.request_id
+            WHERE e.ts >= $1::timestamptz
+              AND e.ts <  $2::timestamptz${publisherFilter(2)}
+              AND ABS(e.expected_value - COALESCE(r.revenue_usd, 0)) > 0.0001
+           ON CONFLICT (request_id, network_type) DO UPDATE SET
+             expected_value = EXCLUDED.expected_value,
+             paid_value = EXCLUDED.paid_value,
+             observed_at = NOW()`,
+          buildParams([from, to])
+        );
+      } catch (err) {
+        logger.warn('VRA: Failed to record granular discrepancies', { error: (err as Error).message });
+      }
+    }
+
     // 5) IVT outlier rule (approximation): compare current window IVT% vs 30-day p95 + band
     try {
       const band = Math.max(0, IVT_P95_BAND_PP) / 100; // convert pp -> fraction

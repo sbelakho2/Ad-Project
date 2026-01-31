@@ -136,11 +136,21 @@ func main() {
 		})
 	}).Methods("GET")
 
+	// Payout validation constants - SECURITY: P0 Fix #11
+	var (
+		minPayoutAmount = decimal.NewFromFloat(10.0)    // Minimum $10 payout
+		maxPayoutAmount = decimal.NewFromFloat(50000.0) // Maximum $50,000 per payout
+		validCurrencies = map[string]bool{
+			"USD": true, "EUR": true, "GBP": true, "CAD": true, "AUD": true,
+		}
+	)
+
 	// Initiate payout
 	router.HandleFunc("/v1/payout", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			PublisherID string `json:"publisher_id"`
 			Amount      string `json:"amount"`
+			Currency    string `json:"currency"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -148,13 +158,73 @@ func main() {
 			return
 		}
 
-		amount, err := decimal.NewFromString(req.Amount)
-		if err != nil {
-			http.Error(w, "Invalid amount", http.StatusBadRequest)
+		// SECURITY: Validate publisher ID format
+		if req.PublisherID == "" || len(req.PublisherID) > 64 {
+			http.Error(w, "Invalid publisher_id", http.StatusBadRequest)
 			return
 		}
 
-		payoutID, err := paymentOrchestrator.InitiatePayout(r.Context(), req.PublisherID, amount)
+		// SECURITY: Validate currency
+		currency := req.Currency
+		if currency == "" {
+			currency = "USD" // Default to USD
+		}
+		if !validCurrencies[currency] {
+			http.Error(w, "Invalid or unsupported currency", http.StatusBadRequest)
+			return
+		}
+
+		amount, err := decimal.NewFromString(req.Amount)
+		if err != nil {
+			http.Error(w, "Invalid amount format", http.StatusBadRequest)
+			return
+		}
+
+		// SECURITY: Validate amount is positive (P0 Fix #11)
+		if amount.LessThanOrEqual(decimal.Zero) {
+			log.WithFields(log.Fields{
+				"publisher_id": req.PublisherID,
+				"amount":       req.Amount,
+			}).Warn("Payout rejected: non-positive amount")
+			http.Error(w, "Amount must be greater than zero", http.StatusBadRequest)
+			return
+		}
+
+		// SECURITY: Validate minimum payout threshold (P0 Fix #11)
+		if amount.LessThan(minPayoutAmount) {
+			log.WithFields(log.Fields{
+				"publisher_id": req.PublisherID,
+				"amount":       req.Amount,
+				"minimum":      minPayoutAmount.String(),
+			}).Warn("Payout rejected: below minimum threshold")
+			http.Error(w, "Amount below minimum payout threshold ($10)", http.StatusBadRequest)
+			return
+		}
+
+		// SECURITY: Validate maximum payout limit (P0 Fix #11)
+		if amount.GreaterThan(maxPayoutAmount) {
+			log.WithFields(log.Fields{
+				"publisher_id": req.PublisherID,
+				"amount":       req.Amount,
+				"maximum":      maxPayoutAmount.String(),
+			}).Warn("Payout rejected: exceeds maximum limit")
+			http.Error(w, "Amount exceeds maximum payout limit ($50,000)", http.StatusBadRequest)
+			return
+		}
+
+		// SECURITY: Validate amount has reasonable precision (max 2 decimal places)
+		// This prevents floating point manipulation attacks
+		truncated := amount.Truncate(2)
+		if !amount.Equal(truncated) {
+			log.WithFields(log.Fields{
+				"publisher_id": req.PublisherID,
+				"amount":       req.Amount,
+			}).Warn("Payout rejected: excessive decimal precision")
+			http.Error(w, "Amount must have at most 2 decimal places", http.StatusBadRequest)
+			return
+		}
+
+		payoutID, err := paymentOrchestrator.InitiatePayout(r.Context(), req.PublisherID, amount, currency)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -164,6 +234,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{
 			"payout_id": payoutID,
 			"status":    "pending",
+			"currency":  currency,
 		})
 	}).Methods("POST")
 

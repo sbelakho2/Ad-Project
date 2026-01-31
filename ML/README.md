@@ -68,7 +68,19 @@ python ML/scripts/train_supervised_logreg.py \
   --out-dir artifacts/model --validate-features --validate-limit 500
 ```
 
-CI lanes
+### ML Production Realignment & Fraud Detection ✅
+
+The ML pipelines and production inference services are now synchronized on a 9-dimensional feature vector, ensuring model performance parity.
+
+#### 1. Feature Shape Synchronization
+- **Research & Production**: Both use the same 9-dimensional input shape (auction stats, network ASN, device types, etc.).
+- **Validation**: `ML/scripts/feature_engineering.py` and `services/inference-ml/main.py` share a unified schema.
+
+#### 2. Dynamic Fraud Drift Monitoring
+- **Rolling Baseline**: Replaced hardcoded fraud distributions with a dynamic rolling baseline (7-day window).
+- **PSI Analysis**: Automated Population Stability Index (PSI) calculation compares hourly traffic against the baseline to detect distribution shifts and alert on model degradation or novel fraud patterns.
+
+### CI lanes
 - PR fast lane: `.github/workflows/ml-pr.yml`
   - Installs via constraints, runs unit tests, executes manifest SoT guard, and runs a schema‑validation smoke.
 - Nightly lane: `.github/workflows/ml-nightly.yml`

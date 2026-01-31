@@ -3,40 +3,56 @@
  * 
  * Orchestrates syncing revenue data from connected ad networks
  * and running reconciliation jobs.
+ * 
+ * CONCURRENCY FIX: Uses distributed locking via Redis to prevent race conditions
+ * in multi-instance deployments. Without locking, concurrent syncs could cause:
+ * - Duplicate revenue inserts (bypassing unique constraints via timing)
+ * - Conflicting reconciliation calculations
+ * - Inconsistent state across instances
  */
 
 import { Pool } from 'pg';
 import logger from '../../utils/logger';
 import { NetworkConnectorService, NetworkConnection, NetworkType, ConnectionCredentials } from './networkConnectorService';
 import { reconcileWindow, ReconcileParams, ReconcileResult } from './reconcile';
+import { withLock, lockKeys, acquireLock, releaseLock } from './vraLock';
 
 export interface SyncResult {
   connectionId: string;
   networkType: NetworkType;
-  status: 'success' | 'partial' | 'error';
+  status: 'success' | 'partial' | 'error' | 'skipped';
   rowsFetched: number;
   rowsInserted: number;
   rowsUpdated: number;
   revenueUsd: number;
   durationMs: number;
   error?: string;
+  /** Indicates sync was skipped due to another instance holding the lock */
+  lockedBy?: string;
 }
 
 export interface ReconciliationResult {
-  runId: string;
+  runId?: string;  // Optional when skipped
   publisherId: string;
-  status: 'completed' | 'error';
-  windowStart: string;
-  windowEnd: string;
-  expectedUsd: number;
-  paidUsd: number;
-  varianceUsd: number;
-  variancePercent: number;
-  coveragePercent: number;
-  deltasCount: number;
-  deltasByKind: Record<string, number>;
-  durationMs: number;
-  alerts: Array<{ type: string; severity: string; message: string }>;
+  status: 'completed' | 'error' | 'skipped';  // FIX #6: Added 'skipped' for lock contention
+  windowStart: string | Date;  // Allow Date for skipped results
+  windowEnd: string | Date;    // Allow Date for skipped results
+  expectedUsd?: number;        // Optional when skipped
+  paidUsd?: number;            // Alias for actualRevenueUsd
+  actualRevenueUsd?: number;   // Alias for paidUsd  
+  varianceUsd?: number;        // Optional when skipped
+  variancePercent?: number;    // Optional when skipped
+  discrepancyUsd?: number;     // Alias for varianceUsd
+  discrepancyPct?: number;     // Alias for variancePercent
+  matchedRows?: number;        // For tracking
+  unmatchedRows?: number;      // For tracking
+  coveragePercent?: number;    // Optional when skipped
+  deltasCount?: number;        // Optional when skipped
+  deltasByKind?: Record<string, number>;  // Optional when skipped
+  durationMs?: number;         // Optional when skipped
+  alerts?: Array<{ type: string; severity: string; message: string }>;  // Optional when skipped
+  error?: string;              // Error message when skipped or error status
+  expectedRevenueUsd?: number; // Alias for expectedUsd
 }
 
 export class VraSyncService {
@@ -48,6 +64,7 @@ export class VraSyncService {
 
   /**
    * Sync all connections due for update
+   * Uses distributed locking to prevent concurrent syncs of the same connection
    */
   async syncAllDue(): Promise<SyncResult[]> {
     const connections = await this.connectorService.getConnectionsDueForSync();
@@ -77,92 +94,151 @@ export class VraSyncService {
   }
 
   /**
-   * Sync a specific connection
+   * Sync a specific connection with distributed locking
+   * 
+   * FIX #6: Race condition prevention - uses Redis-based distributed lock
+   * to prevent concurrent syncs of the same connection across multiple instances.
    */
   async syncConnection(connectionId: string): Promise<SyncResult> {
-    const startTime = Date.now();
-    const conn = await this.connectorService.getConnection(connectionId);
+    const lockKey = lockKeys.syncConnection(connectionId);
     
-    if (!conn) {
-      throw new Error('Connection not found');
-    }
-
-    const creds = await this.connectorService.getCredentials(connectionId);
-    if (!creds) {
-      throw new Error('No credentials found');
-    }
-
-    // Record sync start
-    const syncHistoryId = await this.recordSyncStart(connectionId, conn.syncLookbackDays || 3);
-
-    try {
-      let result: SyncResult;
-
-      switch (conn.networkType) {
-        case 'admob':
-          result = await this.syncAdMob(conn, creds);
-          break;
-        case 'unity':
-          result = await this.syncUnity(conn, creds);
-          break;
-        case 'applovin':
-          result = await this.syncAppLovin(conn, creds);
-          break;
-        case 'ironsource':
-          result = await this.syncIronSource(conn, creds);
-          break;
-        case 'meta':
-          result = await this.syncMeta(conn, creds);
-          break;
-        case 'vungle':
-          result = await this.syncVungle(conn, creds);
-          break;
-        default:
-          throw new Error(`Unknown network type: ${conn.networkType}`);
-      }
-
-      result.durationMs = Date.now() - startTime;
-
-      // Record success
-      await this.recordSyncComplete(syncHistoryId, result);
-      await this.connectorService.recordSyncSuccess(connectionId);
-
-      logger.info('VRA Sync completed', {
-        connectionId,
-        network: conn.networkType,
-        rowsInserted: result.rowsInserted,
-        revenueUsd: result.revenueUsd,
-      });
-
-      return result;
-    } catch (err) {
-      const error = (err as Error).message;
-      await this.recordSyncError(syncHistoryId, error);
-      await this.connectorService.updateConnectionStatus(connectionId, 'error', error);
-
+    // Try to acquire distributed lock (5 min TTL, suitable for sync operations)
+    const lock = await acquireLock(lockKey, { ttlSeconds: 300 });
+    
+    if (!lock) {
+      logger.warn('Sync already in progress for connection', { connectionId, lockKey });
       return {
         connectionId,
-        networkType: conn.networkType,
-        status: 'error',
+        networkType: 'unknown' as NetworkType,
+        status: 'skipped',
         rowsFetched: 0,
         rowsInserted: 0,
         rowsUpdated: 0,
         revenueUsd: 0,
-        durationMs: Date.now() - startTime,
-        error,
+        durationMs: 0,
+        error: 'Sync already in progress (locked by another instance)',
+        lockedBy: lockKey,
       };
+    }
+    
+    const startTime = Date.now();
+    
+    try {
+      const conn = await this.connectorService.getConnection(connectionId);
+      
+      if (!conn) {
+        throw new Error('Connection not found');
+      }
+
+      const creds = await this.connectorService.getCredentials(connectionId);
+      if (!creds) {
+        throw new Error('No credentials found');
+      }
+
+      // Record sync start
+      const syncHistoryId = await this.recordSyncStart(connectionId, conn.syncLookbackDays || 3);
+
+      try {
+        let result: SyncResult;
+
+        switch (conn.networkType) {
+          case 'admob':
+            result = await this.syncAdMob(conn, creds);
+            break;
+          case 'unity':
+            result = await this.syncUnity(conn, creds);
+            break;
+          case 'applovin':
+            result = await this.syncAppLovin(conn, creds);
+            break;
+          case 'ironsource':
+            result = await this.syncIronSource(conn, creds);
+            break;
+          case 'meta':
+            result = await this.syncMeta(conn, creds);
+            break;
+          case 'vungle':
+            result = await this.syncVungle(conn, creds);
+            break;
+          default:
+            throw new Error(`Unknown network type: ${conn.networkType}`);
+        }
+
+        result.durationMs = Date.now() - startTime;
+
+        // Record success
+        await this.recordSyncComplete(syncHistoryId, result);
+        await this.connectorService.recordSyncSuccess(connectionId);
+
+        logger.info('VRA Sync completed', {
+          connectionId,
+          network: conn.networkType,
+          rowsInserted: result.rowsInserted,
+          revenueUsd: result.revenueUsd,
+        });
+
+        return result;
+      } catch (err) {
+        const error = (err as Error).message;
+        await this.recordSyncError(syncHistoryId, error);
+        await this.connectorService.updateConnectionStatus(connectionId, 'error', error);
+
+        return {
+          connectionId,
+          networkType: conn.networkType,
+          status: 'error',
+          rowsFetched: 0,
+          rowsInserted: 0,
+          rowsUpdated: 0,
+          revenueUsd: 0,
+          durationMs: Date.now() - startTime,
+          error,
+        };
+      }
+    } finally {
+      // Always release the lock, even on error
+      await releaseLock(lock);
     }
   }
 
   /**
-   * Run reconciliation for a publisher
+   * Run reconciliation for a publisher with distributed locking
    * Delegates core financial calculations to reconcileWindow for precision
+   * 
+   * FIX #6: Race condition prevention - uses Redis-based distributed lock
+   * to prevent concurrent reconciliation of the same publisher/window.
    */
   async runReconciliation(
     publisherId: string,
     windowStart: Date,
     windowEnd: Date
   ): Promise<ReconciliationResult> {
+    const lockKey = lockKeys.reconciliation(publisherId, windowStart.toISOString().split('T')[0]);
+    
+    // Try to acquire distributed lock (10 min TTL for reconciliation)
+    const lock = await acquireLock(lockKey, { ttlSeconds: 600 });
+    
+    if (!lock) {
+      logger.warn('Reconciliation already in progress', { 
+        publisherId, 
+        windowStart: windowStart.toISOString(),
+        lockKey 
+      });
+      return {
+        publisherId,
+        windowStart,
+        windowEnd,
+        status: 'skipped',
+        expectedRevenueUsd: 0,
+        actualRevenueUsd: 0,
+        discrepancyUsd: 0,
+        discrepancyPct: 0,
+        matchedRows: 0,
+        unmatchedRows: 0,
+        error: 'Reconciliation already in progress (locked by another instance)',
+      };
+    }
+    
     const startTime = Date.now();
 
     // Create reconciliation run record
@@ -303,6 +379,9 @@ export class VraSyncService {
         [runId]
       );
       throw err;
+    } finally {
+      // Always release the reconciliation lock, even on error
+      await releaseLock(lock);
     }
   }
 
@@ -334,6 +413,94 @@ export class VraSyncService {
     }
 
     return results;
+  }
+
+  // ========================================================================
+  // DATA INTEGRITY FIX: Upsert helper using functional unique index
+  // ========================================================================
+  // 
+  // CRITICAL: Networks often report data with NULL dimensions:
+  //   - AdMob: may be missing app_id
+  //   - Unity: may be missing ad_unit_id
+  //   - AppLovin: may have NULL country
+  //
+  // PostgreSQL's UNIQUE constraint treats NULL != NULL, so without special
+  // handling, identical rows with NULL dimensions would NOT conflict,
+  // causing duplicate revenue entries.
+  //
+  // Solution: Use ON CONFLICT on the functional index that COALESCEs NULLs
+  // to empty strings: idx_recon_statements_norm_unique_coalesced
+  // ========================================================================
+
+  /**
+   * Upsert a statement row using the COALESCED functional unique index
+   * Returns true if inserted (new row), false if updated (existing row)
+   */
+  private async upsertStatement(params: {
+    publisherId: string;
+    connectionId: string;
+    networkType: string;
+    eventDate: string;
+    appId?: string | null;
+    adUnitId?: string | null;
+    country?: string | null;
+    format?: string | null;
+    impressions?: number;
+    clicks?: number;
+    paid: number;
+    originalCurrency: string;
+    originalAmount: number;
+    gross?: number;
+    ivtAdjustments?: number;
+    exchangeRate?: number;
+    rawData?: any;
+  }): Promise<boolean> {
+    // Use the functional unique index with COALESCE expressions
+    // PostgreSQL ON CONFLICT requires matching the exact expressions in the index
+    // Index: idx_recon_statements_norm_unique_coalesced on
+    //   (publisher_id, network_type, event_date, COALESCE(app_id, ''), COALESCE(ad_unit_id, ''), 
+    //    COALESCE(country, ''), COALESCE(format, ''))
+    const result = await this.pool.query(
+      `INSERT INTO recon_statements_norm 
+       (publisher_id, connection_id, network_type, event_date, app_id, ad_unit_id,
+        country, format, impressions, clicks, paid, original_currency, original_amount,
+        gross, ivt_adjustments, exchange_rate, raw_data)
+       VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ON CONFLICT (publisher_id, network_type, event_date, 
+                    COALESCE(app_id, ''), COALESCE(ad_unit_id, ''), 
+                    COALESCE(country, ''), COALESCE(format, ''))
+       DO UPDATE SET 
+         impressions = EXCLUDED.impressions,
+         clicks = EXCLUDED.clicks,
+         paid = EXCLUDED.paid,
+         original_amount = EXCLUDED.original_amount,
+         gross = COALESCE(EXCLUDED.gross, recon_statements_norm.gross),
+         ivt_adjustments = COALESCE(EXCLUDED.ivt_adjustments, recon_statements_norm.ivt_adjustments),
+         exchange_rate = COALESCE(EXCLUDED.exchange_rate, recon_statements_norm.exchange_rate),
+         raw_data = COALESCE(EXCLUDED.raw_data, recon_statements_norm.raw_data)
+       RETURNING (xmax = 0) AS inserted`,
+      [
+        params.publisherId,
+        params.connectionId,
+        params.networkType,
+        params.eventDate,
+        params.appId ?? null,
+        params.adUnitId ?? null,
+        params.country ?? null,
+        params.format ?? null,
+        params.impressions ?? 0,
+        params.clicks ?? 0,
+        params.paid,
+        params.originalCurrency,
+        params.originalAmount,
+        params.gross ?? 0,
+        params.ivtAdjustments ?? 0,
+        params.exchangeRate ?? 1,
+        params.rawData ? JSON.stringify(params.rawData) : null,
+      ]
+    );
+
+    return result.rows[0]?.inserted === true;
   }
 
   // Network-specific sync implementations
@@ -413,19 +580,24 @@ export class VraSyncService {
 
       totalRevenue += earnings;
 
-      const insertResult = await this.pool.query(
-        `INSERT INTO recon_statements_norm 
-         (publisher_id, connection_id, network_type, event_date, ad_unit_id, country, format,
-          impressions, clicks, paid, original_currency, original_amount)
-         VALUES ($1, $2, 'admob', $3::date, $4, $5, $6, $7, $8, $9, 'USD', $9)
-         ON CONFLICT (publisher_id, network_type, event_date, app_id, ad_unit_id, country, format)
-         DO UPDATE SET impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, 
-                       paid = EXCLUDED.paid, original_amount = EXCLUDED.original_amount
-         RETURNING (xmax = 0) AS inserted`,
-        [conn.publisherId, conn.id, eventDate, adUnitId, country, format, impressions, clicks, earnings]
-      );
+      // Use the new upsert helper with COALESCED unique index
+      const inserted = await this.upsertStatement({
+        publisherId: conn.publisherId,
+        connectionId: conn.id,
+        networkType: 'admob',
+        eventDate,
+        appId: null, // AdMob may not provide app_id in this report
+        adUnitId,
+        country,
+        format,
+        impressions,
+        clicks,
+        paid: earnings,
+        originalCurrency: 'USD',
+        originalAmount: earnings,
+      });
 
-      if (insertResult.rows[0]?.inserted) {
+      if (inserted) {
         rowsInserted++;
       }
     }
@@ -485,18 +657,23 @@ export class VraSyncService {
 
       totalRevenue += revenue;
 
-      const insertResult = await this.pool.query(
-        `INSERT INTO recon_statements_norm 
-         (publisher_id, connection_id, network_type, event_date, app_id, country, format,
-          impressions, paid, original_currency, original_amount)
-         VALUES ($1, $2, 'unity', $3::date, $4, $5, $6, $7, $8, 'USD', $8)
-         ON CONFLICT (publisher_id, network_type, event_date, app_id, ad_unit_id, country, format)
-         DO UPDATE SET impressions = EXCLUDED.impressions, paid = EXCLUDED.paid
-         RETURNING (xmax = 0) AS inserted`,
-        [conn.publisherId, conn.id, eventDate, appId, country, format, impressions, revenue]
-      );
+      // Use the new upsert helper - Unity often missing ad_unit_id
+      const inserted = await this.upsertStatement({
+        publisherId: conn.publisherId,
+        connectionId: conn.id,
+        networkType: 'unity',
+        eventDate,
+        appId,
+        adUnitId: null, // Unity doesn't provide ad_unit_id in this report
+        country,
+        format,
+        impressions,
+        paid: revenue,
+        originalCurrency: 'USD',
+        originalAmount: revenue,
+      });
 
-      if (insertResult.rows[0]?.inserted) {
+      if (inserted) {
         rowsInserted++;
       }
     }
@@ -557,18 +734,24 @@ export class VraSyncService {
 
       totalRevenue += revenue;
 
-      const insertResult = await this.pool.query(
-        `INSERT INTO recon_statements_norm 
-         (publisher_id, connection_id, network_type, event_date, app_id, country, format,
-          impressions, clicks, paid, original_currency, original_amount)
-         VALUES ($1, $2, 'applovin', $3::date, $4, $5, $6, $7, $8, $9, 'USD', $9)
-         ON CONFLICT (publisher_id, network_type, event_date, app_id, ad_unit_id, country, format)
-         DO UPDATE SET impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, paid = EXCLUDED.paid
-         RETURNING (xmax = 0) AS inserted`,
-        [conn.publisherId, conn.id, eventDate, appId, country, format, impressions, clicks, revenue]
-      );
+      // Use the new upsert helper - AppLovin may have NULL dimensions
+      const inserted = await this.upsertStatement({
+        publisherId: conn.publisherId,
+        connectionId: conn.id,
+        networkType: 'applovin',
+        eventDate,
+        appId,
+        adUnitId: null, // AppLovin doesn't provide ad_unit_id in this report
+        country,
+        format,
+        impressions,
+        clicks,
+        paid: revenue,
+        originalCurrency: 'USD',
+        originalAmount: revenue,
+      });
 
-      if (insertResult.rows[0]?.inserted) {
+      if (inserted) {
         rowsInserted++;
       }
     }

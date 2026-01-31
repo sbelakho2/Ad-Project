@@ -588,11 +588,14 @@ export class VASTXMLParser {
     for (const [key, value] of Object.entries(values)) {
       const encodedValue = encodeURIComponent(String(value));
       
+      // Escape regex special characters in key to prevent ReDoS
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
       // Replace various macro formats
       result = result
-        .replace(new RegExp(`\\[${key}\\]`, 'gi'), encodedValue)
-        .replace(new RegExp(`\\{${key}\\}`, 'gi'), encodedValue)
-        .replace(new RegExp(`%5B${key}%5D`, 'gi'), encodedValue);
+        .replace(new RegExp(`\\[${escapedKey}\\]`, 'gi'), encodedValue)
+        .replace(new RegExp(`\\{${escapedKey}\\}`, 'gi'), encodedValue)
+        .replace(new RegExp(`%5B${escapedKey}%5D`, 'gi'), encodedValue);
     }
     
     return result;

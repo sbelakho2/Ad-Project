@@ -8,7 +8,7 @@ describe('VRA redaction — reason_code safety for CSV and logs', () => {
     expect(out).toContain('[REDACTED_EMAIL]');
     expect(out).toContain('Bearer [REDACTED]');
     expect(out).toContain('sk_live_[REDACTED]');
-    expect(out).toContain('[REDACTED_NUMERIC]');
+    expect(out).toMatch(/\[REDACTED_(NUMERIC|CARD)\]/);
   });
 
   it('Logger redaction masks reason_code field and nested structures', () => {

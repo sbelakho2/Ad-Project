@@ -514,33 +514,115 @@ export class VMAPParser {
   /**
    * Validate URL for safe fetching.
    * SECURITY: Prevents SSRF via protocol validation and hostname checks.
+   * P0 Fix #12: Comprehensive SSRF protection
    */
   private validateFetchUrl(url: string): { valid: boolean; reason?: string } {
     try {
       const parsed = new URL(url);
       
-      // Only allow HTTP/HTTPS protocols
+      // SECURITY: Only allow HTTP/HTTPS protocols
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         return { valid: false, reason: `Invalid protocol: ${parsed.protocol}` };
       }
       
-      // Block localhost and internal hostnames
       const hostname = parsed.hostname.toLowerCase();
-      if (
-        hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        hostname === '::1' ||
-        hostname === '[::1]' ||
-        hostname.endsWith('.local') ||
-        hostname.endsWith('.internal') ||
-        hostname.endsWith('.localhost')
-      ) {
+      
+      // SECURITY: Block localhost and common internal hostnames
+      const blockedHostnames = [
+        'localhost',
+        '127.0.0.1',
+        '::1',
+        '[::1]',
+        '0.0.0.0',
+        // Cloud metadata endpoints (AWS, GCP, Azure, Alibaba)
+        '169.254.169.254',
+        'metadata.google.internal',
+        'metadata',
+        '100.100.100.200',  // Alibaba Cloud metadata
+        // Container/Kubernetes internal services
+        'kubernetes',
+        'kubernetes.default',
+        'kubernetes.default.svc',
+        'kubelet',
+        'docker',
+        'docker.sock',
+        'host.docker.internal',
+      ];
+      
+      if (blockedHostnames.includes(hostname)) {
         return { valid: false, reason: 'Internal hostname not allowed' };
       }
       
-      // Block obvious private IP ranges (basic check)
-      if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/.test(hostname)) {
-        return { valid: false, reason: 'Private IP not allowed' };
+      // SECURITY: Block internal TLDs and localhost variants
+      const blockedSuffixes = [
+        '.local',
+        '.internal',
+        '.localhost',
+        '.lan',
+        '.intra',
+        '.corp',
+        '.home',
+        '.cluster.local',  // Kubernetes internal DNS
+        '.svc.cluster.local',
+      ];
+      
+      if (blockedSuffixes.some(suffix => hostname.endsWith(suffix))) {
+        return { valid: false, reason: 'Internal hostname suffix not allowed' };
+      }
+      
+      // SECURITY: Block IPv4 private and reserved ranges
+      const ipv4PrivatePatterns = [
+        /^10\./,                           // 10.0.0.0/8
+        /^172\.(1[6-9]|2[0-9]|3[01])\./,  // 172.16.0.0/12
+        /^192\.168\./,                     // 192.168.0.0/16
+        /^169\.254\./,                     // Link-local (including metadata)
+        /^127\./,                          // Loopback (127.0.0.0/8)
+        /^0\./,                            // 0.0.0.0/8
+        /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./, // 100.64.0.0/10 (Carrier-grade NAT)
+        /^192\.0\.0\./,                    // 192.0.0.0/24 (IETF reserved)
+        /^192\.0\.2\./,                    // 192.0.2.0/24 (TEST-NET-1)
+        /^198\.51\.100\./,                 // 198.51.100.0/24 (TEST-NET-2)
+        /^203\.0\.113\./,                  // 203.0.113.0/24 (TEST-NET-3)
+        /^192\.88\.99\./,                  // 192.88.99.0/24 (6to4 relay)
+        /^198\.1[89]\./,                   // 198.18.0.0/15 (benchmark)
+        /^224\./,                          // 224.0.0.0/4 (multicast)
+        /^240\./,                          // 240.0.0.0/4 (reserved)
+        /^255\./,                          // broadcast
+      ];
+      
+      if (ipv4PrivatePatterns.some(pattern => pattern.test(hostname))) {
+        return { valid: false, reason: 'Private/reserved IP not allowed' };
+      }
+      
+      // SECURITY: Block IPv6 non-routable addresses
+      if (hostname.startsWith('[') && hostname.endsWith(']')) {
+        const ipv6 = hostname.slice(1, -1).toLowerCase();
+        const ipv6BlockedPrefixes = [
+          'fc',   // fc00::/7 unique local
+          'fd',   // fc00::/7 unique local
+          'fe8',  // fe80::/10 link-local
+          'fe9',
+          'fea',
+          'feb',
+          '::',   // unspecified/loopback
+          '::1',  // loopback
+          '100:', // IPv4-mapped private ranges
+        ];
+        if (ipv6BlockedPrefixes.some(prefix => ipv6.startsWith(prefix))) {
+          return { valid: false, reason: 'IPv6 private/link-local address not allowed' };
+        }
+      }
+      
+      // SECURITY: Block obfuscated IP formats
+      if (/^0x|^0[0-7]+\./.test(hostname)) {
+        return { valid: false, reason: 'Obfuscated IP format not allowed' };
+      }
+      
+      // SECURITY: Block port-based attacks on internal services
+      const blockedPorts = [22, 3306, 5432, 6379, 11211, 27017, 9200, 2375, 2376];
+      const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === 'https:' ? 443 : 80);
+      if (blockedPorts.includes(port)) {
+        return { valid: false, reason: 'Blocked port for security reasons' };
       }
       
       return { valid: true };

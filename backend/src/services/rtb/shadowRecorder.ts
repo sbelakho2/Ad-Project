@@ -54,6 +54,7 @@ let flushing = false;
 let timer: NodeJS.Timeout | null = null;
 
 const MAX_QUEUE = Math.max(100, +(process.env.RTB_SHADOW_MAX_QUEUE || '500'));
+const HARD_MAX_QUEUE = Math.max(5000, +(process.env.RTB_SHADOW_HARD_MAX_QUEUE || '10000'));
 const FLUSH_MS = Math.max(250, +(process.env.RTB_SHADOW_FLUSH_MS || '1000'));
 const MAX_JSON_LEN = Math.max(2_000, +(process.env.RTB_SHADOW_MAX_JSON || '20000'));
 const MAX_BIDS_PER_RECORD = 25;
@@ -206,6 +207,18 @@ function schedule(): void {
 }
 
 export const recordShadowOutcome = async (outcome: ShadowOutcomeRecord): Promise<void> => {
+  // SECURITY FIX: Implement hard limit on queue size to prevent OOM
+  // If the database stalls, we drop events rather than crashing the service.
+  if (queue.length >= HARD_MAX_QUEUE) {
+    if (Math.random() < 0.01) {
+      logger.error('Shadow recorder queue overflow! Dropping records to protect service stability.', { 
+        queueLength: queue.length, 
+        hardLimit: HARD_MAX_QUEUE 
+      });
+    }
+    return;
+  }
+
   try {
     // SECURITY FIX: Use safe truncation that produces valid JSON
     // Previous implementation used .slice() on JSON strings which could produce

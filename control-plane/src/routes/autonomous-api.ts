@@ -97,6 +97,23 @@ function authenticateApiKeyOrJwt(req: Request, res: Response, next: () => void):
   res.status(401).json({ error: 'Unauthorized' });
 }
 
+/**
+ * SECURITY: Safe error response helper (P0 Fix #14)
+ * Hides detailed error messages in production to prevent information leakage
+ */
+function safeErrorResponse(res: Response, err: unknown, defaultMessage: string = 'Internal server error'): void {
+  const error = err as Error;
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  // Log the actual error for debugging
+  logger.error(defaultMessage, { error: error.message, stack: error.stack });
+  
+  // Send safe response
+  res.status(500).json({ 
+    error: isProduction ? defaultMessage : error.message 
+  });
+}
+
 // ============================================================================
 // PUBLIC TRACKING ENDPOINTS (No auth required - must be before middleware)
 // These endpoints are embedded in emails and must work without API keys
@@ -406,8 +423,7 @@ router.get('/sources', async (req: Request, res: Response) => {
       sources,
     });
   } catch (err) {
-    logger.error('Sources fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Sources fetch failed');
   }
 });
 
@@ -457,8 +473,7 @@ router.post('/sources/:id/scraped', async (req: Request, res: Response) => {
       updated,
     });
   } catch (err) {
-    logger.error('Scrape result processing failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Scrape result processing failed');
   }
 });
 
@@ -476,8 +491,7 @@ router.get('/contacts/unscored', async (req: Request, res: Response) => {
       contacts,
     });
   } catch (err) {
-    logger.error('Unscored contacts fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Unscored contacts fetch failed');
   }
 });
 
@@ -508,8 +522,7 @@ router.post('/contacts/:id/score', async (req: Request, res: Response) => {
     
     res.json({ success: true });
   } catch (err) {
-    logger.error('Score submission failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Score submission failed');
   }
 });
 
@@ -593,8 +606,7 @@ router.post('/discover', async (req: Request, res: Response) => {
       });
     }
   } catch (err) {
-    logger.error('Discovery job failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Discovery job failed');
   }
 });
 
@@ -640,8 +652,7 @@ router.get('/jobs/:id', async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    logger.error('Job status fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Job status fetch failed');
   }
 });
 
@@ -663,8 +674,7 @@ router.post('/enrich', async (req: Request, res: Response) => {
       job: result,
     });
   } catch (err) {
-    logger.error('Enrichment job failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Enrichment job failed');
   }
 });
 
@@ -685,8 +695,7 @@ router.post('/train', async (req: Request, res: Response) => {
       job: result,
     });
   } catch (err) {
-    logger.error('Training job failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Training job failed');
   }
 });
 
@@ -850,8 +859,7 @@ router.post('/train/seed', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Training seed failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Training seed failed');
   }
 });
 
@@ -927,8 +935,7 @@ router.post('/score', async (req: Request, res: Response) => {
       });
     }
   } catch (err) {
-    logger.error('Scoring job failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Scoring job failed');
   }
 });
 
@@ -973,8 +980,7 @@ router.post('/compose', async (req: Request, res: Response) => {
       message,
     });
   } catch (err) {
-    logger.error('Compose failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Message compose failed');
   }
 });
 
@@ -1004,8 +1010,7 @@ router.post('/classify', async (req: Request, res: Response) => {
       classification: result,
     });
   } catch (err) {
-    logger.error('Classification failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Email classification failed');
   }
 });
 
@@ -1039,8 +1044,7 @@ router.post('/feedback', async (req: Request, res: Response) => {
     
     res.json({ success: true });
   } catch (err) {
-    logger.error('Feedback recording failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Feedback recording failed');
   }
 });
 
@@ -1142,7 +1146,8 @@ router.post('/webhook/sendgrid', async (req: Request, res: Response) => {
   } catch (err) {
     logger.error('SendGrid webhook failed', { error: (err as Error).message });
     // Return 200 to prevent SendGrid retries on our errors
-    res.status(200).json({ success: false, error: (err as Error).message });
+    // SECURITY: Don't leak error details to external services (P0 Fix #14)
+    res.status(200).json({ success: false, error: 'Processing failed' });
   }
 });
 
@@ -1253,7 +1258,8 @@ router.post('/webhook/email-events', async (req: Request, res: Response) => {
     res.json({ success: true, processed: events.length });
   } catch (err) {
     logger.error('Email events webhook failed', { error: (err as Error).message });
-    res.status(200).json({ success: false, error: (err as Error).message });
+    // SECURITY: Don't leak error details to external services (P0 Fix #14)
+    res.status(200).json({ success: false, error: 'Processing failed' });
   }
 });
 
@@ -1280,7 +1286,11 @@ router.get('/stats', async (_req: Request, res: Response) => {
       error: error.message,
       stack: error.stack,
     });
-    res.status(500).json({ error: error.message, stack: error.stack });
+    // SECURITY: Don't leak stack traces in production (P0 Fix #14)
+    res.status(500).json({ 
+      error: process.env.NODE_ENV === 'production' ? 'Internal server error' : error.message,
+      ...(process.env.NODE_ENV !== 'production' && { stack: error.stack })
+    });
   }
 });
 
@@ -1304,8 +1314,7 @@ router.get('/arms', async (req: Request, res: Response) => {
       stats,
     });
   } catch (err) {
-    logger.error('Arms fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Arms fetch failed');
   }
 });
 
@@ -1335,8 +1344,7 @@ router.post('/arms', async (req: Request, res: Response) => {
       armId,
     });
   } catch (err) {
-    logger.error('Arm creation failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Arm creation failed');
   }
 });
 
@@ -1358,8 +1366,7 @@ router.get('/templates', async (req: Request, res: Response) => {
       templates,
     });
   } catch (err) {
-    logger.error('Templates fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Templates fetch failed');
   }
 });
 
@@ -1392,8 +1399,7 @@ router.post('/templates', async (req: Request, res: Response) => {
       templateId,
     });
   } catch (err) {
-    logger.error('Template creation failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Template creation failed');
   }
 });
 
@@ -1422,8 +1428,7 @@ router.post('/templates/preview', async (req: Request, res: Response) => {
       variations,
     });
   } catch (err) {
-    logger.error('Preview failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Template preview failed');
   }
 });
 
@@ -1589,8 +1594,7 @@ Aaron at ApexMediation`,
     });
     
   } catch (err) {
-    logger.error('Template seeding failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Template seeding failed');
   }
 });
 
@@ -1614,8 +1618,7 @@ router.get('/inbox', async (req: Request, res: Response) => {
       stats,
     });
   } catch (err) {
-    logger.error('Inbox fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Inbox fetch failed');
   }
 });
 
@@ -1637,8 +1640,7 @@ router.post('/inbox/:id', async (req: Request, res: Response) => {
     
     res.json({ success: true });
   } catch (err) {
-    logger.error('Review submission failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Review submission failed');
   }
 });
 
@@ -1677,8 +1679,7 @@ router.post('/sources', async (req: Request, res: Response) => {
       sourceId: result[0]?.id,
     });
   } catch (err) {
-    logger.error('Source creation failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Source creation failed');
   }
 });
 
@@ -1696,8 +1697,7 @@ router.delete('/sources/:id', async (req: Request, res: Response) => {
     
     res.json({ success: true });
   } catch (err) {
-    logger.error('Source deletion failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Source deletion failed');
   }
 });
 
@@ -1748,8 +1748,7 @@ router.get('/hot-leads', async (req: Request, res: Response) => {
       count: leads.length,
     });
   } catch (err) {
-    logger.error('Hot leads fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Hot leads fetch failed');
   }
 });
 
@@ -1837,8 +1836,7 @@ router.get('/competitor-leads', async (req: Request, res: Response) => {
       })),
     });
   } catch (err) {
-    logger.error('Competitor leads fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Competitor leads fetch failed');
   }
 });
 
@@ -1953,8 +1951,7 @@ router.post('/competitor-scan', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Competitor scan failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Competitor scan failed');
   }
 });
 
@@ -2015,8 +2012,7 @@ router.post('/icebreaker/generate', async (req: Request, res: Response) => {
       modelUsed: result.modelUsed,
     });
   } catch (err) {
-    logger.error('Icebreaker generation failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Icebreaker generation failed');
   }
 });
 
@@ -2036,8 +2032,7 @@ router.post('/icebreaker/batch', async (req: Request, res: Response) => {
       ...result,
     });
   } catch (err) {
-    logger.error('Batch icebreaker generation failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Batch icebreaker generation failed');
   }
 });
 
@@ -2056,7 +2051,7 @@ router.get('/icebreaker/status', async (_req: Request, res: Response) => {
       status,
     });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Icebreaker status check failed');
   }
 });
 
@@ -2072,8 +2067,7 @@ router.post('/icebreaker/warmup', async (_req: Request, res: Response) => {
     
     res.json(result);
   } catch (err) {
-    logger.error('LLM warmup failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'LLM warmup failed');
   }
 });
 
@@ -2161,8 +2155,7 @@ router.post('/classify/hybrid', async (req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    logger.error('Hybrid classification failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Hybrid classification failed');
   }
 });
 
@@ -2200,7 +2193,7 @@ router.get('/classify/hybrid/status', async (_req: Request, res: Response) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Hybrid classifier status check failed');
   }
 });
 
@@ -2222,8 +2215,7 @@ router.post('/classify/hybrid/warmup', async (_req: Request, res: Response) => {
       ...result,
     });
   } catch (err) {
-    logger.error('Hybrid classifier warmup failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Hybrid classifier warmup failed');
   }
 });
 
@@ -2242,8 +2234,7 @@ router.get('/reputation/health', async (_req: Request, res: Response) => {
       report,
     });
   } catch (err) {
-    logger.error('Reputation health check failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Reputation health check failed');
   }
 });
 
@@ -2264,8 +2255,7 @@ router.get('/reputation/metrics', async (req: Request, res: Response) => {
       metrics,
     });
   } catch (err) {
-    logger.error('Reputation metrics fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Reputation metrics fetch failed');
   }
 });
 
@@ -2291,8 +2281,7 @@ router.post('/reputation/analyze-bounce', async (req: Request, res: Response) =>
       analysis,
     });
   } catch (err) {
-    logger.error('Bounce analysis failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Bounce analysis failed');
   }
 });
 
@@ -2313,8 +2302,7 @@ router.get('/reputation/alerts', async (req: Request, res: Response) => {
       alerts,
     });
   } catch (err) {
-    logger.error('Reputation alerts fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Reputation alerts fetch failed');
   }
 });
 
@@ -2332,8 +2320,7 @@ router.post('/reputation/alerts/:id/acknowledge', async (req: Request, res: Resp
     
     res.json({ success: true });
   } catch (err) {
-    logger.error('Alert acknowledgment failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Alert acknowledgment failed');
   }
 });
 
@@ -2393,8 +2380,7 @@ router.get('/edge/status', async (_req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    logger.error('Edge status check failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Edge status check failed');
   }
 });
 
@@ -2647,7 +2633,11 @@ router.post('/send', async (req: Request, res: Response) => {
     if (!sendResponse.ok) {
       const errorText = await sendResponse.text();
       logger.error('Resend API error', { status: sendResponse.status, error: errorText });
-      res.status(500).json({ error: `Resend API error: ${errorText}` });
+      // SECURITY: Don't leak Resend API error details to clients
+      const isProduction = process.env.NODE_ENV === 'production';
+      res.status(500).json({ 
+        error: isProduction ? 'Email delivery failed' : `Resend API error: ${errorText}` 
+      });
       return;
     }
     
@@ -2686,8 +2676,7 @@ router.post('/send', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Send email failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Email send failed');
   }
 });
 
@@ -2728,8 +2717,7 @@ router.get('/pending-messages', async (req: Request, res: Response) => {
       count: messages.length,
     });
   } catch (err) {
-    logger.error('Pending messages fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Pending messages fetch failed');
   }
 });
 
@@ -2770,6 +2758,8 @@ router.post('/send-batch', async (req: Request, res: Response) => {
     let failed = 0;
     const results: Array<{ messageId: string; success: boolean; error?: string }> = [];
     
+    const isProduction = process.env.NODE_ENV === 'production';
+    
     for (const msg of pending) {
       try {
         // Make internal send request
@@ -2788,7 +2778,8 @@ router.post('/send-batch', async (req: Request, res: Response) => {
         } else {
           failed++;
           const error = await sendResult.text();
-          results.push({ messageId: msg.id, success: false, error });
+          // SECURITY: Don't leak error details in production (P0 Fix #14)
+          results.push({ messageId: msg.id, success: false, error: isProduction ? 'Send failed' : error });
         }
         
         // Rate limiting delay
@@ -2798,7 +2789,8 @@ router.post('/send-batch', async (req: Request, res: Response) => {
         
       } catch (err) {
         failed++;
-        results.push({ messageId: msg.id, success: false, error: (err as Error).message });
+        // SECURITY: Don't leak error details in production (P0 Fix #14)
+        results.push({ messageId: msg.id, success: false, error: isProduction ? 'Send failed' : (err as Error).message });
       }
     }
     
@@ -2811,8 +2803,7 @@ router.post('/send-batch', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Batch send failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Batch send failed');
   }
 });
 
@@ -2972,8 +2963,7 @@ router.get('/dashboard', async (_req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Dashboard fetch failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Dashboard fetch failed');
   }
 });
 
@@ -3049,8 +3039,7 @@ router.post('/cleanup-emails', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Email cleanup failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Email cleanup failed');
   }
 });
 
@@ -3101,8 +3090,7 @@ router.post('/jobs/cleanup', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Job cleanup failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Job cleanup failed');
   }
 });
 
@@ -3128,6 +3116,13 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
     
     const results: Record<string, unknown> = {};
     const startTime = Date.now();
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    // Helper to get safe error message
+    const safeError = (err: unknown): string => {
+      const message = (err as Error).message;
+      return isProduction ? 'Step failed' : message;
+    };
     
     // Step 0: Cleanup stuck jobs
     try {
@@ -3140,7 +3135,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
       `);
       results.cleanup = { recovered: cleanupResult.length };
     } catch (err) {
-      results.cleanup = { error: (err as Error).message };
+      results.cleanup = { error: safeError(err) };
     }
     
     // Step 1: Discover new leads
@@ -3149,7 +3144,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
       const discoverResult = await orchestrator.runDiscoveryJob(discoverBatch);
       results.discover = { success: true, processed: discoverResult.processed };
     } catch (err) {
-      results.discover = { error: (err as Error).message };
+      results.discover = { error: safeError(err) };
     }
     
     // Step 2: Enrich contacts with emails
@@ -3158,7 +3153,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
       const enrichResult = await orchestrator.runEnrichmentJob(enrichBatch);
       results.enrich = { success: true, enriched: enrichResult.processed };
     } catch (err) {
-      results.enrich = { error: (err as Error).message };
+      results.enrich = { error: safeError(err) };
     }
     
     // Step 3: Score leads
@@ -3167,7 +3162,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
       const scoreResult = await orchestrator.runScoringJob(scoreBatch);
       results.score = { success: true, scored: scoreResult.processed };
     } catch (err) {
-      results.score = { error: (err as Error).message };
+      results.score = { error: safeError(err) };
     }
     
     // Step 4: Compose messages for hot leads without messages
@@ -3198,7 +3193,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
       
       results.compose = { success: true, composed };
     } catch (err) {
-      results.compose = { error: (err as Error).message };
+      results.compose = { error: safeError(err) };
     }
     
     // Step 5: Send pending messages (unless dry run)
@@ -3244,7 +3239,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
         
         results.send = { success: true, sent, failed };
       } catch (err) {
-        results.send = { error: (err as Error).message };
+        results.send = { error: safeError(err) };
       }
     } else {
       results.send = { skipped: true, reason: 'dryRun=true' };
@@ -3262,8 +3257,7 @@ router.post('/run-cycle', async (req: Request, res: Response) => {
     });
     
   } catch (err) {
-    logger.error('Automation cycle failed', { error: (err as Error).message });
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Automation cycle failed');
   }
 });
 
@@ -3417,7 +3411,7 @@ router.get('/v2/stats', async (req: Request, res: Response) => {
     const stats = await orchestrator.getSystemStats();
     res.json({ success: true, stats, _v2Alias: true });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Stats fetch failed');
   }
 });
 
@@ -3461,7 +3455,7 @@ router.post('/v2/compose', async (req: Request, res: Response) => {
     
     res.json({ success: true, message, _v2Alias: true });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Message compose failed');
   }
 });
 
@@ -3471,7 +3465,7 @@ router.get('/v2/templates', async (req: Request, res: Response) => {
     const templates = await getTemplates(templateType);
     res.json({ success: true, templates, _v2Alias: true });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Templates fetch failed');
   }
 });
 
@@ -3517,7 +3511,7 @@ router.get('/v2/inbox', async (req: Request, res: Response) => {
       _v2Alias: true,
     });
   } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    safeErrorResponse(res, err, 'Inbox fetch failed');
   }
 });
 

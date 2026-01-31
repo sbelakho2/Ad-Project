@@ -177,7 +177,15 @@ export class NetworkCredentialVaultService {
       return null;
     }
 
-    const secret = process.env.JWT_SECRET || 'dev-secret';
+    // SECURITY: Require JWT_SECRET in production (P1 Fix #1)
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('JWT_SECRET must be set in production');
+      }
+      logger.warn('JWT_SECRET not set - using insecure default (non-production only)');
+    }
+    const signingSecret = secret || 'dev-secret-not-for-production';
     
     const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
     
@@ -189,7 +197,7 @@ export class NetworkCredentialVaultService {
       exp: Math.floor(expiresAt.getTime() / 1000),
     };
 
-    const token = jwt.sign(payload, secret);
+    const token = jwt.sign(payload, signingSecret);
 
     // Log token generation
     logger.info('Short-lived token generated', {

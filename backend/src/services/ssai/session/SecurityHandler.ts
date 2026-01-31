@@ -77,7 +77,22 @@ export class SecurityHandler {
     tokenSecret?: string,
     ssrfConfig?: Partial<SSRFConfig>
   ) {
-    this.tokenSecret = tokenSecret || process.env.SSAI_TOKEN_SECRET || 'ssai-default-secret';
+    // SECURITY: Require explicit secret - no default fallback (P1 Fix #1)
+    const secret = tokenSecret || process.env.SSAI_TOKEN_SECRET;
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('SSAI_TOKEN_SECRET must be set in production');
+      }
+      // Only allow insecure default in non-production for testing
+      console.warn('[SecurityHandler] WARNING: Using insecure default secret (non-production only)');
+      this.tokenSecret = 'ssai-dev-secret-not-for-production';
+    } else {
+      // SECURITY: Validate secret strength
+      if (secret.length < 32) {
+        throw new Error('SSAI_TOKEN_SECRET must be at least 32 characters');
+      }
+      this.tokenSecret = secret;
+    }
     this.rateLimitStore = new Map();
     this.ssrfConfig = {
       allowedDomains: [],

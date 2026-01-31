@@ -140,27 +140,45 @@ export class VraService {
       appId ? [from, to, publisherId, appId] : [from, to, publisherId]
     );
 
-    // Build lookup map for paid amounts
-    const paidMap = new Map<string, { impressions: number; paid: number }>();
-    for (const r of paidRows) {
+    // Build lookup maps
+    const expectedMap = new Map<string, { impressions: number; expected: number; network: string; format: string; country: string }>();
+    for (const r of expectedRows) {
       const key = `${r.network}|${r.format}|${r.country}`;
-      paidMap.set(key, {
-        impressions: Number(r.impressions) || 0,
-        paid: Number(r.paid) || 0,
-      });
-    }
-
-    // Merge expected with paid data
-    const byBreakdown = expectedRows.map((r) => {
-      const key = `${r.network}|${r.format}|${r.country}`;
-      const paidData = paidMap.get(key);
-      return {
+      expectedMap.set(key, {
         network: r.network,
         format: r.format,
         country: r.country,
         impressions: Number(r.impressions) || 0,
         expected: Number(r.expected) || 0,
-        paid: paidData?.paid || 0,
+      });
+    }
+
+    const paidMap = new Map<string, { impressions: number; paid: number; network: string; format: string; country: string }>();
+    for (const r of paidRows) {
+      const key = `${r.network}|${r.format}|${r.country}`;
+      paidMap.set(key, {
+        network: r.network,
+        format: r.format,
+        country: r.country,
+        impressions: Number(r.impressions) || 0,
+        paid: Number(r.paid) || 0,
+      });
+    }
+
+    // Merge expected with paid data (Full Outer Join in memory)
+    const allKeys = new Set([...expectedMap.keys(), ...paidMap.keys()]);
+    const byBreakdown = Array.from(allKeys).map((key) => {
+      const exp = expectedMap.get(key);
+      const paid = paidMap.get(key);
+      const [network, format, country] = key.split('|');
+      
+      return {
+        network: exp?.network || paid?.network || network,
+        format: exp?.format || paid?.format || format,
+        country: exp?.country || paid?.country || country,
+        impressions: Math.max(exp?.impressions || 0, paid?.impressions || 0),
+        expected: exp?.expected || 0,
+        paid: paid?.paid || 0,
       };
     });
 

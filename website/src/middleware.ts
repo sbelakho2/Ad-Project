@@ -2,9 +2,17 @@ import { jwtVerify } from 'jose';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'your-secret-key-change-in-production'
-);
+// SECURITY: Require JWT_SECRET in production (P1 Fix #1)
+const getJwtSecret = (): Uint8Array => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET must be set in production');
+  }
+  return new TextEncoder().encode(
+    secret || 'dev-middleware-secret-not-for-production'
+  );
+};
+const JWT_SECRET = getJwtSecret();
 
 // Paths that require authentication (prefix matches)
 const protectedPaths = ['/dashboard', '/settings', '/api/internal', '/api/auth'];

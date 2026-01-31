@@ -115,10 +115,21 @@ if (env.TRUST_PROXY) {
   logger.info('Trust proxy enabled - respecting X-Forwarded-* headers');
 }
 
-// Security middleware
+// Security middleware (P1 Fix #6: Enhanced security headers)
 app.use(helmet({
   crossOriginOpenerPolicy: { policy: 'same-origin' },
+  crossOriginResourcePolicy: { policy: 'same-site' },
+  crossOriginEmbedderPolicy: false, // Allow embedding for ad serving
   contentSecurityPolicy: process.env.ENABLE_CSP === '1' ? undefined : false,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  hsts: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true,
+  },
+  xssFilter: true,
+  noSniff: true,
+  frameguard: { action: 'deny' },
 }));
 
 // Strict CORS allowlist

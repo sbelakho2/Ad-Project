@@ -182,7 +182,7 @@ describe('VRA Routes', () => {
     const row = lines[1] || '';
     expect(row).toContain('[REDACTED_EMAIL]');
     expect(row).toContain('Bearer [REDACTED]');
-    expect(row).toContain('[REDACTED_NUMERIC]');
+    expect(row).toMatch(/\[REDACTED_(NUMERIC|CARD)\]/);
   });
 
   it('GET /recon/deltas.csv escapes quotes/newlines/commas in reason_code for stable CSV', async () => {

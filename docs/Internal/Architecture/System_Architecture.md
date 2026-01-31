@@ -19,28 +19,23 @@ graph TD
         LB -->|:3000| Console[Console (Next.js)]
         LB -->|:3002| Website[Website (Next.js)]
         LB -->|:8080| Backend[Backend API (Node.js)]
-        LB -->|:4000| ControlPlane[Control Plane - PROXY ONLY]
+        LB -->|:4000| ControlPlane[Control Plane - Refactored]
         
         Backend -->|Read/Write| Redis[Redis Cache]
-        ControlPlane -->|SSH Tunnel :4001| TestServer
+        ControlPlane ---|ApexTunnel P2P| TestServer
     end
     
     subgraph "Test Server (Hetzner)"
         TestServer[Sales API :4001]
         TestServer -->|Orchestration| SalesModules[Hunter, Analyst, Spintax, Sampler]
         EdgeWorker[Edge Worker :3500]
-        EdgeWorker -->|ML Inference| Models[LaMini, DistilBERT]
-        TestServer -->|SSH Tunnel :6432| AppPgBouncer
-    end
-    
-    subgraph "App Server - DB Access"
-        AppPgBouncer[PgBouncer :6432]
+        EdgeWorker -->|ML Inference| Models[DistilBERT, ONNX 9-Dim]
+        TestServer ---|ApexTunnel P2P| DB
     end
     
     subgraph "DB Server (Hetzner)"
-        Backend -->|Read/Write| DB[PostgreSQL 16]
-        AppPgBouncer -->|:5432| DB
-        ControlPlane -->|Read Only| DB
+        DB[PostgreSQL 16 - BRIN/HLL]
+        Backend -->|Read/Write| DB
     end
     
     subgraph "Monitoring"
@@ -68,30 +63,30 @@ The production environment runs on Hetzner Cloud using a split-server architectu
 
 > **⚠️ CRITICAL: App Server runs NO sales automation logic.**
 > 
-> The Control Plane on App Server is strictly a **proxy client**.
+> The Control Plane on App Server has been refactored into a modular controller architecture and communicates via **ApexTunnel**.
 > ALL sales automation work runs on the **Test Server**.
 
 ```
 App Server (46.62.252.96)          Test Server (157.90.126.205)
 ┌─────────────────────────┐        ┌─────────────────────────┐
 │ Control Plane :4000     │        │ Sales API :4001         │
-│ (PROXY ONLY)            │◄──────►│ - Orchestrator          │
-│                         │ tunnel │ - Thompson Sampler      │
-│ sales-api-tunnel.service│        │ - Spintax Engine        │
-│ localhost:4001→Test:4001│        │ - Hunter, Analyst       │
+│ (Refactored Controllers)│◄──────►│ - Orchestrator          │
+│                         │ Apex   │ - Thompson Sampler      │
+│ apextunnel.service      │ Tunnel │ - Spintax Engine        │
+│ Noise / Ed25519 Identity│ (UDP)  │ - Hunter, Analyst       │
 └─────────────────────────┘        │ - Clerk                 │
                                    │                         │
                                    │ Edge Worker :3500       │
-                                   │ - LaMini-Flan-T5        │
                                    │ - DistilBERT            │
+                                   │ - ONNX 9-Dim Inference  │
                                    │                         │
-                                   │ db-tunnel.service       │
-                                   │ localhost:6432→App:6432 │
+                                   │ apextunnel.service      │
+                                   │ P2P Mesh Connectivity   │
                                    └─────────────────────────┘
                                               │
                                               ▼
                                    DB Server (77.42.44.35)
-                                   └── PostgreSQL :5432
+                                   └── PostgreSQL :5432 (BRIN)
 ```
 
 ### 2.2 Directory Structure (Production)

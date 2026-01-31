@@ -7,6 +7,41 @@ import * as scheduler from './scheduler';
 
 const logger = pino({ level: config.logging.level });
 
+// Allowlist of valid SQL identifiers (schemas and tables) to prevent SQL injection
+// Only these identifiers can be used in DDL commands
+const SAFE_SCHEMAS = new Set(['public', 'billing', 'analytics', 'audit']);
+const SAFE_TABLES = new Set([
+  'users', 'publishers', 'placements', 'campaigns', 'ad_units', 'adapters',
+  'billing_audit', 'billing_transactions', 'invoices', 'subscription_plans',
+  'analytics_impressions', 'analytics_clicks', 'analytics_revenue_events',
+  'analytics_daily_rollups', 'analytics_hourly_rollups', 'analytics_monthly_rollups',
+  'audit_logs', 'api_keys', 'sessions', 'migrations'
+]);
+
+// Validate and sanitize SQL identifier (schema or table name)
+function validateSqlIdentifier(value: string, type: 'schema' | 'table'): string {
+  // Strict regex: only lowercase letters, numbers, and underscores
+  const IDENTIFIER_REGEX = /^[a-z][a-z0-9_]{0,62}$/;
+  
+  if (!value || typeof value !== 'string') {
+    throw new Error(`Invalid ${type} name: empty or non-string`);
+  }
+  
+  const normalized = value.toLowerCase().trim();
+  
+  if (!IDENTIFIER_REGEX.test(normalized)) {
+    throw new Error(`Invalid ${type} name: contains illegal characters`);
+  }
+  
+  // Check against allowlist
+  const allowlist = type === 'schema' ? SAFE_SCHEMAS : SAFE_TABLES;
+  if (!allowlist.has(normalized)) {
+    throw new Error(`${type} '${normalized}' is not in the allowed list`);
+  }
+  
+  return normalized;
+}
+
 // Create Fastify instance
 const app: FastifyInstance = Fastify({
   logger: {
@@ -246,8 +281,11 @@ app.post('/actions/:action', async (
     switch (action) {
       case 'vacuum_analyze':
         if (table && schema) {
-          await db.query(`VACUUM ANALYZE ${schema}.${table}`);
-          return { success: true, message: `VACUUM ANALYZE completed on ${schema}.${table}` };
+          // Validate identifiers to prevent SQL injection
+          const safeSchema = validateSqlIdentifier(schema, 'schema');
+          const safeTable = validateSqlIdentifier(table, 'table');
+          await db.query(`VACUUM ANALYZE ${safeSchema}.${safeTable}`);
+          return { success: true, message: `VACUUM ANALYZE completed on ${safeSchema}.${safeTable}` };
         } else {
           await db.query('VACUUM ANALYZE');
           return { success: true, message: 'VACUUM ANALYZE completed on all tables' };
@@ -258,8 +296,11 @@ app.post('/actions/:action', async (
           reply.code(400);
           return { error: 'table and schema are required for reindex' };
         }
-        await db.query(`REINDEX TABLE ${schema}.${table}`);
-        return { success: true, message: `REINDEX completed on ${schema}.${table}` };
+        // Validate identifiers to prevent SQL injection
+        const safeSchemaReindex = validateSqlIdentifier(schema, 'schema');
+        const safeTableReindex = validateSqlIdentifier(table, 'table');
+        await db.query(`REINDEX TABLE ${safeSchemaReindex}.${safeTableReindex}`);
+        return { success: true, message: `REINDEX completed on ${safeSchemaReindex}.${safeTableReindex}` };
       
       case 'kill_idle_connections':
         const result = await db.query<{ count: number }>(`

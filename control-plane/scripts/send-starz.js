@@ -1,13 +1,20 @@
 // Send email to Starz Electronics
+// SECURITY: Requires OPERATOR_PASSWORD environment variable
 const fetch = require('node-fetch').default;
-const BASE_URL = 'https://admin.apexmediation.ee';
+const BASE_URL = process.env.CONTROL_PLANE_URL || 'https://admin.apexmediation.ee';
+const OPERATOR_PASSWORD = process.env.OPERATOR_PASSWORD;
+
+if (!OPERATOR_PASSWORD) {
+  console.error('ERROR: OPERATOR_PASSWORD environment variable is required');
+  process.exit(1);
+}
 
 async function main() {
   console.log('1. Logging in...');
   const loginResp = await fetch(`${BASE_URL}/api/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'operator', password: '&&Pw20354491', deviceId: 'cli-starz', deviceLabel: 'CLI Starz' }),
+    body: JSON.stringify({ username: 'operator', password: OPERATOR_PASSWORD, deviceId: 'cli-starz', deviceLabel: 'CLI Starz' }),
   });
   const { token } = await loginResp.json();
   const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` };

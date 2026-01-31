@@ -75,6 +75,13 @@ export class InMemorySessionStore implements ISessionStore {
    * Generate a signed session token
    */
   private generateToken(sessionId: string): string {
+    // SECURITY: Require SSAI_TOKEN_SECRET in production (P1 Fix #1)
+    const secret = process.env.SSAI_TOKEN_SECRET;
+    if (!secret && process.env.NODE_ENV === 'production') {
+      throw new Error('SSAI_TOKEN_SECRET must be set in production');
+    }
+    const signingSecret = secret || 'dev-secret-not-for-production';
+
     const payload = {
       sid: sessionId,
       iat: Date.now(),
@@ -83,7 +90,7 @@ export class InMemorySessionStore implements ISessionStore {
 
     const payloadStr = JSON.stringify(payload);
     const signature = crypto
-      .createHmac('sha256', process.env.SSAI_TOKEN_SECRET || 'dev-secret')
+      .createHmac('sha256', signingSecret)
       .update(payloadStr)
       .digest('hex');
 
