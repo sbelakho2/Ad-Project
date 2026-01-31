@@ -2631,7 +2631,7 @@ router.post('/send', async (req: Request, res: Response) => {
       return;
     }
     
-    const messageId = sendResult.messageId || sendResult.emailId || 'unknown';
+    const apexMailMessageId = sendResult.messageId || sendResult.emailId || 'unknown';
     
     // Record successful send for rate limiting
     sendRateLimiter.recordSend();
@@ -2641,20 +2641,20 @@ router.post('/send', async (req: Request, res: Response) => {
       UPDATE sa_outbound_messages
       SET status = 'sent', sent_at = CURRENT_TIMESTAMP, message_id = $1, provider = 'apexmail'
       WHERE id = $2
-    `, [messageId, message.id]);
+    `, [apexMailMessageId, message.id]);
     
     // Save tracking record
     await queryOperator(`
       INSERT INTO sa_email_events 
       (outbound_message_id, contact_id, event_type, arm_id, source, event_data)
       VALUES ($1, $2, 'sent', $3, 'apexmail', $4)
-    `, [message.id, message.contact_id, message.subject_arm_id, JSON.stringify({ trackingId, apexMailId: messageId })]);
+    `, [message.id, message.contact_id, message.subject_arm_id, JSON.stringify({ trackingId, apexMailId: apexMailMessageId })]);
     
     logger.info('Email sent successfully via ApexMail', {
       messageId: message.id,
       contactId: message.contact_id,
       to: contact.email,
-      apexMailId: messageId,
+      apexMailId: apexMailMessageId,
     });
     
     res.json({
