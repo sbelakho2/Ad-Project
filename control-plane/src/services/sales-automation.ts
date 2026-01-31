@@ -504,7 +504,7 @@ export async function updateSalesConfig(updates: Partial<{
 export async function getSalesAutomationStatus(): Promise<{
   enabled: boolean;
   configured: boolean;
-  resendConfigured: boolean;
+  apexMailConfigured: boolean;
   dailyLimit: number;
   todaySent: number;
   todayRemaining: number;
@@ -519,7 +519,7 @@ export async function getSalesAutomationStatus(): Promise<{
   return {
     enabled: config.systemEnabled || systemEnabledMemory,
     configured: true,
-    resendConfigured: !!resend,
+    apexMailConfigured: !!apexmail,
     dailyLimit: config.dailyLimit,
     todaySent,
     todayRemaining: Math.max(0, config.dailyLimit - todaySent),
@@ -1149,8 +1149,8 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
     return { processed: 0, sent: 0, skippedSpam: 0, errors: ['Sales automation system is DISABLED. Enable it from the control panel first.'], dryRun, domainHealth };
   }
 
-  if (!resend && !dryRun) {
-    return { processed: 0, sent: 0, skippedSpam: 0, errors: ['RESEND_API_KEY not configured'], dryRun, domainHealth };
+  if (!apexmail && !dryRun) {
+    return { processed: 0, sent: 0, skippedSpam: 0, errors: ['ApexMail not configured'], dryRun, domainHealth };
   }
 
   // Check daily limit
@@ -1361,19 +1361,30 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
       const unsubscribeUrl = `${process.env.PUBLIC_ORIGIN || 'https://admin.apexmediation.ee'}/unsubscribe?contact=${enrollment.contact_id}`;
       const unsubscribeEmail = config.replyTo || config.fromEmail;
       
-      const result = await resend!.emails.send({
-        from: `${config.fromName} <${config.fromEmail}>`,
+      const result = await apexmail.send({
+        from: config.fromEmail,
+        fromName: config.fromName,
+        replyTo: config.replyTo,
         to: enrollment.contact_email!,
         subject,
         html: body.replace(/\n/g, '<br>'),
         text: body,
+        category: 'marketing',
+        priority: 4, // Priority 4 = Background marketing
+        trackOpens: true,
+        trackClicks: true,
+        entityType: 'sa_email_auto',
+        entityId: enrollment.id,
         // RFC 8058: List-Unsubscribe and List-Unsubscribe-Post headers
-        // These drastically reduce spam complaints by giving recipients an easy opt-out
         headers: {
           'List-Unsubscribe': `<${unsubscribeUrl}>, <mailto:${unsubscribeEmail}?subject=unsubscribe>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
         },
       });
+
+      if (!result.success) {
+        throw new Error(result.error || 'ApexMail delivery failed');
+      }
 
       // Record email
       await write(`
@@ -1386,7 +1397,7 @@ export async function runOutreachCycle(dryRun: boolean = false): Promise<{
         config.fromEmail,
         subject,
         body,
-        result.data?.id || null,
+        result.messageId || result.emailId || null,
         currentStep + 1,
       ], 'Record sent email');
 
