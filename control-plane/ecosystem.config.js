@@ -48,8 +48,17 @@ module.exports = {
       AUTONOMOUS_API_KEY: process.env.AUTONOMOUS_API_KEY, // REQUIRED: Set in server .env
       EDGE_WORKER_URL: process.env.EDGE_WORKER_URL || "http://localhost:3500",
       EDGE_WORKER_SECRET: process.env.EDGE_WORKER_SECRET, // REQUIRED: Set in server .env
-      RESEND_API_KEY: process.env.RESEND_API_KEY, // REQUIRED: Set in server .env
+      
+      // ApexMail (self-hosted email - replaces Resend)
+      SMTP_HOST: process.env.SMTP_HOST,
+      SMTP_PORT: process.env.SMTP_PORT || "587",
+      SMTP_SECURE: process.env.SMTP_SECURE || "false",
+      SMTP_USER: process.env.SMTP_USER,
+      SMTP_PASS: process.env.SMTP_PASS,
       EMAIL_FROM: process.env.EMAIL_FROM || "contact@apexmediation.ee",
+      EMAIL_FROM_NAME: process.env.EMAIL_FROM_NAME || "ApexMediation",
+      APEXMAIL_API_KEY: process.env.APEXMAIL_API_KEY, // For cross-service calls
+      
       PUBLIC_ORIGIN: process.env.PUBLIC_ORIGIN || "https://admin.apexmediation.ee"
     },
     watch: false,

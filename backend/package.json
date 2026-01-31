@@ -96,7 +96,6 @@
     "qrcode": "^1.5.3",
     "redis": "^4.6.11",
     "reflect-metadata": "^0.2.2",
-    "resend": "^6.4.0",
     "stripe": "^19.2.0",
     "swagger-ui-express": "^5.0.1",
     "typeorm": "^0.3.27",

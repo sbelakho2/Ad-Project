@@ -1524,18 +1524,16 @@ if (IS_EXECUTION_NODE) {
 router.use('/api/sales-controls', salesControlsRouter);
 
 // ============================================
-// APEXMAIL EMAIL SERVICE (EXECUTION mode only - Test Server)
+// APEXMAIL EMAIL SERVICE (Available on ALL nodes)
 // ============================================
-if (IS_EXECUTION_NODE) {
-  // Mount ApexMail routes on Test Server only
-  // These provide self-hosted email functionality replacing Resend
-  const pool = getOperatorPool();
-  if (pool) {
-    logger.info('[ApexMail] Mounting routes on EXECUTION node');
-    router.use('/api/apexmail', createApexMailRouter(pool));
-  } else {
-    logger.warn('[ApexMail] Pool not available, routes not mounted');
-  }
+// ApexMail replaces Resend entirely and should be available everywhere
+// Queue processor only starts on EXECUTION node to avoid duplicate sends
+const apexMailPool = getOperatorPool();
+if (apexMailPool) {
+  logger.info('[ApexMail] Mounting routes (available on all nodes)');
+  router.use('/api/apexmail', createApexMailRouter(apexMailPool, { startQueueProcessor: IS_EXECUTION_NODE }));
+} else {
+  logger.warn('[ApexMail] Pool not available, routes not mounted');
 }
 
 export default router;

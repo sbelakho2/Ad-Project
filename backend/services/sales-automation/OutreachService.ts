@@ -1,9 +1,9 @@
 // services/sales-automation/OutreachService.ts
 // Manages automated email outreach sequences
-// Uses Resend free tier (3K emails/month) - existing service
+// Uses ApexMail (self-hosted, replaces Resend)
 
 import { Pool } from 'pg';
-import { Resend } from 'resend';
+import { getApexMailClient, ApexMailClient } from '../../src/services/apexmail-client';
 import crypto from 'crypto';
 
 interface OutreachConfig {
@@ -24,20 +24,15 @@ const DEFAULT_CONFIG: OutreachConfig = {
 
 export class OutreachService {
   private pool: Pool;
-  private resend: Resend | null = null;
+  private apexmail: ApexMailClient;
   private config: OutreachConfig;
 
   constructor(databaseUrl: string, config?: Partial<OutreachConfig>) {
     this.pool = new Pool({ connectionString: databaseUrl });
     this.config = { ...DEFAULT_CONFIG, ...config };
     
-    // Initialize Resend if API key is available
-    const resendApiKey = process.env.RESEND_API_KEY;
-    if (resendApiKey) {
-      this.resend = new Resend(resendApiKey);
-    } else {
-      console.warn('[Outreach] RESEND_API_KEY not set - email sending disabled');
-    }
+    // Initialize ApexMail client
+    this.apexmail = getApexMailClient();
   }
 
   /**
@@ -49,7 +44,7 @@ export class OutreachService {
     let sent = 0;
     let errors = 0;
 
-    if (!this.resend) {
+    if (!this.apexmail.isConfigured()) {
       console.log('[Outreach] Skipping - email service not configured');
       return { sent: 0, errors: 0 };
     }
@@ -406,33 +401,38 @@ export class OutreachService {
   }
 
   /**
-   * Send an individual email via Resend
+   * Send an individual email via ApexMail
    */
   private async sendEmail(email: any): Promise<{ success: boolean; messageId?: string }> {
-    if (!this.resend) {
+    if (!this.apexmail.isConfigured()) {
       return { success: false };
     }
 
     try {
-      const result = await this.resend.emails.send({
-        from: `${this.config.fromName} <${this.config.fromEmail}>`,
+      const result = await this.apexmail.send({
+        from: this.config.fromEmail,
+        fromName: this.config.fromName,
         to: email.to_email,
         subject: email.subject,
         html: email.body_html,
         text: email.body_text,
         replyTo: this.config.replyTo,
+        category: 'marketing',
+        priority: 5,
+        entityType: 'outreach_email',
+        entityId: email.id,
         headers: {
           'X-Entity-Ref-ID': email.id,
           'List-Unsubscribe': `<mailto:sales@apexmediation.ee?subject=unsubscribe-${email.contact_id}>`,
         },
       });
 
-      if (result.error) {
-        console.error('[Outreach] Resend error:', result.error);
+      if (!result.success) {
+        console.error('[Outreach] ApexMail error:', result.error);
         return { success: false };
       }
 
-      return { success: true, messageId: result.data?.id };
+      return { success: true, messageId: result.messageId || result.emailId };
     } catch (error) {
       console.error('[Outreach] Send error:', error);
       return { success: false };

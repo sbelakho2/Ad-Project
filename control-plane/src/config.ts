@@ -28,16 +28,16 @@ const envSchema = z.object({
   DEVICE_CHALLENGE_TTL_MINUTES: z.string().default('30'),
   DEVICE_CHALLENGE_SECRET: z.string().optional(),
 
-  // Resend (preferred if present)
-  RESEND_API_KEY: z.string().optional(),
-
-  // SMTP (required when DEVICE_APPROVAL_ENABLED=true in production)
+  // ApexMail - Self-hosted email service (replaces Resend)
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.string().default('587'),
   SMTP_SECURE: z.string().default('false'),
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   EMAIL_FROM: z.string().default('contact@apexmediation.ee'),
+  EMAIL_FROM_NAME: z.string().default('ApexMediation'),
+  EMAIL_REPLY_TO: z.string().optional(),
+  APEXMAIL_API_KEY: z.string().optional(), // Internal API key for cross-service calls
   
   // Database - Read-Only (monitoring)
   DB_HOST: z.string(),

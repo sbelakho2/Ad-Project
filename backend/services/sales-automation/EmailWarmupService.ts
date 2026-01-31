@@ -3,7 +3,7 @@
 // Critical for deliverability - new domains need 2-4 weeks warmup
 
 import { Pool } from 'pg';
-import { Resend } from 'resend';
+import { getApexMailClient, ApexMailClient } from '../../src/services/apexmail-client';
 
 interface WarmupConfig {
   // Warmup phases (daily send limits)
@@ -119,17 +119,13 @@ Let me know if you need anything else.`,
 
 export class EmailWarmupService {
   private pool: Pool;
-  private resend: Resend | null = null;
+  private apexmail: ApexMailClient;
   private config: WarmupConfig;
 
   constructor(databaseUrl: string, config?: Partial<WarmupConfig>) {
     this.pool = new Pool({ connectionString: databaseUrl });
     this.config = { ...DEFAULT_WARMUP_CONFIG, ...config };
-
-    const resendApiKey = process.env.RESEND_API_KEY;
-    if (resendApiKey) {
-      this.resend = new Resend(resendApiKey);
-    }
+    this.apexmail = getApexMailClient();
   }
 
   /**
@@ -196,8 +192,8 @@ export class EmailWarmupService {
    * Sends warmup emails between internal addresses
    */
   async runWarmupCycle(mailbox: string): Promise<{ sent: number; errors: number }> {
-    if (!this.resend) {
-      console.log('[Warmup] Resend not configured, skipping warmup');
+    if (!this.apexmail) {
+      console.log('[Warmup] ApexMail not configured, skipping warmup');
       return { sent: 0, errors: 0 };
     }
 
@@ -229,11 +225,15 @@ export class EmailWarmupService {
       const recipient = this.config.warmupEmails[Math.floor(Math.random() * this.config.warmupEmails.length)];
 
       try {
-        await this.resend.emails.send({
+        await this.apexmail.send({
           from: mailbox,
           to: recipient,
           subject: template.subject,
           text: template.body,
+          category: 'notification', // System warmup emails use notification category
+          priority: 5, // Lowest priority for warmup
+          trackOpens: true,
+          trackClicks: true
         });
 
         sent++;

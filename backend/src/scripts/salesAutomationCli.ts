@@ -210,7 +210,8 @@ Commands:
 
 Environment Variables:
   DATABASE_URL       PostgreSQL connection string (required)
-  RESEND_API_KEY     Resend API key for email sending (optional)
+  APEXMAIL_API_KEY   ApexMail API key for email sending (optional)
+  SMTP_HOST          SMTP server hostname (optional)
 
 Examples:
   # Run discovery only

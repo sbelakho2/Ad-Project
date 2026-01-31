@@ -41,6 +41,7 @@ import { EmailWarmupService } from './EmailWarmupService';
 import { EmailVerificationService } from './EmailVerificationService';
 import { SendTimingOptimizer } from './SendTimingOptimizer';
 import { EngagementBranchingService } from './EngagementBranchingService';
+import { getApexMailClient } from '../../src/services/apexmail-client';
 // Competitor issue fixes
 import { SpamPrevention } from './SpamPrevention';
 import { ReliabilityGuard } from './ReliabilityGuard';
@@ -72,6 +73,7 @@ export class SalesAutomationEngine {
   private personalization: AdaptivePersonalization;
   private logging: TransparentLogging;
   private dataQuality: DataQualityEngine;
+  private apexmail: any;
   
   private isRunning: boolean = false;
   private intervals: NodeJS.Timeout[] = [];
@@ -94,6 +96,9 @@ export class SalesAutomationEngine {
     this.logging = new TransparentLogging(databaseUrl);
     this.dataQuality = new DataQualityEngine(databaseUrl);
     this.defaultMailbox = defaultMailbox;
+
+    // Initialize ApexMail client (HTTP-based, communicates with control-plane)
+    this.apexmail = getApexMailClient();
   }
 
   /**
@@ -240,6 +245,9 @@ export class SalesAutomationEngine {
       }
     }, 30 * 60 * 1000)); // 30 minutes
 
+    // Start ApexMail queue processor
+    this.apexmail.startQueueProcessor();
+
     this.logging.info('system', 'All scheduled jobs started', { 
       services: ['warmup', 'verification', 'timing', 'branching', 'spam', 'reliability', 'dedup', 'quality', 'logging']
     });
@@ -282,6 +290,9 @@ export class SalesAutomationEngine {
 
     // Stop reliability monitoring
     this.reliability.stopMonitoring();
+
+    // Stop ApexMail queue processor
+    this.apexmail.stopQueueProcessor();
 
     for (const interval of this.intervals) {
       clearInterval(interval);

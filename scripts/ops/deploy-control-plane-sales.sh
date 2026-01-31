@@ -118,19 +118,21 @@ rm /tmp/control-plane-deploy.tar.gz
 cd /opt/adproject/control-plane
 NPM_CONFIG_LOGLEVEL=error npm ci --omit=dev --no-audit --no-fund
 
-# Ensure RESEND_API_KEY is in control-plane.env (copy from main .env if not present)
-if ! grep -q "RESEND_API_KEY" /opt/adproject/control-plane.env; then
-    RESEND_KEY=$(grep "RESEND_API_KEY" /opt/adproject/.env | head -1)
-    if [ -n "$RESEND_KEY" ]; then
-        echo "" >> /opt/adproject/control-plane.env
-        echo "# Sales Automation Email (Resend)" >> /opt/adproject/control-plane.env
-        echo "$RESEND_KEY" >> /opt/adproject/control-plane.env
-        echo "[OK] Added RESEND_API_KEY to control-plane.env"
-    else
-        echo "[WARN] RESEND_API_KEY not found in main .env - emails will be disabled"
-    fi
+# Ensure ApexMail SMTP config is in control-plane.env (copy from main .env if not present)
+if ! grep -q "SMTP_HOST" /opt/adproject/control-plane.env && ! grep -q "EMAIL_FROM" /opt/adproject/control-plane.env; then
+    echo "" >> /opt/adproject/control-plane.env
+    echo "# ApexMail - Self-hosted email (replaces Resend)" >> /opt/adproject/control-plane.env
+    
+    # Copy SMTP settings from main .env if present
+    for VAR in SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER SMTP_PASS EMAIL_FROM EMAIL_FROM_NAME APEXMAIL_API_KEY; do
+        VAL=$(grep "^${VAR}=" /opt/adproject/.env | head -1)
+        if [ -n "$VAL" ]; then
+            echo "$VAL" >> /opt/adproject/control-plane.env
+        fi
+    done
+    echo "[OK] Added ApexMail config to control-plane.env"
 else
-    echo "[OK] RESEND_API_KEY already configured"
+    echo "[OK] ApexMail config already present"
 fi
 
 # Restart service

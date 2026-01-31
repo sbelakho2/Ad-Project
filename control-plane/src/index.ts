@@ -24,6 +24,8 @@ import { initializePools, closePools, getReadOnlyPool, queryReadOnly } from './d
 import routes from './routes';
 import { initializeSalesScheduler, stopSalesScheduler } from './services/sales-scheduler';
 import { ensureCsrfCookie, validateCsrfToken, CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from './csrf';
+import { getApexMail } from './services/apexmail';
+import { InboundSMTPServer } from './services/apexmail/inbound-smtp';
 // NOTE: Orchestrator removed - app server is strictly a proxy client
 // All sales automation work runs on test server (157.90.126.205:4001)
 
@@ -3388,12 +3390,22 @@ async function startServer() {
         serverTime: result.rows[0].time,
       });
 
+      // Initialize and start ApexMail queue processor
+      const apexmail = getApexMail(pool);
+      apexmail.startQueueProcessor();
+      logger.info('ApexMail queue processor started');
+
       // Log execution mode
       if (process.env.SALES_AUTOMATION_ROLE === 'execution') {
          logger.info('Sales automation EXECUTION mode: handling requests locally');
          
          // Start the sales automation scheduler (only in execution mode)
          initializeSalesScheduler();
+
+         // Start Inbound SMTP server
+         const inboundSmtp = new InboundSMTPServer();
+         inboundSmtp.start();
+         (global as any).inboundSmtp = inboundSmtp;
       } else {
          // App server is strictly a proxy client - all sales automation work
          // runs on test server via /api/autonomous/* proxy routes
@@ -3427,6 +3439,18 @@ async function startServer() {
       
       // Stop the scheduler first
       stopSalesScheduler();
+
+      // Stop Inbound SMTP if running
+      if ((global as any).inboundSmtp) {
+        await (global as any).inboundSmtp.stop();
+      }
+
+      // Stop ApexMail processor
+      const pool = getReadOnlyPool();
+      if (pool) {
+        const apexmail = getApexMail(pool);
+        apexmail.stopQueueProcessor();
+      }
       
       server.close(async () => {
         logger.info('HTTP server closed');

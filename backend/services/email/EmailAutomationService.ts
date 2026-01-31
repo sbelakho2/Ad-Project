@@ -1,7 +1,6 @@
 // services/email/EmailAutomationService.ts
-// Email automation with Resend.com integration (free tier: 3K emails/mo)
+// Email automation with ApexMail (self-hosted, replaces Resend)
 
-import { Resend } from 'resend';
 import { Pool } from 'pg';
 import {
   BillingPreviewEmailPayload,
@@ -15,7 +14,54 @@ import {
   buildPaymentSucceededEmail,
 } from './billingEmailBuilders';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// ApexMail API endpoint (via Control Plane)
+const APEXMAIL_BASE_URL = process.env.APEXMAIL_URL || 'http://localhost:4000/api/apexmail';
+const APEXMAIL_API_KEY = process.env.APEXMAIL_API_KEY;
+
+// ApexMail helper function
+async function sendViaApexMail(options: {
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  replyTo?: string;
+  category?: 'transactional' | 'marketing' | 'notification';
+}): Promise<{ data?: { id: string }; error?: { message: string } }> {
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (APEXMAIL_API_KEY) {
+      headers['X-ApexMail-Key'] = APEXMAIL_API_KEY;
+    }
+
+    const response = await fetch(`${APEXMAIL_BASE_URL}/send`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        to: options.to,
+        from: options.from,
+        subject: options.subject,
+        html: options.html,
+        text: options.text || options.html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(),
+        replyTo: options.replyTo,
+        category: options.category || 'transactional',
+        priority: 1,
+      }),
+    });
+
+    if (response.ok) {
+      const result = await response.json() as { emailId?: string };
+      return { data: { id: result.emailId || 'unknown' } };
+    } else {
+      const error = await response.text();
+      return { error: { message: `ApexMail error: ${response.status} ${error}` } };
+    }
+  } catch (error) {
+    return { error: { message: error instanceof Error ? error.message : 'Unknown error' } };
+  }
+}
 
 const db = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -145,7 +191,7 @@ export class EmailAutomationService {
     api_key: string;
     plan_type: string;
   }): Promise<void> {
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: 'Welcome to ApexMediation! 🚀',
@@ -200,7 +246,7 @@ export class EmailAutomationService {
     plan_type: string;
     plan_price: string;
   }): Promise<void> {
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to: data.to,
       subject: `Your ApexMediation trial ends in ${data.days_remaining} day${data.days_remaining > 1 ? 's' : ''}`,
@@ -246,7 +292,7 @@ export class EmailAutomationService {
     const { to, customer_id: _customerId, ...content } = data;
     const { subject, html } = buildBillingPreviewEmail(content);
 
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to,
       subject,
@@ -268,7 +314,7 @@ export class EmailAutomationService {
     const { to, customer_id: _customerId, ...content } = data;
     const { subject, html } = buildPaymentFailedEmail(content);
 
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to,
       subject,
@@ -290,7 +336,7 @@ export class EmailAutomationService {
     const { to, customer_id: _customerId, ...content } = data;
     const { subject, html } = buildPaymentRetryEmail(content);
 
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to,
       subject,
@@ -312,7 +358,7 @@ export class EmailAutomationService {
     const { to, customer_id: _customerId, ...content } = data;
     const { subject, html } = buildPaymentSucceededEmail(content);
 
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to,
       subject,
@@ -335,7 +381,7 @@ export class EmailAutomationService {
     customer_id: string;
     reactivation_url: string;
   }): Promise<void> {
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to: data.to,
       subject: '🚫 Service suspended - payment required',
@@ -389,7 +435,7 @@ export class EmailAutomationService {
     const isOverage = data.percent_used >= 100;
     const overage = isOverage ? data.current_usage - data.limit : 0;
 
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to: data.to,
       subject: isOverage
@@ -444,7 +490,7 @@ export class EmailAutomationService {
     total_api_calls: number;
     revenue_generated: string;
   }): Promise<void> {
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to: data.to,
       subject: `📊 Your ApexMediation summary for ${data.month}`,
@@ -500,7 +546,7 @@ export class EmailAutomationService {
     breaking_changes: boolean;
     changelog_url: string;
   }): Promise<void> {
-    const { data: result, error } = await resend.emails.send({
+    const { data: result, error } = await sendViaApexMail({
       from: this.FROM_EMAIL,
       to: data.to,
       subject: data.breaking_changes
@@ -647,7 +693,7 @@ ${
     const emoji = milestoneEmojis[data.milestone_type] || '🎉';
     const milestoneName = milestoneNames[data.milestone_type] || data.milestone_type;
 
-    const { error } = await resend.emails.send({
+    const { error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: `${emoji} Milestone Reached: ${milestoneName}!`,
@@ -690,7 +736,7 @@ ${
     referral_code: string;
     reward_amount: string;
   }): Promise<void> {
-    const { error } = await resend.emails.send({
+    const { error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: '🎁 Earn $500 for Every Developer You Refer!',
@@ -751,7 +797,7 @@ ${
     nps_score: number;
     incentive: string;
   }): Promise<void> {
-    const { error } = await resend.emails.send({
+    const { error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: '⭐ Would You Share Your ApexMediation Experience?',
@@ -804,7 +850,7 @@ ${
     days_active: number;
     benefits: string[];
   }): Promise<void> {
-    const { error } = await resend.emails.send({
+    const { error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: '📚 Feature Your Success Story?',
@@ -859,7 +905,7 @@ ${
     reward_amount_cents: number;
     badge_url: string;
   }): Promise<void> {
-    const { error } = await resend.emails.send({
+    const { error } = await sendViaApexMail({
       from: this.FOUNDER_EMAIL,
       to: data.to,
       subject: '🏆 Community Champion Reward: $100 Credit!',

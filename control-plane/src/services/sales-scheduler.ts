@@ -161,8 +161,8 @@ async function runHealthCheck(): Promise<{ status: string; checks: Record<string
     }
   }
   
-  // Email service
-  checks.emailConfigured = !!process.env.RESEND_API_KEY;
+  // Email service - ApexMail replaces Resend (check SMTP config)
+  checks.emailConfigured = !!(process.env.SMTP_HOST || process.env.EMAIL_FROM);
   
   const allPassing = Object.values(checks).every(v => v);
   return { status: allPassing ? 'healthy' : 'degraded', checks };

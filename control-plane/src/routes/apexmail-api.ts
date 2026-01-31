@@ -12,12 +12,19 @@ import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { ApexMailService, getApexMail } from '../services/apexmail';
 
-export function createApexMailRouter(pool: Pool): Router {
+export interface ApexMailRouterOptions {
+  startQueueProcessor?: boolean;
+}
+
+export function createApexMailRouter(pool: Pool, options: ApexMailRouterOptions = {}): Router {
   const router = Router();
   const apexmail = getApexMail(pool);
 
-  // Start queue processor
-  apexmail.startQueueProcessor();
+  // Start queue processor only if requested (typically on EXECUTION node)
+  // This prevents duplicate sends when multiple nodes mount the routes
+  if (options.startQueueProcessor !== false) {
+    apexmail.startQueueProcessor();
+  }
 
   // ==========================================================================
   // TRACKING ENDPOINTS (No auth required - embedded in emails)

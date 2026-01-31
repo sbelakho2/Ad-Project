@@ -2,12 +2,11 @@
  * Email Service
  * 
  * Handles sending transactional emails for verification, password reset, etc.
- * Uses a stub implementation that logs emails in development.
- * In production, configure SMTP or use a service like Resend/SendGrid.
+ * Uses ApexMail (self-hosted) via the Control Plane API.
+ * Falls back to stub mode if ApexMail is not available.
  */
 
 import crypto from 'node:crypto';
-import { Resend } from 'resend';
 import logger from '../utils/logger';
 
 export interface EmailOptions {
@@ -24,13 +23,11 @@ export interface EmailResult {
 }
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://console.apexmediation.ee';
-const DEFAULT_FROM =
-  process.env.EMAIL_FROM ||
-  process.env.RESEND_FROM ||
-  'ApexMediation <no-reply@apexmediation.ee>';
+const DEFAULT_FROM = process.env.EMAIL_FROM || 'ApexMediation <no-reply@apexmediation.ee>';
 
-const resendApiKey = process.env.RESEND_API_KEY;
-const resend = resendApiKey ? new Resend(resendApiKey) : null;
+// ApexMail API endpoint (via Control Plane on App Server or localhost on Test Server)
+const APEXMAIL_BASE_URL = process.env.APEXMAIL_URL || 'http://localhost:4000/api/apexmail';
+const APEXMAIL_API_KEY = process.env.APEXMAIL_API_KEY;
 
 /**
  * Generate email HTML based on template
@@ -156,8 +153,8 @@ const generateEmailHtml = (template: EmailOptions['template'], data: Record<stri
 };
 
 /**
- * Send an email
- * In development/test, logs the email instead of sending
+ * Send an email via ApexMail API
+ * Falls back to stub mode if ApexMail is not configured
  */
 export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => {
   const messageId = crypto.randomUUID();
@@ -167,24 +164,43 @@ export const sendEmail = async (options: EmailOptions): Promise<EmailResult> => 
     ? html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
     : '';
 
-  if (resend) {
+  // Try ApexMail API first
+  if (APEXMAIL_API_KEY) {
     try {
-      const result = await resend.emails.send({
-        from: DEFAULT_FROM,
-        to: options.to,
-        subject: options.subject,
-        html,
-        text,
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-ApexMail-Key': APEXMAIL_API_KEY,
+      };
+
+      const response = await fetch(`${APEXMAIL_BASE_URL}/send`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          to: options.to,
+          from: DEFAULT_FROM,
+          subject: options.subject,
+          html,
+          text,
+          category: 'transactional',
+          priority: 1,
+        }),
       });
 
-      return { success: true, messageId: result?.data?.id || messageId };
+      if (response.ok) {
+        const result = await response.json() as { emailId?: string };
+        return { success: true, messageId: result.emailId || messageId };
+      } else {
+        const error = await response.text();
+        logger.error('ApexMail send failed', { status: response.status, error });
+        // Fall through to stub mode
+      }
     } catch (error) {
-      logger.error('Failed to send email via Resend', {
+      logger.error('ApexMail API error', {
         to: options.to,
         subject: options.subject,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
-      return { success: false, error: 'Email sending failed' };
+      // Fall through to stub mode
     }
   }
 
