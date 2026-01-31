@@ -15,6 +15,10 @@ import nodemailer from 'nodemailer';
 import type { Transporter, SentMessageInfo } from 'nodemailer';
 import { Pool } from 'pg';
 import crypto from 'crypto';
+import { logger } from '../../logger';
+import { SmartReplyAnalyzer } from '../sales-automation/SmartReplyAnalyzer';
+import { DomainHealthGuard } from '../sales-automation/DomainHealthGuard';
+import { IntentSignalDetector } from '../sales-automation/IntentSignalDetector';
 
 // ============================================================================
 // CONFIGURATION
@@ -118,6 +122,7 @@ export interface EmailEvent {
     | 'delivered'
     | 'opened'
     | 'clicked'
+    | 'replied'
     | 'bounced'
     | 'complained'
     | 'unsubscribed';
@@ -153,6 +158,11 @@ export class ApexMailService {
   private isProcessing: boolean = false;
   private activeCount: number = 0;
   private pollTimeout: ReturnType<typeof setTimeout> | null = null;
+  
+  // Smart Analysis Services
+  private replyAnalyzer: SmartReplyAnalyzer;
+  private healthGuard: DomainHealthGuard;
+  private intentDetector: IntentSignalDetector;
 
   constructor(pool: Pool, config: Partial<ApexMailConfig> = {}) {
     this.pool = pool;
@@ -175,6 +185,16 @@ export class ApexMailService {
       rateDelta: 1000,
       rateLimit: 50, // 50 messages per second max
     });
+
+    // Initialize Analysis Services
+    this.replyAnalyzer = new SmartReplyAnalyzer(pool);
+    this.healthGuard = new DomainHealthGuard(pool);
+    this.intentDetector = new IntentSignalDetector(pool);
+    
+    // Initialize tables in background
+    this.replyAnalyzer.initialize().catch(err => logger.error('[ApexMail] Failed to initialize SmartReplyAnalyzer', err));
+    this.healthGuard.initialize().catch(err => logger.error('[ApexMail] Failed to initialize DomainHealthGuard', err));
+    this.intentDetector.initialize().catch(err => logger.error('[ApexMail] Failed to initialize IntentSignalDetector', err));
   }
 
   // ==========================================================================
@@ -507,17 +527,40 @@ export class ApexMailService {
       ]
     );
 
-    // Update domain health metrics for bounces/complaints
+    // 1. Update domain health metrics for bounces/complaints
     if (event.type === 'bounced' || event.type === 'complained') {
       await this.updateDomainHealth(event);
     }
 
-    // Add to suppression list for hard bounces/complaints
+    // 2. Add to suppression list for hard bounces/complaints
     if (event.type === 'bounced' && event.metadata?.bounceType === 'hard') {
       await this.addSuppression(event.metadata.email as string, 'hard_bounce');
     }
     if (event.type === 'complained') {
       await this.addSuppression(event.metadata?.email as string, 'complaint');
+    }
+
+    // 3. Smart Analysis: Intent Signals (Opens/Clicks/Replies)
+    if (event.type === 'opened' || event.type === 'clicked' || event.type === 'replied') {
+      const contactId = event.metadata?.contactId as string;
+      if (contactId) {
+        let signalType: any = 'email_open';
+        if (event.type === 'clicked') signalType = 'email_click';
+        if (event.type === 'replied') signalType = 'fast_reply';
+
+        await this.intentDetector.recordSignal(contactId, signalType, 'apexmail', JSON.stringify(event.metadata));
+      }
+    }
+
+    // 4. Smart Analysis: Reply Categorization
+    if (event.type === 'replied' && event.metadata?.body) {
+      const contactId = event.metadata?.contactId as string;
+      const subject = event.metadata?.subject as string || '';
+      const body = event.metadata?.body as string;
+
+      if (contactId) {
+        await this.replyAnalyzer.analyzeAndStore(event.emailId, contactId, subject, body);
+      }
     }
   }
 

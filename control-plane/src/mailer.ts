@@ -1,6 +1,8 @@
 import nodemailer from 'nodemailer';
 import { getConfig } from './config';
 import { logger } from './logger';
+import { getApexMail } from './services/apexmail';
+import { getOperatorPool } from './database';
 
 function escapeHtml(input: string): string {
   return input
@@ -85,35 +87,6 @@ function buildEmail(params: {
   return { subject, text, html };
 }
 
-async function sendWithResend(params: {
-  apiKey: string;
-  from: string;
-  to: string;
-  subject: string;
-  text: string;
-  html: string;
-}): Promise<void> {
-  const resp = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: params.from,
-      to: params.to,
-      subject: params.subject,
-      text: params.text,
-      html: params.html,
-    }),
-  });
-
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`Resend email failed: ${resp.status} ${body}`);
-  }
-}
-
 export async function sendDeviceApprovalEmail(params: {
   operatorEmail: string;
   deviceLabel?: string;
@@ -141,42 +114,56 @@ export async function sendDeviceApprovalEmail(params: {
     kind: params.kind,
   });
 
-  const hasResend = Boolean(cfg.RESEND_API_KEY);
+  // Try ApexMail first
+  try {
+    const apexmail = getApexMail(getOperatorPool());
+    const result = await apexmail.send({
+      to,
+      from,
+      subject,
+      text,
+      html,
+      category: 'transactional',
+      priority: 1, // Critical system email
+      trackOpens: false,
+      trackClicks: false,
+    });
+
+    if (result.success) {
+      logger.info('Device approval email sent via ApexMail', { to, operatorEmail: params.operatorEmail, kind: params.kind });
+      return;
+    }
+    
+    logger.warn('ApexMail failed, falling back to SMTP', { error: result.error });
+  } catch (err) {
+    logger.warn('ApexMail unavailable, falling back to SMTP', { error: (err as Error).message });
+  }
+
+  // Fallback to direct SMTP if configured
   const hasSmtp = Boolean(cfg.SMTP_HOST);
 
-  if (!hasResend && !hasSmtp) {
+  if (!hasSmtp) {
     if (params.kind === 'bootstrap-notice') {
       logger.warn('No email provider configured; skipping bootstrap device email notice', { operatorEmail: params.operatorEmail });
       return;
     }
-    throw new Error('Email provider not configured (set RESEND_API_KEY or SMTP_HOST)');
+    throw new Error('Email provider not configured (ApexMail or SMTP_HOST)');
   }
 
-  if (hasResend) {
-    await sendWithResend({
-      apiKey: cfg.RESEND_API_KEY!,
-      from,
-      to,
-      subject,
-      text,
-      html,
-    });
-  } else {
-    const transporter = nodemailer.createTransport({
-      host: cfg.SMTP_HOST,
-      port: parseInt(cfg.SMTP_PORT, 10),
-      secure: cfg.SMTP_SECURE === 'true',
-      auth: cfg.SMTP_USER && cfg.SMTP_PASS ? { user: cfg.SMTP_USER, pass: cfg.SMTP_PASS } : undefined,
-    });
+  const transporter = nodemailer.createTransport({
+    host: cfg.SMTP_HOST,
+    port: parseInt(cfg.SMTP_PORT, 10),
+    secure: cfg.SMTP_SECURE === 'true',
+    auth: cfg.SMTP_USER && cfg.SMTP_PASS ? { user: cfg.SMTP_USER, pass: cfg.SMTP_PASS } : undefined,
+  });
 
-    await transporter.sendMail({
-      to,
-      from,
-      subject,
-      text,
-      html,
-    });
-  }
+  await transporter.sendMail({
+    to,
+    from,
+    subject,
+    text,
+    html,
+  });
 
-  logger.info('Device approval email sent', { to, operatorEmail: params.operatorEmail, kind: params.kind });
+  logger.info('Device approval email sent via SMTP fallback', { to, operatorEmail: params.operatorEmail, kind: params.kind });
 }

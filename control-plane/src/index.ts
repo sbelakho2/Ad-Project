@@ -143,6 +143,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     return next();
   }
   
+  // Skip CSRF for login route - user doesn't have a token yet
+  // Login is protected by rate limiting and device confirmation instead
+  if (req.path === '/api/v1/auth/login') {
+    return next();
+  }
+  
   // Skip CSRF for ApexMail API calls with valid internal API key
   // This allows service-to-service communication without CSRF tokens
   const apexMailKey = req.headers['x-apexmail-key'] as string | undefined;
@@ -1185,8 +1191,8 @@ app.get('/static/admin-login.js', (req: Request, res: Response) => {
     var cookies = document.cookie.split(';');
     for (var i = 0; i < cookies.length; i++) {
       var cookie = cookies[i].trim();
-      if (cookie.indexOf('__Host-csrf=') === 0) {
-        return cookie.substring('__Host-csrf='.length);
+      if (cookie.indexOf('csrf_token=') === 0) {
+        return cookie.substring('csrf_token='.length);
       }
     }
     return '';

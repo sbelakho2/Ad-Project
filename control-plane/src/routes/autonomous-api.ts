@@ -36,10 +36,14 @@ import { getTemplates, createTemplate, previewVariations } from '../services/mes
 import { getMessagesForReview, submitReview, getClassificationStats } from '../services/inbox/clerk';
 import { getSources, saveDiscoveredApps, getSourcesDueForScrape } from '../services/discovery/hunter';
 import { calculateLeadScore, saveLeadScore, getContactsNeedingScoring } from '../services/discovery/analyst';
-import { queryOperator, queryReadOnly } from '../database';
+import { queryOperator, queryReadOnly, getOperatorPool } from '../database';
 import { logger } from '../logger';
+import { getApexMail } from '../services/apexmail';
 
 const router = Router();
+
+// Use ApexMail service (singleton)
+const apexmail = getApexMail(getOperatorPool());
 
 // ============================================================================
 // MIDDLEWARE
@@ -2587,13 +2591,7 @@ router.post('/send', async (req: Request, res: Response) => {
       return;
     }
     
-    // Send via Resend API
-    const resendApiKey = process.env.RESEND_API_KEY;
-    if (!resendApiKey) {
-      res.status(500).json({ error: 'RESEND_API_KEY not configured' });
-      return;
-    }
-    
+    // EMAIL SENDING (ApexMail Integration)
     const emailFrom = process.env.EMAIL_FROM || 'contact@apexmediation.ee';
     const emailFromName = process.env.EMAIL_FROM_NAME || 'Apex Mediation';
     const replyDomain = process.env.INBOUND_SMTP_DOMAIN || 'replies.apexmediation.ee';
@@ -2606,42 +2604,34 @@ router.post('/send', async (req: Request, res: Response) => {
     const unsubscribeUrl = `${publicOrigin}/api/autonomous/unsubscribe/${message.contact_id}`;
     const unsubscribeMailto = `mailto:unsubscribe+${message.contact_id}@${replyDomain}?subject=Unsubscribe`;
     
-    const sendResponse = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
+    // Send via ApexMail
+    const sendResult = await apexmail.send({
+      from: emailFrom,
+      fromName: emailFromName,
+      replyTo: replyToAddress,
+      to: contact.email,
+      subject: message.subject,
+      html: bodyWithTracking.replace(/\n/g, '<br>'),
+      text: message.body_text,
+      category: 'marketing',
+      priority: 3, // High priority for autonomous sends
+      trackOpens: false, // We use custom tracking pixel above
+      trackClicks: false, // We use custom tracking links if any
+      entityType: 'sa_outbound_auto',
+      entityId: message.id,
       headers: {
-        'Authorization': `Bearer ${resendApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: `${emailFromName} <${emailFrom}>`,
-        reply_to: replyToAddress,
-        to: [contact.email],
-        subject: message.subject,
-        html: bodyWithTracking.replace(/\n/g, '<br>'),
-        text: message.body_text,
-        headers: {
-          'List-Unsubscribe': `<${unsubscribeUrl}>, <${unsubscribeMailto}>`,
-          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-        },
-        tags: [
-          { name: 'tracking_id', value: trackingId },
-          { name: 'contact_id', value: message.contact_id },
-        ],
-      }),
+        'List-Unsubscribe': `<${unsubscribeUrl}>, <${unsubscribeMailto}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      }
     });
     
-    if (!sendResponse.ok) {
-      const errorText = await sendResponse.text();
-      logger.error('Resend API error', { status: sendResponse.status, error: errorText });
-      // SECURITY: Don't leak Resend API error details to clients
-      const isProduction = process.env.NODE_ENV === 'production';
-      res.status(500).json({ 
-        error: isProduction ? 'Email delivery failed' : `Resend API error: ${errorText}` 
-      });
+    if (!sendResult.success) {
+      logger.error('ApexMail delivery failed', { error: sendResult.error });
+      res.status(500).json({ error: 'Email delivery failed' });
       return;
     }
     
-    const sendResult = await sendResponse.json() as { id: string };
+    const messageId = sendResult.messageId || sendResult.emailId || 'unknown';
     
     // Record successful send for rate limiting
     sendRateLimiter.recordSend();
@@ -2649,28 +2639,28 @@ router.post('/send', async (req: Request, res: Response) => {
     // Update message status
     await queryOperator(`
       UPDATE sa_outbound_messages
-      SET status = 'sent', sent_at = CURRENT_TIMESTAMP, message_id = $1, provider = 'resend'
+      SET status = 'sent', sent_at = CURRENT_TIMESTAMP, message_id = $1, provider = 'apexmail'
       WHERE id = $2
-    `, [sendResult.id, message.id]);
+    `, [messageId, message.id]);
     
     // Save tracking record
     await queryOperator(`
       INSERT INTO sa_email_events 
       (outbound_message_id, contact_id, event_type, arm_id, source, event_data)
-      VALUES ($1, $2, 'sent', $3, 'resend', $4)
-    `, [message.id, message.contact_id, message.subject_arm_id, JSON.stringify({ trackingId, resendId: sendResult.id })]);
+      VALUES ($1, $2, 'sent', $3, 'apexmail', $4)
+    `, [message.id, message.contact_id, message.subject_arm_id, JSON.stringify({ trackingId, apexMailId: messageId })]);
     
-    logger.info('Email sent successfully', {
+    logger.info('Email sent successfully via ApexMail', {
       messageId: message.id,
       contactId: message.contact_id,
       to: contact.email,
-      resendId: sendResult.id,
+      apexMailId: messageId,
     });
     
     res.json({
       success: true,
       messageId: message.id,
-      resendId: sendResult.id,
+      apexMailId: messageId,
       trackingId,
       to: contact.email,
     });
