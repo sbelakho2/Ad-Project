@@ -1,6 +1,5 @@
 import { SMTPServer, SMTPServerSession, SMTPServerAddress } from 'smtp-server';
 import { simpleParser, AddressObject } from 'mailparser';
-import axios from 'axios';
 import { Readable } from 'stream';
 import { logger } from '../../logger';
 
@@ -170,14 +169,25 @@ export class InboundSMTPServer {
         }
         
         try {
-          const response = await axios.post(this.config.webhookUrl, payload, {
-            timeout: this.config.webhookTimeoutMs,
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), this.config.webhookTimeoutMs);
+          
+          const response = await fetch(this.config.webhookUrl, {
+            method: 'POST',
+            signal: controller.signal,
             headers: {
               'Content-Type': 'application/json',
               'X-Inbound-SMTP-Session': sessionId,
-              'X-API-Key': this.config.apiKey,
+              'X-API-Key': this.config.apiKey!,
             },
+            body: JSON.stringify(payload),
           });
+          
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
           
           logger.info('[InboundSMTP] Webhook delivery successful', { 
             sessionId,
