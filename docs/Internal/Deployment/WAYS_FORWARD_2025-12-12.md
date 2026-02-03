@@ -19,7 +19,7 @@ The platform has reached full production readiness with:
 - ✅ Stripe webhooks tested (12 event types, all 200 OK)
 - ✅ Load testing passed (k6 30-min soak, 0.66% errors, p95=76.67ms)
 - ✅ Security scans passed (0 critical/high vulnerabilities)
-- ✅ Email notifications configured (Resend + support@apexmediation.ee)
+- ✅ Email notifications configured (Postfix/ApexMail + support@apexmediation.ee)
 - ✅ Rollback procedures documented (docs/runbooks/ROLLBACK.md)
 - ✅ VRA multi-day soak test running
 - ✅ **Documentation pass complete (2025-12-12)**
@@ -91,7 +91,7 @@ The platform has reached full production readiness with:
 ### ✅ Email Configured - Updated 2025-12-12 14:25 UTC
 | Item | Status |
 |------|--------|
-| Resend API Key | ✅ Added to droplet (re_J3MCuG6E_...) |
+| Postfix SMTP | ✅ Configured on test server (mail.apexmediation.ee) |
 | Email From | ✅ support@apexmediation.ee |
 | Backend Restart | ✅ Container restarted with new env vars |
 
@@ -208,7 +208,7 @@ The following items block production launch:
 | ~~Security scans~~ | ~~Compliance requirement~~ | ~~Security~~ | ✅ DONE (0 critical) |
 | ~~Stripe integration~~ | ~~Revenue collection~~ | ~~Backend~~ | ✅ DONE (webhooks tested) |
 | ~~Rollback runbook~~ | ~~Operational safety~~ | ~~Ops~~ | ✅ DONE |
-| ~~Email setup~~ | ~~Notifications~~ | ~~Ops~~ | ✅ DONE (Resend configured) |
+| ~~Email setup~~ | ~~Notifications~~ | ~~Ops~~ | ✅ DONE (Postfix configured) |
 
 **🎉 ALL CRITICAL PATH ITEMS COMPLETE**
 
@@ -235,10 +235,10 @@ The following items block production launch:
    - Includes: SSH access, 4 rollback procedures, database rollback, escalation matrix
    - **Result:** ✅ Operational documentation complete
 
-2. **Email/Resend Setup** ✅ (2025-12-12 14:25 UTC):
-   - Added `RESEND_API_KEY=re_J3MCuG6E_...` to droplet
-   - Added `EMAIL_FROM=support@apexmediation.ee` to droplet
-   - Backend container restarted with new env vars
+2. **Email/Postfix Setup** ✅ (2025-12-12 14:25 UTC):
+   - Configured Postfix MTA on test server (157.90.126.205)
+   - OpenDKIM with apexmail selector
+   - DNS: MX, SPF, DKIM, DMARC, PTR all configured
    - **Result:** ✅ Email automation ready
 
 3. **VRA Multi-Day Test Started** ✅ (2025-12-12 14:28 UTC):
@@ -334,7 +334,7 @@ The following items block production launch:
    - Billing GET routes verified (policy, tiers, invoices)
    - **Security scans: PASSED** (0 critical/high vulnerabilities)
    - **Rollback runbook created** (docs/runbooks/ROLLBACK.md)
-   - **Email/Resend configured** (support@apexmediation.ee)
+   - **Email/Postfix configured** (support@apexmediation.ee)
    - **VRA multi-day test started** (running on droplet)
    - **Stripe webhooks: PASSED** (12 event types tested, all 200 OK)
 

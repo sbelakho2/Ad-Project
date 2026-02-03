@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Orchestrate the full staging run (0.0.7–0.0.12) and zip evidence for 0.0.13
 # Usage:
-#   RESEND_API_KEY=re_xxx \
+#   SMTP_PASS=re_xxx \
 #   BASE_URL=https://api.apexmediation.ee \
 #   ./scripts/ops/run_staging_full.sh 2025-12-08
 
@@ -32,9 +32,9 @@ else
   echo "[warn] Docker not available; skipping compose bring-up. Assuming Console/API already running."
 fi
 
-# 2) Capture Console/API evidence (health/ready/transparency/resend) — 0.0.7
+# 2) Capture Console/API evidence (health/ready/transparency/apexmail) — 0.0.7
 echo "[run] Capturing Console/API evidence"
-RESEND_API_KEY="${RESEND_API_KEY:-}" \
+SMTP_PASS="${SMTP_PASS:-}" \
 bash "${ROOT_DIR}/scripts/ops/staging_console_capture.sh" \
   --base "${BASE_URL:-https://api.apexmediation.ee}" \
   --console "https://console.apexmediation.ee" \

@@ -2,10 +2,10 @@
 # GDPR-Compliant: No PII in alerts
 
 global:
-  smtp_smarthost: 'smtp.resend.com:587'
+  smtp_smarthost: '${SMTP_HOST:-mail.apexmediation.ee}:${SMTP_PORT:-587}'
   smtp_from: 'alerts@apexmediation.ee'
-  smtp_auth_username: 'resend'
-  smtp_auth_password: '${RESEND_API_KEY}'
+  smtp_auth_username: '${SMTP_USER}'
+  smtp_auth_password: '${SMTP_PASS}'
   smtp_require_tls: true
   
   # Slack webhook (set in environment if using)

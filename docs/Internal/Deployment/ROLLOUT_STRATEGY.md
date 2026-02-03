@@ -1805,7 +1805,7 @@ Template: https://postmortems.pagerduty.com/
 | **Infrastructure** | $ | Hetzner app+DB servers + Redis on app server + object storage | Legacy stack removed |
 | **Monitoring** | $ | Self-hosted Grafana + Prometheus + Loki (Hetzner) | Replace Datadog ($300+/mo) |
 | **Error Tracking** | $0 | Sentry free tier (5K events/mo) + GlitchTip self-hosted | Datadog APM |
-| **Email** | $0-15 | Resend.com (3K emails/mo free) or Amazon SES ($0.10/1K) | SendGrid $15+/mo |
+| **Email** | $0 | Self-hosted Postfix + OpenDKIM (unlimited) | SendGrid $15+/mo |
 | **Uptime Monitoring** | $0 | BetterStack free tier (10 monitors) + self-hosted Upptime | UptimeRobot paid |
 | **Status Page** | $0 | Self-hosted Upptime (GitHub Pages) | Atlassian Statuspage $29/mo |
 | **Analytics** | $0 | Self-hosted Plausible or Umami | Google Analytics (privacy concerns) |
@@ -1864,13 +1864,18 @@ monitoring:
 # See: monitoring/README.md and docs/Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md
 ```
 
-**3. Email Automation (100% Free for <10K customers)**
+**3. Email Automation (100% Free, Unlimited)**
 
 ```yaml
 email:
-  provider: resend.com
-  free_tier: 3,000 emails/month, 100/day
-  upgrade_at: 3,000 emails/mo = ~500 customers (trial reminders)
+  provider: postfix (self-hosted)
+  cost: $0 unlimited
+  infrastructure: mail.apexmediation.ee (Test Server)
+  
+  features:
+    - DKIM signing via OpenDKIM
+    - Direct MX delivery
+    - Full deliverability control
   
   templates:
     transactional: 10 templates (welcome, trial, payment, etc.)
@@ -1878,13 +1883,11 @@ email:
     rendering: mjml.io (open source)
     tracking: self-hosted (utm params + analytics DB)
     
-  cost_vs_alternatives:
-    sendgrid: $15/mo for 40K emails
-    postmark: $10/mo for 10K emails
-    resend: $0 for 3K emails → $20/mo for 50K emails
-    amazon_ses: $0.10 per 1K emails (cheapest at scale)
-
-# Migrate to SES when >5K emails/month ($0.50/mo vs Resend $20)
+  dns_records:
+    mx: mail.apexmediation.ee
+    spf: "v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all"
+    dkim: apexmail._domainkey
+    dmarc: "v=DMARC1; p=reject;"
 ```
 
 **4. Support Automation (Zero Cost)**

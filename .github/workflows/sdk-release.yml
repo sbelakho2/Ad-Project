@@ -486,9 +486,8 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: |
-          # Emit SDK update event to email service
+          # Emit SDK update event to email service (processed by ApexMail)
           node -e "
           const { Pool } = require('pg');
           const pool = new Pool({ connectionString: process.env.DATABASE_URL });

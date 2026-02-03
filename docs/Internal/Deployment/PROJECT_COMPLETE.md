@@ -145,7 +145,7 @@ _Last touched: 2025-11-18 during FIX-10 documentation alignment._
 - **CI/CD:** GitHub Actions (free 3K minutes/month)
 - **Monitoring:** Grafana + Prometheus + Loki (self-hosted $8/mo)
 - **Error Tracking:** Sentry free tier or GlitchTip (self-hosted)
-- **Email:** Resend.com (free 3K/month) → Amazon SES ($0.10/1K)
+- **Email:** Self-hosted Postfix + OpenDKIM (unlimited, $0)
 - **Storage:** Cloudflare R2 + Backblaze B2 ($10/mo)
 - **Secrets:** Infisical (self-hosted)
 - **Status:** Upptime (GitHub Pages)

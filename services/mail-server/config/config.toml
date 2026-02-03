@@ -1,0 +1,65 @@
+# ApexMediation Mail Server Configuration
+# /etc/apex-mail/config.toml
+#
+# IMPORTANT: This is a STANDALONE mail server.
+# - Outbound sending uses Resend API (NOT Protonmail)
+# - Inbound receiving uses our own SMTP server (NOT Protonmail)
+# - No third-party mail services are involved in the mail flow
+#
+# DNS Requirements (to fully replace Protonmail):
+# 1. Update MX record: apexmediation.ee -> mail.apexmediation.ee (priority 10)
+# 2. Update SPF record: "v=spf1 include:amazonses.com ip4:<TEST_SERVER_IP> -all"
+# 3. Remove Protonmail SPF include: _spf.protonmail.ch
+# 4. Add DKIM record once key is generated
+# 5. Keep DMARC: "v=DMARC1; p=quarantine"
+
+[server]
+hostname = "mail.apexmediation.ee"
+domain = "apexmediation.ee"
+additional_domains = []
+bind_address = "0.0.0.0"
+
+[database]
+url = "postgresql://mail:password@127.0.0.1:5432/maildb"
+max_connections = 20
+connect_timeout_secs = 30
+
+[storage]
+blob_path = "/var/lib/apex-mail/blobs"
+index_path = "/var/lib/apex-mail/index"
+deduplicate = true
+compress = true
+
+[tls]
+# cert_path = "/etc/letsencrypt/live/mail.apexmediation.ee/fullchain.pem"
+# key_path = "/etc/letsencrypt/live/mail.apexmediation.ee/privkey.pem"
+require_tls = false  # Set to true in production
+min_version = "1.2"
+
+[rspamd]
+url = "http://127.0.0.1:11333"
+enabled = false  # Enable when Rspamd is installed
+timeout_secs = 30
+spam_threshold = 15.0
+
+[resend]
+# api_key loaded from environment: RESEND_API_KEY
+enabled = true
+from_address = "ApexMediation <noreply@apexmediation.ee>"
+
+[dkim]
+selector = "apex2026"
+# private_key_path = "/etc/apex-mail/dkim/apex2026.private"
+enabled = false  # Enable when DKIM key is generated
+
+[grpc]
+mailstore_addr = "127.0.0.1:50051"
+spam_gateway_addr = "127.0.0.1:50052"
+outbound_queue_addr = "127.0.0.1:50053"
+
+[limits]
+max_message_size = 26214400  # 25MB
+max_recipients = 100
+messages_per_hour = 500
+default_quota_bytes = 5368709120  # 5GB
+max_connections_per_ip = 50

@@ -1,11 +1,11 @@
 import { SMTPServer } from "smtp-server";
 import { simpleParser } from "mailparser";
 import axios from "axios";
-import { config } from "dotenv";
+import { ensureEnvLoaded } from "./utils/envLoader";
 import logger from "./utils/logger";
 
-// Load env vars
-config();
+// Use centralized env loading
+ensureEnvLoaded();
 
 const WEBHOOK_URL = process.env.INBOUND_EMAIL_WEBHOOK_URL || "http://localhost:4000/api/autonomous/webhook/sendgrid";
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || "2525");

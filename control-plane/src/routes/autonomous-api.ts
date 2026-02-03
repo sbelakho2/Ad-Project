@@ -2389,7 +2389,7 @@ router.get('/edge/status', async (_req: Request, res: Response) => {
 });
 
 // ============================================================================
-// EMAIL SENDING (Resend Integration)
+// EMAIL SENDING (ApexMail Integration)
 // ============================================================================
 
 // Rate limiting state
@@ -2433,7 +2433,7 @@ const sendRateLimiter = {
 
 /**
  * POST /api/autonomous/send
- * Send a composed message via Resend API
+ * Send a composed message via ApexMail
  * 
  * This is the CRITICAL missing piece that enables the full funnel:
  *   Discover → Score → Compose → SEND → Track → Learn

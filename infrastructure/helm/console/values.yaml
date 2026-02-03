@@ -149,7 +149,10 @@ secrets:
     - NEXTAUTH_URL
     - NEXTAUTH_SECRET
     - JWT_SECRET
-    - RESEND_API_KEY
+    - SMTP_HOST
+    - SMTP_PORT
+    - SMTP_USER
+    - SMTP_PASS
     - STRIPE_SECRET_KEY
     - STRIPE_PUBLIC_KEY
     - SESSION_ENCRYPTION_KEY
@@ -157,7 +160,10 @@ secrets:
     # NEXTAUTH_URL: https://console.apexmediation.ee
     # NEXTAUTH_SECRET: super-secret
     # JWT_SECRET: base64encodedsecret
-    # RESEND_API_KEY: re_...
+    # SMTP_HOST: mail.apexmediation.ee
+    # SMTP_PORT: 587
+    # SMTP_USER: (optional)
+    # SMTP_PASS: (optional)
     # STRIPE_SECRET_KEY: sk_live_...
     # STRIPE_PUBLIC_KEY: pk_live_...
     # SESSION_ENCRYPTION_KEY: base64...

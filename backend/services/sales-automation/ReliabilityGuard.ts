@@ -211,18 +211,19 @@ export class ReliabilityGuard extends EventEmitter {
   }
 
   /**
-   * Check email service
+   * Check email service (ApexMail via Control Plane)
    */
   private async checkEmailService(): Promise<ComponentHealth> {
     const start = Date.now();
-    const hasApiKey = !!process.env.RESEND_API_KEY;
+    // ApexMail uses SMTP configuration - check for SMTP_HOST or control-plane URL
+    const hasEmailConfig = !!process.env.SMTP_HOST || !!process.env.CONTROL_PLANE_URL;
 
-    if (!hasApiKey) {
+    if (!hasEmailConfig) {
       return {
         name: 'email_service',
         status: 'degraded',
         lastSuccess: null,
-        lastError: 'RESEND_API_KEY not configured',
+        lastError: 'SMTP not configured (SMTP_HOST or CONTROL_PLANE_URL required)',
         errorCount: 1,
         responseTime: Date.now() - start,
       };

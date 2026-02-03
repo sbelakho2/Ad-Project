@@ -1,51 +1,12 @@
-import dotenv from 'dotenv';
 import fs from 'node:fs';
-import path from 'node:path';
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import Cursor from 'pg-cursor';
 import logger from './logger';
 import { dbQueryDurationSeconds } from './prometheus';
+import { ensureEnvLoaded } from './envLoader';
 
-// Prefer an explicitly-provided ENV_FILE, then repo-root .env (one level up from backend/)
-// so scripts executed from /opt/adproject/backend pick up /opt/adproject/.env.
-// Only load dotenv if DATABASE_URL isn't already set (e.g. PM2-provided env).
-if (!process.env.DATABASE_URL) {
-  const cwdBase = path.basename(process.cwd());
-  const cwdCandidates =
-    cwdBase === 'backend'
-      ? [
-          // Prefer repo-root env when running inside backend/
-          path.resolve(process.cwd(), '../.env'),
-          path.resolve(process.cwd(), '.env'),
-        ]
-      : [
-          path.resolve(process.cwd(), '.env'),
-          path.resolve(process.cwd(), '../.env'),
-        ];
-
-  const candidates = [
-    process.env.ENV_FILE,
-    ...cwdCandidates,
-    // Running from transpiled dist/ paths (backend/dist/src/utils)
-    path.resolve(__dirname, '../../../../.env'),
-    // Running from source paths (backend/src/utils)
-    path.resolve(__dirname, '../../..', '.env'),
-  ].filter((p): p is string => !!p);
-
-  const envPath = candidates.find((p) => {
-    try {
-      return fs.existsSync(p);
-    } catch {
-      return false;
-    }
-  });
-
-  if (envPath) {
-    dotenv.config({ path: envPath });
-  } else {
-    dotenv.config();
-  }
-}
+// Use centralized env loading (idempotent - safe to call multiple times)
+ensureEnvLoaded();
 
 const defaultTestConnection = 'postgresql://postgres:postgres@localhost:5432/apexmediation_test';
 const connectionString = process.env.DATABASE_URL ?? (process.env.NODE_ENV === 'test' ? defaultTestConnection : undefined);

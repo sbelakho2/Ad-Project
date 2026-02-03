@@ -3,20 +3,9 @@
 // CLI for running the automated sales system on the Hetzner app server
 // Usage: node dist/src/scripts/salesAutomationCli.js [command] [options]
 
-import path from 'path';
-import { config } from 'dotenv';
-
-// Load environment variables from multiple locations
-const envPaths = [
-  path.resolve(process.cwd(), '.env'),
-  path.resolve(process.cwd(), '../.env'),
-  '/opt/adproject/.env',
-  '/opt/adproject/backend/.env',
-];
-
-for (const envPath of envPaths) {
-  config({ path: envPath });
-}
+// Load environment first, before any other imports that depend on process.env
+import { ensureEnvLoaded } from '../utils/envLoader';
+ensureEnvLoaded();
 
 import { SalesAutomationEngine } from '../../services/sales-automation';
 

@@ -147,16 +147,31 @@ Alerts are created when:
 
 ## Deployment Status
 
-- ✅ Migration run on droplet (164.90.232.151)
+**Infrastructure:** Hetzner (migrated from DigitalOcean December 2025)
+
+| Component | Server | Status |
+|-----------|--------|--------|
+| VRA Tables | DB Server (77.42.44.35) | ✅ Deployed |
+| VRA Service | App Server (46.62.252.96) | ✅ Running |
+| VRA Scheduler | App Server | ✅ Active |
+| Console UI | App Server | ✅ Deployed |
+
+- ✅ Migration run on production (Hetzner DB Server)
 - ✅ Backend restarted and healthy
 - ✅ Tables created: vra_network_connections, vra_sync_history, vra_reconciliation_runs, vra_alerts
-- ⏳ Console needs rebuild for UI changes
-- ⏳ Scheduler needs initialization on startup
+- ✅ Console UI deployed with network settings page
+- ✅ Scheduler running (6-hour sync cycle)
 
-## Next Steps
+## Configuration
 
-1. Rebuild console container to deploy UI
-2. Add VRA routes initialization to app startup
-3. Set VRA_ENCRYPTION_KEY environment variable
-4. Test OAuth flows with real network credentials
-5. Enable scheduler in production
+```bash
+# Required environment variables (App Server /opt/adproject/backend/.env)
+VRA_ENCRYPTION_KEY=<32-byte-key>
+VRA_SCHEDULER_ENABLED=true
+
+# Optional: OAuth credentials for supported networks
+ADMOB_CLIENT_ID=...
+ADMOB_CLIENT_SECRET=...
+META_CLIENT_ID=...
+META_CLIENT_SECRET=...
+```

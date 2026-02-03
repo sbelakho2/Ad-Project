@@ -125,7 +125,7 @@ Core Services (17 total)
 ├── External APIs
 │   ├── OpenAI (optional for AI features)
 │   ├── Stripe (required for billing)
-│   ├── Email Provider (SendGrid/Resend/SES)
+│   ├── Email Provider (Self-hosted Postfix/ApexMail)
 │   └── GitHub API (changelog generation)
 │
 └── Service Interconnections
@@ -331,7 +331,7 @@ const validated = ReferralCodeSchema.parse(input);
 - `STRIPE_API_KEY` (payment processing)
 - `OPENAI_API_KEY` (AI features)
 - `JWT_SECRET` (authentication)
-- `EMAIL_API_KEY` (SendGrid/Resend/SES)
+- SMTP credentials (local Postfix - no external API key needed)
 
 **Recommendation:** Use proper secrets management:
 

@@ -567,7 +567,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: \${SECRET_KEY}
       PORT: 8000
-      EMAIL_URL: smtp://\${SMTP_USER}:\${SMTP_PASSWORD}@smtp.resend.com:587
+      EMAIL_URL: smtp://localhost:587
       GLITCHTIP_DOMAIN: https://errors.apexmediation.ee
       DEFAULT_FROM_EMAIL: support@apexmediation.ee
 
@@ -615,7 +615,7 @@ curl -X POST https://api.apexmediation.ee/api/test/error
 
 #### 3.1 Email Marketing: Listmonk
 **From**: Mailchimp ($350-500/month for 10K-50K subscribers)
-**To**: Listmonk self-hosted on the droplet ($0 incremental) + Resend.com for delivery (free 3K/month)
+**To**: Listmonk self-hosted on the droplet ($0 incremental) + Postfix for delivery (unlimited emails)
 
 **Listmonk Features**:
 - Unlimited subscribers (vs Mailchimp's tiered pricing)
@@ -671,14 +671,14 @@ password = "$DB_PASSWORD" # Provided via environment/secrets manager
 database = "listmonk"
 ssl_mode = "disable"
 
-# Use Resend.com for email delivery
+# Use self-hosted Postfix for email delivery
 [[messengers]]
 enabled = true
-host = "smtp.resend.com"
+host = "mail.apexmediation.ee"
 port = 587
-auth_protocol = "login"
-username = "resend"
-password = "$RESEND_API_KEY" # Provided via environment/secrets manager
+auth_protocol = "plain"
+username = "" # No auth needed for local Postfix
+password = "" # No auth needed for local Postfix
 email_format = "html"
 max_conns = 10
 idle_timeout = "15s"
@@ -957,7 +957,7 @@ umami.track('sdk_download', { platform: 'ios' });
 | Misc (egress, DNS, backups) | $3–5 | Buffer for bandwidth/monitoring |
 | Optional: Grafana/Prometheus | $0 | Self-host on droplet; low retention |
 | Optional: Status Page (Upptime) | $0 | GitHub Pages |
-| Optional: Email (Resend) | $0–15 | 3K emails/mo free |
+| Optional: Email (Postfix) | $0 | Self-hosted, unlimited |
 | **Infra Subtotal** | **$44–49** | ≤ $50 cap |
 
 ---

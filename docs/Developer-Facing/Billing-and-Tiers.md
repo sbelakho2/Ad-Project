@@ -23,7 +23,7 @@
 - Billing Settings surfaces the tier capability grid; CTA to upgrade is available.
 
 ## Env/Secrets
-- Console requires `RESEND_API_KEY` (email), `NEXTAUTH_SECRET`, JWT secrets.
+- Console requires SMTP configuration (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`) for email via ApexMail, `NEXTAUTH_SECRET`, JWT secrets.
 - Backend 2FA issuer is set via `TWOFA_ISSUER` to keep branding consistent.
 
 ## Website Alignment

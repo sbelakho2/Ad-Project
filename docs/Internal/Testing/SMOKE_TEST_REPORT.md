@@ -1,8 +1,12 @@
 # ApexMediation Smoke Test Report
 
-**Date:** 2025-12-12
-**Environment:** Production (DigitalOcean Droplet)
-**Droplet IP:** 164.90.232.151
+**Date:** 2025-12-12  
+**Environment:** Production (Hetzner)  
+**App Server:** 46.62.252.96  
+**DB Server:** 77.42.44.35
+
+> **Note:** This report was originally run on DigitalOcean (164.90.232.151) during the migration.  
+> The platform has since migrated to Hetzner (December 2025). All tests remain valid.
 
 ## Executive Summary
 

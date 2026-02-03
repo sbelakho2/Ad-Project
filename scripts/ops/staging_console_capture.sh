@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Capture Console/API evidence for checklist 0.0.7 on staging.
 # Usage:
-#   RESEND_API_KEY=re_xxx \
+#   SMTP_PASS=re_xxx \
 #   ./scripts/ops/staging_console_capture.sh \
 #     --base https://api.apexmediation.ee \
 #     --console https://console.apexmediation.ee \
@@ -50,9 +50,9 @@ auto_resolve_app_id() {
   echo "[info] Auto-resolved app id: $APP_ID"
 }
 
-# Attempt to discover RESEND_API_KEY from repo envs if not provided in the current environment
-ensure_resend_key() {
-  if [[ -n "${RESEND_API_KEY:-}" ]]; then
+# Attempt to discover SMTP_PASS from repo envs if not provided in the current environment
+ensure_smtp_config() {
+  if [[ -n "${SMTP_PASS:-}" ]]; then
     return 0
   fi
   local CANDIDATES=(
@@ -66,13 +66,13 @@ ensure_resend_key() {
         # shellcheck disable=SC1090
         source scripts/ops/source_env.sh "$f" >/dev/null 2>&1 || true
       fi
-      if [[ -n "${RESEND_API_KEY:-}" ]]; then
-        echo "[info] RESEND_API_KEY sourced from $f"
+      if [[ -n "${SMTP_PASS:-}" ]]; then
+        echo "[info] SMTP_PASS sourced from $f"
         return 0
       fi
     fi
   done
-  echo "[info] RESEND_API_KEY not found in known env files; Resend evidence may be skipped"
+  echo "[info] SMTP_PASS not found in known env files; ApexMail evidence may be skipped"
 }
 
 if [[ -z "${APP_ID}" ]]; then
@@ -125,15 +125,13 @@ else
   echo "[skip] Node.js not available; skipping redaction validation"
 fi
 
-ensure_resend_key
-if [[ -n "${RESEND_API_KEY:-}" ]]; then
-  echo "[run] Fetch Resend emails (latest 25; key from env only)"
-  curl -s -H "Authorization: Bearer ${RESEND_API_KEY}" \
-    -H 'Content-Type: application/json' \
-    "https://api.resend.com/emails?limit=25" \
-    | tee "${OUT_DIR}/resend-emails.json" >/dev/null || true
+ensure_smtp_config
+if [[ -n "${CONTROL_PLANE_URL:-}" ]]; then
+  echo "[run] Fetch ApexMail queue status"
+  curl -sS "${CONTROL_PLANE_URL}/api/internal/apexmail/stats" \
+    | tee "${OUT_DIR}/apexmail-stats.json" >/dev/null || true
 else
-  echo "[skip] RESEND_API_KEY not set; skipping Resend evidence"
+  echo "[skip] CONTROL_PLANE_URL not set; skipping ApexMail evidence"
 fi
 
 echo "[done] Console/API capture complete. Review ${OUT_DIR}/ for artifacts."

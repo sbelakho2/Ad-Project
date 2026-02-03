@@ -1,26 +1,8 @@
 import { z } from 'zod';
-import dotenv from 'dotenv';
-import fs from 'node:fs';
-import path from 'node:path';
+import { ensureEnvLoaded } from '../utils/envLoader';
 
-// Load .env before validation.
-// Prefer repo-root .env (../.env) when executed from backend/.
-// Never override env already provided by the process manager.
-(() => {
-  const cwd = process.cwd();
-  const cwdBase = path.basename(cwd);
-  const candidates =
-    cwdBase === 'backend'
-      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
-      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
-
-  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fs.existsSync(p));
-  if (envPath) {
-    dotenv.config({ path: envPath });
-  } else {
-    dotenv.config();
-  }
-})();
+// Use centralized env loading (idempotent - safe to call multiple times)
+ensureEnvLoaded();
 
 /**
  * Environment variable schema with comprehensive validation

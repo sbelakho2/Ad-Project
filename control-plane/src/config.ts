@@ -28,7 +28,7 @@ const envSchema = z.object({
   DEVICE_CHALLENGE_TTL_MINUTES: z.string().default('30'),
   DEVICE_CHALLENGE_SECRET: z.string().optional(),
 
-  // ApexMail - Self-hosted email service (replaces Resend)
+  // ApexMail - Self-hosted email service (Postfix on mail.apexmediation.ee)
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.string().default('587'),
   SMTP_SECURE: z.string().default('false'),

@@ -42,15 +42,16 @@ else
   echo "[skip] Stripe CLI not installed; skipping invoice/event capture"
 fi
 
-# Optional: Extract billing-related emails from Resend (requires RESEND_API_KEY in env)
-if [ -n "${RESEND_API_KEY:-}" ]; then
-  echo "[run] Fetching latest emails from Resend for billing previews"
-  curl -s -H "Authorization: Bearer ${RESEND_API_KEY}" \
+# Optional: Extract billing-related emails from ApexMail queue (requires database access)
+# ApexMail stores emails in apexmail_queue table - query via Control Plane API
+if [ -n "${APEXMAIL_API_KEY:-}" ]; then
+  echo "[run] Fetching latest emails from ApexMail queue for billing previews"
+  curl -s -H "X-ApexMail-Key: ${APEXMAIL_API_KEY}" \
     -H 'Content-Type: application/json' \
-    "https://api.resend.com/emails?limit=25" \
-    | tee "${ROOT_DIR}/${EVIDENCE_DIR}/resend-latest.json" >/dev/null || true
+    "http://localhost:4000/api/apexmail/queue?limit=25&category=dunning" \
+    | tee "${ROOT_DIR}/${EVIDENCE_DIR}/apexmail-billing-queue.json" >/dev/null || true
 else
-  echo "[skip] RESEND_API_KEY not set; skipping email preview capture"
+  echo "[skip] APEXMAIL_API_KEY not set; skipping email queue capture"
 fi
 
 popd >/dev/null

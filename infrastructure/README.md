@@ -6,7 +6,35 @@ Infrastructure as Code (IaC) and deployment configurations for the ApexMediation
 
 The platform is designed for ultra-lean operations, targeting low monthly costs while maintaining high availability and global performance.
 
-## �️ Server Architecture (January 2026)
+## 📋 Declarative Configuration
+
+All deployment configuration is centralized in `deployment.toml`. This file is the **single source of truth** for:
+- Server inventory
+- Service definitions
+- Port mappings
+- Firewall rules
+- Backup schedules
+- Feature flags
+
+### Quick Deploy
+
+```bash
+# Deploy all services (idempotent)
+./deploy.sh all
+
+# Deploy specific component
+./deploy.sh backend
+./deploy.sh console
+./deploy.sh control-plane
+
+# Dry run (show what would be done)
+./deploy.sh all --dry-run
+
+# Verify all services
+./deploy.sh verify
+```
+
+## 🏛️ Server Architecture (February 2026)
 
 | Server | IP | Role | Services |
 |--------|-----|------|----------|

@@ -789,7 +789,8 @@ ALGOLIA_CRAWLER_ID=xxx
 DATABASE_URL=postgresql://...
 
 # Email (Notifications)
-RESEND_API_KEY=re_xxx
+SMTP_HOST=mail.apexmediation.ee
+SMTP_PORT=587
 ```
 
 **Setup:**

@@ -32,8 +32,11 @@ GRAFANA_PASSWORD=changeme
 GRAFANA_URL=http://localhost:3000
 GRAFANA_API_KEY=
 
-# Email alerts
-RESEND_API_KEY=re_...
+# Email alerts (ApexMail - self-hosted Postfix)
+SMTP_HOST=mail.apexmediation.ee
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
 
 # Database (for Grafana datasource)
 DATABASE_URL=postgresql://...
@@ -80,12 +83,12 @@ render_alertmanager_config() {
     exit 1
   fi
 
-  if [ -z "$RESEND_API_KEY" ]; then
-    echo "❌ RESEND_API_KEY is not set in monitoring/.env; required for SMTP auth."
+  if [ -z "$SMTP_PASS" ]; then
+    echo "❌ SMTP_PASS is not set in monitoring/.env; required for SMTP auth."
     exit 1
   fi
 
-  envsubst '$RESEND_API_KEY $TWILIO_WEBHOOK_URL $TWILIO_ACCOUNT_SID $TWILIO_AUTH_TOKEN $SLACK_WEBHOOK_URL $DISCORD_WEBHOOK_URL' \
+  envsubst '$SMTP_HOST $SMTP_PORT $SMTP_USER $SMTP_PASS $TWILIO_WEBHOOK_URL $TWILIO_ACCOUNT_SID $TWILIO_AUTH_TOKEN $SLACK_WEBHOOK_URL $DISCORD_WEBHOOK_URL' \
     < "$MONITORING_DIR/alertmanager.yml" > "$ALERTMANAGER_RENDERED"
 
   strip_optional_alertmanager_block() {

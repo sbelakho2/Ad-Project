@@ -49,7 +49,7 @@ module.exports = {
       EDGE_WORKER_URL: process.env.EDGE_WORKER_URL || "http://localhost:3500",
       EDGE_WORKER_SECRET: process.env.EDGE_WORKER_SECRET, // REQUIRED: Set in server .env
       
-      // ApexMail (self-hosted email - replaces Resend)
+      // ApexMail (self-hosted Postfix on mail.apexmediation.ee)
       SMTP_HOST: process.env.SMTP_HOST,
       SMTP_PORT: process.env.SMTP_PORT || "587",
       SMTP_SECURE: process.env.SMTP_SECURE || "false",

@@ -78,7 +78,7 @@ This is the single, self-contained runbook to take the system to production on D
 - [x] Give every app at least two interstitial placements, two rewarded placements, and one banner slot with consistent IDs. *(Insert all 25 placements using the `sandbox-<platform>-<type>-<nn>` naming convention so they can be referenced in SDK configs.)*
 
 - [x] Stand up FakeNetworkA (always fill), FakeNetworkB (random fill/no-fill), and FakeNetworkC (slow/timeout) plus Starter (~$3k), Growth (~$50k), and Scale (~$150k) revenue scripts. *(Run `npm run sandbox:bootstrap --workspace backend` to upsert adapters/configs/waterfalls + sandbox logins/Stripe, then `npm run sandbox:revenue:starter|growth|scale --workspace backend` to synthesize 30-day revenue (~$3k, ~$50k, ~$150k) across all placements. Scripts are idempotent and scoped to publisher `138f62be-5cee-4c73-aba4-ba78ea77ab44`; use `--dry-run`/`--keep-history` flags when needed.)*
-- [x] Issue staging logins (`owner@`, `dev@`, `finance@apex-sandbox.test`) and enable Stripe test mode with customer + card/ACH/SEPA methods. *(Same bootstrap script hashes deterministic passwords (override via `SANDBOX_USER_PASSWORD`), seeds the three users, and provisions a Stripe test customer with 4242 card + `btok_us_verified` (ACH) + `btok_sepa_debit`. Follow up by sending Resend invites if you need fresh magic links.)*
+- [x] Issue staging logins (`owner@`, `dev@`, `finance@apex-sandbox.test`) and enable Stripe test mode with customer + card/ACH/SEPA methods. *(Same bootstrap script hashes deterministic passwords (override via `SANDBOX_USER_PASSWORD`), seeds the three users, and provisions a Stripe test customer with 4242 card + `btok_us_verified` (ACH) + `btok_sepa_debit`. Follow up by sending ApexMail invites if you need fresh magic links.)*
 - [x] Ensure every SDK build (Android, iOS, Unity, tvOS/CTV, Web) ships adapters for every network API/SDK in scope (FakeNetworkA/B/C + partner networks) so request/response parity is validated end-to-end — captured in `docs/Adapters/SUPPORTED_NETWORKS.md` and the adapters inventory section of `docs/Internal/SANDBOX_TESTING_READINESS_2025-11-13.md` (all 15 partner networks stubbed across platforms).
 
 ### 0.0.2 Android Test App – Full E2E SDK Sandbox
@@ -712,12 +712,13 @@ References
 - [ ] Store evidence under `docs/Internal/QA/stripe-dry-run/`.
 - [ ] Repeat scenario in live mode with €0 invoice once Stripe live.
 
-## 7. Email (Resend.com)
-- [ ] Create Resend account (free 3K emails/mo).
-- [ ] Verify `apexmediation.ee` domain.
-- [ ] Configure SPF/DKIM/DMARC.
-- [ ] Test welcome/trial/payment/usage emails.
-- [ ] Monitor deliverability >98%.
+## 7. Email (Self-Hosted Postfix)
+- [x] Configure Postfix MTA on Test Server (157.90.126.205).
+- [x] Configure OpenDKIM with apexmail selector.
+- [x] Update DNS: MX, SPF, DKIM, DMARC records.
+- [x] Set PTR record in Hetzner Cloud Console.
+- [x] Test welcome/trial/payment/usage emails.
+- [x] Verify deliverability to Gmail/Outlook.
 
 ## 8. Estonian Compliance
 ### 8.1 E-Tax Board (e-MTA)
@@ -766,7 +767,7 @@ References
 ## 10. SDK Release Automation
 ### 10.1 GitHub Actions
 - [ ] Verify workflows (`sdk-release.yml`, `compatibility-testing.yml`, `docs-deployment.yml`).
-- [ ] Configure secrets (COCOAPODS_TRUNK_TOKEN, OSSRH creds + GPG key, NPM_TOKEN, Cloudflare tokens, DATABASE_URL, RESEND_API_KEY).
+- [ ] Configure secrets (COCOAPODS_TRUNK_TOKEN, OSSRH creds + GPG key, NPM_TOKEN, Cloudflare tokens, DATABASE_URL, SMTP_HOST/PORT/USER/PASS).
 - [ ] Run pre-release tag `v0.1.0-beta.1` to exercise build→test→publish→notify→docs.
 
 ### 10.2 Package Managers
@@ -878,7 +879,7 @@ References
 - [ ] DigitalOcean (droplet/Postgres/Spaces).
   - CLI: `doctl auth switch --context apex-prod && doctl account get`
 - [ ] Stripe.
-- [ ] Resend.com.
+- [ ] ApexMail (self-hosted) / SMTP relay.
 - [ ] Sentry.
 - [ ] UptimeRobot/Better Stack or GitHub Upptime.
 - [ ] PagerDuty (optional).
@@ -890,7 +891,7 @@ References
 - [ ] `REDIS_URL` (`redis://:password@127.0.0.1:6379/0`).
 - [ ] Object storage (S3-compatible): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_ENDPOINT`, `S3_BUCKET`.
 - [ ] `STRIPE_SECRET_KEY`.
-- [ ] `RESEND_API_KEY`.
+- [ ] `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (ApexMail SMTP config).
 - [ ] `SENTRY_DSN`.
 - [ ] `STATUS_PAGE_TOKEN` (if applicable).
 - [ ] `PAGERDUTY_API_KEY` (if applicable).

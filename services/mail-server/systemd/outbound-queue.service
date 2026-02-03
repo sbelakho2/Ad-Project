@@ -1,0 +1,29 @@
+[Unit]
+Description=ApexMediation Outbound Queue Service
+After=network.target mailstore-core.service
+Wants=mailstore-core.service
+
+[Service]
+Type=simple
+User=apex-mail
+Group=apex-mail
+WorkingDirectory=/opt/apex-mail
+Environment="RUST_LOG=info"
+EnvironmentFile=/opt/apex-mail/.env
+ExecStart=/opt/apex-mail/bin/outbound-queue --listen 127.0.0.1:50053
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/apex-mail
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

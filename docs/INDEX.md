@@ -35,6 +35,14 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 - **[Data Retention](./DATA_RETENTION_POLICIES.md)**: GDPR and local compliance policies.
 - **[Billing & Tiers](./Developer-Facing/Billing-and-Tiers.md)**: Revenue share models and platform tiers.
 
+## 📧 Email System (ApexMail)
+
+> **⚠️ Architecture Note (February 2026):** ApexMail is the self-hosted email system.  
+> It uses direct SMTP via Postfix on mail.apexmediation.ee with DKIM signing.
+
+- **[ApexMail Design](./Internal/APEXMAIL_DESIGN.md)**: Self-hosted email infrastructure design and database schema.
+- **[Self-Hosted SMTP Setup](./Internal/Sales/SETUP_SELF_HOSTED_SMTP.md)**: SMTP relay configuration guide.
+
 ## 🤖 Sales Automation
 
 > **⚠️ Architecture Note (January 2026):** All sales automation work runs on the **Test Server** (157.90.126.205:4001) connected via **ApexTunnel (P2P Mesh)**.
@@ -54,6 +62,8 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 
 ## 🔒 Security
 - **[VAST/VMAP Parser Security](./SSAI/VAST_VMAP_PARSER.md#security-features)**: XSS, XXE, DoS protections in ad parsing.
+- **[Compliance Status](./Internal/Security/COMPLIANCE_STATUS.md)**: SOC 2, GDPR, PCI DSS compliance tracking.
+- **[Security Audit Report](./Internal/Security/AUDIT_REPORT.md)**: Latest security audit findings.
 
 ---
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-01*

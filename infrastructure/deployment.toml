@@ -1,0 +1,164 @@
+# =============================================================================
+# ApexMediation Deployment Configuration
+# =============================================================================
+# 
+# This is the single source of truth for deployment configuration.
+# All deployment scripts and tools should read from this file.
+#
+# Environment: Production (Hetzner)
+# Last Updated: 2026-02-03
+# =============================================================================
+
+# =============================================================================
+# Server Inventory
+# =============================================================================
+[servers]
+# App Server - Backend, Console, Redis
+app_server_ip = "46.62.252.96"
+app_server_hostname = "app.apexmediation.ee"
+app_server_ssh_user = "root"
+app_server_deploy_path = "/opt/adproject"
+
+# Database Server - PostgreSQL
+db_server_ip = "77.42.44.35"
+db_server_hostname = "db.apexmediation.ee"
+db_server_ssh_user = "root"
+db_server_data_path = "/var/lib/postgresql/16/main"
+
+# =============================================================================
+# Services Architecture
+# =============================================================================
+[services.backend]
+type = "pm2"
+port = 8080
+cwd = "/opt/adproject/backend"
+script = "dist/index.js"
+instances = 1
+max_memory = "1G"
+log_dir = "/var/log/adproject"
+
+[services.console]
+type = "pm2"
+port = 3000
+cwd = "/opt/adproject/console-run"
+script = "server.js"
+instances = 1
+max_memory = "800M"
+log_dir = "/var/log/adproject"
+
+[services.website]
+type = "pm2"
+port = 3001
+cwd = "/opt/adproject/website-run"
+script = "server.js"
+instances = 1
+max_memory = "500M"
+log_dir = "/var/log/adproject"
+
+[services.control_plane]
+# Control Plane runs as systemd, NOT PM2 (per user requirement)
+type = "systemd"
+unit_name = "control-plane"
+port = 4000
+cwd = "/opt/adproject/control-plane"
+script = "dist/index.js"
+env_file = "/opt/adproject/control-plane.env"
+
+[services.redis]
+type = "systemd"
+unit_name = "redis-server"
+port = 6379
+bind = "127.0.0.1"
+max_memory = "2gb"
+max_memory_policy = "allkeys-lru"
+
+[services.postgresql]
+type = "systemd"
+unit_name = "postgresql"
+port = 5432
+version = "16"
+data_dir = "/var/lib/postgresql/16/main"
+
+# =============================================================================
+# Domain Configuration
+# =============================================================================
+[domains]
+api = "api.apexmediation.ee"
+console = "console.apexmediation.ee"
+admin = "admin.apexmediation.ee"
+website = "apexmediation.ee"
+mail = "mail.apexmediation.ee"
+replies = "replies.apexmediation.ee"
+
+# =============================================================================
+# Firewall Rules
+# =============================================================================
+[firewall.app_server]
+# Allow from anywhere
+http = { port = 80, protocol = "tcp" }
+https = { port = 443, protocol = "tcp" }
+ssh = { port = 22, protocol = "tcp" }
+# Internal only (via reverse proxy)
+# backend_internal = { port = 8080, protocol = "tcp", internal = true }
+# console_internal = { port = 3000, protocol = "tcp", internal = true }
+
+[firewall.db_server]
+ssh = { port = 22, protocol = "tcp" }
+# PostgreSQL only from App Server
+postgresql = { port = 5432, protocol = "tcp", source = "46.62.252.96" }
+
+# =============================================================================
+# Backup Configuration
+# =============================================================================
+[backup.postgresql]
+enabled = true
+type = "pgdump"
+schedule = "0 3 * * *"  # Daily at 3 AM
+retention_days = 30
+target_path = "/var/backups/postgresql"
+# Offsite backup (S3/Wasabi)
+offsite_enabled = true
+offsite_bucket = "apexmediation-backups"
+offsite_region = "eu-central-1"
+
+[backup.redis]
+enabled = true
+type = "rdb_snapshot"
+schedule = "0 */6 * * *"  # Every 6 hours
+retention_days = 7
+target_path = "/var/backups/redis"
+
+# =============================================================================
+# Monitoring Configuration
+# =============================================================================
+[monitoring]
+prometheus_enabled = true
+prometheus_port = 9090
+grafana_enabled = true
+grafana_port = 3333
+alertmanager_enabled = true
+
+[monitoring.alerts]
+cpu_threshold = 80
+memory_threshold = 85
+disk_threshold = 90
+db_connection_threshold = 80
+
+# =============================================================================
+# SSL/TLS Configuration
+# =============================================================================
+[ssl]
+provider = "letsencrypt"
+email = "contact@apexmediation.ee"
+auto_renew = true
+
+# =============================================================================
+# Feature Flags (Production Defaults)
+# =============================================================================
+[features]
+billing_enabled = true
+vra_enabled = true
+ab_testing_enabled = true
+migration_studio_enabled = true
+transparency_enabled = true
+fraud_blocking_mode = true

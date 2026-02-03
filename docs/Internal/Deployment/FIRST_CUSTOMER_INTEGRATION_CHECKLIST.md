@@ -204,7 +204,7 @@
 - [ ] **Run cron jobs locally**
   ```bash
   cd backend/scripts
-  DATABASE_URL=$DATABASE_URL STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY RESEND_API_KEY=$RESEND_API_KEY node -r ts-node/register cron-jobs.ts
+  DATABASE_URL=$DATABASE_URL STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY node -r ts-node/register cron-jobs.ts
   ```
   - [ ] Wait for 10:00 AM UTC (or adjust cron schedule for testing)
   - [ ] Verify all first customer experience jobs execute without errors
@@ -212,7 +212,7 @@
 
 - [ ] **Test email sending**
   - [ ] Process email queue: `await emailAutomationService.processEmailQueue()`
-  - [ ] Verify emails sent via Resend dashboard
+  - [ ] Verify emails sent via ApexMail queue status
   - [ ] Check email content renders correctly (HTML + plain text)
   - [ ] Verify referral code share links work
   - [ ] Verify calendar booking links work
@@ -242,7 +242,7 @@
 - [ ] **Environment variables validation**
   - Confirm DATABASE_URL is set
   - Confirm STRIPE_SECRET_KEY is set
-  - Confirm RESEND_API_KEY is set
+  - Confirm SMTP_HOST/PORT/USER/PASS are set for ApexMail
   
 - [ ] **Error handling audit**
   - [ ] Review FirstCustomerExperienceService error handling
@@ -257,7 +257,7 @@
 - [ ] **Rate limiting**
   - [ ] Add rate limits to referral code generation (prevent abuse)
   - [ ] Limit testimonial/case study requests (max 1 per year per customer)
-  - [ ] Monitor Resend email sending limits (3K/month free tier)
+  - [ ] Monitor ApexMail daily sending limits
 
 ## 📊 Success Metrics
 
@@ -301,7 +301,7 @@
 **Priority 2: Growth Automation**
 1. **Create seed data**: Insert test customer, usage, and NPS data
 2. **Test service locally**: Run `FirstCustomerExperienceService.ts` standalone
-3. **Validate email flow**: Process email queue and check Resend dashboard
+3. **Validate email flow**: Process email queue and check ApexMail/Postfix logs
 4. **Monitor cron execution**: Run cron-jobs.ts for 24 hours and check logs
 
 ## 📚 Documentation Links

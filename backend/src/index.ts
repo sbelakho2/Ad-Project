@@ -1,25 +1,6 @@
 // Load environment variables first, before any other imports
-import dotenv from 'dotenv';
-import fsSync from 'node:fs';
-import path from 'node:path';
-
-// Prefer repo-root .env when running from backend/ (e.g. /opt/adproject/backend)
-// and never override env already provided by the process manager (PM2).
-(() => {
-  const cwd = process.cwd();
-  const cwdBase = path.basename(cwd);
-  const candidates =
-    cwdBase === 'backend'
-      ? [path.resolve(cwd, '../.env'), path.resolve(cwd, '.env')]
-      : [path.resolve(cwd, '.env'), path.resolve(cwd, '../.env')];
-
-  const envPath = [process.env.ENV_FILE, ...candidates].find((p) => !!p && fsSync.existsSync(p));
-  if (envPath) {
-    dotenv.config({ path: envPath });
-  } else {
-    dotenv.config();
-  }
-})();
+import { ensureEnvLoaded } from './utils/envLoader';
+ensureEnvLoaded();
 
 import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
@@ -53,6 +34,7 @@ import { authenticate, operatorOnly } from './middleware/auth';
 import { initSalesAutomationScheduler } from './services/salesAutomationScheduler';
 import { spawn } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
+import path from 'node:path';
 
 // Validate environment variables (fails fast with helpful errors)
 import { env } from './config/env';

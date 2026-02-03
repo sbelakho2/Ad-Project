@@ -2,9 +2,9 @@
 global:
   resolve_timeout: 5m
   smtp_from: 'security@apexmediation.ee'
-  smtp_smarthost: 'smtp.resend.com:587'
-  smtp_auth_username: 'resend'
-  smtp_auth_password: '${RESEND_API_KEY}'
+  smtp_smarthost: '${SMTP_HOST:-mail.apexmediation.ee}:${SMTP_PORT:-587}'
+  smtp_auth_username: '${SMTP_USER}'
+  smtp_auth_password: '${SMTP_PASS}'
 
 # Templates for alert messages
 templates:

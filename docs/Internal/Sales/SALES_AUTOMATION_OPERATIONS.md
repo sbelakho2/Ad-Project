@@ -33,7 +33,7 @@ The ApexMediation sales automation system provides complete self-service custome
 - **Usage Metering**: Track SDK usage (impressions, API calls, data transfer)
 - **Billing**: Automated Stripe integration with overage charges
 - **Dunning**: Smart payment retry logic (3 attempts over 7 days)
-- **Email Automation**: Transactional emails via Resend.com (free tier: 3K/month)
+- **Email Automation**: Transactional emails via self-hosted Postfix (unlimited)
 - **Suspension**: Automatic service suspension after failed payments
 - **Reactivation**: Instant reactivation upon successful payment
 
@@ -257,16 +257,17 @@ await dunningManagementService.reactivateSubscription(
 
 ### Email Provider
 
-**Resend.com** (free tier: 3,000 emails/month)
-- No credit card required for free tier
-- 100 emails/day limit
-- Beautiful templates, great DX
-- Upgrade to $20/mo for 50K emails when needed
+**Self-Hosted Postfix** (mail.apexmediation.ee)
+- Zero cost - unlimited emails
+- DKIM signed with OpenDKIM
+- Direct delivery to recipient MX
+- Full control over deliverability
 
-**Migration to Amazon SES:**
-- Trigger: >3K emails/month (~500 customers)
-- Cost: $0.10 per 1,000 emails (5x cheaper at scale)
-- Setup: 10 minutes (verify domain, get credentials)
+**Configuration:**
+- MX: mail.apexmediation.ee (157.90.126.205)
+- SPF: `v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all`
+- DKIM: apexmail._domainkey selector
+- DMARC: `p=reject`
 
 ### Email Templates
 
@@ -598,10 +599,12 @@ await dunningManagementService.processDunningRetries();
 
 ### Issue: Emails not sending
 
-**Check Resend API key:**
+**Check SMTP configuration (ApexMail + Postfix):**
 ```bash
-echo $RESEND_API_KEY
-# Should start with re_...
+echo $SMTP_HOST   # Should be localhost or mail.apexmediation.ee
+echo $SMTP_PORT   # Usually 587
+echo $SMTP_USER   # Empty for local Postfix
+echo $SMTP_PASS   # Empty for local Postfix
 ```
 
 **Check email queue:**
@@ -620,10 +623,10 @@ ORDER BY created_at DESC
 LIMIT 10;
 ```
 
-**Check Resend dashboard:**
-- Visit: https://resend.com/emails
-- Look for failed deliveries
-- Check bounce rate
+**Check ApexMail queue status:**
+```bash
+curl -sS "${CONTROL_PLANE_URL}/api/internal/apexmail/stats"
+```
 
 ### Issue: Customer suspended incorrectly
 
@@ -717,7 +720,7 @@ ORDER BY attempt_number;
 
 Before going live:
 
-- [ ] Resend API key configured (`RESEND_API_KEY`)
+- [ ] SMTP configured for ApexMail (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`)
 - [ ] Stripe API key configured (`STRIPE_SECRET_KEY`)
 - [ ] ClickHouse database created and accessible
 - [ ] Database migrations run (`008_sales_automation.sql`)

@@ -188,10 +188,10 @@ function OverviewTab({ status }: { status?: SalesAutomationStatus }) {
           subtitle={`${status.todayRemaining} remaining`}
         />
         <StatusCard
-          title="Resend API"
-          value={status.resendConfigured ? 'Connected' : 'Not Configured'}
+          title="SMTP (ApexMail)"
+          value={status.smtpConfigured ? 'Connected' : 'Not Configured'}
           icon={Mail}
-          color={status.resendConfigured ? 'green' : 'yellow'}
+          color={status.smtpConfigured ? 'green' : 'yellow'}
         />
         <StatusCard
           title="Review Queue"

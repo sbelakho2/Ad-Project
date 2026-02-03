@@ -149,7 +149,7 @@ export interface SalesAutomationConfig {
 export interface SalesAutomationStatus {
   enabled: boolean
   configured: boolean
-  resendConfigured: boolean
+  smtpConfigured: boolean
   dailyLimit: number
   todaySent: number
   todayRemaining: number

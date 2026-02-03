@@ -27,7 +27,7 @@
 ```bash
 # 1. Setup database tables and default sequences
 cd backend
-DATABASE_URL="..." RESEND_API_KEY="..." npx ts-node -P tsconfig.json services/sales-automation/cli.ts setup
+DATABASE_URL="..." npx ts-node -P tsconfig.json services/sales-automation/cli.ts setup
 
 # 2. Import leads from CSV
 npx ts-node -P tsconfig.json services/sales-automation/cli.ts import leads.csv
@@ -52,7 +52,7 @@ npx ts-node -P tsconfig.json services/sales-automation/cli.ts run
 | DB-backed Config | ✅ WORKING | Sender settings in sa_config table |
 | CLI Interface | ✅ WORKING | Import, enroll, send, track |
 | Database Tables | ✅ CREATED | sa_contacts, sa_sequences, sa_enrollments, sa_emails, sa_config |
-| Email Sending | ✅ WORKING | Via Resend (3K/month free) |
+| Email Sending | ✅ WORKING | Via ApexMail (self-hosted) |
 | Review Queue | ✅ WORKING | Optional draft approval before sending |
 | Email Verification | ✅ WORKING | Optional requirement for verified contacts |
 | Domain Health Guard | ✅ WORKING | Auto-stops at high bounce rates |
@@ -119,8 +119,10 @@ npx ts-node cli.ts status          # Check results
 
 ```bash
 DATABASE_URL=postgresql://...     # Required
-RESEND_API_KEY=re_...             # Required for sending
-RESEND_WEBHOOK_SECRET=...          # Optional (signature verification)
+SMTP_HOST=mail.apexmediation.ee   # Self-hosted Postfix mail server
+SMTP_PORT=587                     # SMTP port
+SMTP_USER=                        # SMTP username (optional for local)
+SMTP_PASS=                        # SMTP password (optional for local)
 SALES_AUTOMATION_ENABLED=true      # Enable autonomous engine
 SALES_AUTOMATION_CRON=*/30 * * * * # Run every 30 minutes
 SALES_AUTOMATION_RUN_ON_STARTUP=false

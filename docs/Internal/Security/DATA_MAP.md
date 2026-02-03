@@ -5,7 +5,7 @@ This document enumerates personal and business data processed by the Billing sub
 
 Processors
 - Stripe: Payments, invoices, Customer Portal. No PAN/BIN/CVV processed server‑side (SAQ‑A via Stripe Elements/Portal).
-- Email (Resend): Dunning and billing notifications.
+- Email (Postfix/ApexMail): Dunning and billing notifications.
 
 Storage locations
 - Postgres: `usage_events`, `billing_audit`, and related tables.

@@ -72,9 +72,9 @@ services:
       - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
       - GF_SERVER_ROOT_URL=${GF_SERVER_ROOT_URL:-http://localhost:3000}
       - GF_SMTP_ENABLED=true
-      - GF_SMTP_HOST=smtp.resend.com:587
-      - GF_SMTP_USER=resend
-      - GF_SMTP_PASSWORD=${RESEND_API_KEY}
+      - GF_SMTP_HOST=${SMTP_HOST:-mail.apexmediation.ee}:${SMTP_PORT:-587}
+      - GF_SMTP_USER=${SMTP_USER}
+      - GF_SMTP_PASSWORD=${SMTP_PASS}
       - GF_SMTP_FROM_ADDRESS=security@apexmediation.ee
     volumes:
       - ./grafana-datasources.generated.yml:/etc/grafana/provisioning/datasources/datasources.yml

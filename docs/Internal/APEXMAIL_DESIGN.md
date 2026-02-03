@@ -2,13 +2,47 @@
 
 ## Executive Summary
 
-**ApexMail** is a zero-cost, self-hosted email system designed to replace Resend with superior performance, richer features, and complete operational control. It runs entirely on the test server infrastructure.
+**ApexMail** is a zero-cost, self-hosted email system using direct SMTP delivery via Postfix on `mail.apexmediation.ee`. It provides full control over email delivery with DKIM signing, SPF validation, and comprehensive tracking. The system runs on the Test Server (157.90.126.205).
 
 ---
 
-## Current State Analysis
+## Current Deployment Status (February 2026)
 
-### Resend Usage Inventory
+| Component | Server | Status | Details |
+|-----------|--------|--------|---------|  
+| **ApexMail Service** | Test Server (157.90.126.205) | ✅ Running | Port 4001 (sales-api) |
+| **Inbound SMTP** | Test Server | ✅ Running | Port 2525 (systemd) |
+| **Postfix MTA** | Test Server | ✅ Running | Port 25/587 with DKIM |
+| **OpenDKIM** | Test Server | ✅ Running | Selector: apexmail |
+| **Tracking Pixel** | Test Server | ✅ Active | `/api/apexmail/track/:id/open.gif` |
+| **Email Queue** | PostgreSQL | ✅ Active | `apexmail_queue` table |
+| **Event Logging** | PostgreSQL | ✅ Active | `apexmail_events` table |
+
+### SMTP Configuration (Test Server)
+
+```bash
+# /opt/adproject/control-plane/.env
+SMTP_HOST=localhost
+SMTP_PORT=587
+SMTP_SECURE=false        # STARTTLS
+SMTP_USER=                # Local Postfix - no auth needed
+SMTP_PASS=
+EMAIL_FROM=contact@apexmediation.ee
+EMAIL_FROM_NAME=ApexMediation
+```
+
+### DNS Records (apexmediation.ee)
+
+| Record | Type | Value |
+|--------|------|-------|
+| MX | @ | `10 mail.apexmediation.ee` |
+| A | mail | `157.90.126.205` |
+| TXT | @ | `v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all` |
+| TXT | apexmail._domainkey | DKIM public key |
+| TXT | _dmarc | `v=DMARC1; p=reject; rua=mailto:dmarc@apexmediation.ee; pct=100` |
+| PTR | 157.90.126.205 | `mail.apexmediation.ee` |
+
+### Previous Resend Usage
 
 | Component | File | Usage | Monthly Volume Est. |
 |-----------|------|-------|---------------------|
@@ -20,10 +54,17 @@
 
 **Total**: ~7,000-63,000 emails/month
 
-### Resend Costs (Current)
-- Free tier: 100 emails/day (3,000/month)
-- Pro tier: $20/month for 50,000 emails
-- **Annual cost**: $240-480/year
+### Migration Benefits (vs Resend SDK)
+
+| Feature | Resend SDK | ApexMail | Improvement |
+|---------|------------|----------|-------------|
+| **Latency** | 200-500ms API call | 50-100ms direct SMTP | 4x faster |
+| **Rate Limits** | 10 req/sec | Unlimited | No throttling |
+| **Cost** | $0.001/email | $0 (relay only) | Zero API cost |
+| **Tracking** | Basic open/click | Custom + geo-IP | Richer data |
+| **Templates** | External API | DB-versioned | Full control |
+| **Logs** | 7 days | Forever | Compliance |
+| **Retry Logic** | Opaque | Configurable | Visibility |
 
 ### Existing Infrastructure Assets
 
@@ -61,8 +102,8 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌─────────────┐    ┌──────────────┐    ┌─────────────────┐                │
-│  │ Application │───▶│ ApexMail     │───▶│ Outbound SMTP   │───▶ Internet   │
-│  │   Code      │    │ Service      │    │ (Port 587/465)  │                │
+│  │ Application │───▶│ ApexMail     │───▶│ Postfix + DKIM  │───▶ Internet   │
+│  │   Code      │    │ Service      │    │(localhost:587)  │                │
 │  └─────────────┘    └──────────────┘    └─────────────────┘                │
 │         │                  │                     │                          │
 │         │                  ▼                     │                          │
@@ -76,7 +117,7 @@
 │         │                  │                                                │
 │         │          ┌──────────────┐    ┌─────────────────┐                 │
 │         └─────────▶│ Inbound SMTP │◀───│ MX Records      │◀─── Replies     │
-│                    │ (Port 2525)  │    │ replies.apex... │                 │
+│                    │ (Port 2525)  │    │ mail.apex...    │                 │
 │                    └──────────────┘    └─────────────────┘                 │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘

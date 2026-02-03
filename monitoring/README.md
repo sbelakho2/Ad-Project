@@ -14,7 +14,7 @@ This directory contains the complete monitoring stack for Rival Ad Platform, inc
 
 ### Local Development
 
-> ⚠️ Before running any containers, create a `.env` file in this directory (or run `./deploy-monitoring.sh start` once to scaffold it) and replace every placeholder secret. Docker Compose automatically reads `.env`, so values such as `GRAFANA_PASSWORD`, `RESEND_API_KEY`, `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` must be present before the stack boots.
+> ⚠️ Before running any containers, create a `.env` file in this directory (or run `./deploy-monitoring.sh start` once to scaffold it) and replace every placeholder secret. Docker Compose automatically reads `.env`, so values such as `GRAFANA_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` must be present before the stack boots.
 
 ```bash
 # Start the monitoring stack

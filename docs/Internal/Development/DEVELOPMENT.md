@@ -67,7 +67,7 @@ ApexMediation is a Unity-rival ad mediation platform designed to address Unity's
 - **Analytics DB**: Postgres analytics replicas (and/or self-hosted ClickHouse if needed)
 - **Storage**: Cloudflare R2 $5/mo + Backblaze B2 $5/mo (vs AWS S3 $23/TB)
 - **Monitoring**: Self-hosted Grafana stack $8/mo VM (vs Datadog $300/mo) = **$292/mo saved**
-- **Email**: Resend.com free 3K/mo or Amazon SES $0.10/1K (vs SendGrid $15-90/mo)
+- **Email**: Self-hosted Postfix + OpenDKIM $0/mo unlimited (vs SendGrid $15-90/mo)
 - **Status Page**: Upptime on GitHub Pages $0 (vs Statuspage $29/mo) = **$29/mo saved**
 - **Secrets**: Infisical self-hosted $0 (vs AWS Secrets Manager $40/mo) = **$40/mo saved**
 - **Error Tracking**: Sentry free 5K events or GlitchTip self-hosted (vs Datadog APM)
@@ -794,7 +794,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 | **Sales** | **Customer dashboard for invoices, usage, and payment methods** | **Solo Ops** | **Done** |
 | **Sales** | **Onboarding email automation with SendGrid/Postmark** | **Solo Ops** | **Done** |
 | **Sales** | **Usage metering service (PostgreSQL + ClickHouse + Stripe sync)** | **Solo Ops** | **Done** |
-| **Sales** | **Email automation service with 10+ templates (Resend.com)** | **Solo Ops** | **Done** |
+| **Sales** | **Email automation service with 10+ templates (Postfix/ApexMail)** | **Solo Ops** | **Done** |
 | **Sales** | **Cron jobs for usage sync, dunning retries, trial reminders** | **Solo Ops** | **Done** |
 | **Sales** | **API endpoints for usage tracking and analytics** | **Solo Ops** | **Done** |
 | **Sales** | **Production checklist: Environment variables, DB migrations, testing** | **Solo Ops** | **Done** |
@@ -813,7 +813,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed contribution guidelines.
 | **Infrastructure** | **Self-host secrets: Infisical on Hetzner (replace cloud secrets manager)** | **Solo Ops** | **Done** |
 | **Infrastructure** | **Implement scaling playbooks: vertical scaling + add nodes behind reverse proxy** | **Solo Ops** | **Done** |
 | **Infrastructure** | **Setup Cloudflare R2 + Backblaze B2 for <$15/mo storage (replace AWS S3)** | **Solo Ops** | **Done** |
-| **Sales** | **Replace SendGrid with Resend.com (free 3K emails/mo) or Amazon SES ($0.10/1K)** | **Solo Ops** | **Done** |
+| **Sales** | **Replace SendGrid with Postfix (self-hosted, unlimited emails)** | **Solo Ops** | **Done** |
 | **Sales** | **Implement AI-powered support with GPT-4o-mini ($0.03/ticket vs Intercom $0.99)** | **Solo Ops** | **Done** |
 | **Sales** | **Setup GitHub Discussions as free support forum (SEO-indexed, crowdsourced)** | **Solo Ops** | **Done** |
 | **Sales** | **Build self-healing systems: auto-restart unhealthy services, deadlock detection** | **Solo Ops** | **Done** |
