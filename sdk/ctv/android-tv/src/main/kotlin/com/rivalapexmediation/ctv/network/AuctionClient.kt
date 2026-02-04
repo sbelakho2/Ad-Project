@@ -59,8 +59,12 @@ class AuctionClient(
         )
         val body = gson.toJson(mapOf("body" to req)).toRequestBody("application/json".toMediaType())
         val url = config.apiBaseUrl.trimEnd('/') + "/rtb/bid"
+        // Generate correlation ID for distributed tracing
+        val correlationId = UUID.randomUUID().toString()
         val builder = Request.Builder().url(url).post(body)
             .header("Content-Type", "application/json")
+            .header("X-Correlation-ID", correlationId)
+            .header("X-SDK-Version", "ctv-android-tv-sdk/1.0.0")
         config.apiKey?.let { builder.header("Authorization", "Bearer $it") }
         val httpReq = builder.build()
 

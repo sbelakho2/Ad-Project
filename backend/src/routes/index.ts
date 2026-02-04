@@ -38,6 +38,7 @@ import settingsRoutes from './settings.routes';
 import { killSwitchGuard } from '../middleware/featureFlags';
 import vraRoutes from './vra.routes';
 import vraConnectionsRoutes from './vraConnections.routes';
+import creativeScanningRoutes from './creativeScanningRoutes';
 
 const router = Router();
 
@@ -82,6 +83,7 @@ router.use('/admin', adminRoutes);
 router.use('/privacy', privacyRoutes);
 router.use('/byo', byoRoutes); // BYO model credential vault & transparency
 router.use('/tools', toolsRoutes); // Developer tools (e.g., app-ads.txt inspector)
+router.use('/creative-scanning', creativeScanningRoutes); // Creative scanning and brand safety
 // VRA routes mounted at root to expose /recon/* and /proofs/* under /api/v1
 router.use('/', vraRoutes);
 // VRA network connection management

@@ -71,6 +71,12 @@ export interface SdkConfigHash {
 // -----------------------------------------------------
 
 /**
+ * Current hash algorithm version.
+ * Increment when changing the normalization or hashing algorithm.
+ */
+const HASH_VERSION = 'v1';
+
+/**
  * Compute a deterministic hash of SDK config.
  * This algorithm must match the SDK-side implementation.
  * 
@@ -78,6 +84,9 @@ export interface SdkConfigHash {
  * 1. Normalize all config values (sort arrays, lowercase strings)
  * 2. Create canonical JSON representation
  * 3. SHA-256 hash the canonical JSON
+ * 4. Prefix with version identifier for forward compatibility
+ * 
+ * Hash format: "v1:<hex-digest>"
  */
 export function computeConfigHash(config: SdkConfigData): string {
   // Normalize config for deterministic hashing
@@ -86,8 +95,9 @@ export function computeConfigHash(config: SdkConfigData): string {
   // Create canonical JSON (sorted keys)
   const canonical = JSON.stringify(normalized, Object.keys(normalized).sort());
   
-  // SHA-256 hash
-  return createHash('sha256').update(canonical).digest('hex');
+  // SHA-256 hash with version prefix (matches Web SDK format)
+  const digest = createHash('sha256').update(canonical).digest('hex');
+  return `${HASH_VERSION}:${digest}`;
 }
 
 /**
@@ -139,10 +149,13 @@ export async function getAppConfigHash(appId: string): Promise<SdkConfigHash | n
     
     const hash = computeConfigHash(config);
     
+    // Extract short hash from digest portion (after "v1:" prefix)
+    const digestPart = hash.includes(':') ? hash.split(':')[1] : hash;
+    
     return {
       appId,
       hash,
-      shortHash: hash.substring(0, 8),
+      shortHash: digestPart.substring(0, 8),
       generatedAt: new Date().toISOString(),
       configVersion: config.configVersion,
     };
@@ -254,13 +267,16 @@ export async function checkConfigParity(
 ): Promise<ParityCheckResult> {
   const serverHashResult = await getAppConfigHash(appId);
   
+  // Extract digest portion from client hash (after "v1:" prefix if present)
+  const clientDigest = clientHash.includes(':') ? clientHash.split(':')[1] : clientHash;
+  
   if (!serverHashResult) {
     return {
       match: false,
       serverHash: '',
       clientHash,
       serverShortHash: '',
-      clientShortHash: clientHash.substring(0, 8),
+      clientShortHash: clientDigest.substring(0, 8),
       drift: true,
       driftDetails: {
         fieldsMismatched: ['app_not_found'],
@@ -276,7 +292,7 @@ export async function checkConfigParity(
     serverHash: serverHashResult.hash,
     clientHash,
     serverShortHash: serverHashResult.shortHash,
-    clientShortHash: clientHash.substring(0, 8),
+    clientShortHash: clientDigest.substring(0, 8),
     drift: !match,
     driftDetails: match ? undefined : {
       fieldsMismatched: ['unknown'], // Would need full config comparison for details

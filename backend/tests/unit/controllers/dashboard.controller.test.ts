@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from '@jest/globals';
 import request from 'supertest';
 import { Application } from 'express';
-import { createTestApp } from '../../../src/__tests__/helpers/testApp';
+import { createTestApp } from '../../helpers/testApp';
 
 jest.mock('../../../src/utils/postgres', () => {
   const query = jest.fn();

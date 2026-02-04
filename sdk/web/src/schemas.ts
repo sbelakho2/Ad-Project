@@ -10,7 +10,7 @@ export const ConsentSchema = z.object({
 
 export const AdRequestSchema = z.object({
   placement: z.string().min(1),
-  adType: z.enum(['banner', 'interstitial', 'rewarded']),
+  adType: z.enum(['banner', 'interstitial', 'rewarded', 'rewarded_interstitial', 'native', 'app_open']),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   testMode: z.boolean().optional(),
@@ -41,6 +41,11 @@ export const AdResponseSchema = z.object({
   currency: z.string().optional(),
   creative: AdCreativeSchema.nullable().optional(),
   ttlSeconds: z.number().int().positive().optional(),
+  // Additional fields for parity with native SDKs
+  networkName: z.string().optional(),
+  adType: z.enum(['banner', 'interstitial', 'rewarded', 'rewarded_interstitial', 'native', 'app_open']).optional(),
+  placementId: z.string().optional(),
+  expiryTimeMs: z.number().int().positive().optional(),
 });
 
 export type ConsentSchemaType = z.infer<typeof ConsentSchema>;

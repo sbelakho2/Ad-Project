@@ -22,14 +22,29 @@ type State = {
 
 const state: State = { initialized: false };
 
+/**
+ * Initialize the SDK. Must be called before any other SDK methods.
+ * Calling init() multiple times will reset the SDK state.
+ * @throws SdkError if endpoint is missing or invalid
+ */
 export function init(options: InitOptions) {
   const endpoint = options?.endpoint?.trim();
   if (!endpoint) throw Errors.invalidOptions('endpoint is required');
+  
+  // Validate endpoint is a valid URL
+  try {
+    new URL(endpoint);
+  } catch {
+    throw Errors.invalidOptions('endpoint must be a valid URL');
+  }
+
   const timeoutMs = Math.max(1, options.timeoutMs ?? 2000);
   const maxRetries = Math.max(0, options.maxRetries ?? 2);
   const retryBackoffBaseMs = Math.max(0, options.retryBackoffBaseMs ?? 100);
   const retryJitterMs = Math.max(0, options.retryJitterMs ?? 50);
 
+  // Reset state on re-initialization (allows clean reconfiguration)
+  state.consent = undefined;
   state.cfg = {
     endpoint,
     timeoutMs,
@@ -43,6 +58,27 @@ export function init(options: InitOptions) {
   state.initialized = true;
   state.debug = Boolean(options.debug);
   state.telemetryEnabled = options.telemetryEnabled !== false; // default true
+  
+  emitter.emit('sdk:initialized', { endpoint, appId: options.appId });
+}
+
+/**
+ * Check if the SDK has been initialized.
+ */
+export function isInitialized(): boolean {
+  return state.initialized;
+}
+
+/**
+ * Reset the SDK to uninitialized state.
+ * Useful for testing or reconfiguration.
+ */
+export function reset(): void {
+  state.initialized = false;
+  state.consent = undefined;
+  state.cfg = undefined;
+  state.debug = undefined;
+  state.telemetryEnabled = undefined;
 }
 
 export function setConsent(consent: ConsentState) {

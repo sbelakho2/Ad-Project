@@ -43,7 +43,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function isRetryableStatus(status: number): boolean {
-  return status >= 500 && status < 600; // retry 5xx
+  // Retry on 5xx server errors and 429 rate limit
+  return (status >= 500 && status < 600) || status === 429;
 }
 
 export async function requestAuction(

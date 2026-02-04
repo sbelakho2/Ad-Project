@@ -3,6 +3,11 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Generate a correlation ID for distributed tracing
+private func generateCorrelationId() -> String {
+    return UUID().uuidString
+}
+
 public struct AuctionWin: Codable, Equatable {
     public let requestId: String
     public let bidId: String
@@ -74,6 +79,10 @@ public final class AuctionClient {
         req.httpMethod = "POST"
         req.addValue("application/json", forHTTPHeaderField: "Content-Type")
         if let key = config.apiKey { req.addValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        // Add correlation ID for distributed tracing
+        let correlationId = generateCorrelationId()
+        req.addValue(correlationId, forHTTPHeaderField: "X-Correlation-ID")
+        req.addValue("ctv-tvos-sdk/1.0.0", forHTTPHeaderField: "X-SDK-Version")
         req.httpBody = data
         let startTime = Date()
 

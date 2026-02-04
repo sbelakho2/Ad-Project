@@ -24,7 +24,7 @@ export type InitOptions = {
 
 export type AdRequest = {
   placement: string;
-  adType: 'banner' | 'interstitial' | 'rewarded';
+  adType: 'banner' | 'interstitial' | 'rewarded' | 'rewarded_interstitial' | 'native' | 'app_open';
   width?: number;
   height?: number;
   testMode?: boolean;
@@ -45,9 +45,15 @@ export type AdResponse = {
   currency?: string;
   creative?: AdCreative | null;
   ttlSeconds?: number;
+  // Additional fields for parity with native SDKs
+  networkName?: string; // Winning ad network
+  adType?: 'banner' | 'interstitial' | 'rewarded' | 'rewarded_interstitial' | 'native' | 'app_open';
+  placementId?: string;
+  expiryTimeMs?: number; // Absolute expiry timestamp
 };
 
 export type SdkEvent =
+  | 'sdk:initialized'
   | 'consent:updated'
   | 'ad:requested'
   | 'ad:filled'
