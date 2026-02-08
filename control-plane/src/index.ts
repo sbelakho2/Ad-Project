@@ -72,7 +72,9 @@ app.use(cors({
 app.use(cookieParser());
 
 // Trust proxy for accurate IP detection behind Caddy/nginx
-app.set('trust proxy', true);
+// Use '1' instead of 'true' to trust only the first proxy hop (Caddy)
+// This prevents ERR_ERL_PERMISSIVE_TRUST_PROXY warnings from express-rate-limit
+app.set('trust proxy', 1);
 
 // ============================================
 // RATE LIMITING (P1 Security Fix #2)
