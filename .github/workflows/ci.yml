@@ -73,7 +73,7 @@ jobs:
         run: npm test -- --coverage
 
       - name: Upload backend coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           files: ./backend/coverage/coverage-final.json
           flags: backend
@@ -227,7 +227,7 @@ jobs:
             -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
 
       - name: Upload iOS coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v5
         with:
           files: ./sdk/core/ios/coverage.lcov
           flags: ios-sdk
