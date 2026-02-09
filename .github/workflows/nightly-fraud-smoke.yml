@@ -77,7 +77,7 @@ jobs:
           fi
       
       - name: Upload test artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: fraud-smoke-test-${{ env.ENVIRONMENT }}-${{ github.run_number }}

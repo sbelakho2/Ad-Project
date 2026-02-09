@@ -78,21 +78,21 @@ jobs:
           zip -r ../../api-docs-html.zip .
 
       - name: Upload AAR artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-apexmediation-aar
           path: sdk/core/android/build/outputs/aar/*-release.aar
           if-no-files-found: error
 
       - name: Upload SDK size report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-sdk-size-report
           path: sdk/core/android/build/reports/sdk-size/size-report.json
           if-no-files-found: error
 
       - name: Upload API docs (Dokka HTML zip)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: android-api-docs-html
           path: sdk/core/android/build/api-docs-html.zip
