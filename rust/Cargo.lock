@@ -14,6 +14,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-autopilot"
+version = "0.1.0"
+dependencies = [
+ "apex-audit",
+ "apex-core",
+ "apex-proof",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "apex-billing"
 version = "0.1.0"
 dependencies = [

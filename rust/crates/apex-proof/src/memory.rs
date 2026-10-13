@@ -122,6 +122,11 @@ impl InMemoryLedger {
         self.entries.get(index).map(|entry| &entry.record)
     }
 
+    /// All records, in append order.
+    pub fn records(&self) -> Vec<&LedgerRecord> {
+        self.entries.iter().map(|entry| &entry.record).collect()
+    }
+
     /// The public key this ledger signs with.
     pub fn public_key(&self) -> &VerifyingKey {
         &self.verifying_key
