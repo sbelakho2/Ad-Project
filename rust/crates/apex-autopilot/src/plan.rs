@@ -64,13 +64,16 @@ fn change_kind_of(action: &Action) -> ChangeKind {
     }
 }
 
-/// True when an equal change with the same idempotency key is already in the
-/// ledger (idempotent reruns must not re-apply it).
-pub fn already_applied(ledger: &InMemoryLedger, key: &str) -> bool {
+/// True when the SAME change (equal idempotency key AND equal change payload)
+/// is already in the ledger; a rerun must never re-apply it, and a rerun with
+/// a different VALUE under a colliding key must never be mistaken for it.
+pub fn already_applied(ledger: &InMemoryLedger, key: &str, action: &Action) -> bool {
+    let expected = change_kind_of(action);
     ledger.records().iter().any(|record| {
         matches!(
             record,
-            LedgerRecord::ChangeApplied { idempotency_key, .. } if idempotency_key == key
+            LedgerRecord::ChangeApplied { idempotency_key, change, .. }
+                if idempotency_key == key && *change == expected
         )
     })
 }
@@ -145,7 +148,7 @@ pub async fn run_cycle(
         let key = idempotency_key(&proposal.action).map_err(|source| PlanError::ApplyFailed {
             source: PlatformError::Validation(source.to_string()),
         })?;
-        if already_applied(ledger, &key) {
+        if already_applied(ledger, &key, &proposal.action) {
             skipped_this_cycle += 1;
             outcomes.push(ActionOutcome::Skipped {
                 reason: "already_applied".into(),

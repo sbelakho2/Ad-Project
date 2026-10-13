@@ -4,7 +4,7 @@
 
 use apex_core::{
     admob_ecpm_key, levelplay_create_key, levelplay_price_key, levelplay_remove_key,
-    max_experiment_key, normalize_country, PlatformError, PlatformId,
+    max_experiment_key, max_floor_key, PlatformError, PlatformId,
 };
 
 use crate::model::Action;
@@ -16,34 +16,51 @@ fn action_slug(action: &Action) -> String {
         Action::SetCountryFloor {
             ad_unit_id,
             country,
-            ..
+            floor_ecpm,
         } => {
             format!(
-                "floor-{}-{}",
+                "floor-{}-{}-{}",
                 slug(ad_unit_id),
-                slug(&country.to_lowercase())
+                slug(&country.to_lowercase()),
+                slug(&apex_core::format_micros_short(*floor_ecpm))
             )
         }
         Action::SetMappingEcpm {
             mediation_group_id,
             ad_unit_id,
-            ..
+            ecpm,
         } => {
-            format!("ecpm-{}-{}", slug(mediation_group_id), slug(ad_unit_id))
+            format!(
+                "ecpm-{}-{}-{}",
+                slug(mediation_group_id),
+                slug(ad_unit_id),
+                slug(&apex_core::format_micros_short(*ecpm))
+            )
         }
         Action::SetWaterfallPrice {
             ad_unit_id,
             entry_id,
-            ..
+            price_ecpm,
         } => {
-            format!("wfp-{}-{}", slug(ad_unit_id), slug(entry_id))
+            format!(
+                "wfp-{}-{}-{}",
+                slug(ad_unit_id),
+                slug(entry_id),
+                slug(&apex_core::format_micros_short(*price_ecpm))
+            )
         }
         Action::CreateWaterfallEntry {
             ad_unit_id,
             network,
-            ..
+            instance_name: _,
+            price_ecpm,
         } => {
-            format!("wfc-{}-{}", slug(ad_unit_id), slug(network))
+            format!(
+                "wfc-{}-{}-{}",
+                slug(ad_unit_id),
+                slug(network),
+                slug(&apex_core::format_micros_short(*price_ecpm))
+            )
         }
         Action::RemoveWaterfallEntry {
             ad_unit_id,
@@ -74,10 +91,8 @@ pub fn idempotency_key(action: &Action) -> Result<String, PlatformError> {
         Action::SetCountryFloor {
             ad_unit_id,
             country,
-            ..
-        } => {
-            format!("max-floor:{}:{}", ad_unit_id, normalize_country(country)?)
-        }
+            floor_ecpm,
+        } => max_floor_key(ad_unit_id, country, *floor_ecpm)?,
         Action::SetMappingEcpm {
             mediation_group_id,
             ad_unit_id,
@@ -86,14 +101,15 @@ pub fn idempotency_key(action: &Action) -> Result<String, PlatformError> {
         Action::SetWaterfallPrice {
             ad_unit_id,
             entry_id,
+            price_ecpm,
             ..
-        } => levelplay_price_key(ad_unit_id, entry_id),
+        } => levelplay_price_key(ad_unit_id, entry_id, *price_ecpm),
         Action::CreateWaterfallEntry {
             ad_unit_id,
             network,
             instance_name,
-            ..
-        } => levelplay_create_key(ad_unit_id, network, instance_name),
+            price_ecpm,
+        } => levelplay_create_key(ad_unit_id, network, instance_name, *price_ecpm),
         Action::RemoveWaterfallEntry {
             ad_unit_id,
             entry_id,

@@ -150,7 +150,10 @@ fn seed_change(ledger: &mut InMemoryLedger, at: i64, key: &str) -> u64 {
 
 #[test]
 fn idempotency_keys_are_pinned_exactly() {
-    assert_eq!(idempotency_key(&floor_action()).unwrap(), "max-floor:u1:EE");
+    assert_eq!(
+        idempotency_key(&floor_action()).unwrap(),
+        "max-floor:u1:EE:2.5"
+    );
     assert_eq!(
         idempotency_key(&ecpm_action()).unwrap(),
         "admob-ecpm:g1:u2:1.75"
@@ -162,7 +165,7 @@ fn idempotency_keys_are_pinned_exactly() {
             price_ecpm: 2_345_000,
         })
         .unwrap(),
-        "levelplay-price:u1:e1"
+        "levelplay-price:u1:e1:2.345"
     );
     assert_eq!(
         idempotency_key(&Action::CreateWaterfallEntry {
@@ -172,7 +175,7 @@ fn idempotency_keys_are_pinned_exactly() {
             price_ecpm: 750_000,
         })
         .unwrap(),
-        "levelplay-create:u1:mintegral:MTG_1"
+        "levelplay-create:u1:mintegral:MTG_1:0.75"
     );
     assert_eq!(
         idempotency_key(&Action::RemoveWaterfallEntry {
@@ -203,10 +206,10 @@ fn experiment_names_are_deterministic_and_case_stable() {
         floor_ecpm: 2_500_000,
     });
     assert_eq!(a, b, "country case must not change the experiment key");
-    assert_eq!(a, "max-experiment:autopilot-floor-u1-ee:u1");
+    assert_eq!(a, "max-experiment:autopilot-floor-u1-ee-2-5:u1");
     assert_eq!(
         experiment_name(&ecpm_action()),
-        "max-experiment:autopilot-ecpm-g1-u2:u2"
+        "max-experiment:autopilot-ecpm-g1-u2-1-75:u2"
     );
 }
 
@@ -356,7 +359,7 @@ async fn cap_boundary_mid_cycle_skips_the_rest() {
             ActionOutcome::Applied {
                 change_seq: 0,
                 experiment_id: "exp-default".into(),
-                idempotency_key: "max-floor:u1:EE".into(),
+                idempotency_key: "max-floor:u1:EE:2.5".into(),
             },
             ActionOutcome::Applied {
                 change_seq: 2,
@@ -525,7 +528,7 @@ async fn successful_apply_records_change_and_experiment() {
             }),
             Some(LedgerRecord::ExperimentStarted { experiment_id, .. }),
         ) => {
-            assert_eq!(idempotency_key, "max-floor:u1:EE");
+            assert_eq!(idempotency_key, "max-floor:u1:EE:2.5");
             assert_eq!(experiment_id, "exp-default");
         }
         other => panic!("unexpected ledger shape: {other:?}"),
@@ -648,6 +651,56 @@ async fn rerun_skips_already_applied_actions() {
         .filter(|entry| entry.starts_with("apply:"))
         .count();
     assert_eq!(applies, 1, "rerun must not re-apply");
+}
+
+#[tokio::test]
+async fn rerun_with_a_changed_floor_value_applies_again() {
+    // The repricing falsifier: an earlier value-less key would mark the second
+    // proposal as already applied and silently skip the newer floor.
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let first = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("first run");
+    assert_eq!(first.applied, 1);
+
+    let mut changed = floor_action();
+    if let Action::SetCountryFloor { floor_ecpm, .. } = &mut changed {
+        *floor_ecpm = 3_000_000;
+    }
+    let second = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(changed)],
+        NOW + 1_000,
+    )
+    .await
+    .expect("second run");
+    assert_eq!(
+        second.applied, 1,
+        "a changed floor value must apply, not skip"
+    );
+
+    let keys: Vec<&String> = l
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::ChangeApplied {
+                idempotency_key, ..
+            } => Some(idempotency_key),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(keys, vec!["max-floor:u1:EE:2.5", "max-floor:u1:EE:3"]);
 }
 
 #[tokio::test]

@@ -157,7 +157,7 @@ impl LevelPlayClient {
             crate::encode_query_component(ad_unit_id),
             crate::encode_query_component(entry_id)
         );
-        let key = levelplay_price_key(ad_unit_id, entry_id);
+        let key = levelplay_price_key(ad_unit_id, entry_id, price);
         self.caller
             .call(
                 "updateEntryPrice",
@@ -192,7 +192,7 @@ impl LevelPlayClient {
             "/v1/adunits/{}/waterfall",
             crate::encode_query_component(ad_unit_id)
         );
-        let key = levelplay_create_key(ad_unit_id, network, instance_name);
+        let key = levelplay_create_key(ad_unit_id, network, instance_name, price);
         let data = self
             .caller
             .call(

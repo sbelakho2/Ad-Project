@@ -18,6 +18,12 @@ zola serve
 
 `base_url` in `config.toml` is set to `https://apexmediation.example`, the site's canonical example domain. A production deploy replaces it with the live domain, and the `Sitemap:` line in `static/robots.txt` must be updated to the same domain at the same time.
 
+## Measurement notes
+
+Lighthouse runs under CPU emulation on a developer machine read several points
+below native scores for the same bytes. The CI lane audits one page per job on
+native hardware, so that lane is the arbiter for the performance budget.
+
 ## Layout
 
 - `config.toml`: Zola configuration: `base_url`, title, description, `generate_sitemap = true`, `minify_html = true`, and the `[extra]` navigation, footer and contact data used by the templates.

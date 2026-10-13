@@ -647,7 +647,7 @@ async fn lp_price_update_pins_body_and_key() {
     );
     assert_eq!(
         call.header("Idempotency-Key"),
-        Some("levelplay-price:u1:e1")
+        Some("levelplay-price:u1:e1:2.345")
     );
 
     let client = lp_client(mock.clone());
@@ -675,7 +675,7 @@ async fn lp_create_and_remove_contract() {
     assert_eq!(id, "new-1");
     assert_eq!(
         mock.calls()[0].header("Idempotency-Key"),
-        Some("levelplay-create:u1:mintegral:MTG_1")
+        Some("levelplay-create:u1:mintegral:MTG_1:0.75")
     );
     client.remove_entry("u1", "e9").await.unwrap();
     assert_eq!(mock.calls()[1].method, HttpMethod::Delete);

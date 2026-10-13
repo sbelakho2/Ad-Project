@@ -65,12 +65,44 @@ pub fn max_experiment_key(name: &str, ad_unit_id: &str) -> String {
     format!("max-experiment:{name}:{ad_unit_id}")
 }
 
-pub fn levelplay_price_key(ad_unit_id: &str, entry_id: &str) -> String {
-    format!("levelplay-price:{ad_unit_id}:{entry_id}")
+/// Price writers include the VALUE: the same entry repriced later must not
+/// collide with the earlier write's idempotency key (platforms treat a repeat
+/// of a key as a duplicate of the ORIGINAL request, which would silently drop
+/// a genuine change). This intentionally diverges from the TypeScript
+/// reference, which had no value in these keys and no rerun-dedupe logic.
+pub fn levelplay_price_key(ad_unit_id: &str, entry_id: &str, price_ecpm: Micros) -> String {
+    format!(
+        "levelplay-price:{ad_unit_id}:{entry_id}:{}",
+        format_micros_short(price_ecpm)
+    )
 }
 
-pub fn levelplay_create_key(ad_unit_id: &str, network: &str, instance_name: &str) -> String {
-    format!("levelplay-create:{ad_unit_id}:{network}:{instance_name}")
+pub fn levelplay_create_key(
+    ad_unit_id: &str,
+    network: &str,
+    instance_name: &str,
+    price_ecpm: Micros,
+) -> String {
+    format!(
+        "levelplay-create:{ad_unit_id}:{network}:{instance_name}:{}",
+        format_micros_short(price_ecpm)
+    )
+}
+
+/// MAX floors have no TypeScript-era key at all; the value is part of the key
+/// for the same reason as the LevelPlay price key above. The country arrives
+/// normalized, so reruns that only differ in input casing dedupe correctly.
+pub fn max_floor_key(
+    ad_unit_id: &str,
+    country: &str,
+    floor_ecpm: Micros,
+) -> Result<String, PlatformError> {
+    Ok(format!(
+        "max-floor:{}:{}:{}",
+        ad_unit_id,
+        normalize_country(country)?,
+        format_micros_short(floor_ecpm)
+    ))
 }
 
 pub fn levelplay_remove_key(ad_unit_id: &str, entry_id: &str) -> String {
@@ -139,15 +171,18 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_parity_with_ts_reference() {
+    fn idempotency_key_formats_are_pinned() {
         assert_eq!(
             max_experiment_key("floors-ee", "u1"),
             "max-experiment:floors-ee:u1"
         );
-        assert_eq!(levelplay_price_key("u1", "e1"), "levelplay-price:u1:e1");
         assert_eq!(
-            levelplay_create_key("u1", "mintegral", "MTG_1"),
-            "levelplay-create:u1:mintegral:MTG_1"
+            levelplay_price_key("u1", "e1", 2_350_000),
+            "levelplay-price:u1:e1:2.35"
+        );
+        assert_eq!(
+            levelplay_create_key("u1", "mintegral", "MTG_1", 750_000),
+            "levelplay-create:u1:mintegral:MTG_1:0.75"
         );
         assert_eq!(levelplay_remove_key("u1", "e9"), "levelplay-remove:u1:e9");
         assert_eq!(
@@ -155,6 +190,30 @@ mod tests {
             "admob-ecpm:g1:u2:1.75"
         );
         assert_eq!(admob_ecpm_key("g1", "u2", 2_000_000), "admob-ecpm:g1:u2:2");
+        assert_eq!(
+            max_floor_key("u1", " ee ", 2_500_000).unwrap(),
+            "max-floor:u1:EE:2.5"
+        );
+        assert!(max_floor_key("u1", "EST", 1).is_err());
+    }
+
+    #[test]
+    fn value_bearing_keys_never_collide_across_values() {
+        // The repricing falsifier: same entry, different price must produce a
+        // different key, or the platform would treat the new write as a
+        // duplicate of the first and silently drop the change.
+        assert_ne!(
+            levelplay_price_key("u1", "e1", 1_100_000),
+            levelplay_price_key("u1", "e1", 1_300_000)
+        );
+        assert_ne!(
+            max_floor_key("u1", "EE", 2_000_000).unwrap(),
+            max_floor_key("u1", "ee", 3_000_000).unwrap()
+        );
+        assert_ne!(
+            admob_ecpm_key("g1", "u2", 1_000_000),
+            admob_ecpm_key("g1", "u2", 1_500_000)
+        );
     }
 
     #[test]

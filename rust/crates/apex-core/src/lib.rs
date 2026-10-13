@@ -34,5 +34,6 @@ pub use platform::{
 };
 pub use validation::{
     admob_ecpm_key, format_micros_short, levelplay_create_key, levelplay_price_key,
-    levelplay_remove_key, max_experiment_key, normalize_country, validate_ecpm, validate_floor,
+    levelplay_remove_key, max_experiment_key, max_floor_key, normalize_country, validate_ecpm,
+    validate_floor,
 };
