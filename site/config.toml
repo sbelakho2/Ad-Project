@@ -1,0 +1,26 @@
+# Apex marketing site — Zola 0.19.x.
+# The production deploy replaces base_url with the live domain; the Sitemap line
+# in static/robots.txt must be updated to match at the same time.
+
+base_url = "https://apexmediation.example"
+title = "Apex"
+description = "Apex is the no-SDK autopilot that works on top of the mediation you already run: a free read-only revenue-leak audit, changes applied through each platform's own management API, and fees only on lift the platform's own A/B test measured."
+default_language = "en"
+generate_sitemap = true
+minify_html = true
+compile_sass = false
+taxonomies = []
+
+[markdown]
+smart_punctuation = true
+
+[extra]
+contact_email = "hello@apexmediation.example"
+footer_text = "Apex runs on top of AppLovin MAX, LevelPlay and AdMob. No SDK, no ad serving, nothing flows through Apex."
+nav = [
+  { name = "How it works", path = "@/how-it-works.md" },
+  { name = "Pricing", path = "@/pricing.md" },
+  { name = "Proof", path = "@/proof.md" },
+  { name = "Security", path = "@/security.md" },
+  { name = "For publishers", path = "@/for-publishers.md" },
+]

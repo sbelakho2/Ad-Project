@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ config.title }}{% endblock title %}</title>
+{% block meta %}<meta name="description" content="{{ config.description }}">{% endblock meta %}
+<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}">
+<link rel="stylesheet" href="{{ get_url(path='style.css') }}">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <p class="brand"><a href="{{ config.base_url | safe }}">Apex</a></p>
+  <nav aria-label="Primary">
+    <ul>
+      {%- for item in config.extra.nav %}
+      <li><a href="{{ get_url(path=item.path) }}">{{ item.name }}</a></li>
+      {%- endfor %}
+    </ul>
+  </nav>
+</header>
+<main id="main">
+{% block content %}{% endblock content %}
+</main>
+<footer class="site-footer">
+  <p>{{ config.extra.footer_text }}</p>
+  <p>Contact: <a href="mailto:{{ config.extra.contact_email }}">{{ config.extra.contact_email }}</a></p>
+</footer>
+</body>
+</html>

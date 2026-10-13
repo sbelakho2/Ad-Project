@@ -20,6 +20,7 @@ depends_on:
   - scripts-shell-coverage
   - contract-coverage
   - dogfood-audit
+  - site-perf
 
 steps:
   aggregate-coverage-verdict:

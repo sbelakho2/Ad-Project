@@ -1,0 +1,201 @@
+/* Apex marketing site — single hand-written stylesheet.
+   Palette and measured contrast ratios (WCAG, against the backgrounds in use):
+   - #1a1a1a on #ffffff body text ........ 17.4:1
+   - #595959 on #ffffff secondary text ... 7.0:1
+   - #0b5fa5 on #ffffff links ............ 6.6:1
+   - #1a1a1a on #f4f4f4 footer ........... 15.8:1
+   - #1a1a1a on #eef4fa table header ..... 15.7:1
+   All ratios meet WCAG AA for normal text. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --ink: #1a1a1a;
+  --ink-soft: #595959;
+  --link: #0b5fa5;
+  --surface: #f4f4f4;
+  --surface-alt: #eef4fa;
+  --line: #d9d9d9;
+}
+
+html {
+  font-size: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.6;
+}
+
+a {
+  color: var(--link);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+a:focus-visible {
+  outline: 3px solid var(--link);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -100vw;
+  top: 0;
+  padding: 0.5rem 1rem;
+  background: var(--ink);
+  color: #ffffff;
+}
+
+.skip-link:focus {
+  left: 0;
+  z-index: 1;
+}
+
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.brand a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.site-header nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.site-header nav a {
+  font-size: 0.95rem;
+}
+
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 3rem;
+}
+
+.prose {
+  max-width: 46rem;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+  margin: 2rem 0 0.75rem;
+}
+
+h1 {
+  font-size: 1.9rem;
+  margin-top: 1rem;
+}
+
+h2 {
+  font-size: 1.4rem;
+}
+
+h3 {
+  font-size: 1.15rem;
+}
+
+p,
+ul,
+ol,
+table {
+  margin: 0 0 1rem;
+}
+
+li {
+  margin-bottom: 0.35rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.925em;
+  background: var(--surface);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+th,
+td {
+  border: 1px solid var(--line);
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--surface-alt);
+}
+
+.site-footer {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding: 1.25rem;
+}
+
+.site-footer p {
+  max-width: 62rem;
+  margin: 0 auto 0.4rem;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+@media (max-width: 40rem) {
+  .site-header {
+    display: block;
+  }
+
+  .site-header nav {
+    margin-top: 0.5rem;
+  }
+
+  h1 {
+    font-size: 1.55rem;
+  }
+
+  .prose table {
+    display: block;
+    overflow-x: auto;
+  }
+}

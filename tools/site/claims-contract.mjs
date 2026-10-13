@@ -33,15 +33,25 @@ export function checkClaims(claims, { readFile, exists }) {
       violations.push(`${id}: anchor path does not exist: ${claim.anchor}`);
       continue;
     }
-    let anchorText;
-    try {
-      anchorText = readFile(claim.anchor);
-    } catch (error) {
-      violations.push(`${id}: anchor unreadable: ${error.message}`);
+    // `test` is either a bare name (pinned inside the anchor file) or
+    // `name (path)` when the test lives in a sibling test file; both forms must
+    // resolve to a file that CONTAINS the exact test name.
+    const pinned = claim.test.match(/^(.*?)\s*\(([^)]+)\)\s*$/);
+    const testName = (pinned ? pinned[1] : claim.test).trim();
+    const testPath = pinned ? pinned[2].trim() : claim.anchor;
+    if (!exists(testPath)) {
+      violations.push(`${id}: pinned test file does not exist: ${testPath}`);
       continue;
     }
-    if (!normalize(anchorText).includes(normalize(claim.test))) {
-      violations.push(`${id}: pinned test '${claim.test}' not found in ${claim.anchor}`);
+    let testText;
+    try {
+      testText = readFile(testPath);
+    } catch (error) {
+      violations.push(`${id}: pinned test file unreadable: ${error.message}`);
+      continue;
+    }
+    if (!normalize(testText).includes(normalize(testName))) {
+      violations.push(`${id}: pinned test '${testName}' not found in ${testPath}`);
     }
   }
   return violations;

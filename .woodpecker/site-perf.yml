@@ -1,0 +1,30 @@
+# site-perf: the marketing site's hard performance budgets.
+# Zola builds the static site; the built DIST is then measured, never the intent:
+# zero JavaScript, per-page byte budgets, self-hosted resources only, and the
+# two-way claims contract (every claim anchored to a pinned test AND present on
+# a page). Lighthouse asserts the user-facing budgets on the same dist.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  site-build-and-budget:
+    image: ghcr.io/getzola/zola:v0.19.2
+    commands:
+      - cd site
+      - zola build
+  site-claims-contract:
+    image: node:20-bookworm
+    commands:
+      - node tools/site/claims-contract.mjs
+  site-perf-budget:
+    image: node:20-bookworm
+    depends_on: [site-build-and-budget]
+    commands:
+      - node tools/site/perf-budget.mjs --dist site/public --min-pages 6
+  site-lighthouse:
+    image: node:20-bookworm
+    depends_on: [site-build-and-budget]
+    commands:
+      - cd site
+      - npx -y @lhci/cli@0.14.0 autorun --config=lighthouserc.json

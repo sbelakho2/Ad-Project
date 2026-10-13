@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Page not found — {{ config.title }}{% endblock title %}
+{% block meta %}<meta name="description" content="That page is not part of the Apex site. Start from the home page or one of the main sections.">{% endblock meta %}
+{% block content %}
+<article class="prose">
+<h1>Page not found</h1>
+<p>The address you opened does not match a page on this site. The main pages are listed below; if you followed a link that should have worked, write to <a href="mailto:{{ config.extra.contact_email }}">{{ config.extra.contact_email }}</a>.</p>
+<ul>
+  <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
+  <li><a href="{{ get_url(path='@/how-it-works.md') }}">How Apex works</a></li>
+  <li><a href="{{ get_url(path='@/pricing.md') }}">Pricing</a></li>
+  <li><a href="{{ get_url(path='@/proof.md') }}">Proof</a></li>
+  <li><a href="{{ get_url(path='@/security.md') }}">Security</a></li>
+  <li><a href="{{ get_url(path='@/for-publishers.md') }}">For publishers</a></li>
+</ul>
+</article>
+{% endblock content %}

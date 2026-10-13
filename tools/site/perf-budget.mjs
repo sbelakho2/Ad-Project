@@ -11,25 +11,51 @@ import { fileURLToPath } from 'node:url';
 export const HTML_BUDGET_BYTES = 40_000;
 export const CSS_BUDGET_BYTES = 12_000;
 
-/** Pure: evaluate one built page. Returns violations for that page. */
-export function checkPage(rel, html, htmlBudget = HTML_BUDGET_BYTES) {
+/** Parse attributes from a tag's inner text (quoted or unquoted, any order). */
+export function parseAttrs(tagInner) {
+  const attrs = new Map();
+  const re = /([a-zA-Z_:][a-zA-Z0-9_:.-]*)(?:\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+  let m;
+  while ((m = re.exec(tagInner)) !== null) {
+    const value = m[3] ?? m[4] ?? m[5] ?? '';
+    attrs.set(m[1].toLowerCase(), value);
+  }
+  return attrs;
+}
+
+/** Pure: evaluate one built page. Returns violations for that page.
+ * `origin` is the site's own origin (e.g. "https://apexmediation.example"); resource
+ * links pointing at the SAME origin are self-hosted and fine, anything else is an
+ * external request. */
+export function checkPage(rel, html, htmlBudget = HTML_BUDGET_BYTES, origin = null) {
   const violations = [];
   const bytes = Buffer.byteLength(html, 'utf8');
   if (bytes > htmlBudget) violations.push(`${rel}: ${bytes} bytes > html budget ${htmlBudget}`);
   if (/<script[\s>]/i.test(html)) violations.push(`${rel}: contains a <script> tag (zero-JS budget)`);
-  if (!/<meta\s+name="description"\s+content="[^"]+"/i.test(html)) violations.push(`${rel}: missing meta description`);
-  const links = html.match(/<link\b[^>]*>/gi) ?? [];
-  const canonical = links.some((tag) => /rel="canonical"/i.test(tag));
-  if (!canonical) violations.push(`${rel}: missing canonical link`);
-  for (const tag of links) {
-    const relMatch = tag.match(/rel="([^"]+)"/i);
-    const hrefMatch = tag.match(/href="(https?:\/\/[^"]+)"/i);
-    if (!relMatch || !hrefMatch) continue;
-    const kind = relMatch[1].toLowerCase();
+
+  const metas = [...html.matchAll(/<meta\b([^>]*)>/gi)].map((m) => parseAttrs(m[1]));
+  const hasDescription = metas.some(
+    (attrs) => attrs.get('name') === 'description' && (attrs.get('content') ?? '').trim() !== '',
+  );
+  if (!hasDescription) violations.push(`${rel}: missing meta description`);
+
+  const links = [...html.matchAll(/<link\b([^>]*)>/gi)].map((m) => parseAttrs(m[1]));
+  // 404 is legitimately canonical-less; every other page must name its canonical URL.
+  if (rel !== '404.html') {
+    const canonical = links.some((attrs) => (attrs.get('rel') ?? '').toLowerCase() === 'canonical' && (attrs.get('href') ?? '').trim() !== '');
+    if (!canonical) violations.push(`${rel}: missing canonical link`);
+  }
+  for (const attrs of links) {
+    const kind = (attrs.get('rel') ?? '').toLowerCase();
+    const href = attrs.get('href') ?? '';
     // Only resource-fetching links are external-request violations; a canonical
     // (or alternate/sitemap) URL is metadata, not a network dependency.
-    if (/(stylesheet|preconnect|dns-prefetch|preload|prefetch|icon|manifest)/.test(kind)) {
-      violations.push(`${rel}: external ${kind} request (self-host only): ${hrefMatch[1]}`);
+    if (!/(stylesheet|preconnect|dns-prefetch|preload|prefetch|icon|manifest)/.test(kind)) continue;
+    const absolute = /^(https?:)?\/\//i.test(href);
+    if (!absolute) continue; // relative path: self-hosted by construction
+    const sameOrigin = origin !== null && origin !== '' && href.startsWith(origin + '/');
+    if (!sameOrigin) {
+      violations.push(`${rel}: external ${kind} request (self-host only): ${href}`);
     }
   }
   return violations;
@@ -41,7 +67,7 @@ export function checkDist(pages, cssBytes, opts = {}) {
   const cssBudget = opts.cssBudget ?? CSS_BUDGET_BYTES;
   const minPages = opts.minPages ?? 6;
   const violations = [];
-  for (const [rel, html] of pages) violations.push(...checkPage(rel, html, htmlBudget));
+  for (const [rel, html] of pages) violations.push(...checkPage(rel, html, htmlBudget, opts.origin ?? null));
   if (pages.size < minPages) violations.push(`built ${pages.size} pages < required ${minPages}`);
   if (cssBytes > cssBudget) violations.push(`stylesheets total ${cssBytes} bytes > budget ${cssBudget}`);
   return violations;
@@ -68,6 +94,15 @@ function main() {
     process.exit(1);
   }
 
+  // The site's own origin comes from config.toml's base_url; same-origin absolute
+  // URLs (canonical, stylesheet) are self-hosted, cross-origin ones are violations.
+  let origin = null;
+  const configPath = path.join(repoRoot, 'site', 'config.toml');
+  if (fs.existsSync(configPath)) {
+    const match = fs.readFileSync(configPath, 'utf8').match(/^base_url\s*=\s*"([^"]+)"/m);
+    if (match) origin = match[1].replace(/\/+$/, '');
+  }
+
   const files = walk(dist);
   const pages = new Map();
   let cssBytes = 0;
@@ -76,7 +111,7 @@ function main() {
     if (file.endsWith('.html')) pages.set(rel, fs.readFileSync(file, 'utf8'));
     else if (file.endsWith('.css')) cssBytes += fs.statSync(file).size;
   }
-  const violations = checkDist(pages, cssBytes, { minPages });
+  const violations = checkDist(pages, cssBytes, { minPages, origin });
   if (!fs.existsSync(path.join(dist, 'robots.txt'))) violations.push('dist missing robots.txt');
   if (!fs.existsSync(path.join(dist, 'sitemap.xml'))) violations.push('dist missing sitemap.xml');
 

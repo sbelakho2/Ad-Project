@@ -1,0 +1,130 @@
+{
+  "claims": [
+    {
+      "id": "no-sdk",
+      "claim": "No SDK in your app.",
+      "anchor": "rust/crates/apex-connectors/src/lib.rs",
+      "test": "endpoint_metas_are_pinned (rust/crates/apex-connectors/src/tests.rs)"
+    },
+    {
+      "id": "max-management-api",
+      "claim": "On AppLovin MAX, Apex reads and writes through MAX's own management API.",
+      "anchor": "rust/crates/apex-connectors/src/max.rs",
+      "test": "max_set_country_floor_pins_path_and_body (rust/crates/apex-connectors/src/tests.rs)"
+    },
+    {
+      "id": "levelplay-management-api",
+      "claim": "On LevelPlay, price changes go through LevelPlay's Ad Unit price API.",
+      "anchor": "rust/crates/apex-connectors/src/levelplay.rs",
+      "test": "lp_price_update_pins_body_and_key (rust/crates/apex-connectors/src/tests.rs)"
+    },
+    {
+      "id": "admob-management-api",
+      "claim": "On AdMob, mediation group updates are read-modify-write replacements through AdMob's API.",
+      "anchor": "rust/crates/apex-connectors/src/admob.rs",
+      "test": "admob_update_mapping_is_read_modify_write_full_list (rust/crates/apex-connectors/src/tests.rs)"
+    },
+    {
+      "id": "platform-native-ab-proof",
+      "claim": "Every gain is proven by the platform's own built-in A/B experiment.",
+      "anchor": "rust/crates/apex-autopilot/src/settle.rs",
+      "test": "settle_keep_golden_arithmetic_and_billing_proof (rust/crates/apex-autopilot/src/tests.rs)"
+    },
+    {
+      "id": "lift-fee-band",
+      "claim": "Our fee is 15% to 20% of the lift the platform itself measured.",
+      "anchor": "rust/crates/apex-core/src/money.rs",
+      "test": "fee_rate_bounds_are_typed_errors"
+    },
+    {
+      "id": "no-lift-no-fee",
+      "claim": "If the platform's own experiment shows no lift, the change is rolled back and no fee applies.",
+      "anchor": "rust/crates/apex-core/src/money.rs",
+      "test": "fee_only_on_proven_positive_lift"
+    },
+    {
+      "id": "signed-change-log",
+      "claim": "Every applied change and rollback is appended to a signed, hash-chained ledger.",
+      "anchor": "rust/crates/apex-proof/src/ledger.rs",
+      "test": "every_single_byte_flip_is_rejected (rust/crates/apex-proof/src/tests.rs)"
+    },
+    {
+      "id": "automatic-rollback",
+      "claim": "If a change fails to clear the keep threshold, Apex automatically rolls it back.",
+      "anchor": "rust/crates/apex-autopilot/src/settle.rs",
+      "test": "settle_rolls_back_below_lift_floor (rust/crates/apex-autopilot/src/tests.rs)"
+    },
+    {
+      "id": "zero-lift-rollback-no-billing",
+      "claim": "A zero-lift outcome triggers a rollback without creating a billable proof.",
+      "anchor": "rust/crates/apex-autopilot/src/settle.rs",
+      "test": "settle_rolls_back_zero_lift_without_billing (rust/crates/apex-autopilot/src/tests.rs)"
+    },
+    {
+      "id": "free-audit-read-only",
+      "claim": "The audit runs read-only: it never mutates your platform settings, and the deployment holds no write credentials.",
+      "anchor": "rust/crates/apex-api/src/cycle.rs",
+      "test": "defaults_are_read_only_with_the_stripe_tolerance_and_system_clock (rust/crates/apex-api/src/state.rs)"
+    },
+    {
+      "id": "audit-stale-floors",
+      "claim": "The audit flags stale floors — a country floor set above that country's recent eCPM is throttling demand.",
+      "anchor": "rust/crates/apex-audit/src/rules/stale_floor.rs",
+      "test": "critical_at_exact_100k_boundary"
+    },
+    {
+      "id": "audit-disabled-bidders",
+      "claim": "The audit finds bidders enabled at the network but disabled in your waterfall.",
+      "anchor": "rust/crates/apex-audit/src/rules/disabled_bidder.rs",
+      "test": "critical_when_network_is_in_the_waterfall"
+    },
+    {
+      "id": "audit-missing-country-floors",
+      "claim": "The audit finds countries with real revenue and no configured floor.",
+      "anchor": "rust/crates/apex-audit/src/rules/missing_floor.rs",
+      "test": "golden_recovery_worked_example"
+    },
+    {
+      "id": "audit-reporting-gap",
+      "claim": "The audit measures the gap between network-reported revenue and mediation-reported revenue.",
+      "anchor": "rust/crates/apex-audit/src/rules/reporting_gap.rs",
+      "test": "gap_is_symmetric"
+    },
+    {
+      "id": "audit-app-ads-txt",
+      "claim": "The audit validates app-ads.txt and reports malformed lines by line number.",
+      "anchor": "rust/crates/apex-audit/src/rules/app_ads_txt.rs",
+      "test": "malformed_lines_report_sorted_line_numbers"
+    },
+    {
+      "id": "sandbox-confirmed-writes",
+      "claim": "A write path must be confirmed against the platform's live sandbox before the autopilot may write through it.",
+      "anchor": "rust/crates/apex-core/src/endpoint.rs",
+      "test": "writes_blocked_until_documented"
+    },
+    {
+      "id": "verify-live-write-refusal",
+      "claim": "The autopilot refuses to apply changes through endpoints that are not sandbox-confirmed.",
+      "anchor": "rust/crates/apex-autopilot/src/plan.rs",
+      "test": "verify_live_endpoints_refuse_before_apply (rust/crates/apex-autopilot/src/tests.rs)"
+    },
+    {
+      "id": "critical-finding-blackout",
+      "claim": "A critical audit finding blackouts every write until it is resolved.",
+      "anchor": "rust/crates/apex-autopilot/src/plan.rs",
+      "test": "critical_findings_blackout_every_write (rust/crates/apex-autopilot/src/tests.rs)"
+    },
+    {
+      "id": "encrypted-credentials",
+      "claim": "Publisher network credentials are stored encrypted with AES-256-GCM.",
+      "anchor": "backend/src/services/networkCredentialVault.ts",
+      "test": "should store new credentials successfully (backend/src/services/__tests__/networkCredentialVault.test.ts)"
+    },
+    {
+      "id": "invoice-reverified-from-ledger",
+      "claim": "Every invoice line is re-derived from the signed ledger proof before it is billed.",
+      "anchor": "rust/crates/apex-billing/src/invoice.rs",
+      "test": "invoice_never_trusts_the_stored_fee (rust/crates/apex-billing/src/tests.rs)"
+    }
+  ]
+}

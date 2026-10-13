@@ -222,3 +222,6 @@ sdk/core/android/.gradle-home/
 sdk/core/android/.gradle-dist/
 # Rust build output (workspace target dir)
 rust/target/
+
+site/public/
+site/lhci-report/

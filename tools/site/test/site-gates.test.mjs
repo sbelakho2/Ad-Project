@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPage, checkDist, HTML_BUDGET_BYTES } from '../perf-budget.mjs';
+import { checkPage, checkDist, parseAttrs, HTML_BUDGET_BYTES } from '../perf-budget.mjs';
 import { normalize, checkClaims, checkPages } from '../claims-contract.mjs';
 
 const goodPage = `<!doctype html><html lang="en"><head><title>x</title>
@@ -28,9 +28,35 @@ test('perf: missing meta description and canonical are flagged', () => {
   assert.ok(v.some((m) => m.includes('canonical')));
 });
 
-test('perf: external stylesheet request is rejected', () => {
-  const v = checkPage('x.html', goodPage.replace('/style.css', 'https://cdn.example/x.css'));
-  assert.ok(v.some((m) => m.includes('external')));
+test('perf: minified attribute forms (unquoted, reordered) still pass', () => {
+  const minified = `<!doctype html><html lang=en><head><meta charset=utf-8><meta content="d" name=description><title>t</title><link href=https://a/ rel=canonical><link href=/style.css rel=stylesheet></head><body></body></html>`;
+  assert.deepEqual(checkPage('index.html', minified), []);
+});
+
+test('perf: attribute parser handles quotes and bare attributes', () => {
+  const attrs = parseAttrs(` content="a b" name=description defer`);
+  assert.equal(attrs.get('name'), 'description');
+  assert.equal(attrs.get('content'), 'a b');
+  assert.equal(attrs.get('defer'), '');
+});
+
+test('perf: 404 pages are exempt from the canonical requirement only', () => {
+  const page404 = `<!doctype html><html><head><meta name=description content="missing page"></head><body></body></html>`;
+  assert.deepEqual(checkPage('404.html', page404), []);
+  assert.ok(checkPage('other.html', page404).some((m) => m.includes('canonical')));
+});
+
+test('perf: external stylesheet request is rejected; same-origin absolute passes', () => {
+  const external = checkPage('x.html', goodPage.replace('/style.css', 'https://cdn.example/x.css'));
+  assert.ok(external.some((m) => m.includes('external')));
+  const sameOrigin = goodPage.replace('/style.css', 'https://apexmediation.example/style.css');
+  assert.deepEqual(checkPage('x.html', sameOrigin, HTML_BUDGET_BYTES, 'https://apexmediation.example'), []);
+  assert.ok(
+    checkPage('x.html', sameOrigin, HTML_BUDGET_BYTES, 'https://other.example').some((m) => m.includes('external')),
+    'a different origin is still external',
+  );
+  const protocolRelative = goodPage.replace('/style.css', '//cdn.example/x.css');
+  assert.ok(checkPage('x.html', protocolRelative, HTML_BUDGET_BYTES, 'https://apexmediation.example').some((m) => m.includes('external')));
 });
 
 test('perf: dist-level budgets count pages and css', () => {
@@ -57,6 +83,30 @@ test('claims: missing anchor path and missing test token are violations', () => 
   });
   assert.ok(v.some((m) => m.startsWith('a1: anchor path does not exist')));
   assert.ok(v.some((m) => m.includes("pinned test 'settle_keeps_positive_lift' not found")));
+});
+
+test('claims: cross-file pin name (path) resolves against the cited file', () => {
+  const claims = { claims: [
+    { id: 'x1', claim: 'c', anchor: 'impl.rs', test: 'my_test (tests/it.rs)' },
+  ] };
+  const v = checkClaims(claims, {
+    exists: (p) => p === 'impl.rs' || p === 'tests/it.rs',
+    readFile: (p) => (p === 'tests/it.rs' ? 'fn my_test() {}' : '// no test here'),
+  });
+  assert.deepEqual(v, []);
+});
+
+test('claims: cross-file pin with missing or empty test file is a violation', () => {
+  const claims = { claims: [
+    { id: 'x2', claim: 'c', anchor: 'impl.rs', test: 'my_test (tests/nope.rs)' },
+    { id: 'x3', claim: 'c', anchor: 'impl.rs', test: 'my_test (tests/empty.rs)' },
+  ] };
+  const v = checkClaims(claims, {
+    exists: (p) => p === 'impl.rs' || p === 'tests/empty.rs',
+    readFile: () => 'other content',
+  });
+  assert.ok(v.some((m) => m.includes('pinned test file does not exist: tests/nope.rs')));
+  assert.ok(v.some((m) => m.includes("pinned test 'my_test' not found in tests/empty.rs")));
 });
 
 test('claims: duplicate ids are violations', () => {
