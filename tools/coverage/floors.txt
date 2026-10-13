@@ -28,3 +28,6 @@ apex-core 0
 apex-connectors 0
 apex-audit 0
 apex-proof 0
+apex-autopilot 0
+apex-billing 0
+apex-api 0

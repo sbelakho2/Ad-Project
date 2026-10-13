@@ -40,7 +40,10 @@ if (shell || full) {
       const hasSetEu = /set\s+-eu(o\s+pipefail)?/.test(firstHundred);
       if (!hasSetEu && !shellAllowlistNoSetEu.some((p) => rel.startsWith(p))) actual.shell.push(`${rel}: set -eu missing`);
     }
-    if (/deploy|ssh|kubectl|docker|pm2|systemctl|helm|terraform|migrate|DROP|TRUNCATE/i.test(text) && !/DOGFOOD_DRY_RUN/.test(text)) {
+    // Word-boundary destructive keywords: 'dropped' must not match DROP (the
+    // docs-lint port surfaced that substring false positive), and deploy-all.sh
+    // as a FILE name is not content; only actual words count.
+    if (/\b(deploy|ssh|kubectl|docker|pm2|systemctl|helm|terraform|migrate|drop|truncate)\b/i.test(text) && !/DOGFOOD_DRY_RUN/.test(text)) {
       actual.shell.push(`${rel}: destructive without DOGFOOD_DRY_RUN guard`);
     }
   }

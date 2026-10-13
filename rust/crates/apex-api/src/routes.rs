@@ -1,0 +1,316 @@
+//! The axum 0.8 router: JSON API plus the server-rendered console.
+//!
+//! Wire contract (all JSON responses are `application/json`):
+//!
+//! | route | success | refusals |
+//! |---|---|---|
+//! | `GET /healthz` | `200 {"status":"ok"}` | — |
+//! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform`, `404 not_found` |
+//! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
+//! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy`, `404`, `422` |
+//! | `POST /v1/stripe/webhook` | `200 {"received":true,"timestamp":t}` | `400 invalid_signature`, `503 webhook_not_configured` |
+//!
+//! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
+//! with the wrong method is axum's `405` (asserted by tests).
+
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
+use tower_http::trace::TraceLayer;
+
+use crate::cycle::{CycleRequest, CycleSummary, READ_ONLY_MODE};
+use crate::error::ApiError;
+use crate::html::{
+    render_audit_form, render_audit_page, render_error_page, render_ledger_form,
+    render_ledger_records, render_overview,
+};
+use crate::sources::{is_valid_publisher, parse_platform};
+use crate::state::AppState;
+
+/// Build the complete router (API + console) over `state`.
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/v1/audit/{platform}", get(audit_report))
+        .route("/v1/ledger/{publisher}", get(ledger))
+        .route("/v1/cycle/{publisher}", post(run_cycle))
+        .route("/v1/stripe/webhook", post(stripe_webhook))
+        .route("/", get(console_overview))
+        .route("/console/audit", get(console_audit))
+        .route("/console/ledger", get(console_ledger))
+        .fallback(not_found)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+async fn not_found() -> ApiError {
+    ApiError::NotFound
+}
+
+async fn healthz() -> Json<serde_json::Value> {
+    Json(json!({ "status": "ok" }))
+}
+
+async fn audit_report(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+) -> Result<Json<apex_audit::AuditReport>, ApiError> {
+    let platform = parse_platform(&platform).ok_or(ApiError::BadRequest("unknown_platform"))?;
+    let snapshot = state.audit_source.snapshot(platform).await?;
+    Ok(Json(apex_audit::run(&snapshot)))
+}
+
+async fn ledger(
+    State(state): State<AppState>,
+    Path(publisher): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !is_valid_publisher(&publisher) {
+        return Err(ApiError::BadRequest("invalid_publisher"));
+    }
+    let records = state.ledger_source.records(&publisher).await?;
+    Ok(Json(json!({
+        "publisher": publisher,
+        "mode": READ_ONLY_MODE,
+        "records": records,
+    })))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CycleParams {
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+async fn run_cycle(
+    State(state): State<AppState>,
+    Path(publisher): Path<String>,
+    Query(params): Query<CycleParams>,
+    body: Bytes,
+) -> Result<Json<CycleSummary>, ApiError> {
+    if !is_valid_publisher(&publisher) {
+        return Err(ApiError::BadRequest("invalid_publisher"));
+    }
+    let platform_name = params
+        .platform
+        .ok_or(ApiError::BadRequest("platform_required"))?;
+    let platform =
+        parse_platform(&platform_name).ok_or(ApiError::BadRequest("unknown_platform"))?;
+    let request = if body.is_empty() {
+        CycleRequest::default()
+    } else {
+        parse_cycle_request(&body)?
+    };
+    let summary = state
+        .cycle_runner
+        .run(&publisher, platform, request)
+        .await?;
+    Ok(Json(summary))
+}
+
+/// Parse the optional cycle body strictly: a JSON object with only the known
+/// keys, whose `policy` (if present, non-null) is itself an object with only
+/// the known keys. Serde's sequence form for structs (e.g. `[]`) and unknown
+/// fields are refused, so a typo cannot silently change what runs.
+fn parse_cycle_request(body: &[u8]) -> Result<CycleRequest, ApiError> {
+    let invalid = || ApiError::BadRequest("invalid_cycle_request");
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| invalid())?;
+    let object = value.as_object().ok_or_else(invalid)?;
+    for key in object.keys() {
+        if key != "policy" {
+            return Err(invalid());
+        }
+    }
+    if let Some(policy) = object.get("policy") {
+        if !policy.is_null() {
+            let policy = policy.as_object().ok_or_else(invalid)?;
+            for key in policy.keys() {
+                if key != "minLiftRateBp" && key != "maxFeeMicros" {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
+    serde_json::from_value(value).map_err(|_| invalid())
+}
+
+async fn stripe_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (secret, tolerance) = match (&state.webhook_secret, &state.stripe) {
+        (Some(secret), _) => (secret.clone(), state.stripe_tolerance_secs),
+        (None, Some(client)) => (
+            client.webhook_secret().to_vec(),
+            state.stripe_tolerance_secs,
+        ),
+        (None, None) => return Err(ApiError::WebhookNotConfigured),
+    };
+    let signature_header = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::InvalidSignature)?;
+    let now_unix_s = state.clock.now_unix_s();
+    let event = apex_billing::verify_stripe_signature(
+        &body,
+        signature_header,
+        &secret,
+        tolerance,
+        now_unix_s,
+    )
+    .map_err(|error| {
+        tracing::debug!(%error, "stripe signature refused");
+        ApiError::InvalidSignature
+    })?;
+    Ok(Json(
+        json!({ "received": true, "timestamp": event.timestamp }),
+    ))
+}
+
+async fn console_overview() -> Html<String> {
+    Html(render_overview())
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AuditConsoleParams {
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+async fn console_audit(
+    State(state): State<AppState>,
+    Query(params): Query<AuditConsoleParams>,
+) -> Response {
+    let Some(platform_name) = params.platform else {
+        return page(StatusCode::OK, render_audit_form(None, None));
+    };
+    let Some(platform) = parse_platform(&platform_name) else {
+        let problem = format!("unknown platform \"{platform_name}\"");
+        return page(
+            StatusCode::BAD_REQUEST,
+            render_audit_form(None, Some(&problem)),
+        );
+    };
+    match state.audit_source.snapshot(platform).await {
+        Ok(snapshot) => {
+            let report = apex_audit::run(&snapshot);
+            page(StatusCode::OK, render_audit_page(platform, &report))
+        }
+        Err(ApiError::NotFound) => page(
+            StatusCode::NOT_FOUND,
+            render_audit_form(
+                Some(platform.as_str()),
+                Some("no snapshot file exists for this platform in this deployment"),
+            ),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "audit console failed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                render_error_page("audit error", "the snapshot could not be read"),
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LedgerConsoleParams {
+    #[serde(default)]
+    publisher: Option<String>,
+}
+
+async fn console_ledger(
+    State(state): State<AppState>,
+    Query(params): Query<LedgerConsoleParams>,
+) -> Response {
+    let Some(publisher) = params.publisher else {
+        return page(StatusCode::OK, render_ledger_form(None, None));
+    };
+    if !is_valid_publisher(&publisher) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            render_ledger_form(
+                Some(&publisher),
+                Some("invalid publisher name (allowed: A-Z a-z 0-9 _ -, 1..=64 characters)"),
+            ),
+        );
+    }
+    match state.ledger_source.records(&publisher).await {
+        Ok(records) => page(StatusCode::OK, render_ledger_records(&publisher, &records)),
+        Err(ApiError::LedgerUnverified { line }) => page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            render_ledger_form(
+                Some(&publisher),
+                Some(&format!(
+                    "ledger verification failed at line {line}; no record is served from an \
+                     unverified ledger"
+                )),
+            ),
+        ),
+        Err(ApiError::NotFound) => page(
+            StatusCode::NOT_FOUND,
+            render_ledger_form(
+                Some(&publisher),
+                Some("no ledger exists for this publisher in this deployment"),
+            ),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "ledger console failed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                render_error_page("ledger error", "the ledger could not be read"),
+            )
+        }
+    }
+}
+
+fn page(status: StatusCode, body: String) -> Response {
+    (status, Html(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tower::ServiceExt;
+
+    use crate::sources::{StaticAuditSource, StaticLedgerSource};
+    use crate::state::AppState;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fallback_and_method_mismatch_are_axum_defaults() {
+        let app = router(AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        ));
+        let missing = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let wrong_method = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/healthz")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}

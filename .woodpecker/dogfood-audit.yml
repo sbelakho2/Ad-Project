@@ -47,8 +47,12 @@ steps:
           if [ "${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "${CI_COMMIT_TARGET_SHA:-}" ]; then
             base="$CI_COMMIT_TARGET_SHA"
           else
-            git fetch --depth=2 --no-filter origin "$CI_COMMIT_SHA" >/dev/null 2>&1 || true
-            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+            if ! git fetch --depth=2 --no-filter origin "$CI_COMMIT_SHA" >/dev/null 2>&1; then
+              echo "warning: could not deepen the shallow clone to find the integrity base" >&2
+            fi
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              base="$(git rev-parse --verify HEAD^)"
+            fi
           fi
         fi
         [ -n "$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }

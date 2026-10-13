@@ -1,0 +1,32 @@
+[package]
+name = "apex-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+apex-audit = { path = "../apex-audit" }
+apex-billing = { path = "../apex-billing" }
+apex-core.workspace = true
+apex-proof = { path = "../apex-proof" }
+async-trait = "0.1"
+axum = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "api_latency"
+harness = false

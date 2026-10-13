@@ -13,6 +13,9 @@ matrix:
     - CRATE: apex-connectors
     - CRATE: apex-audit
     - CRATE: apex-proof
+    - CRATE: apex-autopilot
+    - CRATE: apex-billing
+    - CRATE: apex-api
 
 steps:
   apex-rs-crate:
