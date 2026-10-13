@@ -118,7 +118,7 @@ impl RuleId {
     }
 }
 
-/// One audit finding. `evidence` holds the exact numbers; `message` is the human
+/// One audit result. `evidence` holds the exact numbers; `message` is the human
 /// rendering and must not contain a standalone number absent from `evidence`
 /// (enforced by the parity test).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

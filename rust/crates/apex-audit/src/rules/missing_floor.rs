@@ -94,7 +94,7 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
         if share_bp < WARN_SHARE_BP {
             continue;
         }
-        // One clamped value used in BOTH message and evidence: the parity
+        // One clamped value used in both message and evidence: the parity
         // contract must hold even when i128 share overflows i64 (verifier A2).
         let share_bp_clamped = clamp_i64(share_bp);
         let severity = if share_bp >= CRITICAL_SHARE_BP {

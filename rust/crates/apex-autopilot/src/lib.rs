@@ -1,9 +1,9 @@
 //! apex-autopilot — the propose/apply/experiment/keep-or-rollback loop.
 //!
 //! Anchored rules (each pinned by tests):
-//! - a change NEVER ships without a platform-native experiment; if the platform
+//! - a change never ships without a platform-native experiment; if the platform
 //!   cannot start the experiment, the change is rolled back immediately,
-//! - a Critical audit finding blackouts all writes (policy-configurable),
+//! - a Critical audit result blackouts all writes (policy-configurable),
 //! - the daily cap is counted from the signed ledger, never from caller state,
 //! - verify-live endpoints refuse before any side effect,
 //! - billing proofs exist only for platform-proven positive lift.

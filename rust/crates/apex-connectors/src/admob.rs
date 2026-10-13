@@ -201,7 +201,7 @@ impl AdmobClient {
         })
     }
 
-    /// Read-modify-write of the FULL mapping list (the API replaces the whole list).
+    /// Read-modify-write of the full mapping list (the API replaces the whole list).
     pub async fn update_mapping_ecpm(
         &self,
         mediation_group_id: &str,

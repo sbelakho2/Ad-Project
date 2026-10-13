@@ -708,7 +708,7 @@ async fn webhook_client_tolerance_beats_a_narrower_state_tolerance() {
 
 #[tokio::test]
 async fn cycle_duplicate_query_keys_are_json_bad_request() {
-    // Before the fix this was axum's plain-text QueryRejection; `/v1/*`
+    // The rejection mapping yields the JSON shape; plain-text axum output
     // refusals must stay `application/json` with the pinned code.
     let temp = TempDir::new("cycle-dup-query");
     write_standard_fixture(temp.path());
@@ -810,7 +810,7 @@ async fn ledger_symlink_escaping_the_root_is_refused() {
 
 #[tokio::test]
 async fn empty_ledger_verifies_to_zero_records() {
-    // Fix 2(a): an empty file is a valid empty ledger in `Ledger::verify`; the
+    // An empty file is a valid empty ledger in `Ledger::verify`; the
     // single verified read keeps that contract and serves zero records.
     let temp = TempDir::new("ledger-empty");
     write_ledger(temp.path(), PUBLISHER, &seed_keypair(7), vec![]);
@@ -823,7 +823,7 @@ async fn empty_ledger_verifies_to_zero_records() {
 #[test]
 fn ledger_read_path_is_pinned_to_a_single_read() {
     // Source-level pin (compile-time `include_str!`) of the verification
-    // report's fix 2: the ledger must be parsed from the one read that
+    // The ledger is parsed from the one read that
     // `Ledger::read_verified` performed, never from a second whole-file read
     // that could observe a file swapped after verification. The only raw
     // `std::fs::read` left in sources.rs is the audit-snapshot reader.

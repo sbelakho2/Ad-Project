@@ -94,7 +94,7 @@ pub async fn run_cycle(
         if !criticals.is_empty() {
             return Err(PlanError::PolicyViolation {
                 reason: format!(
-                    "blackout: {} critical audit finding(s): {}",
+                    "blackout: {} critical audit result(s): {}",
                     criticals.len(),
                     criticals.join(", ")
                 ),
@@ -179,7 +179,7 @@ pub async fn run_cycle(
         applied_today += 1;
         applied_this_cycle += 1;
 
-        // A change NEVER ships without its platform-native experiment.
+        // A change never ships without its platform-native experiment.
         let spec = apex_core::ExperimentSpec {
             name: experiment_name(&proposal.action),
             ad_unit_id: proposal.action.ad_unit_id().to_string(),

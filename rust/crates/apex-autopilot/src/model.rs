@@ -66,7 +66,7 @@ pub struct AutopilotPolicy {
     pub min_lift_bp: i64,
     /// Minimum platform-reported confidence in basis points (95% = 9500).
     pub min_confidence_bp: i32,
-    /// Refuse every write while any Critical audit finding exists.
+    /// Refuse every write while any Critical audit result exists.
     pub blackout_on_critical_findings: bool,
 }
 

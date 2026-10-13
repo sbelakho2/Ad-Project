@@ -1,5 +1,5 @@
 //! Validation helpers and idempotency-key builders.
-//! The key formats are the SAME strings the TypeScript reference layer used, so any
+//! The key formats are the same strings the TypeScript reference layer used, so any
 //! external system that observed keys from either implementation agrees.
 
 use crate::errors::PlatformError;
@@ -24,7 +24,7 @@ pub fn normalize_country(input: &str) -> Result<String, PlatformError> {
 
 /// eCPM bounds for price-setting operations: (0, 500] units.
 pub fn validate_ecpm(micros: Micros) -> Result<Micros, PlatformError> {
-    // Note: 0 is INVALID for a price, so the bound is 1..=MAX (clippy-suggested
+    // Note: 0 is invalid for a price, so the bound is 1..=MAX (clippy-suggested
     // `0..=MAX` would silently accept zero).
     if !(1..=MAX_ECPM_MICROS).contains(&micros) {
         return Err(PlatformError::Validation(format!(

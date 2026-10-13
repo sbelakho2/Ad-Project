@@ -816,7 +816,7 @@ async fn admob_update_rejects_unknown_group_unit_and_bad_ecpm() {
         client.update_mapping_ecpm("g1", "u1", 500_000_001).await,
         Err(PlatformError::Validation(_))
     ));
-    // Range validation runs BEFORE the group read; the two lookup errors each cost
+    // Range validation runs before the group read; the two lookup errors each cost
     // exactly one list call and never reach the PATCH.
     assert_eq!(
         mock.calls().len(),

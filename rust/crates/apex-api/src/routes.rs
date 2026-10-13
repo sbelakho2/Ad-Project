@@ -218,7 +218,7 @@ async fn stripe_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Precedence, pinned by tests: a configured `StripeClient` supplies BOTH
+    // Precedence, pinned by tests: a configured `StripeClient` supplies both
     // the signing secret and the freshness tolerance (its own
     // `tolerance_secs`), so a stricter tolerance on the client is never
     // silently widened. The state's explicit `webhook_secret` and

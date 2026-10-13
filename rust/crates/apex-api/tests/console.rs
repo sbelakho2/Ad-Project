@@ -22,7 +22,7 @@ const HOSTILE_ENCODED: &str = "%3Cscript%3Ealert(1)%3C%2Fscript%3E";
 
 fn assert_no_raw_script(body: &str, context: &str) {
     // Case-insensitive: a regression that re-introduced markup could emit
-    // `<SCRIPT>` just as well as `<script>`.
+    // an uppercase tag matches just as well.
     let lowercase = body.to_ascii_lowercase();
     assert!(
         !lowercase.contains("<script"),
@@ -316,7 +316,7 @@ async fn console_pages_are_html_and_contain_no_script_elements() {
 
 #[tokio::test]
 async fn console_duplicate_query_keys_are_html_bad_request() {
-    // Before the fix this was axum's plain-text QueryRejection; console
+    // The rejection mapping yields the console HTML shape; plain-text axum
     // refusals must stay HTML with the pinned error page.
     let temp = TempDir::new("console-dup-query");
     let app = router(file_state(temp.path(), pub1_keys()));

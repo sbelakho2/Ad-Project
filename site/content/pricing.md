@@ -5,9 +5,9 @@ description = "Apex charges 15% to 20% of the lift the platform's own A/B test m
 
 ## The rule
 
-Our fee is 15% to 20% of the lift the platform itself measured. The rate is agreed in a fixed range when you sign, and the exact percentage inside that range is stated in your order. If the platform's own experiment shows no lift, the change is rolled back and no fee applies.
+Our fee is 15% to 20% of the lift the platform itself measured. The rate is agreed in a fixed range when you sign, and the exact percentage inside that range is stated in your order. When the platform's experiment shows no lift, the change comes out and no fee applies.
 
-No lift, no fee is not a slogan; it is enforced by the billing path. Every invoice line is re-derived from the signed ledger proof before it is billed. The billed amount is recomputed from the platform-measured lift and the agreed rate, and an invoice that cannot re-derive every line from signed proof is refused rather than estimated. A zero-lift outcome triggers a rollback without creating a billable proof, so there is nothing to invoice in the first place.
+No lift, no fee is not a slogan; it is enforced by the billing path. Before anything is billed, each invoice line is re-derived from the signed ledger proof. The billed amount is recomputed from the platform-measured lift and the agreed rate, and an invoice that cannot re-derive every line from signed proof is refused rather than estimated. A zero-lift outcome triggers a rollback without creating a billable proof, so there is nothing to invoice in the first place.
 
 There is no subscription, no seat fee, no platform fee and no minimum commitment. The free read-only audit carries no obligation to continue.
 
@@ -45,11 +45,13 @@ Apex's difference is structural: no code in the app, no new ad path, no Apex-sid
 ## What we do not charge for
 
 - The read-only audit: free, before any contract, no obligation.
+
 - Rollbacks: a failed change costs you nothing and is never billed.
+
 - Access to the change log: the signed ledger is yours to verify at any time, at no cost.
 
-## What we do NOT do
+## What Apex does not do
 
-No ad serving. No SDK. No new mediation layer. No partnerships needed with your networks. Nothing flows through Apex — not ad requests, not bids, not user data. Apex touches only the management APIs of the platform you already use, and the fee only exists when those platforms' own numbers say your revenue went up.
+Apex serves no ads and ships no SDK. No new mediation layer. No partnerships needed with your networks. Nothing flows through Apex — not ad requests, not bids, not user data. Apex touches only the management APIs of the platform you already use, and the fee only exists when those platforms' own numbers say your revenue went up.
 
 Questions about the band, the thresholds or the worked example: write to [hello@apexmediation.example](mailto:hello@apexmediation.example).

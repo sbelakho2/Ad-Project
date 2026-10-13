@@ -12,8 +12,9 @@
 //!   not fire (nothing is being blocked).
 //!
 //! Recovery model: `expected_ecpm * impressions / 1000`, where `expected_ecpm`
-//! is the **ad unit's overall eCPM** over all countries (`sum(revenue) *
-//! 1000 / sum(impressions)` from `country_revenue` rows). Rationale: with the
+//! is the **ad unit's overall eCPM** over all countries, computed as the sum
+//! of revenue times 1000 divided by the sum of impressions from the
+//! `country_revenue` rows. Rationale: with the
 //! floor lifted, the blocked impressions are expected to monetize at least at
 //! the unit's average rate. No win-rate fudge factors are applied — the model is
 //! exactly the unit eCPM applied to the blocked impressions, so the claim is
@@ -24,8 +25,8 @@
 //! (Critical -> Warning -> Info, floor at Info): we will not claim money the
 //! snapshot cannot support.
 //!
-//! Country codes are compared normalized (trim + uppercase). Duplicate floor
-//! entries for the same `(unit, country)` keep the **minimum** floor, so the
+//! Country codes are compared normalized with trim and uppercase. Duplicate
+//! floor entries per unit and country keep the **minimum** floor, so the
 //! finding never overstates the configured barrier.
 
 use std::collections::BTreeMap;

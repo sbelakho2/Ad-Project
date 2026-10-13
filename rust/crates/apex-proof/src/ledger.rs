@@ -7,7 +7,7 @@
 //! {"record":{...},"signature":"<128 lowercase hex>","pubkey":"<64 lowercase hex>"}
 //! ```
 //!
-//! Verification does NOT merely parse the line: it re-serializes the parsed
+//! Parsing the line alone is not enough: verification re-serializes the parsed
 //! record with the parsed signature/pubkey and requires the on-disk bytes to
 //! equal that canonical serialization exactly. Unknown injected fields,
 //! whitespace changes, reordered keys and uppercase-hex edits are therefore
@@ -279,8 +279,8 @@ impl Ledger {
             }
         }
         if let Some(error) = tail_error {
-            // The verified prefix is only trusted by OFFSET, so a tamper that changes
-            // the prefix LENGTH can slice a line in half and surface as `Malformed`
+            // The verified prefix is only trusted by offset, so a tamper that changes
+            // the prefix length can slice a line in half and surface as `Malformed`
             // here. Fall back to a full re-verification to produce the truthful
             // taxonomy (e.g. HashMismatch on the tampered line) before giving up.
             return match read_and_verify(&self.path, &self.verifying_key) {

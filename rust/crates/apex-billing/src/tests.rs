@@ -710,7 +710,7 @@ async fn mixed_sub_cent_invoice_is_refused_before_any_request() {
     // Falsifier from the adversarial review (probe G): a fully re-verified
     // invoice can contain a line whose fee truncates to a sub-cent amount
     // (lift 7 @1500bp -> 1 micro). Every item must be built before the first
-    // request so a later sub-cent line refuses the WHOLE invoice with zero
+    // request so a later sub-cent line refuses the whole invoice with zero
     // charges.
     let invoice = compute_invoice(
         "pub-1",

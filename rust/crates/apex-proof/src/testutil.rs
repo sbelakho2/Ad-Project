@@ -22,7 +22,7 @@ pub(crate) fn seal_record(mut record: LedgerRecord, seq: u64, prev_hash: [u8; 32
     record
 }
 
-/// Serialize one persisted line (no trailing newline) through the SAME canonical
+/// Serialize one persisted line (no trailing newline) through the same canonical
 /// writer the ledger uses, signed with `keypair`. Byte-identical to what
 /// [`crate::Ledger::append`] would write for this record.
 pub(crate) fn signed_line(record: &LedgerRecord, keypair: &Keypair) -> String {

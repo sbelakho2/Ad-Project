@@ -6,7 +6,7 @@ use apex_core::PlatformError;
 ///
 /// Fail-closed contract (pinned by tests):
 /// - rejects empty/whitespace, signs, exponent notation, non-digit characters;
-/// - the fractional part may have at most 6 digits (MORE => error, never silent
+/// - the fractional part may have at most 6 digits (more => error, never silent
 ///   truncation, because silently dropping precision corrupts money);
 /// - "2." (dot without fraction) is rejected; "2" is fine.
 pub fn parse_decimal_micros(input: &str) -> Result<i64, PlatformError> {

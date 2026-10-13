@@ -110,7 +110,7 @@
     },
     {
       "id": "critical-finding-blackout",
-      "claim": "A critical audit finding blackouts every write until it is resolved.",
+      "claim": "A critical audit result blackouts every write until it is resolved.",
       "anchor": "rust/crates/apex-autopilot/src/plan.rs",
       "test": "critical_findings_blackout_every_write (rust/crates/apex-autopilot/src/tests.rs)"
     },

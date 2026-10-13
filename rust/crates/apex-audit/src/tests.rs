@@ -54,12 +54,12 @@ fn rich_snapshot() -> Snapshot {
 /// Numeric tokens that the message/evidence parity contract covers.
 ///
 /// Contract (documented in lib.rs): parity applies to every numeric token
-/// OUTSIDE backticked spans. Backticked spans carry identifiers verbatim
+/// outside backticked spans. Backticked spans carry identifiers verbatim
 /// (country codes, networks, domains) which may themselves contain digit runs;
 /// those are data, not claims. The scanner is:
 /// - backtick-aware (spans between ` pairs are skipped entirely),
 /// - sign-aware ("-42" is the token -42, not 42),
-/// - strict: a standalone digit run that does not parse as i128 PANICS, so an
+/// - strict: a standalone digit run that does not parse as i128 panics, so an
 ///   unparseable run can never be silently ignored (verifier finding A4).
 fn message_numbers(message: &str) -> Vec<i128> {
     let mut outside = String::new();

@@ -465,7 +465,7 @@ fn append_refuses_a_broken_chain_and_leaves_the_file_untouched() {
     let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
     append_sample(&mut ledger);
 
-    // Forge a CANONICAL line whose payload differs from the stored hash: the
+    // Forge a canonical line whose payload differs from the stored hash: the
     // clone keeps the original `hash` (and we sign it), so the byte-exact
     // canonical check passes and the hash recomputation MUST catch the tamper.
     let original = ledger.get(0).expect("record 0").clone();

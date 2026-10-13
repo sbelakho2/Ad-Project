@@ -1,6 +1,6 @@
 //! Idempotency keys, experiment naming and platform attribution.
-//! The CHANGE keys reuse apex-core builders verbatim so the platform sees the
-//! SAME key whether the write came from a direct call or the autopilot.
+//! The change keys reuse apex-core builders verbatim so the platform sees the
+//! same key whether the write came from a direct call or the autopilot.
 
 use apex_core::{
     admob_ecpm_key, levelplay_create_key, levelplay_price_key, levelplay_remove_key,
@@ -66,7 +66,7 @@ fn slug(raw: &str) -> String {
         .collect()
 }
 
-/// The idempotency key for the platform WRITE that applies `action`.
+/// The idempotency key for the platform write that applies `action`.
 /// `SetCountryFloor` gets a dedicated `max-floor:` key (MAX has no core builder
 /// for floors); every other variant reuses the apex-core builder verbatim.
 pub fn idempotency_key(action: &Action) -> Result<String, PlatformError> {

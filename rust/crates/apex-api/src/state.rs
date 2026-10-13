@@ -117,7 +117,7 @@ mod tests {
         assert!(state.stripe.is_none());
         assert!(state.webhook_secret.is_none());
         assert_eq!(state.stripe_tolerance_secs, DEFAULT_STRIPE_TOLERANCE_SECS);
-        // Fix 5: the API default is the billing verifier's default itself,
+        // The API default equals the billing verifier's default by construction;
         // not a second copy of the number.
         assert_eq!(
             DEFAULT_STRIPE_TOLERANCE_SECS,

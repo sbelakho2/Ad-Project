@@ -192,7 +192,7 @@ mod tests {
         ];
         snapshot.waterfall = vec![waterfall_entry("e1", "uA", "mintegral")];
         let finding = only(&snapshot);
-        // Byte-order smallest spelling: "MINTEGRAL" < "Mintegral" < "mintegral".
+        // Byte-order smallest spelling wins: the uppercase form sorts first.
         assert_eq!(finding.subject, "network:MINTEGRAL");
         assert_eq!(finding.evidence["qualifying_accounts"], 2);
     }
