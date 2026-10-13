@@ -14,6 +14,9 @@
     <Compile Include="**/*.cs" />
     <Compile Remove="obj/**/*.cs" />
     <Compile Remove="bin/**/*.cs" />
+    <!-- UnityStubs.cs belongs to ApexMediation.Runtime (single definition of the UnityEngine
+         types; compiling it here as well caused CS0436 conflicts across the two assemblies). -->
+    <Compile Remove="UnityStubs.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UnityRunner)' == 'true'">

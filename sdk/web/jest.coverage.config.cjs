@@ -1,13 +1,17 @@
-// jest.coverage.config.cjs — additive 100% coverage gate for the web SDK
-// (base config already collects coverage; this adds the threshold).
+// jest.coverage.config.cjs — additive 100% coverage gate for the web SDK.
+// Scope is single-sourced from tools/coverage/collect-scope.json (stack-integrity parity test).
 const base = require('./jest.config.cjs');
+const scope = require('../../tools/coverage/collect-scope.json')['web-sdk'];
 
 /** @type {import('jest').Config} */
 const config = {
   ...base,
-  coverageThreshold: {
-    global: { branches: 100, functions: 100, lines: 100, statements: 100 },
-  },
+  collectCoverage: true,
+  coverageReporters: ['json-summary', 'lcov', 'text'],
+  collectCoverageFrom: scope.collectCoverageFrom,
+  // Floors are enforced by tools/coverage/coverage-gate.mjs from tools/coverage/coverage-floor.json
+  // (ratchet-only, single source of truth). No hardcoded thresholds here by design.
+
 };
 
 module.exports = config;

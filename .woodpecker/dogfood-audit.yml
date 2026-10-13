@@ -24,6 +24,49 @@ steps:
     commands:
       - node tools/coverage/yaml-policy-gate.mjs --full
 
+  stub-ban:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/dogfood-gates.mjs stub-ban
+
+  docs-lint:
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash gawk ripgrep
+      - sh tools/docs-lint/docs-lint-one-shot-test.sh
+      - sh tools/docs-lint/docs-lint.sh --source --baseline tools/docs-lint/docs-lint-baseline.txt
+
+  docs-lint-integrity:
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash gawk ripgrep git
+      - |
+        set -eu
+        base="${CI_COMMIT_BEFORE_SHA:-}"
+        if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+          if [ "${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "${CI_COMMIT_TARGET_SHA:-}" ]; then
+            base="$CI_COMMIT_TARGET_SHA"
+          else
+            git fetch --depth=2 --no-filter origin "$CI_COMMIT_SHA" >/dev/null 2>&1 || true
+            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+        fi
+        [ -n "$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }
+        git cat-file -e "$base:tools/docs-lint/docs-lint-baseline.txt" 2>/dev/null \
+          || { echo "no baseline file at $base" >&2; exit 1; }
+        git show "$base:tools/docs-lint/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+        while IFS= read -r entry; do
+          entry="${entry#"${entry%%[![:space:]]*}"}"
+          entry="${entry%%#*}"
+          entry="${entry%"${entry##*[![:space:]]}"}"
+          [ -n "$entry" ] || continue
+          if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
+            echo "stale adoption manifest entry: $entry already has a baseline row" >&2
+            exit 1
+          fi
+        done < tools/docs-lint/docs-lint-adopted.txt
+        sh tools/docs-lint/docs-lint.sh --source --integrity /tmp/base-baseline.txt
+
   meta-assertion-presence:
     image: node:20-bookworm
     commands:

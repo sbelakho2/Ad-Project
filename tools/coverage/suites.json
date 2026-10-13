@@ -1,0 +1,4 @@
+{
+  "comment": "Suite registry: every code file in coverage-manifest.json must be claimed by exactly one suite (or carry an exclusion reason). 'covers' are glob patterns. Registered suites come online per rollout phase; orphan-gate fails while orphan percent exceeds tools/coverage/coverage-floor.json:orphanFloorPercent.",
+  "suites": []
+}

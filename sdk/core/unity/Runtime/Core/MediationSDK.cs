@@ -26,6 +26,7 @@ namespace Apex.Mediation.Core
         private IPlatformBridge? _bridge;
         private bool _initialized;
         private AdapterValidator? _validator;
+        private int _lifecycleGeneration;
 
         public ConsentManager ConsentManager => _consentManager;
         public bool IsInitialized => _initialized;
@@ -122,6 +123,12 @@ namespace Apex.Mediation.Core
             _circuitBreakers.Clear();
             _interstitialCache.Clear();
             _rewardedCache.Clear();
+
+            // Bump the lifecycle generation: any load that completes AFTER this point must
+            // not repopulate the just-cleared caches or mutate captured breakers (a queued
+            // EventPump action from the previous lifecycle is dropped and its callback is
+            // failed deterministically with "sdk_shutdown").
+            Interlocked.Increment(ref _lifecycleGeneration);
         }
 
         public void ValidateAdapter(string network, IReadOnlyDictionary<string, object?> credentials, Action<AdapterValidationResult> callback)
@@ -165,10 +172,18 @@ namespace Apex.Mediation.Core
                 RecordTrace(placementId, "circuit", "load_failure", TimeSpan.Zero, extras);
                 return;
             }
+            var lifecycleGeneration = Volatile.Read(ref _lifecycleGeneration);
             loader(extras, (success, error) =>
             {
                 _eventPump.Enqueue(() =>
                 {
+                    if (lifecycleGeneration != Volatile.Read(ref _lifecycleGeneration))
+                    {
+                        // SDK was shut down while this load was in flight: fail the callback
+                        // deterministically and do not touch the new lifecycle's caches/breakers.
+                        callback?.Invoke(false, "sdk_shutdown");
+                        return;
+                    }
                     if (success)
                     {
                         cache.TryStore(new RenderableAd(placementId, extras["adapter"]?.ToString() ?? "mock", format, Config.AdCacheTtl));

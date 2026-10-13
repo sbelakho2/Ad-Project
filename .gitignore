@@ -209,7 +209,16 @@ sdk/core/unity/Runtime/bin/
 sdk/core/unity/Runtime/obj/
 sdk/core/unity/Tests/bin/
 sdk/core/unity/Tests/obj/
+
+# The blanket `coverage/` rule above (earlier in this file) must never hide the
+# first-party gate tooling: re-include the tools/coverage directory and its contents,
+# then re-exclude only the generated c8 report directory inside it.
+!tools/coverage/
+!tools/coverage/**
+tools/coverage/coverage/
 sdk/core/unity/.gradle-home/
 sdk/core/unity/.gradle-dist/
 sdk/core/android/.gradle-home/
 sdk/core/android/.gradle-dist/
+# Rust build output (workspace target dir)
+rust/target/

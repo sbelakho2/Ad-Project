@@ -1,0 +1,37 @@
+# apex-rs — the Rust implementation of the no-SDK autopilot product.
+# The mediation platform itself is not part of this workspace (explicitly out of scope).
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "proprietary"
+publish = false
+
+[workspace.dependencies]
+apex-core = { path = "crates/apex-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "deny"
+
+[workspace.lints.clippy]
+all = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Performance budgets start with the build profile: smallest, fastest release artifacts.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3

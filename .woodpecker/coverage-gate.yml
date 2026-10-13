@@ -16,6 +16,7 @@ depends_on:
   - sdk-flutter-coverage
   - python-coverage
   - rust-coverage
+  - apex-rs-coverage
   - scripts-shell-coverage
   - contract-coverage
   - dogfood-audit

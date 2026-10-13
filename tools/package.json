@@ -5,7 +5,7 @@
   "description": "Coverage gate tooling for the adversarial dogfooding stack (see docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md)",
   "scripts": {
     "test": "node --test coverage/test/",
-    "test:cov": "c8 --all --include 'coverage/*.mjs' --exclude 'coverage/test/**' --report-dir coverage/coverage --reporter json-summary --reporter lcov --reporter text node --test coverage/test/"
+    "test:cov": "c8 --all --include 'coverage/*.mjs' --include 'content-guard.js' --exclude 'coverage/test/**' --report-dir coverage/coverage --reporter json-summary --reporter lcov --reporter text node --test coverage/test/"
   },
   "devDependencies": {
     "c8": "^10.1.3"

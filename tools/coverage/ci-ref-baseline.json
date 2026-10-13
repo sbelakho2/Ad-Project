@@ -1,0 +1,11 @@
+{
+  "__comment": "Ratchet baseline for ci-reference-integrity (S-CI). Keys are `<workflow> -> <missing-ref>`. Entries here are KNOWN legacy debt: workflows written against the pre-2025 `sdks/` / `Packages/` layout that has never existed in this repository. The gate tolerates exactly these; any NEW missing ref fails, and an entry that is no longer missing fails as STALE so the baseline can only shrink. Phase-1 remediation: rebuild these workflows against the real `sdk/` layout (see docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md 7.4).",
+  "knownMissing": {
+    ".github/workflows/compatibility-testing.yml -> sdks/integration-tests": "legacy layout; integration harness never existed — rebuild in phase 1",
+    ".github/workflows/compatibility-testing.yml -> sdks": "legacy layout dir; real SDK lives at sdk/",
+    ".github/workflows/sdk-release.yml -> sdks/ios": "legacy layout; real SDK at sdk/core/ios — release pipeline uses release-sdks.yml (working) until rebuilt",
+    ".github/workflows/sdk-release.yml -> sdks/android": "legacy layout; real SDK at sdk/core/android",
+    ".github/workflows/sdk-release.yml -> sdks/unity": "legacy layout; real SDK at sdk/core/unity",
+    ".github/workflows/sdk-release.yml -> Packages/com.rivalapexmediation.sdk": "legacy UPM layout; real package at sdk/core/unity"
+  }
+}

@@ -44,12 +44,14 @@ object TCFParser {
     /** Returns the Purpose 1 consent bit, or null when the string is not valid TCF v2. */
     private fun decodePurpose1Consent(tcfV2: String): Boolean? {
         val segments = tcfV2.split('.')
-        if (segments.size != 3) return null
+        // TCF v2: Core + Disclosed Vendors are REQUIRED; Publisher TC is OPTIONAL.
+        if (segments.size < 2 || segments.size > 3) return null
 
         val core = decodeBase64Url(segments[0]) ?: return null
-        // Segments 2 and 3 must at least be decodable base64url (structure check).
+        // Disclosed vendors segment is required and must be decodable.
         if (decodeBase64Url(segments[1]) == null) return null
-        if (decodeBase64Url(segments[2]) == null) return null
+        // Optional publisher segment: when present it must be decodable (empty = absent).
+        if (segments.size == 3 && segments[2].isNotEmpty() && decodeBase64Url(segments[2]) == null) return null
 
         val bits = BitReader(core)
         if (bits.read(6) != TCF_V2_VERSION) return null

@@ -100,17 +100,24 @@ export async function executeWithWaterfall(
   });
 
   // Get adapters sorted by priority (lower number = higher priority)
-  const adapters = getAdapterConfig()
+  const sortedAdapters = getAdapterConfig()
     .filter(a => a.enabled)
     .sort((a, b) => a.priority - b.priority);
 
+  // Dedupe BEFORE the loop by keeping the first (highest-priority) occurrence of each id.
+  // Duplicate ids previously consumed attempt slots (a `continue` skip still burned an
+  // iteration against maxAttempts), silently starving distinct adapters later in the list.
+  const adapters = sortedAdapters.filter((a, i, arr) => arr.findIndex((x) => x.id === a.id) === i);
+  if (adapters.length !== sortedAdapters.length) {
+    logger.warn('Waterfall adapter list contained duplicate ids; deduplicated by priority', {
+      requestId: request.id,
+      before: sortedAdapters.length,
+      after: adapters.length,
+    });
+  }
+
   // Waterfall through adapters by priority
   let currentDelay = waterfallConfig.initialRetryDelay;
-
-  // Cycle/duplicate guard (adversarial case R3): a misconfigured adapter list with repeated
-  // ids must never be queried twice; the indexed loop already bounds attempts, and this set
-  // makes the guarantee explicit and logs the detection.
-  const seenAdapterIds = new Set<string>();
 
   for (let attemptNum = 2; attemptNum <= waterfallConfig.maxAttempts && attemptNum <= adapters.length + 1; attemptNum++) {
     // Exponential backoff delay
@@ -126,16 +133,6 @@ export async function executeWithWaterfall(
       });
       break;
     }
-
-    if (seenAdapterIds.has(adapterId)) {
-      logger.warn('Waterfall cycle detected: adapter already queried, skipping', {
-        requestId: request.id,
-        adapter: adapterId,
-        attemptNumber: attemptNum,
-      });
-      continue;
-    }
-    seenAdapterIds.add(adapterId);
 
     logger.info('Waterfall attempt', {
       requestId: request.id,

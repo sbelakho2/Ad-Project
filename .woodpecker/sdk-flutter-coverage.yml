@@ -1,13 +1,19 @@
-# Flutter (Dart) coverage: sdk/flutter via flutter test --coverage, lcov gated to 100% lines.
+# Flutter (Dart) coverage: sdk/flutter via flutter test --coverage, lcov gated to the
+# flutter floor from tools/coverage/floors.txt (single source: coverage-floor.json).
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
 steps:
-  flutter-coverage-100:
+  flutter-coverage:
     image: ghcr.io/cirruslabs/flutter:3.24.3
     commands:
       - cd sdk/flutter
       - flutter pub get
       - flutter test --coverage
-      - node "$CI_WORKSPACE/tools/coverage/lcov-gate.mjs" coverage/lcov.info 100
+  flutter-gate:
+    image: node:20-bookworm
+    depends_on: [flutter-coverage]
+    commands:
+      - FLOOR=$(grep -E '^flutter ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs sdk/flutter/coverage/lcov.info $FLOOR

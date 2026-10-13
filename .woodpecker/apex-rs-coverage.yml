@@ -1,0 +1,29 @@
+# apex-rs coverage: the Rust implementation of the no-SDK autopilot product
+# (apex-core, apex-connectors, apex-audit, apex-proof — autopilot/billing/api crates
+# join this matrix as they land). Real per-crate floors from tools/coverage/floors.txt;
+# coverage via cargo-llvm-cov with a real lcov artifact consumed by the same lcov gate
+# as every other domain (no --fail-under shortcuts).
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+matrix:
+  include:
+    - CRATE: apex-core
+    - CRATE: apex-connectors
+    - CRATE: apex-audit
+    - CRATE: apex-proof
+
+steps:
+  apex-rs-crate:
+    image: rust:1.87-bookworm
+    commands:
+      - rustup component add llvm-tools-preview
+      - cargo install cargo-llvm-cov --locked
+      - cd rust
+      - cargo llvm-cov -p "$CRATE" --lcov --output-path "$CRATE.lcov"
+      - cargo test -p "$CRATE"
+      - cargo clippy -p "$CRATE" --all-targets -- -D warnings
+      - cargo fmt -p "$CRATE" --check
+      - FLOOR=$(grep -E "^${CRATE} " "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
+      - cd "$CI_WORKSPACE" && node tools/coverage/lcov-gate.mjs "rust/$CRATE.lcov" "$FLOOR"

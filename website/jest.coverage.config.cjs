@@ -3,6 +3,7 @@
 // is testable (the base config deliberately skipped TS; that exclusion is banned
 // by the 100%-of-repo policy).
 const base = require('./jest.config.cjs');
+const scope = require('../tools/coverage/collect-scope.json')['website'];
 
 /** @type {import('jest').Config} */
 const config = {
@@ -15,10 +16,12 @@ const config = {
     '^.+\\.(ts|tsx)$': ['babel-jest', { presets: ['next/babel'] }],
   },
   testMatch: ['**/src/**/*.test.{js,ts,tsx}'],
-  collectCoverageFrom: ['src/**/*.{js,jsx,ts,tsx}', '!src/**/*.d.ts'],
-  coverageThreshold: {
-    global: { branches: 100, functions: 100, lines: 100, statements: 100 },
-  },
+  // Scope is single-sourced from tools/coverage/collect-scope.json; the stack-integrity
+  // test asserts it matches the manifest domain, so the artifact cannot silently miss files.
+  collectCoverageFrom: scope.collectCoverageFrom,
+  // Floors are enforced by tools/coverage/coverage-gate.mjs from tools/coverage/coverage-floor.json
+  // (ratchet-only, single source of truth). No hardcoded thresholds here by design.
+
   testPathIgnorePatterns: ['/node_modules/', '/.next/'],
 };
 

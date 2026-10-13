@@ -7,13 +7,16 @@
 # Allow opt-in strict mode via STRICT=1
 if [[ "${STRICT:-0}" -eq 1 ]]; then
   set -euo pipefail
-# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+else
+  set +e
+fi
+
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1).
+# MUST sit at top level, unconditionally: nesting it inside the STRICT=1 branch turned the
+# dry-run into a silent false PASS of this pre-deployment gate.
 if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
   echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
   exit 0
-fi
-else
-  set +e
 fi
 
 EXPECTED_MIGRATIONS_DEFAULT=1

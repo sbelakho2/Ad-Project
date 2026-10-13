@@ -3,7 +3,7 @@
  * The native module is mocked at the module boundary (jest.mock('react-native')) so the
  * JS-side singleton, event fan-out, and AdSize helpers run deterministically on Node.
  */
-import type { InitializationStatus } from '../src';
+import type { InitializationStatus } from '..';
 
 const nativeModule = {
   initialize: jest.fn(async (_appId: string, _testMode: boolean, _verbose: boolean): Promise<InitializationStatus> => ({ isInitialized: true, adapters: [] })),
@@ -36,7 +36,7 @@ jest.mock('react-native', () => ({
   },
 }));
 
-import AdProjectDefault, { AdProject, AdSize } from '../src';
+import AdProjectDefault, { AdProject, AdSize } from '..';
 
 describe('React Native SDK JS layer', () => {
   beforeEach(() => {
