@@ -13,8 +13,8 @@ use crate::admob::{normalize_account_id, AdmobClient, ADMOB_ENDPOINTS};
 use crate::levelplay::{LevelPlayClient, LEVELPLAY_ENDPOINTS};
 use crate::max::{MaxClient, MAX_ENDPOINTS};
 use crate::transport::{
-    HttpMethod, HttpRequest, HttpResponse, PlatformCaller, RecordingSleeper, RetryTransport,
-    Transport, TransportError,
+    HttpBody, HttpMethod, HttpRequest, HttpResponse, PlatformCaller, RecordingSleeper,
+    RetryTransport, Transport, TransportError, FORM_CONTENT_TYPE,
 };
 
 struct MockTransport {
@@ -427,7 +427,10 @@ async fn max_set_country_floor_pins_path_and_body() {
         call.url,
         "https://max.test/v1/max/ad_units/unit%2Fa%20b/floors/EE"
     );
-    assert_eq!(call.body.as_ref().unwrap()["floor_ecpm"], 2_500_000);
+    assert_eq!(
+        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["floor_ecpm"],
+        2_500_000
+    );
 }
 
 #[tokio::test]
@@ -474,8 +477,9 @@ async fn max_create_experiment_full_contract() {
         call.header("Idempotency-Key"),
         Some("max-experiment:floors-ee:u1")
     );
-    assert_eq!(call.body.as_ref().unwrap()["variant_count"], 2);
-    assert_eq!(call.body.as_ref().unwrap()["metric"], "ecpm");
+    let body = call.body.as_ref().and_then(HttpBody::as_json).unwrap();
+    assert_eq!(body["variant_count"], 2);
+    assert_eq!(body["metric"], "ecpm");
 
     let bad = ExperimentSpec {
         variants: 5,
@@ -637,7 +641,10 @@ async fn lp_price_update_pins_body_and_key() {
     let call = &mock.calls()[0];
     assert_eq!(call.method, HttpMethod::Patch);
     assert_eq!(call.url, "https://lp.test/v1/adunits/u1/waterfall/e1");
-    assert_eq!(call.body.as_ref().unwrap()["price_ecpm"], 2_345_000);
+    assert_eq!(
+        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["price_ecpm"],
+        2_345_000
+    );
     assert_eq!(
         call.header("Idempotency-Key"),
         Some("levelplay-price:u1:e1")
@@ -770,7 +777,7 @@ async fn admob_update_mapping_is_read_modify_write_full_list() {
         patch.url,
         "https://admob.test/v1/accounts/pub-1234567890123456/mediationGroups/g1"
     );
-    let mappings = patch.body.as_ref().unwrap()["adUnitMappings"]
+    let mappings = patch.body.as_ref().and_then(HttpBody::as_json).unwrap()["adUnitMappings"]
         .as_array()
         .unwrap();
     assert_eq!(mappings.len(), 2, "FULL list written back");
@@ -859,4 +866,51 @@ fn endpoint_metas_are_pinned() {
         .writable());
 
     assert_eq!(ADMOB_ENDPOINTS.len(), 3);
+}
+
+// ---------------- body shape and diagnostics ----------------
+
+#[test]
+fn http_request_debug_redacts_credentials() {
+    let request = HttpRequest {
+        platform: PlatformId::Admob,
+        operation: "op".to_string(),
+        method: HttpMethod::Post,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![
+            (
+                "Authorization".to_string(),
+                "Bearer sk_live_SUPERSECRET".to_string(),
+            ),
+            (
+                "Idempotency-Key".to_string(),
+                "stripe-item:pub-1:secret-exp:2023-11".to_string(),
+            ),
+            ("Accept".to_string(), "application/json".to_string()),
+            ("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string()),
+        ],
+        body: Some(HttpBody::Form("amount=50&currency=usd".to_string())),
+        timeout_ms: 10_000,
+    };
+    let rendered = format!("{request:?}");
+    assert!(rendered.contains("[redacted]"), "{rendered}");
+    assert!(!rendered.contains("SUPERSECRET"), "{rendered}");
+    assert!(!rendered.contains("sk_live"), "{rendered}");
+    assert!(!rendered.contains("secret-exp"), "{rendered}");
+    // Non-sensitive material stays debuggable.
+    assert!(rendered.contains("application/json"), "{rendered}");
+    assert!(rendered.contains("amount=50"), "{rendered}");
+    assert!(rendered.contains("api.example.test"), "{rendered}");
+    assert_eq!(
+        request.body.as_ref().and_then(HttpBody::as_form),
+        Some("amount=50&currency=usd")
+    );
+    assert!(request.body.as_ref().and_then(HttpBody::as_json).is_none());
+}
+
+#[test]
+fn http_body_from_json_value_is_json() {
+    let body: HttpBody = serde_json::json!({"a": 1}).into();
+    assert_eq!(body.as_json(), Some(&serde_json::json!({"a": 1})));
+    assert!(body.as_form().is_none());
 }

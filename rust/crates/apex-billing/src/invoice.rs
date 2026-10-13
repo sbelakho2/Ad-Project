@@ -93,6 +93,10 @@ pub struct InvoiceLine {
 
 /// A monthly invoice: the verified lines (ordered by `seq`) and their checked
 /// total.
+///
+/// Zero-fee lines are kept when a positive proof truncates to a zero fee, but
+/// [`crate::bill_invoice`] intentionally omits them from the Stripe receipt:
+/// `receipt.items` can be shorter than `line_items`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoice {
@@ -107,6 +111,16 @@ pub struct Invoice {
 /// An empty proof set is not an error: it yields a zero invoice (no lift, no
 /// fee). Any offending proof refuses the whole invoice with a typed error —
 /// there is no partial acceptance.
+///
+/// # Provenance precondition
+///
+/// This function re-verifies **arithmetic only**: period, publisher, positive
+/// lift, rate band and the recomputed fee. It cannot verify the ledger chain —
+/// a [`BillingProofRecord`] is freely constructible and its fee can be made
+/// consistent with any lift/rate pair. Callers MUST pass records flattened
+/// from a chain verified against the expected public key (for example via
+/// [`apex_proof::Ledger::open`] or [`apex_proof::Ledger::verify`]); otherwise a
+/// fabricated yet arithmetically consistent record would be billed.
 pub fn compute_invoice(
     publisher_id: &str,
     period: BillingPeriod,

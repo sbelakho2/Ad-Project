@@ -33,8 +33,8 @@ pub use decimal::parse_decimal_micros;
 pub use levelplay::LevelPlayClient;
 pub use max::MaxClient;
 pub use transport::{
-    HttpMethod, HttpRequest, HttpResponse, RecordingSleeper, ReqwestTransport, RetryTransport,
-    Sleeper, TokioSleeper, Transport, TransportError,
+    HttpBody, HttpMethod, HttpRequest, HttpResponse, RecordingSleeper, ReqwestTransport,
+    RetryTransport, Sleeper, TokioSleeper, Transport, TransportError, FORM_CONTENT_TYPE,
 };
 
 /// Percent string/number (e.g. "7.5" meaning 7.5%) -> basis points (750).

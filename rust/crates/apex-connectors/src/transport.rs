@@ -38,15 +38,85 @@ impl HttpMethod {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Content type carried by [`HttpBody::Form`] requests.
+pub const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+
+/// Request body shape. The mediation platform APIs use JSON; [`HttpBody::Form`]
+/// carries an already-encoded `application/x-www-form-urlencoded` string for
+/// APIs that mandate form encoding (Stripe's v1 REST endpoints).
+#[derive(Debug, Clone, PartialEq)]
+pub enum HttpBody {
+    /// `application/json` payload, serialized by the transport.
+    Json(serde_json::Value),
+    /// Pre-encoded `application/x-www-form-urlencoded` payload, sent verbatim.
+    Form(String),
+}
+
+impl From<serde_json::Value> for HttpBody {
+    fn from(value: serde_json::Value) -> Self {
+        Self::Json(value)
+    }
+}
+
+impl HttpBody {
+    /// The JSON value, when this is an [`HttpBody::Json`].
+    pub fn as_json(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Json(value) => Some(value),
+            Self::Form(_) => None,
+        }
+    }
+
+    /// The raw form string, when this is an [`HttpBody::Form`].
+    pub fn as_form(&self) -> Option<&str> {
+        match self {
+            Self::Form(raw) => Some(raw),
+            Self::Json(_) => None,
+        }
+    }
+}
+
+/// One HTTP request. `Debug` redacts credential-bearing header values
+/// (`Authorization`, `Idempotency-Key`) so diagnostics never leak secrets.
+#[derive(Clone)]
 pub struct HttpRequest {
     pub platform: PlatformId,
     pub operation: String,
     pub method: HttpMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<serde_json::Value>,
+    pub body: Option<HttpBody>,
     pub timeout_ms: u64,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let shown: &str = if is_sensitive_header(name) {
+                    "[redacted]"
+                } else {
+                    value.as_str()
+                };
+                (name.as_str(), shown)
+            })
+            .collect::<Vec<_>>();
+        f.debug_struct("HttpRequest")
+            .field("platform", &self.platform)
+            .field("operation", &self.operation)
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body", &self.body)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("idempotency-key")
 }
 
 impl HttpRequest {
@@ -342,7 +412,7 @@ impl PlatformCaller {
             method,
             url: format!("{}{}", self.base_url.trim_end_matches('/'), path),
             headers,
-            body,
+            body: body.map(HttpBody::from),
             timeout_ms: 10_000,
         };
         match self.transport.request(req.clone()).await {
@@ -404,7 +474,20 @@ impl Transport for ReqwestTransport {
             builder = builder.header(k, v);
         }
         if let Some(body) = &req.body {
-            builder = builder.json(body);
+            match body {
+                HttpBody::Json(value) => {
+                    builder = builder.json(value);
+                }
+                HttpBody::Form(raw) => {
+                    // The caller may already have declared the form content
+                    // type; only fill it in when absent so the header is not
+                    // sent twice.
+                    if req.header("Content-Type").is_none() {
+                        builder = builder.header(reqwest::header::CONTENT_TYPE, FORM_CONTENT_TYPE);
+                    }
+                    builder = builder.body(raw.clone());
+                }
+            }
         }
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {

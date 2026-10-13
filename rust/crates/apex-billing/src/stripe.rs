@@ -26,10 +26,11 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use apex_connectors::transport::{HttpMethod, HttpRequest, Transport};
+use apex_connectors::transport::{HttpBody, HttpMethod, HttpRequest, Transport, FORM_CONTENT_TYPE};
 use apex_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
+use crate::encode::encode_form_component;
 use crate::errors::BillingError;
 use crate::invoice::{Invoice, InvoiceLine};
 
@@ -66,24 +67,55 @@ pub struct VerifiedEvent {
     pub timestamp: i64,
 }
 
+/// A configuration refusal while building a [`StripeClient`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StripeClientError {
+    /// The webhook signing secret was empty. HMAC accepts an empty key, so an
+    /// empty secret would verify every delivery signed with the empty key;
+    /// this is a misconfiguration, never a working endpoint.
+    #[error("stripe webhook signing secret must not be empty")]
+    EmptySecret,
+}
+
 /// A Stripe endpoint client: the webhook signing secret plus the freshness
 /// tolerance. This type performs no network I/O; it is the credential +
 /// verification surface the API server holds.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StripeClient {
     webhook_secret: Vec<u8>,
     tolerance_secs: u64,
+}
+
+impl std::fmt::Debug for StripeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the signing secret; `webhook_secret()` is the
+        // deliberate accessor.
+        f.debug_struct("StripeClient")
+            .field("webhook_secret", &"[redacted]")
+            .field("tolerance_secs", &self.tolerance_secs)
+            .finish()
+    }
 }
 
 impl StripeClient {
     /// Build a client from the endpoint's webhook signing secret and the
     /// maximum accepted timestamp skew in seconds (Stripe emits skew well
     /// under a minute; 300 is the customary default).
-    pub fn new(webhook_secret: impl Into<Vec<u8>>, tolerance_secs: u64) -> Self {
-        Self {
-            webhook_secret: webhook_secret.into(),
-            tolerance_secs,
+    ///
+    /// Refuses an empty secret ([`StripeClientError::EmptySecret`]): an empty
+    /// HMAC key is legal and would accept forgeries signed with it.
+    pub fn new(
+        webhook_secret: impl Into<Vec<u8>>,
+        tolerance_secs: u64,
+    ) -> Result<Self, StripeClientError> {
+        let webhook_secret = webhook_secret.into();
+        if webhook_secret.is_empty() {
+            return Err(StripeClientError::EmptySecret);
         }
+        Ok(Self {
+            webhook_secret,
+            tolerance_secs,
+        })
     }
 
     /// The configured webhook signing secret.
@@ -201,18 +233,26 @@ impl<'a> ParsedHeader<'a> {
                 return Err(StripeSignatureError::MalformedHeader);
             };
             let key = key.trim();
-            let value = value.trim();
-            if key.is_empty() || value.is_empty() {
+            if key.is_empty() || value.trim().is_empty() {
                 return Err(StripeSignatureError::MalformedHeader);
             }
             match key {
                 "t" => {
+                    // Exactly one timestamp, in canonical decimal form:
+                    // `+1000`, `00001000`, padded values and a repeated `t`
+                    // are malformed, never silently normalized.
+                    if timestamp.is_some() {
+                        return Err(StripeSignatureError::MalformedHeader);
+                    }
                     let parsed = value
                         .parse::<i64>()
                         .map_err(|_| StripeSignatureError::MalformedHeader)?;
-                    timestamp.get_or_insert(parsed);
+                    if value != parsed.to_string() {
+                        return Err(StripeSignatureError::MalformedHeader);
+                    }
+                    timestamp = Some(parsed);
                 }
-                "v1" => signatures.push(value),
+                "v1" => signatures.push(value.trim()),
                 // Unknown keys (e.g. `v0`, future schemes) are ignored: they
                 // cannot weaken verification because only `v1` verifies.
                 _ => {}
@@ -242,6 +282,11 @@ pub const STRIPE_CURRENCY: &str = "usd";
 /// rounded (money is never silently moved).
 pub const MICROS_PER_MINOR_UNIT: i64 = 10_000;
 
+/// Maximum length of the derived `Idempotency-Key` header value. Stripe's
+/// documented limit is 255 characters; the builder caps itself lower so the
+/// refusal is a local, typed error rather than a remote 400.
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 200;
+
 /// One Stripe invoice-item request derived from a verified invoice line,
 /// including its deterministic idempotency key:
 /// `stripe-item:<publisher>:<experiment>:<YYYY-MM>`.
@@ -268,7 +313,10 @@ impl InvoiceLineItem {
     /// Refuses a fee that is not an exact number of cents
     /// ([`BillingError::SubCentAmount`]) and a negative fee
     /// ([`BillingError::TamperedProof`], defensively: `compute_invoice` never
-    /// produces one).
+    /// produces one). Also refuses identifiers that cannot travel in the
+    /// `Idempotency-Key` header: control characters (including CR/LF) or a
+    /// derived key longer than [`MAX_IDEMPOTENCY_KEY_LEN`]
+    /// ([`BillingError::UnsafeIdentifier`]).
     pub fn from_invoice_line(
         line: &InvoiceLine,
         publisher_id: &str,
@@ -283,21 +331,54 @@ impl InvoiceLineItem {
         if line.fee_micros % MICROS_PER_MINOR_UNIT != 0 {
             return Err(BillingError::SubCentAmount { seq: line.seq });
         }
+        let idempotency_key = format!(
+            "stripe-item:{publisher_id}:{}:{year_month}",
+            line.experiment_id
+        );
+        if let Some(control) = idempotency_key.chars().find(|c| c.is_control()) {
+            return Err(BillingError::UnsafeIdentifier {
+                seq: line.seq,
+                detail: format!(
+                    "idempotency key contains control character U+{:04X}",
+                    control as u32
+                ),
+            });
+        }
+        if idempotency_key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(BillingError::UnsafeIdentifier {
+                seq: line.seq,
+                detail: format!(
+                    "idempotency key is {} characters (max {MAX_IDEMPOTENCY_KEY_LEN})",
+                    idempotency_key.len()
+                ),
+            });
+        }
         Ok(Self {
             seq: line.seq,
             experiment_id: line.experiment_id.clone(),
             amount_minor_units: line.fee_micros / MICROS_PER_MINOR_UNIT,
             currency: STRIPE_CURRENCY.to_string(),
-            idempotency_key: format!(
-                "stripe-item:{publisher_id}:{}:{year_month}",
-                line.experiment_id
-            ),
+            idempotency_key,
             description: format!(
                 "Apex proven-lift fee: experiment {} ({} bp of {} micros proven lift)",
                 line.experiment_id, line.rate_bp, line.proven_lift
             ),
         })
     }
+}
+
+/// The exact `application/x-www-form-urlencoded` body for one invoice item:
+/// `amount=<cents>&currency=usd&description=<percent-encoded>`. The amount is
+/// already an exact cent count (enforced in
+/// [`InvoiceLineItem::from_invoice_line`]) and the description is
+/// percent-encoded, so no value can break the form or inject a field.
+fn stripe_form_body(item: &InvoiceLineItem) -> String {
+    format!(
+        "amount={}&currency={}&description={}",
+        item.amount_minor_units,
+        encode_form_component(&item.currency),
+        encode_form_component(&item.description),
+    )
 }
 
 /// The fields of Stripe's invoice-item response that billing records. Stripe
@@ -310,7 +391,9 @@ pub struct StripeItemResponse {
 
 /// What [`bill_invoice`] created: the Stripe item ids and their checked
 /// total. An invoice whose every line is zero (or which has no lines) sends
-/// no request at all and yields an empty receipt with a zero total.
+/// no request at all and yields an empty receipt with a zero total. Zero-fee
+/// lines among paid lines are intentionally omitted from `items`, so
+/// `items.len()` can be smaller than the invoice's `line_items.len()`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BillingReceipt {
@@ -331,14 +414,25 @@ pub struct BillingReceipt {
 /// Every request goes through the shared [`Transport`] with
 /// `Authorization: Bearer <api_key>` and the deterministic `Idempotency-Key`
 /// of the line, so a partially applied invoice can be resumed without double
-/// billing. Refusals are typed:
+/// billing. Each item is sent as an `application/x-www-form-urlencoded` body:
+/// `amount=<cents>&currency=usd&description=<percent-encoded>`. Refusals are
+/// typed:
 ///
-/// - a non-exact cent fee refuses the whole invoice before any request
-///   ([`BillingError::SubCentAmount`]);
+/// - the whole invoice is refused **before any request** when any billable
+///   line is a non-exact cent fee ([`BillingError::SubCentAmount`]), a
+///   negative fee ([`BillingError::TamperedProof`]) or carries an identifier
+///   unusable in a header ([`BillingError::UnsafeIdentifier`]) — every
+///   request payload is built first;
 /// - a failure on the *first* item surfaces the underlying typed error;
 /// - a failure *after* at least one item was created is
-///   [`BillingError::StripePartial`] with the created ids, so the caller can
-///   resume precisely.
+///   [`BillingError::StripePartial`] with the created ids and the cause, so
+///   the caller can resume precisely. A 2xx response whose body is not a
+///   Stripe item object counts as created, because Stripe processed the
+///   request.
+///
+/// Zero-fee lines are intentionally omitted from `items` (a positive proof
+/// can truncate to a zero fee); `receipt.items` can therefore be shorter than
+/// `invoice.line_items`.
 ///
 /// The shared request envelope carries a platform tag for retry/error
 /// classification; billing is platform-agnostic, so the tag is
@@ -349,48 +443,55 @@ pub async fn bill_invoice(
     transport: &dyn Transport,
     invoice: &Invoice,
 ) -> Result<BillingReceipt, BillingError> {
-    let mut items: Vec<StripeItemResponse> = Vec::with_capacity(invoice.line_items.len());
+    // Build every request payload before the first byte of I/O: a sub-cent,
+    // negative or header-unsafe line must refuse the whole invoice without
+    // charging anything (the partial-charge falsifier).
+    let items_to_create: Vec<InvoiceLineItem> = invoice
+        .line_items
+        .iter()
+        .filter(|line| line.fee_micros != 0)
+        .map(|line| {
+            InvoiceLineItem::from_invoice_line(
+                line,
+                &invoice.publisher_id,
+                &invoice.period.year_month,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut items: Vec<StripeItemResponse> = Vec::with_capacity(items_to_create.len());
     let mut total_minor_units: i64 = 0;
-    for line in &invoice.line_items {
-        if line.fee_micros == 0 {
-            // A zero-fee line bills nothing; creating a zero-amount Stripe
-            // item would be noise, not money.
-            continue;
-        }
-        let item = InvoiceLineItem::from_invoice_line(
-            line,
-            &invoice.publisher_id,
-            &invoice.period.year_month,
-        )?;
+    for item in &items_to_create {
         let request = HttpRequest {
             platform: PlatformId::Admob,
-            operation: format!("stripe-invoice-item:seq:{}", line.seq),
+            operation: format!("stripe-invoice-item:seq:{}", item.seq),
             method: HttpMethod::Post,
             url: format!("{STRIPE_API_BASE}/v1/invoiceitems"),
             headers: vec![
                 ("Authorization".to_string(), format!("Bearer {api_key}")),
                 ("Accept".to_string(), "application/json".to_string()),
-                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string()),
                 ("Idempotency-Key".to_string(), item.idempotency_key.clone()),
             ],
-            body: Some(serde_json::json!({
-                "amount": item.amount_minor_units,
-                "currency": item.currency,
-                "description": item.description,
-            })),
+            body: Some(HttpBody::Form(stripe_form_body(item))),
             timeout_ms: 10_000,
         };
         match transport.request(request).await {
             Ok(response) if (200..300).contains(&response.status) => {
-                let parsed: StripeItemResponse =
-                    serde_json::from_slice(&response.body).map_err(|error| {
-                        BillingError::Schema {
+                let parsed: StripeItemResponse = match serde_json::from_slice(&response.body) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        // A 2xx means Stripe accepted the request, so anything
+                        // already created must still be named.
+                        let error = BillingError::Schema {
                             detail: format!(
                                 "invoice item for seq {} is not a Stripe item object: {error}",
-                                line.seq
+                                item.seq
                             ),
-                        }
-                    })?;
+                        };
+                        return Err(partial_or(error, items, item.seq));
+                    }
+                };
                 total_minor_units = total_minor_units
                     .checked_add(item.amount_minor_units)
                     .ok_or(BillingError::Overflow)?;
@@ -398,11 +499,11 @@ pub async fn bill_invoice(
             }
             Ok(response) => {
                 let error = classify_stripe_status(response.status);
-                return Err(partial_or(error, items, line.seq));
+                return Err(partial_or(error, items, item.seq));
             }
             Err(transport_error) => {
                 let error = BillingError::from(transport_error);
-                return Err(partial_or(error, items, line.seq));
+                return Err(partial_or(error, items, item.seq));
             }
         }
     }
@@ -424,8 +525,8 @@ fn classify_stripe_status(status: u16) -> BillingError {
 }
 
 /// A failure on the first item is the underlying error; a failure afterwards
-/// is a partial application naming what already exists (resumable by the
-/// deterministic idempotency keys).
+/// is a partial application naming what already exists and why the run
+/// stopped (resumable by the deterministic idempotency keys).
 fn partial_or(
     error: BillingError,
     items: Vec<StripeItemResponse>,
@@ -437,5 +538,6 @@ fn partial_or(
     BillingError::StripePartial {
         completed: items.into_iter().map(|item| item.id).collect(),
         failed_seq,
+        cause: error.to_string(),
     }
 }

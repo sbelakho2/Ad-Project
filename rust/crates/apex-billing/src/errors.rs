@@ -56,15 +56,23 @@ pub enum BillingError {
     Transport { detail: String },
 
     /// One or more items were created, then one failed. The idempotency keys
-    /// are deterministic, so the caller resumes the same invoice safely.
+    /// are deterministic, so the caller resumes the same invoice safely; the
+    /// `cause` names why the run stopped (Display of the underlying error).
     #[error(
-        "stripe partial failure: {completed} item(s) created, seq {failed_seq} failed",
+        "stripe partial failure: {completed} item(s) created, seq {failed_seq} failed: {cause}",
         completed = .completed.len()
     )]
     StripePartial {
         completed: Vec<String>,
         failed_seq: u64,
+        cause: String,
     },
+
+    /// An identifier cannot be placed in a Stripe header: it contains a
+    /// control character (including CR/LF) or the derived idempotency key
+    /// exceeds the length cap. Refused before any request is sent.
+    #[error("invoice line seq {seq} has an identifier unusable in a Stripe header: {detail}")]
+    UnsafeIdentifier { seq: u64, detail: String },
 
     /// The signature header could not be parsed (or a ledger record was not a
     /// billing proof).

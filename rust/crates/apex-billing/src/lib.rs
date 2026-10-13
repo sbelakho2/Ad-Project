@@ -43,7 +43,7 @@ pub use encode::encode_form_component;
 pub use errors::BillingError;
 pub use invoice::{compute_invoice, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine};
 pub use stripe::{
-    bill_invoice, BillingReceipt, InvoiceLineItem, StripeClient, StripeItemResponse,
-    STRIPE_API_BASE,
+    bill_invoice, BillingReceipt, InvoiceLineItem, StripeClient, StripeClientError,
+    StripeItemResponse, STRIPE_API_BASE,
 };
 pub use webhook::{verify_stripe_signature, EventMeta, DEFAULT_TOLERANCE_SECS};

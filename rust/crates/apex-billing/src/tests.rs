@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use apex_connectors::transport::{
-    HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
+    HttpBody, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
 };
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 use async_trait::async_trait;
@@ -18,8 +18,9 @@ use crate::encode::encode_form_component;
 use crate::errors::BillingError;
 use crate::invoice::{compute_invoice, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine};
 use crate::stripe::{
-    bill_invoice, sign_stripe_payload, StripeClient, StripeItemResponse, StripeSignatureError,
-    VerifiedEvent, MICROS_PER_MINOR_UNIT, STRIPE_API_BASE, STRIPE_CURRENCY,
+    bill_invoice, sign_stripe_payload, StripeClient, StripeClientError, StripeItemResponse,
+    StripeSignatureError, VerifiedEvent, MAX_IDEMPOTENCY_KEY_LEN, MICROS_PER_MINOR_UNIT,
+    STRIPE_API_BASE, STRIPE_CURRENCY,
 };
 use crate::webhook::{verify_stripe_signature, EventMeta, DEFAULT_TOLERANCE_SECS};
 
@@ -173,6 +174,36 @@ fn malformed_headers_are_refused_as_malformed_input() {
 }
 
 #[test]
+fn non_canonical_and_duplicate_timestamps_are_malformed() {
+    let zeros = "00".repeat(32);
+    for header in [
+        format!("t=+1000,v1={zeros}"),
+        format!("t=00001000,v1={zeros}"),
+        format!("t= 1000 ,v1={zeros}"),
+        format!("t=1000,t=2000,v1={zeros}"),
+    ] {
+        assert!(
+            matches!(
+                verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, 1_000),
+                Err(BillingError::Malformed(_))
+            ),
+            "header {header:?} must be malformed"
+        );
+    }
+    // The canonical spelling parses; only the MAC is then wrong.
+    assert_eq!(
+        verify_stripe_signature(
+            PINNED_BODY,
+            &format!("t=1000,v1={zeros}"),
+            SECRET,
+            300,
+            1_000
+        ),
+        Err(BillingError::InvalidSignature)
+    );
+}
+
+#[test]
 fn undecodable_or_short_v1_values_never_match() {
     for value in [
         "zz".repeat(32),
@@ -190,8 +221,9 @@ fn undecodable_or_short_v1_values_never_match() {
 
 #[test]
 fn uppercase_hex_is_a_different_byte_string() {
-    // Stripe emits lowercase hex; uppercase is decoded and compared as bytes,
-    // which is why an uppercase digest of the same bytes still matches.
+    // Uppercase hex is a different text string but decodes to the same bytes,
+    // and the comparison runs on the decoded bytes, so an uppercase digest of
+    // the same MAC still matches; behavior correct.
     let header = format!("t={PINNED_TIMESTAMP},v1={}", PINNED_DIGEST.to_uppercase());
     verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, PINNED_TIMESTAMP)
         .expect("hex case is an encoding detail, not a different MAC");
@@ -206,7 +238,7 @@ fn empty_payload_is_signed_like_any_other() {
 
 #[test]
 fn client_reuses_its_configured_secret_and_tolerance() {
-    let client = StripeClient::new(SECRET.to_vec(), 120);
+    let client = StripeClient::new(SECRET.to_vec(), 120).expect("non-empty secret");
     assert_eq!(client.webhook_secret(), SECRET);
     assert_eq!(client.tolerance_secs(), 120);
     let header = sign_stripe_payload(SECRET, PINNED_BODY, 5_000);
@@ -224,9 +256,31 @@ fn client_reuses_its_configured_secret_and_tolerance() {
         })
     );
     assert_eq!(
-        StripeClient::new(b"wrong".to_vec(), 120).verify(PINNED_BODY, &header, 5_000),
+        StripeClient::new(b"wrong".to_vec(), 120)
+            .expect("non-empty secret")
+            .verify(PINNED_BODY, &header, 5_000),
         Err(StripeSignatureError::NoMatchingSignature)
     );
+}
+
+#[test]
+fn stripe_client_refuses_an_empty_secret() {
+    assert!(matches!(
+        StripeClient::new(Vec::<u8>::new(), 300),
+        Err(StripeClientError::EmptySecret)
+    ));
+    let client = StripeClient::new(b" ", 300).expect("a single space is still a key");
+    assert_eq!(client.webhook_secret(), b" ");
+}
+
+#[test]
+fn stripe_client_debug_redacts_the_secret() {
+    let client = StripeClient::new(b"whsec_SUPER_SECRET".to_vec(), 300).expect("non-empty");
+    let rendered = format!("{client:?}");
+    assert!(rendered.contains("[redacted]"), "{rendered}");
+    assert!(!rendered.contains("SUPER_SECRET"), "{rendered}");
+    assert!(!rendered.contains("whsec"), "{rendered}");
+    assert!(rendered.contains("tolerance_secs: 300"), "{rendered}");
 }
 
 #[test]
@@ -527,15 +581,82 @@ async fn bill_invoice_posts_one_idempotent_item_per_line() {
     assert_eq!(first.method, HttpMethod::Post);
     assert_eq!(first.url, format!("{STRIPE_API_BASE}/v1/invoiceitems"));
     assert_eq!(first.header("Authorization"), Some("Bearer sk_test_123"));
+    assert_eq!(first.header("Accept"), Some("application/json"));
     assert_eq!(
         first.header("Idempotency-Key"),
         Some("stripe-item:pub-1:exp-a:2023-11")
     );
-    assert_eq!(first.header("Content-Type"), Some("application/json"));
-    let body = first.body.as_ref().expect("body");
-    assert_eq!(body["amount"], 50); // 500_000 micros = 50 cents
-    assert_eq!(body["currency"], STRIPE_CURRENCY);
+    assert_eq!(
+        first.header("Content-Type"),
+        Some("application/x-www-form-urlencoded")
+    );
+    assert!(
+        !first
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                && value.contains("application/json")),
+        "invoice items are form-encoded, never JSON: {:?}",
+        first.headers
+    );
+    let body = first
+        .body
+        .as_ref()
+        .and_then(HttpBody::as_form)
+        .expect("form body");
+    assert_eq!(
+        body,
+        "amount=50&currency=usd&description=Apex%20proven-lift%20fee%3A%20experiment%20exp-a%20%282000%20bp%20of%202500000%20micros%20proven%20lift%29"
+    );
     assert!(first.retryable(), "the idempotency key makes retries safe");
+}
+
+#[tokio::test]
+async fn stripe_item_body_is_pinned_form_encoded() {
+    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 500_000)]);
+    bill_invoice("sk_test_123", &transport, &invoice)
+        .await
+        .expect("billing succeeds");
+    let request = &transport.requests()[0];
+    assert_eq!(
+        request.body.as_ref().and_then(HttpBody::as_form),
+        Some(
+            "amount=50&currency=usd&description=Apex%20proven-lift%20fee%3A%20experiment%20exp-a%20%282000%20bp%20of%202500000%20micros%20proven%20lift%29"
+        )
+    );
+    assert_eq!(
+        request.header("Content-Type"),
+        Some("application/x-www-form-urlencoded")
+    );
+}
+
+#[tokio::test]
+async fn form_body_percent_encodes_injection_and_unicode() {
+    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
+    let invoice = invoice_with(vec![invoice_line(1, "exp&admin=1 +é", 500_000)]);
+    bill_invoice("sk_test_123", &transport, &invoice)
+        .await
+        .expect("billing succeeds");
+    let body = transport.requests()[0]
+        .body
+        .as_ref()
+        .and_then(HttpBody::as_form)
+        .expect("form body")
+        .to_string();
+    assert!(
+        body.starts_with("amount=50&currency=usd&description="),
+        "{body}"
+    );
+    assert_eq!(
+        body.matches('&').count(),
+        2,
+        "only the two field separators: {body}"
+    );
+    assert!(body.contains("%26admin%3D1"), "{body}");
+    assert!(body.contains("%2B"), "{body}");
+    assert!(body.contains("%C3%A9"), "{body}");
+    assert!(!body.contains('\n') && !body.contains('\r'), "{body}");
 }
 
 #[tokio::test]
@@ -585,6 +706,97 @@ async fn sub_cent_fees_refuse_the_invoice_before_any_request() {
 }
 
 #[tokio::test]
+async fn mixed_sub_cent_invoice_is_refused_before_any_request() {
+    // Falsifier from the adversarial review (probe G): a fully re-verified
+    // invoice can contain a line whose fee truncates to a sub-cent amount
+    // (lift 7 @1500bp -> 1 micro). Every item must be built before the first
+    // request so a later sub-cent line refuses the WHOLE invoice with zero
+    // charges.
+    let invoice = compute_invoice(
+        "pub-1",
+        period(),
+        &[
+            proof(1, "exp-a", 2_500_000, 2_000),
+            proof(2, "exp-b", 7, 1_500),
+        ],
+    )
+    .expect("both proofs re-verify");
+    assert_eq!(invoice.line_items.len(), 2);
+    assert_eq!(invoice.line_items[0].fee_micros, 500_000);
+    assert_eq!(invoice.line_items[1].fee_micros, 1);
+    let transport = MockTransport::default();
+    assert_eq!(
+        bill_invoice("sk_test_123", &transport, &invoice).await,
+        Err(BillingError::SubCentAmount { seq: 2 })
+    );
+    assert!(
+        transport.requests().is_empty(),
+        "no line may be charged once any line is sub-cent"
+    );
+}
+
+#[tokio::test]
+async fn header_unsafe_identifiers_are_refused_before_any_request() {
+    let transport = MockTransport::default();
+    let injection = invoice_with(vec![invoice_line(1, "exp\r\nInjected: x", 500_000)]);
+    let error = bill_invoice("sk_test_123", &transport, &injection)
+        .await
+        .expect_err("CR/LF must be refused");
+    assert!(
+        matches!(error, BillingError::UnsafeIdentifier { seq: 1, .. }),
+        "{error:?}"
+    );
+    assert!(transport.requests().is_empty());
+
+    // Key length = 12 ("stripe-item:") + 5 ("pub-1") + 1 + experiment + 1 + 7.
+    let boundary = "y".repeat(MAX_IDEMPOTENCY_KEY_LEN - 26);
+    let accepted = invoice_with(vec![invoice_line(1, &boundary, 500_000)]);
+    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
+    bill_invoice("sk_test_123", &transport, &accepted)
+        .await
+        .expect("a key at the cap is still usable");
+    assert_eq!(
+        transport.requests()[0]
+            .header("Idempotency-Key")
+            .expect("key")
+            .len(),
+        MAX_IDEMPOTENCY_KEY_LEN
+    );
+
+    let too_long = invoice_with(vec![invoice_line(
+        1,
+        &"y".repeat(MAX_IDEMPOTENCY_KEY_LEN - 25),
+        500_000,
+    )]);
+    let transport = MockTransport::default();
+    let error = bill_invoice("sk_test_123", &transport, &too_long)
+        .await
+        .expect_err("over-long key must be refused");
+    assert!(
+        matches!(error, BillingError::UnsafeIdentifier { seq: 1, .. }),
+        "{error:?}"
+    );
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
+async fn zero_fee_line_is_in_the_invoice_but_not_in_the_receipt() {
+    // lift 3 @1500bp truncates to a zero fee (pinned by apex-core); the line
+    // stays on the invoice but intentionally bills nothing.
+    let invoice = compute_invoice("pub-1", period(), &[proof(1, "exp-zero", 3, 1_500)])
+        .expect("positive lift truncates to a zero fee");
+    assert_eq!(invoice.line_items.len(), 1);
+    assert_eq!(invoice.total_micros, 0);
+    let transport = MockTransport::default();
+    let receipt = bill_invoice("sk_test_123", &transport, &invoice)
+        .await
+        .expect("zero invoice");
+    assert!(receipt.items.is_empty());
+    assert_eq!(receipt.total_minor_units, 0);
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
 async fn first_item_failure_surfaces_the_underlying_error() {
     for (status, expected) in [
         (401u16, BillingError::Auth { status: 401 }),
@@ -613,8 +825,50 @@ async fn partial_application_names_what_was_created() {
         bill_invoice("sk_test_123", &transport, &invoice).await,
         Err(BillingError::StripePartial {
             completed: vec!["ii_1".to_string()],
-            failed_seq: 2
+            failed_seq: 2,
+            cause: "stripe request failed (HTTP 500)".to_string(),
         })
+    );
+}
+
+#[tokio::test]
+async fn unparseable_2xx_after_a_success_names_the_created_item() {
+    // Falsifier from the adversarial review (probe B): HTTP 200 with a body
+    // that is not a Stripe item is still a created charge; the error must
+    // carry the created id instead of a bare Schema refusal.
+    let transport = MockTransport::with(vec![
+        Ok(ok_item("ii_1")),
+        Ok(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: b"not json".to_vec(),
+        }),
+    ]);
+    let invoice = invoice_with(vec![
+        invoice_line(1, "exp-a", 500_000),
+        invoice_line(2, "exp-b", 150_000),
+    ]);
+    let error = bill_invoice("sk_test_123", &transport, &invoice)
+        .await
+        .expect_err("second response is unparseable");
+    match &error {
+        BillingError::StripePartial {
+            completed,
+            failed_seq,
+            cause,
+        } => {
+            assert_eq!(completed, &vec!["ii_1".to_string()]);
+            assert_eq!(*failed_seq, 2);
+            assert!(cause.contains("seq 2"), "{cause}");
+            assert!(cause.contains("not a Stripe item object"), "{cause}");
+        }
+        other => panic!("expected StripePartial, got {other:?}"),
+    }
+    assert!(format!("{error:?}").contains("ii_1"), "{error:?}");
+    assert_eq!(
+        transport.requests().len(),
+        2,
+        "both requests reached Stripe"
     );
 }
 
