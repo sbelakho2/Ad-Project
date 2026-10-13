@@ -489,6 +489,7 @@
 }
 
 /* Reduce sticky jitter safeguard */
+/* css-contract:allow-important motion-neutralizing transform reset for sticky ancestors */
 .no-transform-ancestor * { transform: none !important; }
 
 @layer utilities {

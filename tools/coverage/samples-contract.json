@@ -1,0 +1,14 @@
+{
+  "__comment": "Structural contract for the declared sample projects: each entry lists the paths that make the project buildable, so a rename or deletion cannot silently leave an empty shell. Consumed by tools/coverage/contract-checks.mjs. Compile execution is the phase-2 lane.",
+  "shapeChecks": [
+    { "dir": "sdk/samples/android/ApexSandboxAndroid", "required": ["build.gradle.kts", "settings.gradle.kts", "app/build.gradle.kts"] },
+    { "dir": "sdk/samples/android_tv/ApexSandboxCTV-Android", "required": ["build.gradle", "settings.gradle", "app/build.gradle"] },
+    { "dir": "sdk/samples/ios/ApexSandboxiOS", "required": ["project.yml", "Sources"] },
+    { "dir": "sdk/samples/unity/ApexSandboxUnity", "required": ["Assets", "Packages"] },
+    { "dir": "sdk/samples/tvos", "required": ["ApexSandboxCTV-tvOS", "ApexSandboxTVOS"] }
+  ],
+  "web": {
+    "packageJson": "sdk/samples/web/apex-sandbox-web/package.json",
+    "entry": "sdk/samples/web/apex-sandbox-web/index.html"
+  }
+}

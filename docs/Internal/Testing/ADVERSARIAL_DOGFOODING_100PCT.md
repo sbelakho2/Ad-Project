@@ -341,9 +341,17 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 | S-SAMPLE | `sdk/samples/**`, `adapter-samples`, `Test Apps` | all sample apps compile (`build` contracts) + smoke boot | `contract-coverage.yml` |
 | S-CONTENT | `tools/content-guard.js` | guard fed adversarial provider strings (homoglyphs, split tokens) — guard itself must classify correctly | `contract-coverage.yml` |
 
+### 5.9.1 Additional contract suites, shipped
+
+| id | target | adversarial check | gate |
+|---|---|---|---|
+| S-I18N | locale trees under console and website `i18n` | every locale carries exactly the reference key set; empty strings, arrays and non-string leaves fail closed | `contract-coverage.yml` step `i18n-parity` |
+| S-CSS | console, website and site stylesheets | balanced braces and quotes, no empty rules, `!important` only with an in-rule justification, lowercase hex, size budget; the console theme block was refactored to remove fifteen unjustified flags and website keeps only the audited reduced-motion pattern | `contract-coverage.yml` step `css-contract` |
+| S-SAMPLE | six sample projects | structural contract from `samples-contract.json`; each sample carries its buildable shape and the web sample has a build script and entry page | `contract-coverage.yml` step `samples-build-contract` |
+
 ### 5.10 Docs domain (suite `S-DOCS`)
 
-Linkcheck (internal anchors + cross-references) + freshness contract: every doc referencing an npm script/Makefile target/env var references something that exists (same engine as `ci-reference-integrity`, applied to `docs/**`). Adversarial case `S-DOCS-1`: rename a script and the docs contract fails. The prose ratchet (M-10) scans `docs`, `website/src`, `console/src`, `tools/coverage`, `tools/docs-lint`, `tools/ui-ux`, `site`, `rust`, and `.woodpecker` against a committed baseline total of 8005.
+Linkcheck is real: `tools/coverage/docs-links.mjs` resolves every relative markdown link and every #anchor against document headings, with a ratchet baseline of 171 frozen legacy rows across 51 documents (rows may only shrink; a stale row fails). Adversarial case `S-DOCS-2`: break a relative link or move a heading, and docs-links fails. The freshness contract stays: every doc referencing an npm script, Makefile target or env var references something that exists. The prose ratchet (M-10) scans `docs`, `website/src`, `console/src`, `tools/coverage`, `tools/docs-lint`, `tools/ui-ux`, `site`, `rust`, and `.woodpecker` against a committed baseline total of 8005.
 
 ### 5.11 Findings implemented by the dogfooding run itself (this change)
 
@@ -379,12 +387,13 @@ The first execution of this stack (Unity tier-1, promtool, shell/bats, contract 
 | M-6 | CI reference integrity (all paths in workflows exist) | `tools/coverage/contract-checks.mjs ci-reference-integrity` |
 | M-7 | every test file contains at least one assertion (kills always-green tests) | meta test scan |
 | M-8 | self-coverage: the gate tooling runs under `npm run test:cov` in `tools/` | c8 over `coverage/*.mjs`, `site/*.mjs`, `ui-ux/*.mjs`, `content-guard.js`; the `coverage-gate.mjs --domain js-tools` step |
+| M-11 | walker parity: no git-tracked file or symlink may be invisible to the manifest | `dogfood-gates.mjs walker-parity` compares `git ls-files -s` against `coverage-manifest.json`; gitlinks are accounted, case-folded names are noted, anything else fails |
 | M-9 | zero scaffold markers on the new-model surfaces | `dogfood-gates.mjs stub-ban` over `rust/`, `tools/coverage/`, `tools/docs-lint/` |
 | M-10 | prose ratchet: every scanned row at or below its committed baseline; adoption is one-shot | `docs-lint.sh --source --baseline` plus `--integrity` in `dogfood-audit.yml` |
 
 ### 6.2 Why mutation testing is the "correct expectations" oracle
 
-A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants. An expectation that does not pin behavior lets mutants survive; the audit scores kills and fails below floor. That is the only mechanical proof that expectations are *correct and tight*; phase 3 therefore floors at a 60% kill rate with a ratchet to 80%.
+A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants. An expectation that does not pin behavior lets mutants survive; the audit scores kills and fails below floor. That is the only mechanical proof that expectations are *correct and tight*; phase 3 therefore floors at a 60% kill rate with a ratchet to 80%. Phase 3 has started: `tools/coverage/rust-mutation-smoke.sh` applies six hand-picked mutants across money and validation in a throwaway copy of apex-core, demands the suite kill each one, and writes `tools/coverage/mutation-results.json`; the floor is live at 60% and the current sample kills six of six. The StrykerJS/mutmut rollout continues in later phases toward the 80% target.
 
 ---
 

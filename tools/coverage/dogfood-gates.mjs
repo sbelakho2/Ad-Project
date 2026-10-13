@@ -93,6 +93,46 @@ switch (cmd) {
     console.log(`floors-sync PASS: ${txt.size} domains in lockstep`);
     break;
   }
+  case 'walker-parity': {
+    // Machine proof that nothing tracked can hide from the manifest: every
+    // git-tracked regular file (and symlink) must appear in coverage-manifest.
+    // Gitlinks (mode 160000, uninitialized submodules) are accounted, not
+    // violations: their contents are not part of this repository.
+    const { execFileSync } = await import('node:child_process');
+    const manifest = loadJson(get('--manifest', 'coverage-manifest.json'));
+    const inManifest = new Set(manifest.files.map((f) => f.path));
+    // Case-insensitive filesystems (macOS) expose an on-disk name that can
+    // differ from the git-tracked casing (Logo.jpg vs logo.jpg): the folded
+    // fallback keeps that an accounted difference, not a false failure.
+    const folded = new Map();
+    for (const f of manifest.files) {
+      const key = f.path.toLowerCase();
+      folded.set(key, f.path);
+    }
+    const raw = execFileSync('git', ['ls-files', '-s'], { cwd: REPO_ROOT, encoding: 'utf8' });
+    const invisible = [];
+    const caseFolded = [];
+    let gitlinks = 0;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const [meta, path] = line.split('\t');
+      const mode = meta.split(' ')[0];
+      if (mode === '160000') { gitlinks += 1; continue; }
+      if (inManifest.has(path)) continue;
+      if (folded.has(path.toLowerCase())) { caseFolded.push(`${path} ~ ${folded.get(path.toLowerCase())}`); continue; }
+      invisible.push(`${path} (mode ${mode})`);
+    }
+    if (invisible.length) {
+      die(`WALKER-PARITY FAILED: ${invisible.length} tracked paths are invisible to the manifest (fix classification or the walker):`,
+        invisible.slice(0, 40));
+    }
+    for (const note of caseFolded) {
+      console.log(`walker-parity note: case-only name difference on this filesystem: ${note}`);
+    }
+    console.log(`walker-parity PASS: all tracked regular files and symlinks classified (${inManifest.size} manifest paths, ${gitlinks} gitlinks accounted, ${caseFolded.length} case-folded)`);
+    break;
+  }
+
   case 'assertion-presence': {
     // M-7: every file that DEFINES test cases must also assert something.
     // Support files (helpers, msw handlers, fixtures, setup) define no test cases
@@ -133,7 +173,7 @@ switch (cmd) {
     // 0-scaffolding law: the new-model surfaces (Rust workspace, gate tooling,
     // docs-lint port) may never carry scaffold markers. Legacy TS surfaces are
     // phase-1 refactors and are out of scope here (they are tracked by floors).
-    const roots = ['rust/', 'tools/coverage/', 'tools/docs-lint/'];
+    const roots = ['rust/', 'tools/coverage/', 'tools/docs-lint/', 'site/'];
     const patterns = [
       [/todo!\(/, 'rust todo!()'],
       [/unimplemented!\(/, 'rust unimplemented!()'],
@@ -170,5 +210,5 @@ switch (cmd) {
     break;
   }
   default:
-    die('usage: dogfood-gates.mjs <orphan-gate|floor-ratchet|floors-sync|assertion-presence|mutation-floor|stub-ban> [flags]');
+    die('usage: dogfood-gates.mjs <orphan-gate|floor-ratchet|floors-sync|walker-parity|assertion-presence|mutation-floor|stub-ban> [flags]');
 }

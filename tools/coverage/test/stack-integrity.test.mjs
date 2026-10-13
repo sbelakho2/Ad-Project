@@ -138,3 +138,36 @@ test('contract-checks builds its artifact filter from the single-sourced pattern
 test('glob helper is importable from the stack test', () => {
   assert.ok(globToRegExp('a/**/*.ts').test('a/b/c.ts'));
 });
+
+test('contract registry keys exactly match the classified contract/docs domains', () => {
+  const registry = JSON.parse(fs.readFileSync(path.join(coverageDir, 'contract-suites.json'), 'utf8'));
+  const expected = DOMAINS.filter((d) => d.kind === 'contract' || d.id === 'docs').map((d) => d.id).sort();
+  const actual = Object.keys(registry.domains).filter((k) => !k.startsWith('__')).sort();
+  assert.deepEqual(actual, expected, 'every contract/docs domain must be registered, and nothing extra');
+});
+
+test('contract registry references real pipeline files and real step names', () => {
+  const registry = JSON.parse(fs.readFileSync(path.join(coverageDir, 'contract-suites.json'), 'utf8'));
+  for (const [domain, entry] of Object.entries(registry.domains)) {
+    if (entry.pipeline === null) continue;
+    const file = path.resolve(repoRoot, '.woodpecker', entry.pipeline);
+    assert.ok(fs.existsSync(file), `${domain}: pipeline missing ${entry.pipeline}`);
+    const text = fs.readFileSync(file, 'utf8');
+    for (const step of entry.steps) {
+      assert.ok(text.includes(`\n  ${step}:`), `${domain}: step '${step}' not found in ${entry.pipeline}`);
+    }
+  }
+});
+
+test('every woodpecker pipeline is reachable from the aggregate gate', () => {
+  const dir = path.resolve(repoRoot, '.woodpecker');
+  const gate = fs.readFileSync(path.join(dir, 'coverage-gate.yml'), 'utf8');
+  const depsBlock = gate.match(/depends_on:\n((?:\s+-\s+[a-z0-9-]+\n?)+)/);
+  assert.ok(depsBlock, 'depends_on block missing');
+  const deps = new Set([...depsBlock[1].matchAll(/^\s+-\s+([a-z0-9-]+)$/gm)].map((m) => m[1]));
+  const pipelines = fs.readdirSync(dir).filter((f) => f.endsWith('.yml')).map((f) => f.replace(/\.yml$/, ''));
+  for (const pipeline of pipelines) {
+    if (pipeline === 'coverage-gate') continue;
+    assert.ok(deps.has(pipeline), `pipeline '${pipeline}' is not referenced by coverage-gate depends_on`);
+  }
+});

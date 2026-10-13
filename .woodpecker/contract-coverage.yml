@@ -67,6 +67,21 @@ steps:
     commands:
       - node tools/coverage/contract-checks.mjs docs-references
 
+  docs-links-check:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/docs-links.mjs --check --baseline tools/coverage/docs-links-baseline.txt
+
+  i18n-parity:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/i18n-parity.mjs
+
+  css-contract:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/css-lint.mjs
+
   shell-policy:
     image: node:20-bookworm
     commands:

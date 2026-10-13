@@ -1,13 +1,20 @@
 {
   "comment": "Ratchet-only floors. 'history' must be monotonically non-decreasing (enforced by dogfood-gates.mjs floor-ratchet). Domain floors are minimum percentages for ALL FOUR metrics (lines/branches/functions/statements where the tool supports them). Phase 0 seeds 0/100 so the first run is green; every later change may only raise values. Final phase: every domain floor = 100, orphanFloorPercent = 0.",
   "orphanFloorPercent": 100,
-  "mutationKillFloorPercent": 0,
+  "mutationKillFloorPercent": 60,
   "history": [
     {
       "at": "2026-10-13",
       "orphanFloorPercent": 100,
       "mutationKillFloorPercent": 0,
       "domains": {}
+    },
+    {
+      "at": "2026-10-13",
+      "orphanFloorPercent": 100,
+      "mutationKillFloorPercent": 60,
+      "domains": {},
+      "__note": "phase-3 start: sample-based mutation smoke over apex-core kills 6/6 mutants; floor enforces a 60% minimum for the sampled set and ratchets upward with the sample"
     }
   ],
   "domains": {

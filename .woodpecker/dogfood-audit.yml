@@ -19,6 +19,12 @@ steps:
       - node tools/coverage/dogfood-gates.mjs floor-ratchet
       - node tools/coverage/dogfood-gates.mjs floors-sync
 
+  walker-parity:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/build-coverage-manifest.mjs --out coverage-manifest.json
+      - node tools/coverage/dogfood-gates.mjs walker-parity --manifest coverage-manifest.json
+
   pragma-and-skip-ban:
     image: node:20-bookworm
     commands:
@@ -83,7 +89,13 @@ steps:
       - cd "$CI_WORKSPACE/tools" && npm run test:cov
       - cd "$CI_WORKSPACE" && node tools/coverage/coverage-gate.mjs --domain js-tools --artifact tools/coverage/coverage/coverage-summary.json --tool c8
 
+  apex-core-mutation-smoke:
+    image: rust:1.87-bookworm
+    commands:
+      - sh tools/coverage/rust-mutation-smoke.sh
+
   mutation-floor:
     image: node:20-bookworm
+    depends_on: [apex-core-mutation-smoke]
     commands:
       - node tools/coverage/dogfood-gates.mjs mutation-floor

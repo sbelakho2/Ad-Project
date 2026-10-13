@@ -12,14 +12,14 @@ import { pathToFileURL } from 'node:url';
 import { walkRepo, REPO_ROOT, CI_GENERATED_PATH_PATTERNS } from './coverage-lib.mjs';
 
 const [cmd] = process.argv.slice(2);
-function die(msg, extra = []) { console.error(`CONTRACT GATE FAILED [${cmd}] ${msg}`); for (const e of extra) console.error(`  - ${e}`); process.exit(1); }
+function die(msg, extra = []) { console.error(`contract gate failed [${cmd}] ${msg}`); for (const e of extra) console.error(`  - ${e}`); process.exit(1); }
 const exists = (p) => fs.existsSync(path.join(REPO_ROOT, p));
 
 // Generated-at-build paths that are legitimately absent in a fresh checkout.
 // Pattern list is single-sourced in coverage-lib.mjs (CI_GENERATED_PATH_PATTERNS).
 const GENERATED_ARTIFACT = new RegExp(CI_GENERATED_PATH_PATTERNS.join('|'));
 
-// Extract path refs from workflow yaml: ONLY structured fields, never free-text tokens.
+// Extract path refs from workflow yaml: only structured fields, never free-text tokens.
 function extractPathRefs(rel, text) {
   const refs = [];
   const add = (raw) => {
@@ -121,12 +121,40 @@ switch (cmd) {
     break;
   }
   case 'samples': {
-    const samples = ['sdk/samples/android/ApexSandboxAndroid', 'sdk/samples/ios/ApexSandboxiOS', 'sdk/samples/web/apex-sandbox-web', 'sdk/samples/unity/ApexSandboxUnity', 'sdk/samples/android_tv/ApexSandboxCTV-Android', 'sdk/samples/tvos'];
-    const missing = samples.filter((p) => !exists(p));
-    if (missing.length) die('declared sample projects missing (S-SAMPLE build contract):', missing);
-    console.log('samples contract PASS (inventory); compile execution is phase-2 lane');
+    // Structural contract anchored to what each sample actually ships. The
+    // spec lives in samples-contract.json; compile execution is the phase-2 lane.
+    const specPath = path.join(REPO_ROOT, 'tools/coverage/samples-contract.json');
+    const specText = fs.readFileSync(specPath, 'utf8');
+    const spec = JSON.parse(specText);
+    const failures = [];
+    for (const check of spec.shapeChecks) {
+      if (!exists(check.dir)) {
+        failures.push(`${check.dir}: sample directory missing`);
+        continue;
+      }
+      for (const rel of check.required) {
+        if (!exists(`${check.dir}/${rel}`)) failures.push(`${check.dir}: required path missing: ${rel}`);
+      }
+    }
+    if (!exists(spec.web.packageJson)) {
+      failures.push(`${spec.web.packageJson}: missing`);
+    } else {
+      const pkgPath = path.join(REPO_ROOT, spec.web.packageJson);
+      const pkgText = fs.readFileSync(pkgPath, 'utf8');
+      const pkg = JSON.parse(pkgText);
+      const build = pkg.scripts?.build;
+      if (typeof build !== 'string' || build.trim() === '') {
+        failures.push(`${spec.web.packageJson}: no build script; the sample must be buildable`);
+      }
+      if (!exists(spec.web.entry)) failures.push(`${spec.web.entry}: missing entry page`);
+    }
+    if (failures.length) die('sample projects failed the structural contract:', failures);
+    console.log(
+      `samples contract PASS: ${spec.shapeChecks.length + 1} projects carry their buildable shape; compile execution is the phase-2 lane`,
+    );
     break;
   }
+
   case 'docs-references': {
     const bad = [];
     const pkgJson = ['package.json', 'backend/package.json', 'console/package.json', 'website/package.json', 'control-plane/package.json', 'sdk/web/package.json', 'tools/package.json'];
