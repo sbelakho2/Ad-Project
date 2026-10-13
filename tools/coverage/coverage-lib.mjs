@@ -14,7 +14,7 @@ export const SKIP_DIRS = new Set([
   '.build', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.nyc_output', 'Pods',
   'DerivedData', 'test-results', 'playwright-report', 'artifacts', '.idea', '.kilo',
   '.artifacts', '_out', '_tmp', '.gradle-dist', '.gradle-home', 'shell-cov', 'public',
-  'lhci-report',
+  'lhci-report', '.lighthouseci', 'chrome', 'chromium',
   'obj', 'bin',
 ]);
 

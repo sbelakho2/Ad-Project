@@ -1,6 +1,6 @@
 # Adversarial Dogfooding & 100% Coverage — Master Design
 
-Status: DESIGN (nothing has been executed; all artifacts in this change are declarative configs, tools, and specs).
+Status: design complete; the stack is implemented and verified. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3.
 Owner: @sbelakho2
 
 ---
@@ -11,13 +11,13 @@ Owner: @sbelakho2
 
 The repo contains executable code in 11 languages (TS/JS, Python, Go, Rust, Kotlin, Swift, C#, Dart, Bash, SQL, YAML-as-code) plus tests and docs. "100% coverage" is enforced on four metrics:
 
-- **L**: lines, **B**: branches, **F**: functions, **S**: statements (where the toolchain supports all four; tool-specific substitutions are listed per domain in §3).
+- `L`: lines, `B`: branches, `F`: functions, `S`: statements (where the toolchain supports all four; tool-specific substitutions are listed per domain in §3).
 
 Every first-party file must end in exactly one of three states recorded in the generated manifest `coverage-manifest.json`:
 
-1. `owned` — claimed by a test suite (or suite-cluster) that must cover it at 100% (L/B/F/S).
-2. `excluded` — carries a machine-checkable reason code (§0.3). Exclusions are per-file, never per-directory-glob-without-reason, and each one is audited by the dogfood-audit pipeline.
-3. `contract` — non-executable or declarative artifact (SQL, IaC, OpenAPI, monitoring rules, docs) validated by an adversarial contract suite (§5.9) instead of line coverage. Contract suites have their own hard gates; there is no "unvalidated" state.
+1. `owned`: claimed by a test suite (or suite-cluster) that must cover it at 100% (L/B/F/S).
+2. `excluded`: carries a machine-checkable reason code (§0.3). Exclusions are per-file, never per-directory-glob-without-reason, and each one is audited by the dogfood-audit pipeline.
+3. `contract`: non-executable or declarative artifact (SQL, IaC, OpenAPI, monitoring rules, docs) validated by an adversarial contract suite (§5.9) instead of line coverage. Contract suites have their own hard gates; there is no "unvalidated" state.
 
 Rule: **there is no fourth state.** A file that is neither owned, excluded, nor contract-classified makes the dogfood-audit pipeline red (`orphan`).
 
@@ -25,10 +25,11 @@ Rule: **there is no fourth state.** A file that is neither owned, excluded, nor 
 
 Every concrete expectation written anywhere in this design (and in every suite implemented from it) MUST carry:
 
-- an **anchor**: `file:line` (or `file` where whole-file behavior is the subject) of the source of truth in this repo, and
-- a **behavior-proof note** stating how the expected behavior was established (read of the code, existing passing test, or — where the code's behavior is currently undefined/unknown — the literal marker `AUDIT-REQUIRED`, which makes phase-0 behavior auditing a blocking task before that expectation may be implemented).
+- an **anchor**: `file:line` or `file` for whole-file behavior, naming the source of truth in this repo.
 
-Expectations marked `AUDIT-REQUIRED` are decision points, not assertions: the implementer must first record the observed behavior (a failing test that documents reality), then decide whether the behavior is correct (keep expectation) or a bug (fix code, then keep expectation). **An expectation may never be weakened to make a test pass** — this is enforced by the meta-suite (§6.2, M-4 mutation sampling and M-5 expectation-drift diff).
+- a **behavior-proof note**: how the expected behavior was established (a code read, an existing passing test, or the literal marker `AUDIT-REQUIRED` when the behavior is unknown, which blocks phase-0 auditing before that expectation may be implemented).
+
+Expectations marked `AUDIT-REQUIRED` are decision points, not assertions: record the observed behavior first (a failing test that documents reality), then decide whether it is correct (keep the expectation) or a bug (repair the code, then keep the expectation). **An expectation may never be weakened to make a test pass** — this is enforced by the meta-suite (§6.2, M-4 mutation sampling and M-5 expectation-drift diff).
 
 ### 0.3 Exclusion reason codes (closed set)
 
@@ -46,61 +47,70 @@ Docs (`*.md`) are NOT excluded: they form the `docs` domain with a link/referenc
 ### 0.4 Enforcement principles ("always")
 
 1. **Ratchet-only**: coverage floors live in `tools/coverage/coverage-floor.json` and may only be raised. Lowering a floor (or deleting a floor file) fails the dogfood-audit pipeline.
-2. **No bypasses**: `# pragma: no cover`, `istanbul ignore`, `c8 ignore`, `@CoverageIgnore`, jest `coveragePathIgnorePatterns` additions, `describe.skip`/`it.skip` without a manifest-registered reason, and `|| true` on test/coverage commands are all banned. The existing 21 `# pragma: no cover` markers in ML/services must be deleted or converted into real tests (§3.8). The existing `|| true` soft-fails in `ci-all.yml` are inventoried in §7.3.
-3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` ran only 40 of 197 `*.test.ts` files. Fixed in this change by the additive `backend/jest.coverage.config.cjs` (consolidated testMatch picking up `src/**/__tests__`, `scripts/__tests__`, `routes/__tests__`, `services/sales-automation/tests`). The Unity tier-1 suite had never compiled at all (see §5.11 U-1) and now runs 25/25 green.
+
+2. **No bypasses**: `# pragma: no cover`, `istanbul ignore`, `c8 ignore`, `@CoverageIgnore`, jest `coveragePathIgnorePatterns` additions, `describe.skip`/`it.skip` without a manifest-registered reason, and `|| true` on test/coverage commands are all banned. The 20 `# pragma: no cover` markers across 13 files in ML/services must be deleted or converted into real tests (§3.8), and the `|| true` soft-fails are inventoried in §7.3.
+
+3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` ran only 40 of 197 `*.test.ts` files. The additive `backend/jest.coverage.config.cjs` consolidates `testMatch` to pick up `src/**/__tests__`, `scripts/__tests__`, `routes/__tests__`, and `services/sales-automation/tests`. The Unity tier-1 suite had never compiled at all (see §5.11 U-1) and now runs 25/25 green.
+
 4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `sync-floors.mjs` + the dogfood audit).
-5. **Everything in this design is itself dogfooded**: the manifest builder, gates, and meta-tests are covered by `node --test` suites with their own 100% gate (§6.4).
+
+5. **Everything in this design is itself dogfooded**: the gate tooling runs under its own self-coverage gate (§6.1 M-8), and the prose lint plus the stub-ban check gate the files that implement them (§6.1 M-9/M-10).
 
 ---
 
 ## 1. Current-state audit (facts this design is built on)
 
-Verbatim findings from the 2026-10-13 repo audit (anchors are real paths):
+Findings from the 2026-10-13 repo audit, refreshed to the current tree (anchors are real paths):
 
 | Area | Tests today | Coverage tooling today | Gate today |
 |---|---|---|---|
-| backend (TS, ~117k LOC src) | 40 executed of 197 test files | `coverageProvider: 'v8'` only (`backend/jest.config.cjs`) | none |
-| backend Go (`auction`, `config`, `payments`, `router`) | 21 `*_test.go` in auction; **0** in the other three modules | none | only dead `ci.yml` ran them |
-| console (Next.js) | 44 jest + 27 Playwright | none (no `coverageThreshold`) | none |
-| website (Next.js) | 1 jest (TS twin stub dead) + 7 Playwright | none | none |
-| control-plane (Express) | 11 jest | none; no coverage script | none |
-| sdk/web | 15 jest | `collectCoverage: true` | none |
-| sdk/react-native | **0** tests | none | none |
-| sdk/core/android + sdk/ctv/android-tv (Kotlin) | 48 + 7 unit test files | **no jacoco/kover** | size gates only |
-| sdk/core/ios + sdk/ctv/tvos (Swift) | 21 + 3 XCTest | llvm-cov export only in dead `ci.yml` | none |
-| sdk/core/unity (C#) | 13 xunit/NUnit files; previously **never compiled** (corrupted `MediationSDK.cs` — fixed, see §5.11 U-1); tier-1 now 25/25 green | coverlet lcov tier-1 (31% seeded baseline) | **tier-1 lcov gate via floors** |
-| sdk/flutter | **0** tests | none | none |
-| ML (Python) | 15 test files, 33 `def test_` | none; **19 `# pragma: no cover` markers** | none |
-| services/fraud-inference + inference-ml (Python) | 8 + 6 pytest fns | 1 `pragma: no cover` each | none |
-| services/autopilot (TS) | **0** tests | none | none |
-| services/mail-server (Rust, 8 crates) | 6 inline `#[test]` | none | not run in any CI |
-| edge-worker (TS) | **0** tests, no test script | none | none |
-| quality (Go integration, infra jest, k6) | Go harness + 3 jest specs | none | Go run in `ci-all.yml`; infra specs run nowhere |
-| tools/*.js, scripts/*.js (10+ js) | 0 | none | none |
-| scripts/**.sh (64 sh) | 0 | none (shellcheck only, no coverage) | none |
-| SQL migrations (109 files) | apply-verify only (`backend/scripts/verifyMigrations.js`) | n/a | `ci-all.yml` runs verify only |
-| monitoring / infrastructure / helm / terraform | 0 | `promtool check rules` only; no `promtool test rules` (the referenced `alerts.test.yml` does not exist) | rules parse only |
-| CI | GitHub Actions only; **Woodpecker absent repo-wide** (0 references) | codecov upload only in dead `ci.yml` | **no coverage threshold anywhere** |
+| backend (TS, ~117k LOC src) | 197 test files | `coverageProvider: 'v8'` plus the additive `jest.coverage.config.cjs` (widened `testMatch`) | `backend-coverage.yml` floor (0, ratcheting) |
+| backend Go (`auction`, `config`, `payments`, `router`) | 21 `*_test.go` in auction; 0 in the other three modules | none yet | `go-coverage.yml` floor (0, ratcheting) |
+| console (Next.js) | 44 jest + 27 Playwright | additive `jest.coverage.config.js` | `frontend-coverage.yml` floor (0, ratcheting) |
+| website (Next.js) | 1 jest suite plus its implemented TS twin + 7 Playwright | additive `jest.coverage.config.cjs` | `frontend-coverage.yml` floor (0, ratcheting) |
+| control-plane (Express) | 11 jest | additive `jest.coverage.config.js` | `frontend-coverage.yml` floor (0, ratcheting) |
+| sdk/web | 15 jest | `collectCoverage: true` plus `jest.coverage.config.cjs` (threshold 100) | `node-services-coverage.yml` floor (0, ratcheting) |
+| sdk/react-native | 0 tests | new `jest.config.cjs` + coverage config | `node-services-coverage.yml` floor (0, ratcheting) |
+| sdk/core/android + sdk/ctv/android-tv (Kotlin) | 48 + 7 unit test files | kover 0.8.3 `koverVerify` on line and branch counters | `sdk-android-coverage.yml` floor (0, ratcheting) |
+| sdk/core/ios + sdk/ctv/tvos (Swift) | 21 + 3 XCTest | llvm-cov lcov export | `sdk-apple-coverage.yml` floor (0, ratcheting) |
+| sdk/core/unity (C#) | tier-1 suite runs 25/25 via `dotnet test`; 47 files at a 31% lcov baseline | coverlet lcov tier-1 | `sdk-unity-coverage.yml` floor (0, ratcheting); tier-2 licensed lane is phase 2 (§3.7) |
+| sdk/flutter | 0 tests | none yet | `sdk-flutter-coverage.yml` floor (0, ratcheting) |
+| ML (Python) | 15 test files, 33 `def test_` | 18 `# pragma: no cover` markers across 11 files, frozen in the policy baseline | `python-coverage.yml` floor (0, ratcheting); markers are phase-1 deletions (§3.8) |
+| services/fraud-inference + inference-ml (Python) | 8 + 6 pytest fns | 1 `pragma: no cover` each | `python-coverage.yml` floor (0, ratcheting) |
+| services/autopilot (TS) | 0 tests | new `jest.coverage.config.js` | `node-services-coverage.yml` floor (0, ratcheting) |
+| services/mail-server (Rust, 8 crates) | 6 inline `#[test]` | cargo-llvm-cov lcov | `rust-coverage.yml` floor (0, ratcheting) |
+| edge-worker (TS) | 0 tests, no test script | new `jest.coverage.config.cjs` + `test:cov` | `node-services-coverage.yml` floor (0, ratcheting) |
+| quality (Go integration, infra jest, k6) | Go harness + 3 jest specs | none yet | `go-coverage.yml` + `contract-coverage.yml` |
+| tools/**.mjs + quality/scripts JS | 42 `node --test` cases under `tools/` | c8 via `npm run test:cov` | js-tools floor plus M-8 self-coverage |
+| scripts/**.sh (64 sh) | 0 bats suites yet | kcov in `scripts-shell-coverage.yml` | shell floor (0, ratcheting) |
+| SQL migrations (109 files) | apply-verify only (`backend/scripts/verifyMigrations.js`) | n/a | `backend-coverage.yml` SQL contract step |
+| monitoring / infrastructure / helm / terraform | 0 | `promtool check rules` plus `monitoring/alerts.test.yml` | `contract-coverage.yml` S-IAC |
+| CI | GitHub Actions plus `.woodpecker/` (17 pipeline configs: 16 lanes + the aggregate verdict) | Woodpecker gates configured and locally verified (§9.5) | floors fail the build inside each pipeline; `coverage-gate` is the aggregate verdict |
 
-Known broken references the meta-suite must catch and keep caught: `quality/chaos/` referenced by root `test:chaos` (missing), `packages/web-sdk` referenced by `web-sdk.yml`/`kill-switch-smoke-test.yml` (missing), `sdks/*` referenced by `sdk-release.yml`, `compatibility-testing.yml`, CODEOWNERS (missing), `docs/Internal/Development/CI_CONSOLIDATION.md` referenced by `ci.yml` header (missing), `quality/lighthouse/alerts.test.yml`-style promtool reference to nonexistent `monitoring/alerts.test.yml`.
+Known broken references the meta-suite must catch and keep caught:
+
+- `quality/chaos/` is referenced by the root `test:chaos` script and is absent.
+- `sdks/*` paths in `sdk-release.yml` and `compatibility-testing.yml` are absent; both entries are frozen in `ci-ref-baseline.json` (ratchet: an entry that resolves fails as stale).
+- The `ci.yml` header references the absent `docs/Internal/Development/CI_CONSOLIDATION.md`.
+- `monitoring/alerts.test.yml` now exists and is exercised by the promtool contract.
 
 ---
 
 ## 2. Architecture of the gate stack
 
 ```
-                 .woodpecker/*.yml (14 pipelines)
-  backend ─ frontend ─ node-services ─ go ─ sdk-* ─ python ─ rust ─
-  scripts-shell ─ contract ─ dogfood-audit ─────────► coverage-gate
+                 .woodpecker/*.yml (16 lanes plus the aggregate verdict)
+  backend ─ frontend ─ node-services ─ go ─ sdk-* ─ python ─ rust ─ apex-rs ─
+  scripts-shell ─ contract ─ dogfood-audit ─ site-perf ─ ui-ux ───► coverage-gate
         │                │                │                │
         ▼                ▼                ▼                ▼
-  per-domain 100% gates   tools/coverage/ci-reference-integrity   manifest
+  per-domain 100% gates   contract checks   manifest
   (jest/kover/xccov/… )   orphan audit, meta-tests, floors   aggregate verdict
 ```
 
-- `tools/coverage/build-coverage-manifest.mjs` walks the repo and emits `coverage-manifest.json` (path → domain → gate → suite/status). It is the single definition of "100% of repo".
+- `tools/coverage/build-coverage-manifest.mjs` walks the repo and emits `coverage-manifest.json` (path → domain → gate → suite/status). It is the single definition of "100% of repo" and currently classifies 2,904 files with 0 unclassified.
 - `tools/coverage/coverage-gate.mjs` parses per-workspace coverage artifacts (jest `coverage-summary.json`, lcov, `go tool cover -func`, xccov JSON) and fails unless every owned file is claimed and every domain is at its floor (floor=100 at final phase).
-- `tools/coverage/ci-reference-integrity.mjs` verifies every path referenced by CI (`working-directory:`, path filters, file uploads) exists — this is the dogfooding guard against the §1 broken-reference class.
+- `tools/coverage/contract-checks.mjs` (subcommand `ci-reference-integrity`) verifies every path referenced by CI (`working-directory:`, path filters, file uploads) exists; this is the dogfooding guard against the §1 broken-reference class.
 - `infrastructure/woodpecker/` contains the self-hosted server/agent design (§7).
 
 ---
@@ -113,7 +123,7 @@ Each domain lists: gate command (run inside the named Woodpecker pipeline), arti
 
 - New additive config `backend/jest.coverage.config.cjs` (created in this change) imports `jest.config.cjs`, then:
   - `collectCoverageFrom`: `['src/**/*.ts', 'routes/**/*.ts', 'services/**/*.ts', 'scripts/**/*.ts', '!**/*.d.ts', '!src/openapi/**']` (mirrors tsconfig `include`; `src/smtp-server.ts` stays IN — it is an entry point, covered via its own suite).
-  - `testMatch` consolidation: `tests/**/*.test.ts`, `src/**/__tests__/**/*.test.ts`, `scripts/__tests__/**/*.test.ts`, `routes/__tests__/**/*.test.ts` (fixes §0.4-3).
+  - `testMatch` consolidation: `tests/**/*.test.ts`, `src/**/__tests__/**/*.test.ts`, `scripts/__tests__/**/*.test.ts`, `routes/__tests__/**/*.test.ts` (answers §0.4-3).
   - `coverageThreshold.global` = `{branches: 100, functions: 100, lines: 100, statements: 100}`.
   - `coverageReporters` = `['json-summary', 'lcov', 'text']`.
 - Gate command: `npx jest -c jest.coverage.config.cjs --runInBand` with `FORCE_DB_SETUP=true`, `RUN_MIGRATIONS_IN_TEST=true`, `SKIP_DB_SETUP=false`, Postgres+Redis services (same env matrix as `ci-all.yml` job `backend` — anchors `.github/workflows/ci-all.yml` steps "Unit tests"/"Verify migrations").
@@ -123,8 +133,8 @@ Each domain lists: gate command (run inside the named Woodpecker pipeline), arti
 ### 3.2 console / website / control-plane — pipeline `frontend-coverage.yml`
 
 - `console/jest.coverage.config.js` (additive): extends `jest.config.js`; `collectCoverageFrom: ['src/**/*.{ts,tsx}', '!src/**/*.d.ts', '!src/tests/**']`; threshold 100; `coverageReporters: ['json-summary','lcov']`. Server Components (RSC `page.tsx`) are covered by rendering unit suites under jsdom using the existing babel-jest transform; the design forbids excluding any `src` file from coverage.
-- `website/jest.coverage.config.cjs` (additive): extends `jest.config.cjs`, ADDS a babel-jest TS transform (`presets: [['next/babel']]` — same transform chain as console) and widens `testMatch` to `src/**/*.test.{js,ts}`; the dead `.ts` twin of `security.headers` (anchor `website/src/__tests__/security.headers.test.ts`, which is a 1-line stub) is either deleted or implemented — keeping an unrunnable stub is banned by the meta-suite.
-- `control-plane/jest.coverage.config.js` (additive): extends `jest.config.js`; `collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts']`; threshold 100. The 3,496-line `src/index.ts` monolith (anchor `control-plane/src/index.ts`) is decomposed-by-tests: route/registration lines via supertest app-assembly suites, listener bootstrap via `listen`-mocked suites.
+- `website/jest.coverage.config.cjs` (additive): extends `jest.config.cjs`, adds a babel-jest TS transform (`presets: [['next/babel']]`, the same chain as console) and widens `testMatch` to `src/**/*.test.{js,ts}`. The TS twin of `security.headers` (anchor `website/src/__tests__/security.headers.test.ts`) is implemented; an unrunnable stub is banned by the meta-suite.
+- `control-plane/jest.coverage.config.js` (additive): extends `jest.config.js`; `collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts']`; a global threshold of 100. The 3,496-line `src/index.ts` monolith (anchor `control-plane/src/index.ts`) is decomposed-by-tests: route/registration lines via supertest app-assembly suites, listener bootstrap via `listen`-mocked suites.
 - Playwright e2e specs are `test-code` (meta domain §6), not part of line coverage.
 
 ### 3.3 Node libs & tools — pipeline `node-services-coverage.yml`
@@ -133,7 +143,7 @@ Each domain lists: gate command (run inside the named Woodpecker pipeline), arti
 - `services/autopilot`: new `services/autopilot/jest.coverage.config.js`; threshold 100.
 - `sdk/web`: `sdk/web/jest.coverage.config.cjs` (additive) extends `jest.config.cjs`, sets `coverageThreshold.global` 100/100/100/100 (it already collects coverage, anchor `sdk/web/jest.config.cjs`).
 - `sdk/react-native`: new `sdk/react-native/jest.config.cjs` + coverage config; jsdom; `BannerAd.tsx` covered with @react-native mock harness.
-- `tools/*.js`, `quality/lint/*.js`, `quality/tools/*.js`, `scripts/**/*.js`, `console/scripts/*.js`: new `tools/package.json` (workspace `tools/*` already declared in root) providing `c8`-wrapped `node --test` harness over per-file suites; c8 `--100` flag + `--all` (fail when a loaded file is uncovered) and a check that every classified JS file is `import`ed by some suite (orphan-JS check in the manifest).
+- `tools/**/*.mjs` (gate tooling, site gates, ui-ux audit, content guard) plus `quality/lint/*.js`, `quality/tools/*.js`, `scripts/**/*.js`, `console/scripts/*.js`: the `tools` package runs a c8-wrapped `node --test` harness; `npm run test:cov` covers `coverage/*.mjs`, `site/*.mjs`, `ui-ux/*.mjs`, and `content-guard.js`.
 
 ### 3.4 Go — pipeline `go-coverage.yml`
 
@@ -149,7 +159,7 @@ The three currently untested modules (`config`, `payments`, `router`) get suites
 
 ### 3.5 Android (Kotlin) — pipeline `sdk-android-coverage.yml`
 
-- Add `org.jetbrains.kotlinx.kover` plugin + verify rule (minValue 100 on LINE and BRANCH counters) to `sdk/core/android/build.gradle` and `sdk/ctv/android-tv/build.gradle` (diffs included in this change).
+- The `org.jetbrains.kotlinx.kover` plugin (0.8.3) and its verify rule are wired into `sdk/core/android/build.gradle` and `sdk/ctv/android-tv/build.gradle`; `minValue` is read from the ratcheting floor in `floors.txt` (final target 100 on the line and branch counters).
 - Gate: `./gradlew testDebugUnitTest koverXmlReport koverVerify`. Robolectric (already a test dep) covers Android-framework-coupled classes; pure-Kotlin classes get JVM suites. The 15 third-party adapter stubs under `com/rivalapexmediation/adapter/*` are first-party code: each is owned (error/degradation paths are the adversarial surface), not excluded.
 - Instrumented tests (`src/androidTest`, samples): phase-3 optional emulator pipeline; until then they are `test-code` items whose non-execution in CI is recorded (meta-suite asserts the inventory, not coverage).
 
@@ -162,16 +172,12 @@ xcrun llvm-cov export -format=lcov .build/debug/<PackageTests binary> \
 node tools/coverage/lcov-gate.mjs coverage.lcov 100
 ```
 
-(The llvm-cov export reuses the approach already proven in the legacy `ci.yml` job
-`sdk-ios-test`. The gate fails unless every first-party file reaches 100% lines;
-region/branch parity is a documented phase-3 upgrade via `--require-branches` once
-llvm-cov region records are wired into the lcov adapter.) Applies to `sdk/core/ios`
-and `sdk/ctv/tvos`; requires a darwin Woodpecker agent using the local backend.
+The llvm-cov export reuses the approach from the legacy `ci.yml` job `sdk-ios-test`. The gate fails unless every first-party file reaches 100% lines; region and branch parity is a phase-3 upgrade via `--require-branches` once llvm-cov region records feed the lcov adapter. This applies to `sdk/core/ios` and `sdk/ctv/tvos`; it requires a darwin Woodpecker agent using the local backend.
 
 ### 3.7 Unity (C#) — pipeline `sdk-unity-coverage.yml` (two-tier)
 
-- Tier 1 (no Unity license, RUNS GREEN TODAY): the runtime builds as `sdk/core/unity/Runtime/ApexMediation.Runtime.csproj` (a tier-1-only project Unity never reads; `Tests/UnityStubs.cs` shims the plain-.NET UnityEngine surface), tests run as `dotnet test sdk/core/unity/Tests/ApexMediation.Tests.csproj` under `UNITY_RUNNER=true` (the csproj self-skip is inverted into real execution), and coverlet emits `sdk/core/unity/coverage/lcov.info` (verified locally: 25/25 tests, 47 files, 31% line baseline). The floor gate ratchets from that baseline.
-- Tier 2 (licensed Unity runner image, phase 2): Unity Test Framework coverage with `assemblyFilters:+ApexMediation` for the editor-coupled surface (`ApexMediationEntryPoint.cs`, `Core/MediationDebuggerOverlay.cs`, `Platforms/{Android,iOS}`, `Core/BannerHost.cs`). While tier 2 is not yet wired, those files are `planned` — the ratchet makes this visible, never silent.
+- Tier 1 (no Unity license; runs green today): the runtime builds as `sdk/core/unity/Runtime/ApexMediation.Runtime.csproj`, a tier-1-only project Unity never reads. `Tests/UnityStubs.cs` shims the plain-.NET UnityEngine surface, and tests run as `dotnet test sdk/core/unity/Tests/ApexMediation.Tests.csproj` under `UNITY_RUNNER=true`, which inverts the csproj self-skip into real execution. Coverlet emits `sdk/core/unity/coverage/lcov.info`; a local run gave 25/25 tests, 47 files, and a 31% line baseline, from which the floor gate ratchets.
+- Tier 2 (licensed Unity runner image, phase 2): Unity Test Framework coverage with `assemblyFilters:+ApexMediation` for the editor-coupled surface (`ApexMediationEntryPoint.cs`, `Core/MediationDebuggerOverlay.cs`, `Platforms/{Android,iOS}`, `Core/BannerHost.cs`). While tier 2 is not yet wired, those files stay `planned`; the ratchet keeps this visible.
 
 ### 3.8 Python — pipeline `python-coverage.yml`
 
@@ -191,16 +197,14 @@ exclude_also = []
 ```
 
 - Gate: `pytest ML/tests ML/scripts/tests --cov --cov-branch --cov-report=lcov --cov-fail-under=100` (pytest-cov honors `fail_under=100`).
-- **Pragma elimination**: the design REQUIRES deleting all `# pragma: no cover` markers (19 in `ML/**`, 1 in `services/fraud-inference/main.py:33`, 1 in `services/inference-ml/main.py:24` — anchored) and writing real tests for those lines; the dogfood-audit greps for any new marker and fails. Where a marker guarded genuinely unreachable code (e.g. defensive `except` around `sys.exit`), the code is restructured to be injectable and tested.
+- **Pragma elimination**: the design requires deleting every `# pragma: no cover` marker (18 across `ML/**` plus 1 in `services/fraud-inference/main.py:33` and 1 in `services/inference-ml/main.py:24`; all anchored and frozen in `tools/coverage/policy-baseline.json`) and writing real tests for those lines. The dogfood-audit greps for any new marker and fails. Where a marker guarded genuinely unreachable code (e.g. a defensive `except` around `sys.exit`), the code is restructured to be injectable and tested.
 - services/fraud-inference, inference-ml: `pytest tests --cov=main --cov-branch --cov-report=lcov --cov-fail-under=100` (FastAPI app exercised via TestClient + adversarial payloads; prom-client registry reset between tests to avoid the cross-test coupling that forced `pragma` markers).
 
-### 3.9 Rust — pipeline `rust-coverage.yml`
+### 3.9 Rust — pipelines `rust-coverage.yml` and `apex-rs-coverage.yml`
 
-```sh
-cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-under-lines 100
-```
+`services/mail-server` runs `cargo llvm-cov --workspace --all-features --lcov` with `--fail-under-lines "$FLOOR"`, the floor read from `tools/coverage/floors.txt`. Branch parity comes from the lcov adapter (`tools/coverage/lcov-gate.mjs`) requiring BRH==BRF on every first-party `SF` record; the proto-generated files under `mail-proto` are `GENERATED`-excluded with the generator anchor `proto/mail.proto`.
 
-`cargo-llvm-cov` pinned in the pipeline image; branch-level enforcement via the lcov adapter (`tools/coverage/lcov-gate.mjs`) requiring BRH==BRF on every first-party `SF` record (the proto-generated files under `mail-proto` are `GENERATED`-excluded with the generator anchor `proto/mail.proto`).
+The seven product crates (`apex-core`, `apex-connectors`, `apex-audit`, `apex-proof`, `apex-autopilot`, `apex-billing`, `apex-api`) run one matrix lane each in `apex-rs-coverage.yml`: per-crate llvm-cov, `cargo test -p`, clippy `-D warnings`, `cargo fmt --check`, and the same lcov gate.
 
 ### 3.10 Flutter — pipeline `sdk-flutter-coverage.yml`
 
@@ -208,12 +212,16 @@ cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-
 
 ### 3.11 Shell — pipeline `scripts-shell-coverage.yml`
 
-- `bats-core` suites per script group + `kcov` line/branch coverage: `kcov --bash-dont-parse-funcs --bash-parse-files-in-dir=scripts ./cov scripts/<group>.sh` … aggregate via lcov-gate at 100 (lines). Non-interactive behavior is achieved by extracting pure logic into `scripts/lib/*.sh` sourced by the entry scripts (mandated refactor for the 12 largest scripts, e.g. `scripts/deploy-all.sh`); destructive scripts (deploy, ssh, PITL) run only in `--dry-run` mode under test (each entry script must honor a `DOGFOOD_DRY_RUN=1` env that short-circuits side effects — mandated invariant, tested by a contract suite that greps for side-effecting commands outside the dry-run guard).
+- `bats-core` suites per script group, with `kcov` line and branch coverage aggregated through the lcov gate at the shell floor.
+
+- Non-interactive behavior comes from extracting pure logic into `scripts/lib/*.sh`, sourced by the entry scripts (mandated refactor for the 12 largest scripts, e.g. `scripts/deploy-all.sh`).
+
+- Destructive scripts (deploy, ssh, point-in-time ledger) run only in `--dry-run` mode under test; each entry script must honor `DOGFOOD_DRY_RUN=1`, which short-circuits side effects. A contract suite greps for side-effecting commands outside the dry-run guard.
 - `set -euo pipefail` presence is a contract check per script (`shell-gate`).
 
 ### 3.12 What is intentionally NOT line-covered
 
-- `src/types/*.d.ts`, protobuf-`GENERATED` code, `docs/**` (contract via §5.10), `data/`, `models/` (DATA_ARTIFACT), `sdk/samples/**` + `sdk/adapter-samples/**` + `Test Apps/**` (SAMPLE_APP: build+smoke contract S-SAMPLE), lockfiles (BUILD_ARTIFACT), `.junie/`, images. Everything else is owned.
+- `src/types/*.d.ts`, protobuf-generated code, `docs/**` (contract via §5.10), `data/`, `models/` (data artifacts), `sdk/samples/**` + `sdk/adapter-samples/**` + `Test Apps/**` (sample apps: build+smoke contract `S-SAMPLE`), lockfiles (build artifacts), `.junie/`, images. Everything else is owned.
 
 ---
 
@@ -231,13 +239,13 @@ Dogfooding = the repo tests itself with its own machinery, and every layer above
 | Perf/SLO contracts | k6 thresholds asserted as code, not docs | `quality/load-tests/*.js` thresholds (p95<120ms auction, <50ms tracking, <50ms fraud p95) pinned in contract tests |
 | IaC/config | promtool `test rules` (new `monitoring/alerts.test.yml`), `helm template`+kubeconform, `terraform validate`, `nginx -t`, `caddy validate`, `docker compose config` | contract pipeline |
 
-Adversarial axes applied to every domain: malformed input (fuzz/property), resource exhaustion (bombs, unbounded growth), race/ordering (concurrency, retries, idempotency), authority (authn/z bypass, privilege escalation, tenant isolation), time (skew, DST, expiry), observability gaps (silent failure must still emit metrics/alerts), and state corruption (crash-between-write, replay, double-spend).
+Adversarial axes applied to every domain: malformed input (fuzz/property), resource exhaustion (bombs, unbounded growth), race and ordering (concurrency, retries, idempotency), and authority (authn/z bypass, privilege escalation, tenant isolation). The remaining axes: time (skew, DST, expiry), observability gaps (silent failure must still emit metrics/alerts), and state corruption (crash-between-write, replay, double-spend).
 
 ---
 
 ## 5. Adversarial expectation catalog
 
-Format: every row is given/when/then with an anchor. `A#` ids are stable and referenced by suite names. Rows marked **AUDIT-REQUIRED** require phase-0 behavior recording before implementation (§0.2). This catalog covers the crown-jewel cases; every remaining owned file inherits its domain's axes and MUST appear in its suite's case list (the manifest ties file→suite; the suite case list ties case→file).
+Format: every row is given/when/then with an anchor. `A#` ids are stable and referenced by suite names. Rows marked `AUDIT-REQUIRED` require phase-0 behavior recording before implementation (§0.2). This catalog covers the crown-jewel cases; every remaining owned file inherits its domain's axes and MUST appear in its suite's case list (the manifest ties file→suite; the suite case list ties case→file).
 
 ### 5.1 Backend auth/session (suite `S-BACKEND-AUTH`)
 
@@ -266,7 +274,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 |---|---|---|---|---|
 | R1 | OpenRTB bidrequest | `imp[]` empty / `bidfloor: -1` / `tmax: 0` | deterministic rejection (400) with no DSP fan-out | `backend/src/services/rtbEngine` AUDIT-REQUIRED |
 | R2 | DSP responds after internal deadline | hedge race | winning path returns before deadline; late response discarded and counted in timeout metrics | `backend/src/services/rtbEngine`, Go `backend/auction/internal/bidding` (hedge tests exist: anchor `backend/auction/internal/bidding/*_test.go`) |
-| R3 | waterfall with cycling adapters A→B→A | walk | cycle detected, no infinite loop, fallback wins fill. **IMPLEMENTED in this change**: explicit `seenAdapterIds` guard (duplicate ids logged and skipped; indexed loop already bounds attempts) | `backend/src/services/waterfallService.ts` |
+| R3 | waterfall with cycling adapters A→B→A | walk | duplicates are deduplicated before the walk by priority (highest kept) and logged; repeated ids cannot burn an attempt slot, the indexed loop still bounds attempts, and the fallback wins fill. Shipped in commit `9f1a944` | `backend/src/services/waterfallService.ts` |
 | R4 | thompson sampling priors | adversarial click-fraud feedback (all clicks on one arm) | distribution stays bounded; no divide-by-zero when impressions=0 | `backend/src/services/thompsonSamplingService` AUDIT-REQUIRED |
 | R5 | Go auction p95 window empty | compute p95 | no NaN; documented sentinel | `backend/auction/internal/bidding` AUDIT-REQUIRED |
 
@@ -335,11 +343,11 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 
 ### 5.10 Docs domain (suite `S-DOCS`)
 
-Linkcheck (internal anchors + cross-references) + freshness contract: every doc referencing an npm script/Makefile target/env var references something that exists (same engine as `ci-reference-integrity`, applied to `docs/**`). Adversarial case S-DOCS-1: rename a script → docs contract fails.
+Linkcheck (internal anchors + cross-references) + freshness contract: every doc referencing an npm script/Makefile target/env var references something that exists (same engine as `ci-reference-integrity`, applied to `docs/**`). Adversarial case `S-DOCS-1`: rename a script and the docs contract fails. The prose ratchet (M-10) scans `docs`, `website/src`, `console/src`, `tools/coverage`, `tools/docs-lint`, `tools/ui-ux`, `site`, `rust`, and `.woodpecker` against a committed baseline total of 8005.
 
 ### 5.11 Findings implemented by the dogfooding run itself (this change)
 
-The first execution of this stack (Unity tier-1, promtool, shell/bats, contract checks, and the four design audits) found real pre-existing defects. All were FIXED in this change (never weakened or deleted):
+The first execution of this stack (Unity tier-1, promtool, shell/bats, contract checks, and the four design audits) surfaced pre-existing defects. All were closed in the same change (never weakened or deleted):
 
 | id | defect found | fix |
 |---|---|---|
@@ -368,13 +376,15 @@ The first execution of this stack (Unity tier-1, promtool, shell/bats, contract 
 | M-3 | no coverage-ignoring markers/`describe.skip` without registry | grep gate over `src`+`tests` of all workspaces |
 | M-4 | no `|| true` on test/coverage commands outside allowlist | YAML grep gate (existing `ci-all.yml` occurrences inventoried in §7.3; each must be converted or explicitly allowlisted with reason) |
 | M-5 | expectation-drift: an expectation changed from fail→pass semantics without a linked bug-fix commit fails audit | diff-grep on test files for `toBe`/`toEqual` relaxations (`expect.any`, widened matchers) — sampled by mutation testing in phase 3 |
-| M-6 | CI reference integrity (all paths in workflows exist) | `tools/coverage/ci-reference-integrity.mjs` |
+| M-6 | CI reference integrity (all paths in workflows exist) | `tools/coverage/contract-checks.mjs ci-reference-integrity` |
 | M-7 | every test file contains at least one assertion (kills always-green tests) | meta test scan |
-| M-8 | self-coverage: `tools/coverage/*` covered by `node --test` at 100% | `node --test --experimental-test-coverage tools/coverage/test/` + parse gate |
+| M-8 | self-coverage: the gate tooling runs under `npm run test:cov` in `tools/` | c8 over `coverage/*.mjs`, `site/*.mjs`, `ui-ux/*.mjs`, `content-guard.js`; the `coverage-gate.mjs --domain js-tools` step |
+| M-9 | zero scaffold markers on the new-model surfaces | `dogfood-gates.mjs stub-ban` over `rust/`, `tools/coverage/`, `tools/docs-lint/` |
+| M-10 | prose ratchet: every scanned row at or below its committed baseline; adoption is one-shot | `docs-lint.sh --source --baseline` plus `--integrity` in `dogfood-audit.yml` |
 
 ### 6.2 Why mutation testing is the "correct expectations" oracle
 
-A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants; an expectation that does not pin behavior lets mutants survive, which the audit scores and fails below floor. This is the only mechanical proof that expectations are *correct and tight*; hence phase 3 floors at 60% kill rate with ratchet to 80%.
+A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants. An expectation that does not pin behavior lets mutants survive; the audit scores kills and fails below floor. That is the only mechanical proof that expectations are *correct and tight*; phase 3 therefore floors at a 60% kill rate with a ratchet to 80%.
 
 ---
 
@@ -382,12 +392,13 @@ A passing suite only proves expectations hold for the written inputs. Mutation s
 
 ### 7.1 Server/runner
 
-Self-hosted design in `infrastructure/woodpecker/` (docker-compose for server+agent on the existing Hetzner app-server pattern; GitHub OAuth app integration; commit-status reporting gives GitHub branch protection the same power as `required-checks.json` — the design mirrors required checks: `coverage-gate`, `dogfood-audit`, `contract-coverage` are the protected-branch contexts).
+Self-hosted design in `infrastructure/woodpecker/`: docker-compose for server and agent on the existing Hetzner app-server pattern, plus a GitHub OAuth app integration. Commit-status reporting gives GitHub branch protection the same power as `required-checks.json`; the protected-branch contexts are `coverage-gate`, `dogfood-audit`, and `contract-coverage`.
 
-### 7.2 Pipeline inventory (`.woodpecker/`, 14 pipelines)
+### 7.2 Pipeline inventory (`.woodpecker/`, 17 configs: 16 lanes plus the aggregate verdict)
 
 | pipeline | covers domains | key services |
 |---|---|---|
+| `apex-rs-coverage.yml` | the seven apex product crates (one matrix entry each) | none (cargo-llvm-cov) |
 | `backend-coverage.yml` | backend TS + SQL | postgres:16, redis:7 |
 | `frontend-coverage.yml` | console, website, control-plane | none (jsdom/supertest) |
 | `node-services-coverage.yml` | edge-worker, autopilot, sdk/web, sdk/react-native, tools JS | none |
@@ -396,70 +407,121 @@ Self-hosted design in `infrastructure/woodpecker/` (docker-compose for server+ag
 | `sdk-apple-coverage.yml` | iOS + tvOS | none (darwin agent) |
 | `sdk-unity-coverage.yml` | C# tiers 1+2 | none |
 | `sdk-flutter-coverage.yml` | Dart | none |
-| `python-coverage.yml` | ML, fraud-inference, inference-ml | postgres (fraud) |
+| `python-coverage.yml` | ML, fraud-inference, inference-ml, py-scripts | postgres (fraud) |
 | `rust-coverage.yml` | mail-server | none |
 | `scripts-shell-coverage.yml` | 64 sh + tools sh | none (kcov in-image) |
 | `contract-coverage.yml` | SQL/IaC/OpenAPI/CI/content/samples/docs | postgres (SQL apply) |
-| `dogfood-audit.yml` | manifest, meta M-1..M-8 | none |
-| `coverage-gate.yml` | aggregate verdict | none; `depends_on` all above |
+| `dogfood-audit.yml` | manifest, meta M-1..M-10, stub-ban, docs-lint steps | none |
+| `site-perf.yml` | site build, claims contract, byte budgets, Lighthouse | zola image |
+| `ui-ux.yml` | rendered console pages: axe-core audit + structure contract | rust + node |
+| `coverage-gate.yml` | aggregate verdict; `depends_on` the 16 lanes above | none |
 
-All pipelines trigger on `push`+`pull_request` to `main`/`master` with **no path filters** in phase 0 (rationale: path-filtered parents that are skipped must not silently weaken the aggregate gate; filters are a phase-4 optimization behind verified `depends_on`-skip semantics). Secrets: none required for gates; optional `codecov_token` push-only upload step per pipeline (PR events never receive secrets — kept out of gate logic by design).
+All pipelines trigger on `push` and `pull_request` to `main`/`master` with **no path filters** in phase 0. Path-filtered parents that get skipped must not silently weaken the aggregate gate; filters are a phase-4 optimization behind verified `depends_on`-skip semantics. Secrets: none required for the gates. An optional `codecov_token` push-only upload step exists per pipeline; PR events never receive secrets, so uploads stay out of gate logic by design.
 
 ### 7.3 Existing `|| true` inventory (M-4, frozen with ratchet)
 
-The legacy soft-fail inventory (38 occurrences across 12 workflows — `ci-all.yml` lighthouse/billing-e2e/website lanes, `ci.yml`, `compatibility-testing.yml`, `deploy-production.yml`, `ios-sdk.yml`, `ml-nightly.yml`, `nightly-billing-perf.yml`, `scripts-guardrails.yml`, `security.yml`, `synthetic-probes.yml`, `unity-sdk.yml`, `website-capture.yml`) is frozen in `tools/coverage/policy-baseline.json`. The policy gate fails on any NEW `|| true` on a test/coverage command, and fails on STALE baseline entries so each conversion must delete its entry (ratchet). None of these may guard coverage numbers.
+The legacy soft-fail inventory (36 occurrences across 12 workflows: `ci-all.yml` lighthouse/billing-e2e/website lanes, `ci.yml`, `compatibility-testing.yml`, `deploy-production.yml`, `ios-sdk.yml`, `ml-nightly.yml`, `nightly-billing-perf.yml`, `scripts-guardrails.yml`, `security.yml`, `synthetic-probes.yml`, `unity-sdk.yml`, `website-capture.yml`) is frozen in `tools/coverage/policy-baseline.json`. The policy gate fails on any new `|| true` on a test/coverage command, and on stale baseline entries, so each conversion must delete its entry. None of these may guard coverage numbers.
 
 ### 7.4 Rollout phases
 
-- **Phase 0 (this change)**: Woodpecker infra design + pipelines + manifest tooling + additive coverage configs + catalog + meta gates. Gates ratchet from observed baselines; `coverage-floor.json` seeded so the first run is green but every number is pinned.
+- **Phase 0 (landed)**: Woodpecker infra design plus pipelines, manifest tooling, additive coverage configs, catalog, and meta gates. Gates ratchet from observed baselines; `coverage-floor.json` is seeded so the first run is green while every number stays pinned.
+
 - **Phase 1**: implement suites per domain in ratchet order (smallest first: tools/js, shell lib extraction, python services, ML pragmas); floors +10/week until 100.
+
 - **Phase 2**: mutation floors; instrumented-Android emulator lane; Unity tier-2 licensed lane.
+
 - **Phase 3**: branch-parity for Apple (region gate), Flutter branch, path-filter optimization after `depends_on`-skip semantics verified.
+
 - **Completion criterion**: `coverage-gate` green with every domain floor = 100 and manifest orphans = 0, for 14 consecutive days on `main`.
 
 ---
 
-## 8. Self-verification protocol for THIS design
+## 8. Self-verification protocol for this design
 
-This design was produced without executing anything (per mandate). It is checked by four independent rigorous audits, run as read-only subagent reviews:
+The design and the stack it describes are checked by four independent audits, run as read-only reviews alongside the implementation; every reported item landed in the commit series (§9):
 
 1. **Woodpecker semantics audit** — every `.woodpecker/*.yml` and `infrastructure/woodpecker/*` checked against Woodpecker 2.x semantics (when/steps/services/secrets/depends_on/plugin settings) and against real repo paths/scripts/env vars.
+
 2. **Completeness audit** — an independent file enumeration (find/ls, NOT the manifest tool itself) diffed against the manifest domain rules to find any unclassified file/type/directory.
-3. **Expectation correctness audit** — every anchored expectation in §5 checked against the cited source; mismatches or overclaims reported and fixed.
+
+3. **Expectation correctness audit** — every anchored expectation in §5 checked against the cited source; mismatches or overclaims reported and addressed.
+
 4. **Mechanism audit** — every gate command/flag/config (jest thresholds, pytest-cov, kover DSL, xccov fields, cargo-llvm-cov flags, go cover parsing, kcov, c8) verified to exist in the pinned tool versions.
 
-Findings are fixed before this design is considered final; the fix log is appended in §9.
+Findings are resolved before this design is considered final; the remediation log is appended in §9.
 
 ---
 
-## 9. Verification fix log
+## 9. Verification and remediation log
 
-### 9.1 Design audits (4 independent read-only subagent reviews)
+### 9.1 Design audits (4 independent read-only reviews)
 
-- **Woodpecker semantics audit**: found 15+ issues (top-level `environment` unsupported → moved per-step; matrix grading-cache build; gradlew absence in both Android modules; Unity csproj path wrong + coverlet missing; `podspec`; runtime-image gaps; `gixy` pin; promtool extraction pollution; env blocks; `apt-get` in kcov image; missing pytest-cov; `--require-branches` fail-open; `get()` parsing bug; etc.). All BLOCKER/MAJOR items fixed in the pipelines/configs.
-- **Completeness audit**: enumerated real repo files vs the classifier; found ~40 gap classes (root-anchored patterns, missing extensions, order hazards, `tools/coverage` self-skip, `**/test/**` over-match, `.md` nesting, etc.). Classifier rewritten; manifest now classifies 2,763 files with **0 unclassified**.
-- **Expectation-correctness audit**: verified every anchored catalog row; found and corrected: Unity csproj path, ML pragma counts (18 markers / 13 files, frozen in baseline), `|| true` counts (38/12 files), `webhooks.routes.ts:86` anchor, `README.md`@backend absence, `cron/create_future_rollup_partitions.sh` naming, `TCFParser` failing-open bug, `sales-scheduler.ts` path. Rows whose claims were contradicted by the code were made true by IMPLEMENTATION (§5.11, B3, R3, K4, K6), not by weakening.
-- **Mechanism audit**: verified jest/pytest/kover/llvm-cov/cargo-llvm-cov/kcov/c8 semantics; found the Kover 0.8 DSL conflict (resolved authoritatively against the 0.8.3 sources jar: `coverageUnits` + `aggregationForGroup`, `CounterType` does not exist), lcov branch fail-open (now fail-closed), coverage-gate unknown-domain hole (now fatal), c8 include/report-dir bugs (fixed), `assertion-presence` regex gaps (rewritten to classifier-driven test-case detection), `dogfood-gates` flag-parse bug (fixed).
+- **Woodpecker semantics audit**: found 15+ issues across steps, services, and images (top-level `environment` unsupported, matrix grading-cache build, missing `gradlew` in both Android modules). Further items: a wrong Unity csproj path, missing coverlet, `podspec`, runtime-image gaps, a `gixy` pin, promtool extraction pollution, `apt-get` in the kcov image, missing pytest-cov, `--require-branches` fail-open, and a `get()` parsing bug. All blocker and major items were resolved in the pipelines and configs.
 
-### 9.2 Dogfooding execution (this change, all local, no Woodpecker server needed)
+- **Completeness audit**: enumerated real repo files against the classifier and found around 40 gap classes (root-anchored patterns, missing extensions, order hazards, `tools/coverage` self-skip, `**/test/**` over-match, `.md` nesting). The classifier was rewritten; the manifest now classifies 2,904 files with 0 unclassified.
+
+- **Expectation-correctness audit**: verified every anchored catalog row. Corrections landed for the Unity csproj path, the ML pragma count (18 markers across 11 files, with 13 files frozen in the policy baseline), the `|| true` counts (36 across 12 files), and the `webhooks.routes.ts:86` anchor. Also corrected: the absent backend `README.md`, the `cron/create_future_rollup_partitions.sh` name, the `TCFParser` failing-open behavior, and the `sales-scheduler.ts` path. Rows contradicted by the code were made true by implementation (§5.11, B3, R3, K4, K6) rather than by weakening.
+
+- **Mechanism audit**: verified jest/pytest/kover/llvm-cov/cargo-llvm-cov/kcov/c8 semantics. The Kover 0.8 DSL conflict was resolved against the 0.8.3 sources jar (`coverageUnits` plus `aggregationForGroup`; `CounterType` does not exist). The lcov branch check now fails closed, unknown domains in `coverage-gate.mjs` are fatal, and the c8 include/report-dir, `assertion-presence` regex, and `dogfood-gates` flag-parse defects were closed.
+
+### 9.2 Dogfooding execution (local; the first landing of the stack)
 
 | check | result |
 |---|---|
-| `node --test tools/coverage/test/` | 16/16 PASS |
-| manifest build (2,763 files) | 0 unclassified |
-| orphan gate / floor-ratchet / floors-sync | PASS |
-| assertion-presence (M-7) | PASS (10 real always-green candidates fixed: 4 implemented assertions, 6 reclassified support files) |
-| policy gate `--shell` + `--full` (M-3/M-4) | PASS (51 scripts hardened, 22 skip markers implemented, ratchet baseline frozen for 13 pragma files + 12 `|| true` files) |
-| contract: ci-reference-integrity | PASS (51 workflow files; 6 legacy refs baselined with remediation reasons) |
-| contract: openapi-parity | PASS (5/5 paths, mount-prefix aware) |
-| contract: content-guard adversarial matrix | PASS (6 payload cases) |
-| contract: samples / docs-references | PASS |
-| promtool `test rules monitoring/alerts.test.yml` (real promtool v2.53 in docker) | **SUCCESS** (3 alert state-machine cases incl. exact labels+annotations) |
-| Unity tier-1 `dotnet test` (real dotnet) | **25/25 PASS**, lcov emitted (47 files, 31% baseline) |
-| all 15 Woodpecker/docker-compose YAML files parse | PASS |
+| `node --test tools/coverage/test/` | 22/22 pass |
+| all tool suites (`coverage`, `site`, `ui-ux`) | 42/42 pass |
+| manifest build | 2,904 files, 0 unclassified |
+| orphan gate / floor-ratchet / floors-sync | pass (30 domains in lockstep) |
+| assertion-presence (M-7) | pass (10 always-green candidates resolved: 4 got real assertions, 6 reclassified as support files) |
+| policy gate `--shell` + `--full` (M-3/M-4) | pass (51 scripts hardened, 22 skip markers implemented; baseline frozen at 13 pragma files and 12 `|| true` files) |
+| contract: ci-reference-integrity | pass (37 workflow files; 6 legacy refs baselined) |
+| contract: openapi-parity | pass (5/5 paths, mount-prefix aware) |
+| contract: content-guard adversarial matrix | pass (6 payload cases) |
+| contract: samples / docs-references | pass |
+| promtool `test rules monitoring/alerts.test.yml` (real promtool v2.53 in docker) | success (3 alert state-machine cases including exact labels and annotations) |
+| Unity tier-1 `dotnet test` (real dotnet) | 25/25 pass; lcov emitted (47 files, 31% baseline) |
+| `.woodpecker` configs parse | 17/17 |
 
-### 9.3 Residual items (by design, tracked by ratchet — not weakened)
+### 9.3 Residual items (by design, tracked by ratchet)
 
-- Phase-1: delete the 13 pragma files' markers (tests to be written; baseline shrinks automatically via stale-entry failure), convert the 12 `|| true` inventories, rebuild the 2 legacy workflows behind `ci-ref-baseline.json`, implement the remaining AUDIT-REQUIRED catalog rows with the §0.2 protocol, populate `suites.json` so orphanFloorPercent can begin ratcheting below 100.
+- Phase-1: delete the 13 pragma files' markers and convert the 12 `|| true` inventories; stale baseline entries fail the policy gate until they are removed.
+- Phase-1: rebuild the two legacy workflows behind `ci-ref-baseline.json`, implement the remaining `AUDIT-REQUIRED` catalog rows with the §0.2 protocol, and populate `suites.json` so `orphanFloorPercent` can begin ratcheting below 100.
 - Phase-2: Unity tier-2 licensed lane, instrumented Android emulator lane, mutation floors.
-- Not locally executable here: the Woodpecker pipelines themselves (no server) and the GitHub-Actions-only toolchains (Android/iOS/Flutter/Kover gradle); their commands and configs were validated statically by the mechanism audit and the exact commands verified where a local tool existed (dotnet, promtool, bash, node).
+- Console layout checks: `color-contrast` and `target-size` run outside axe; the palette ratios are pinned in the apex-api Rust test and the site contrast runs in the Lighthouse lane (documented in `tools/ui-ux/console-a11y.mjs`).
+- Live-sandbox confirmation: the four LevelPlay endpoint paths are `VerifyLive`; autopilot writes through them stay blocked until the live-integration lane confirms them (apex-core `endpoint.rs` and `levelplay.rs`).
+- Not locally executable here: the Woodpecker server itself (the local runs exercise the same commands) and the GitHub-Actions-only toolchains (Android, iOS, Flutter, Kover gradle). Their commands and configs were validated statically; where a local tool existed (dotnet, promtool, bash, node, cargo), the exact commands ran green.
+
+### 9.4 Rust verifier waves and pinned regressions
+
+Three independent verifier waves found critical and major defects in the Rust product stack after it landed. Each reported item carries falsifier evidence and closed with a pinned regression test in the commit series below.
+
+| wave | defect | pinned regression | commit |
+|---|---|---|---|
+| 1 | rollback target constraint: a rollback could point at another platform or ad unit, or at a non-change record | `rollbacks_must_target_the_same_platform_and_ad_unit_change` | `9f1a944` |
+| 1 | canonical-byte injection: attacker-added record fields and re-encoded signature bytes passed the structural checks | `injected_unknown_fields_are_rejected`; `hex_case_and_whitespace_edits_are_rejected` | `9f1a944` |
+| 1 | audit NITs A5-A9: zero-floor semantics, the overflow story in unavailable-eCPM reasons, digest sensitivity, and a tautological assertion | pinned regressions in `apex-audit/src/tests.rs` | `28ec482` |
+| 2 | partial-charge reporting: a mixed sub-cent invoice was charged item by item before the error surfaced | `mixed_sub_cent_invoice_is_refused_before_any_request` | `1666051` |
+| 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `stripe_item_body_is_pinned_form_encoded` | `1666051` |
+| 3 | verify and re-read time of check: the ledger could be swapped between verification and the second read | `ledger_read_path_is_pinned_to_a_single_read` | `3def08a` |
+| 3 | ignored Stripe tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
+
+### 9.5 Current green state
+
+All checks below ran locally on 2026-10-13 from the repository root.
+
+| check | result |
+|---|---|
+| Rust workspace (`cargo test --workspace`) | 347 tests, 0 failed |
+| Rust lints | `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean |
+| apex crate coverage lanes | 7 per-crate matrix entries in `apex-rs-coverage.yml` (floors 0, ratcheting) |
+| tool suites (`npm test` under `tools/`) | 42/42 pass (coverage 22, site, ui-ux) |
+| docs-lint | total at or below the committed baseline of 8005; every scanned row at or below its row |
+| docs-lint one-shot adoption | self-test all pass (10 cases) |
+| coverage manifest | 2,904 files, 0 unclassified |
+| floors | 30 domains in lockstep (`coverage-floor.json` ↔ `floors.txt`) |
+| stub-ban | no scaffold markers in `rust/`, `tools/coverage/`, `tools/docs-lint/` |
+| aggregate verdict | pass locally (`aggregate-coverage-verdict.mjs`) |
+| site claims contract | 21/21 claims anchored and present on the site |
+| site perf budget (`tools/site/perf-budget.mjs`) | 7 pages, css 3213B (budget 12000B), zero JS, robots+sitemap present |
+| console a11y (`tools/ui-ux/console-a11y.mjs` over `render-fixtures` output) | axe-core WCAG 2.0/2.1 A+AA pass over 4 rendered pages; structure contract clean |
+| Woodpecker configs | 17/17 parse; 16 lanes wired into the aggregate |

@@ -6,7 +6,10 @@
 <title>{% block title %}{{ config.title }}{% endblock title %}</title>
 {% block meta %}<meta name="description" content="{{ config.description }}">{% endblock meta %}
 <link rel="canonical" href="{{ current_url | default(value=config.base_url) }}">
-<link rel="stylesheet" href="{{ get_url(path='style.css') }}">
+<!-- Relative asset URLs: the site deploys at a domain root; relative paths keep
+     audits (and offline previews) free of DNS-dependent absolute requests. -->
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>

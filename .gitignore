@@ -225,3 +225,8 @@ rust/target/
 
 site/public/
 site/lhci-report/
+
+# Lighthouse runner caches (any cwd)
+.lighthouseci/
+lhci-report/
+site/chrome/
