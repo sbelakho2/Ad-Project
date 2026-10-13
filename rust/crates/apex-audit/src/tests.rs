@@ -398,3 +398,93 @@ fn extreme_share_clamps_consistently_in_message_and_evidence() {
         );
     }
 }
+
+// ---------------- verifier NIT regressions (A5, A8, A9) ----------------
+
+#[test]
+fn zero_valued_floor_is_not_a_revenue_leak() {
+    // A zero floor blocks nothing; it must never be reported as a stale floor.
+    let mut snapshot = empty_snapshot();
+    snapshot.platform_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 0)])];
+    snapshot.country_revenue = vec![
+        row("EE", "uA", 0, 100_000),
+        row("US", "uA", 5_000_000, 100_000),
+    ];
+    let report = run(&snapshot);
+    assert!(
+        !report.findings.iter().any(|f| f.rule == RuleId::StaleFloor),
+        "a zero floor is 'no floor', not a stale one: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn overflow_unavailable_ecpm_reports_the_overflow_story() {
+    // Unit revenue sums past i64::MAX in i128 so the eCPM cannot convert back:
+    // the finding must say "overflows", not blame "0 impressions" (verifier A9).
+    let mut snapshot = empty_snapshot();
+    snapshot.platform_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1_000_000)])];
+    // Pair impressions at the minimum keep the unit denominator small enough
+    // that 11 x i64::MAX revenue overflows the i64 micros eCPM on conversion.
+    let mut rows = vec![row("EE", "uA", 0, 10_000)];
+    for _ in 0..11 {
+        rows.push(row("ZZ", "uA", i64::MAX, 1));
+    }
+    snapshot.country_revenue = rows;
+
+    let report = run(&snapshot);
+    let stale = report
+        .findings
+        .iter()
+        .find(|f| f.rule == RuleId::StaleFloor)
+        .expect("stale floor fires for the zero-revenue floored pair");
+    assert_eq!(stale.evidence["ecpm_unavailable_reason"], "ecpm_overflow");
+    assert!(
+        stale.message.contains("overflows"),
+        "message must name the overflow: {}",
+        stale.message
+    );
+    assert!(
+        !stale.message.contains("or unavailable"),
+        "message must not use the old conflated zero/unavailable wording: {}",
+        stale.message
+    );
+}
+
+#[test]
+fn total_saturates_at_i64_max_without_wrap() {
+    // Two stale recoveries whose sum exceeds i64::MAX: the reported total must
+    // clamp (documented in engine.rs), never wrap into a negative number.
+    let mut snapshot = empty_snapshot();
+    snapshot.platform_totals_30d = totals(1_000_000, 1_000);
+    snapshot.mediation_totals_30d = totals(1_000_000, 1_000);
+    snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1), floor("DE", 1)])];
+    snapshot.country_revenue = vec![
+        row("EE", "uA", 0, u64::MAX),
+        row("DE", "uA", 0, u64::MAX),
+        row("US", "uA", i64::MAX, 1_000),
+    ];
+    let report = run(&snapshot);
+    let stales: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule == RuleId::StaleFloor)
+        .collect();
+    assert_eq!(stales.len(), 2, "EE and DE are stale on the floored unit");
+    for finding in &stales {
+        assert!(
+            finding.estimated_monthly_recovery > i64::MAX / 2,
+            "each recovery is itself enormous: {}",
+            finding.estimated_monthly_recovery
+        );
+    }
+    assert_eq!(
+        report.total_estimated_monthly_recovery,
+        i64::MAX,
+        "the total saturates at i64::MAX"
+    );
+}

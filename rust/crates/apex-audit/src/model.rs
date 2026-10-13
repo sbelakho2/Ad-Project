@@ -223,6 +223,5 @@ mod tests {
     #[test]
     fn generated_by_is_pinned_to_crate_version() {
         assert_eq!(GENERATED_BY, "apex-audit v0.1.0");
-        assert_eq!(crate::model::GENERATED_BY.len(), "apex-audit v0.1.0".len());
     }
 }

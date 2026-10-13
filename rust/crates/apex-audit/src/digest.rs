@@ -99,3 +99,70 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod extra_sensitivity_tests {
+    use super::*;
+    use crate::model::AuditReport;
+    use crate::testkit::{empty_snapshot, mediation_group, row, totals, unit, waterfall_entry};
+
+    fn digest_of(snapshot: &crate::model::Snapshot) -> String {
+        snapshot_digest(snapshot)
+    }
+
+    #[test]
+    fn digest_changes_for_unit_waterfall_and_mediation_fields() {
+        let build = || {
+            let mut s = empty_snapshot();
+            s.platform_totals_30d = totals(1_000_000, 1_000);
+            s.mediation_totals_30d = totals(1_000_000, 1_000);
+            s.ad_units = vec![unit("u1", true, vec![])];
+            s.waterfall = vec![waterfall_entry("e1", "u1", "admob")];
+            s.mediation_groups = vec![mediation_group("g1", &["admob"], "u1")];
+            s.country_revenue = vec![row("EE", "u1", 1, 1)];
+            s
+        };
+        let base = digest_of(&build());
+
+        let mut units = build();
+        units.ad_units[0].name = "renamed-ad-unit".into();
+        assert_ne!(
+            digest_of(&units),
+            base,
+            "ad unit content must move the digest"
+        );
+
+        let mut waterfall = build();
+        waterfall.waterfall[0].price_ecpm += 1;
+        assert_ne!(
+            digest_of(&waterfall),
+            base,
+            "waterfall content must move the digest"
+        );
+
+        let mut mediation = build();
+        mediation.mediation_groups[0].mappings[0].ecpm += 1;
+        assert_ne!(
+            digest_of(&mediation),
+            base,
+            "mediation content must move the digest"
+        );
+
+        let mut revenue = build();
+        revenue.country_revenue[0].revenue_30d += 1;
+        assert_ne!(
+            digest_of(&revenue),
+            base,
+            "revenue rows must move the digest"
+        );
+    }
+
+    #[test]
+    fn report_digest_matches_snapshot_digest() {
+        let mut s = empty_snapshot();
+        s.platform_totals_30d = totals(1, 1);
+        s.mediation_totals_30d = totals(1, 1);
+        let report: AuditReport = crate::engine::run(&s);
+        assert_eq!(report.snapshot_digest, digest_of(&s));
+    }
+}

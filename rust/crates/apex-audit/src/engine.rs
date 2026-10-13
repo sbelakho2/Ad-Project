@@ -32,6 +32,9 @@ pub fn run(snapshot: &Snapshot) -> AuditReport {
     let total = findings.iter().fold(0i128, |acc, finding| {
         acc + finding.estimated_monthly_recovery as i128
     });
+    // The reported total is the exact i128 sum CLAMPED into i64: an adversarial
+    // snapshot can produce recoveries whose sum exceeds i64::MAX, and the total
+    // must saturate rather than wrap (pinned by total_saturates_at_i64_max).
     AuditReport {
         snapshot_digest: snapshot_digest(snapshot),
         findings,

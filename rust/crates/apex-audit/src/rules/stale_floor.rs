@@ -68,6 +68,12 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
             continue;
         };
         for floor in country_floors {
+            // A zero-valued floor blocks nothing, so it can never be the cause of
+            // a revenue leak; it is "no floor" written explicitly (consistent with
+            // missing_floor counting a zero floor as configured). Verifier A8.
+            if floor.floor_ecpm <= 0 {
+                continue;
+            }
             let country = normalize_country(&floor.country);
             let entry = floors
                 .entry((unit.platform_unit_id.as_str(), country))
@@ -93,13 +99,17 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
         let unit_total_revenue = unit_revenue.get(unit_id).copied().unwrap_or(0);
         let unit_total_impressions = unit_impressions.get(unit_id).copied().unwrap_or(0);
         let unit_ecpm = ecpm_i128(unit_total_revenue, unit_total_impressions);
-        let expected_ecpm = match unit_ecpm {
-            Some(value) if value > 0 => value,
-            _ => {
-                severity = downgrade(severity);
-                0
-            }
+        // Distinguish WHY the eCPM is unavailable (verifier A9): a true zero, no
+        // impressions, and an i128->i64 overflow are different operator stories.
+        let (expected_ecpm, unavailable_reason) = match unit_ecpm {
+            Some(value) if value > 0 => (value, None),
+            Some(_) => (0, Some("zero_ecpm")),
+            None if unit_total_impressions == 0 => (0, Some("no_impressions")),
+            None => (0, Some("ecpm_overflow")),
         };
+        if unavailable_reason.is_some() {
+            severity = downgrade(severity);
+        }
         let recovery = recovery_from_ecpm(expected_ecpm, impressions, 10_000);
         let recovery_model = if expected_ecpm > 0 {
             "floor_blocks_fill"
@@ -114,11 +124,15 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
                  (model: {recovery_model})"
             )
         } else {
+            let why = match unavailable_reason {
+                Some("zero_ecpm") => "ad unit eCPM is 0 micros",
+                Some("no_impressions") => "ad unit has no impressions",
+                _ => "ad unit eCPM overflows the representable micros range",
+            };
             format!(
                 "stale floor on ad unit {unit_id} in country {country}: floor {floor_ecpm} micros \
-                 set, pair revenue 0 micros over {impressions} impressions; ad unit eCPM is 0 \
-                 micros or unavailable (0 impressions), recovery capped at 0 micros/month and \
-                 severity downgraded one level (model: {recovery_model})"
+                 set, pair revenue 0 micros over {impressions} impressions; {why}, recovery capped \
+                 at 0 micros/month and severity downgraded one level (model: {recovery_model})"
             )
         };
         findings.push(finding(
@@ -135,6 +149,7 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
                 "ad_unit_total_revenue_30d_micros": clamp_i64(unit_total_revenue),
                 "ad_unit_total_impressions_30d": unit_total_impressions,
                 "ad_unit_ecpm_micros": expected_ecpm,
+                "ecpm_unavailable_reason": unavailable_reason,
                 "recovery_model": recovery_model,
                 "estimated_monthly_recovery_micros": recovery,
             }),
