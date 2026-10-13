@@ -65,9 +65,9 @@ pub fn max_experiment_key(name: &str, ad_unit_id: &str) -> String {
     format!("max-experiment:{name}:{ad_unit_id}")
 }
 
-/// Price writers include the VALUE: the same entry repriced later must not
+/// Price writers include the value: the same entry repriced later must not
 /// collide with the earlier write's idempotency key (platforms treat a repeat
-/// of a key as a duplicate of the ORIGINAL request, which would silently drop
+/// of a key as a duplicate of the original request, which would silently drop
 /// a genuine change). This intentionally diverges from the TypeScript
 /// reference, which had no value in these keys and no rerun-dedupe logic.
 pub fn levelplay_price_key(ad_unit_id: &str, entry_id: &str, price_ecpm: Micros) -> String {

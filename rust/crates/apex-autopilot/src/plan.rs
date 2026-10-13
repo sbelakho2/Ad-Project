@@ -64,9 +64,9 @@ fn change_kind_of(action: &Action) -> ChangeKind {
     }
 }
 
-/// True when the SAME change (equal idempotency key AND equal change payload)
+/// True when the same change (equal idempotency key and equal payload)
 /// is already in the ledger; a rerun must never re-apply it, and a rerun with
-/// a different VALUE under a colliding key must never be mistaken for it.
+/// a different value under a colliding key must never be mistaken for it.
 pub fn already_applied(ledger: &InMemoryLedger, key: &str, action: &Action) -> bool {
     let expected = change_kind_of(action);
     ledger.records().iter().any(|record| {
