@@ -7,8 +7,11 @@ mod common;
 
 use std::sync::Arc;
 
-use apex_api::{router, FixedClock};
+use apex_api::{router, FixedClock, MAX_BODY_BYTES};
 use apex_billing::StripeClient;
+use axum::body::Body;
+use axum::http::header::CONTENT_LENGTH;
+use axum::http::Request;
 use common::*;
 use serde_json::json;
 
@@ -428,8 +431,12 @@ async fn webhook_valid_signature_is_200_with_fixed_clock() {
 #[tokio::test]
 async fn webhook_secret_can_come_from_the_stripe_client() {
     let temp = TempDir::new("webhook-client");
+    // `StripeClient::new` became fallible upstream (it now refuses an empty
+    // secret); the pinned non-empty test secret still constructs.
     let state = file_state(temp.path(), pub1_keys())
-        .with_stripe(Arc::new(StripeClient::new(WEBHOOK_SECRET, 300)))
+        .with_stripe(Arc::new(
+            StripeClient::new(WEBHOOK_SECRET, 300).expect("pinned secret is non-empty"),
+        ))
         .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
     let app = router(state);
     let response = send(
@@ -641,4 +648,197 @@ async fn every_api_success_carries_application_json() {
             response.content_type()
         );
     }
+}
+
+// --- hardening regressions pinned from the adversarial verification report ---
+
+#[tokio::test]
+async fn webhook_client_tolerance_beats_a_wider_state_tolerance() {
+    // Falsifier from the verification report: a client configured with a 10 s
+    // tolerance must refuse a delivery 100 s old even though the state
+    // tolerance (600 s here, had it been consulted) would accept it.
+    let temp = TempDir::new("webhook-client-tight");
+    let state = file_state(temp.path(), pub1_keys())
+        .with_stripe(Arc::new(
+            StripeClient::new(WEBHOOK_SECRET, 10).expect("pinned secret is non-empty"),
+        ))
+        .with_stripe_tolerance_secs(600)
+        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 100)));
+    let app = router(state);
+    let response = send(
+        &app,
+        post_with_header(
+            "/v1/stripe/webhook",
+            "stripe-signature",
+            &webhook_header(),
+            WEBHOOK_BODY,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
+}
+
+#[tokio::test]
+async fn webhook_client_tolerance_beats_a_narrower_state_tolerance() {
+    // The converse direction: a client with a 300 s tolerance accepts a
+    // delivery 100 s old even though the state tolerance is 10 s, proving the
+    // client's value (not the state's) is the one used.
+    let temp = TempDir::new("webhook-client-wide");
+    let state = file_state(temp.path(), pub1_keys())
+        .with_stripe(Arc::new(
+            StripeClient::new(WEBHOOK_SECRET, 300).expect("pinned secret is non-empty"),
+        ))
+        .with_stripe_tolerance_secs(10)
+        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 100)));
+    let app = router(state);
+    let response = send(
+        &app,
+        post_with_header(
+            "/v1/stripe/webhook",
+            "stripe-signature",
+            &webhook_header(),
+            WEBHOOK_BODY,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["received"], true);
+}
+
+#[tokio::test]
+async fn cycle_duplicate_query_keys_are_json_bad_request() {
+    // Before the fix this was axum's plain-text QueryRejection; `/v1/*`
+    // refusals must stay `application/json` with the pinned code.
+    let temp = TempDir::new("cycle-dup-query");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &app,
+        post(&format!(
+            "/v1/cycle/{PUBLISHER}?platform=admob&platform=admob"
+        )),
+    )
+    .await;
+    assert_eq!(response.status, 400);
+    assert!(
+        response.content_type().starts_with(JSON),
+        "{}",
+        response.content_type()
+    );
+    assert_eq!(response.json(), json!({"error": "bad_request"}));
+}
+
+#[tokio::test]
+async fn invalid_utf8_path_segments_are_json_bad_request() {
+    // `%FF` is not valid UTF-8: both parameterised `/v1` routes must answer
+    // with the pinned JSON refusal instead of axum's plain-text PathRejection.
+    let temp = TempDir::new("invalid-utf8-path");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    for uri in ["/v1/audit/%FF", "/v1/ledger/%FF"] {
+        let response = send(&app, get(uri)).await;
+        assert_eq!(response.status, 400, "{uri}");
+        assert!(
+            response.content_type().starts_with(JSON),
+            "{uri}: {}",
+            response.content_type()
+        );
+        assert_eq!(response.json(), json!({"error": "bad_request"}), "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn oversized_request_body_is_json_413() {
+    let temp = TempDir::new("cycle-oversized");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    // With `Content-Length` the pre-routing guard refuses; without it the
+    // `DefaultBodyLimit` inside the handler's `Bytes` extraction must still
+    // produce the same shaped refusal through the response mapper.
+    for declared in [true, false] {
+        let body = vec![b'x'; MAX_BODY_BYTES + 1];
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/cycle/{PUBLISHER}?platform=admob"))
+            .header("content-type", "application/json");
+        if declared {
+            builder = builder.header(CONTENT_LENGTH, body.len().to_string());
+        }
+        let request = builder.body(Body::from(body)).expect("request");
+        let response = send(&app, request).await;
+        assert_eq!(response.status, 413, "declared={declared}");
+        assert!(
+            response.content_type().starts_with(JSON),
+            "declared={declared}: {}",
+            response.content_type()
+        );
+        assert_eq!(
+            response.json(),
+            json!({"error": "bad_request"}),
+            "declared={declared}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ledger_symlink_escaping_the_root_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    // A perfectly valid signed ledger exists *outside* the configured root;
+    // a symlink placed inside the root must not make the API serve it.
+    let root = TempDir::new("symlink-root");
+    let outside = TempDir::new("symlink-outside");
+    let target = write_ledger(
+        outside.path(),
+        PUBLISHER,
+        &seed_keypair(7),
+        vec![change_record(1)],
+    );
+    symlink(&target, root.path().join(format!("{PUBLISHER}.jsonl"))).expect("create symlink");
+    let app = router(file_state(root.path(), pub1_keys()));
+
+    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    assert_eq!(response.status, 404, "{}", response.body);
+    assert_eq!(response.json()["error"], "not_found");
+
+    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    assert_eq!(response.status, 404);
+    assert!(response.body.contains("no ledger exists"));
+}
+
+#[tokio::test]
+async fn empty_ledger_verifies_to_zero_records() {
+    // Fix 2(a): an empty file is a valid empty ledger in `Ledger::verify`; the
+    // single verified read keeps that contract and serves zero records.
+    let temp = TempDir::new("ledger-empty");
+    write_ledger(temp.path(), PUBLISHER, &seed_keypair(7), vec![]);
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["records"], json!([]));
+}
+
+#[test]
+fn ledger_read_path_is_pinned_to_a_single_read() {
+    // Source-level pin (compile-time `include_str!`) of the verification
+    // report's fix 2: the ledger must be parsed from the one read that
+    // `Ledger::read_verified` performed, never from a second whole-file read
+    // that could observe a file swapped after verification. The only raw
+    // `std::fs::read` left in sources.rs is the audit-snapshot reader.
+    const SOURCES: &str = include_str!("../src/sources.rs");
+    assert_eq!(
+        SOURCES.matches("std::fs::read(").count(),
+        1,
+        "sources.rs must contain exactly one raw file read (the snapshot reader)"
+    );
+    assert!(
+        SOURCES.contains("Ledger::read_verified"),
+        "the ledger path must go through the single verified read"
+    );
+    assert!(
+        !SOURCES.contains("PersistedLine"),
+        "the post-verification re-parse must stay deleted"
+    );
 }

@@ -98,6 +98,53 @@ fn empty_ledger_file_verifies_and_missing_file_is_an_io_error() {
 }
 
 #[test]
+fn read_verified_returns_the_records_from_the_verifying_read() {
+    let dir = TempDir::new("read-verified");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(2);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    append_sample(&mut ledger);
+
+    let records = Ledger::read_verified(&path, &keys.verifying_key()).expect("verified read");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].seq(), 0);
+    assert_eq!(records[1].seq(), 1);
+    assert_eq!(read_lines(&path).len(), 2);
+}
+
+#[test]
+fn read_verified_of_an_empty_file_is_zero_records() {
+    let dir = TempDir::new("read-verified-empty");
+    let path = dir.file("ledger.jsonl");
+    std::fs::write(&path, b"").expect("write empty file");
+    let keys = keypair(3);
+
+    let records = Ledger::read_verified(&path, &keys.verifying_key()).expect("empty verifies");
+    assert!(records.is_empty());
+}
+
+#[test]
+fn read_verified_names_the_tampered_line() {
+    let dir = TempDir::new("read-verified-tamper");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(4);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    for op in 0..3 {
+        ledger.append(change(op)).expect("append");
+    }
+
+    let mut lines = read_lines(&path);
+    lines[1] = lines[1].replacen("admob-ecpm:g1:u1:1", "admob-ecpm:g1:u1:9", 1);
+    write_lines(&path, &lines);
+
+    let err = Ledger::read_verified(&path, &keys.verifying_key()).expect_err("tampered");
+    assert!(
+        matches!(err, LedgerError::HashMismatch { line: 2 }),
+        "{err}"
+    );
+}
+
+#[test]
 fn first_append_is_genesis_and_links_are_consistent() {
     let dir = TempDir::new("genesis");
     let path = dir.file("ledger.jsonl");

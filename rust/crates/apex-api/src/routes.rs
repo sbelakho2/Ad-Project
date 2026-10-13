@@ -5,17 +5,28 @@
 //! | route | success | refusals |
 //! |---|---|---|
 //! | `GET /healthz` | `200 {"status":"ok"}` | — |
-//! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform`, `404 not_found` |
-//! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
-//! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy`, `404`, `422` |
+//! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
+//! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
+//! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
 //! | `POST /v1/stripe/webhook` | `200 {"received":true,"timestamp":t}` | `400 invalid_signature`, `503 webhook_not_configured` |
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
 //! with the wrong method is axum's `405` (asserted by tests).
+//!
+//! Refusals produced inside route extraction follow the same audience split:
+//! a malformed path segment or duplicated query key on `/v1/*` is
+//! `400 {"error":"bad_request"}`, the same failure on `/console/*` is the HTML
+//! error page with status `400`. Request bodies are capped at
+//! [`MAX_BODY_BYTES`] (256 KiB) via [`DefaultBodyLimit`]; an oversized body is
+//! refused with `413` in the audience's shape (JSON on `/v1/*`, HTML
+//! elsewhere), whether it is declared up front by `Content-Length` or caught
+//! by the extractor inside the handler.
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -32,6 +43,12 @@ use crate::html::{
 use crate::sources::{is_valid_publisher, parse_platform};
 use crate::state::AppState;
 
+/// Hard cap on every request body, enforced by [`DefaultBodyLimit`] and by the
+/// pre-routing `Content-Length` check below. 256 KiB is far above the largest
+/// legitimate body (the optional cycle policy JSON) and bounds the memory a
+/// single request can make the server buffer.
+pub const MAX_BODY_BYTES: usize = 256 * 1024;
+
 /// Build the complete router (API + console) over `state`.
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -44,8 +61,54 @@ pub fn router(state: AppState) -> Router {
         .route("/console/audit", get(console_audit))
         .route("/console/ledger", get(console_ledger))
         .fallback(not_found)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(shape_oversized_responses))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Refuse a body that declares itself larger than [`MAX_BODY_BYTES`] before
+/// routing, and re-shape any `413` produced by the body extractors afterwards
+/// so an oversized body always answers in the audience's contract shape.
+async fn shape_oversized_responses(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > MAX_BODY_BYTES as u64) {
+        return body_too_large(&path);
+    }
+    let response = next.run(request).await;
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return body_too_large(&path);
+    }
+    response
+}
+
+/// The `413` response for `path`: the pinned JSON refusal on `/v1/*`, the
+/// HTML error page everywhere else.
+fn body_too_large(path: &str) -> Response {
+    if path.starts_with("/v1/") {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "bad_request" })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Html(render_error_page(
+                "bad request",
+                &format!(
+                    "request body exceeds the deployment's {} KiB limit",
+                    MAX_BODY_BYTES / 1024
+                ),
+            )),
+        )
+            .into_response()
+    }
 }
 
 async fn not_found() -> ApiError {
@@ -58,8 +121,11 @@ async fn healthz() -> Json<serde_json::Value> {
 
 async fn audit_report(
     State(state): State<AppState>,
-    Path(platform): Path<String>,
+    platform: Result<Path<String>, PathRejection>,
 ) -> Result<Json<apex_audit::AuditReport>, ApiError> {
+    let Ok(Path(platform)) = platform else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
     let platform = parse_platform(&platform).ok_or(ApiError::BadRequest("unknown_platform"))?;
     let snapshot = state.audit_source.snapshot(platform).await?;
     Ok(Json(apex_audit::run(&snapshot)))
@@ -67,8 +133,11 @@ async fn audit_report(
 
 async fn ledger(
     State(state): State<AppState>,
-    Path(publisher): Path<String>,
+    publisher: Result<Path<String>, PathRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let Ok(Path(publisher)) = publisher else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
     if !is_valid_publisher(&publisher) {
         return Err(ApiError::BadRequest("invalid_publisher"));
     }
@@ -88,13 +157,19 @@ struct CycleParams {
 
 async fn run_cycle(
     State(state): State<AppState>,
-    Path(publisher): Path<String>,
-    Query(params): Query<CycleParams>,
+    publisher: Result<Path<String>, PathRejection>,
+    params: Result<Query<CycleParams>, QueryRejection>,
     body: Bytes,
 ) -> Result<Json<CycleSummary>, ApiError> {
+    let Ok(Path(publisher)) = publisher else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
     if !is_valid_publisher(&publisher) {
         return Err(ApiError::BadRequest("invalid_publisher"));
     }
+    let Ok(Query(params)) = params else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
     let platform_name = params
         .platform
         .ok_or(ApiError::BadRequest("platform_required"))?;
@@ -143,13 +218,18 @@ async fn stripe_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (secret, tolerance) = match (&state.webhook_secret, &state.stripe) {
-        (Some(secret), _) => (secret.clone(), state.stripe_tolerance_secs),
-        (None, Some(client)) => (
-            client.webhook_secret().to_vec(),
-            state.stripe_tolerance_secs,
-        ),
-        (None, None) => return Err(ApiError::WebhookNotConfigured),
+    // Precedence, pinned by tests: a configured `StripeClient` supplies BOTH
+    // the signing secret and the freshness tolerance (its own
+    // `tolerance_secs`), so a stricter tolerance on the client is never
+    // silently widened. The state's explicit `webhook_secret` and
+    // `stripe_tolerance_secs` are the fallback for deployments that hold only
+    // a secret; with neither configured the route is 503.
+    let (secret, tolerance) = match &state.stripe {
+        Some(client) => (client.webhook_secret().to_vec(), client.tolerance_secs()),
+        None => match &state.webhook_secret {
+            Some(secret) => (secret.clone(), state.stripe_tolerance_secs),
+            None => return Err(ApiError::WebhookNotConfigured),
+        },
     };
     let signature_header = headers
         .get("stripe-signature")
@@ -184,8 +264,17 @@ struct AuditConsoleParams {
 
 async fn console_audit(
     State(state): State<AppState>,
-    Query(params): Query<AuditConsoleParams>,
+    params: Result<Query<AuditConsoleParams>, QueryRejection>,
 ) -> Response {
+    let Ok(Query(params)) = params else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            render_error_page(
+                "bad request",
+                "the request parameters could not be interpreted",
+            ),
+        );
+    };
     let Some(platform_name) = params.platform else {
         return page(StatusCode::OK, render_audit_form(None, None));
     };
@@ -226,8 +315,17 @@ struct LedgerConsoleParams {
 
 async fn console_ledger(
     State(state): State<AppState>,
-    Query(params): Query<LedgerConsoleParams>,
+    params: Result<Query<LedgerConsoleParams>, QueryRejection>,
 ) -> Response {
+    let Ok(Query(params)) = params else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            render_error_page(
+                "bad request",
+                "the request parameters could not be interpreted",
+            ),
+        );
+    };
     let Some(publisher) = params.publisher else {
         return page(StatusCode::OK, render_ledger_form(None, None));
     };

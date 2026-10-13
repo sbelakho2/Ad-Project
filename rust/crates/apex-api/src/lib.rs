@@ -59,7 +59,7 @@ pub use html::{
     html_escape, render_audit_form, render_audit_page, render_error_page, render_ledger_form,
     render_ledger_records, render_overview,
 };
-pub use routes::router;
+pub use routes::{router, MAX_BODY_BYTES};
 pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,

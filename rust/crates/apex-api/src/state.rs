@@ -15,8 +15,10 @@ use crate::cycle::{CycleRunner, LedgerOnlyRunner};
 use crate::sources::{AuditSource, LedgerSource};
 
 /// The webhook freshness tolerance used when [`AppState::new`] builds the
-/// state: 300 seconds, the customary Stripe default.
-pub const DEFAULT_STRIPE_TOLERANCE_SECS: u64 = 300;
+/// state: the single billing-side default
+/// ([`apex_billing::DEFAULT_TOLERANCE_SECS`], 300 seconds), re-exported so the
+/// API cannot drift from the verifier it calls.
+pub use apex_billing::DEFAULT_TOLERANCE_SECS as DEFAULT_STRIPE_TOLERANCE_SECS;
 
 /// The complete dependency set of the HTTP surface.
 #[derive(Clone, Debug)]
@@ -25,11 +27,16 @@ pub struct AppState {
     pub audit_source: Arc<dyn AuditSource>,
     /// Where verified ledger records come from.
     pub ledger_source: Arc<dyn LedgerSource>,
-    /// Stripe API client (webhook secret carrier in this deployment).
+    /// Stripe API client. When configured, the webhook route takes **both**
+    /// the signing secret and the freshness tolerance from it; the state's
+    /// `webhook_secret` / `stripe_tolerance_secs` are the fallback for
+    /// deployments without a client.
     pub stripe: Option<Arc<StripeClient>>,
-    /// Explicit webhook secret; takes precedence over the client's secret.
+    /// Explicit webhook secret, used only when no Stripe client is
+    /// configured.
     pub webhook_secret: Option<Vec<u8>>,
-    /// Maximum accepted Stripe signature timestamp skew, in seconds.
+    /// Maximum accepted Stripe signature timestamp skew, in seconds, used
+    /// only when no Stripe client is configured (a client carries its own).
     pub stripe_tolerance_secs: u64,
     /// The clock used for Stripe signature freshness.
     pub clock: Arc<dyn Clock>,
@@ -110,6 +117,12 @@ mod tests {
         assert!(state.stripe.is_none());
         assert!(state.webhook_secret.is_none());
         assert_eq!(state.stripe_tolerance_secs, DEFAULT_STRIPE_TOLERANCE_SECS);
+        // Fix 5: the API default is the billing verifier's default itself,
+        // not a second copy of the number.
+        assert_eq!(
+            DEFAULT_STRIPE_TOLERANCE_SECS,
+            apex_billing::DEFAULT_TOLERANCE_SECS
+        );
         assert!(state.stripe_tolerance_secs > 0);
         assert!(format!("{:?}", state.clock).contains("SystemClock"));
     }

@@ -122,7 +122,28 @@ impl Ledger {
         path: impl AsRef<Path>,
         expected_pubkey: &VerifyingKey,
     ) -> Result<(), LedgerError> {
-        read_and_verify(path.as_ref(), expected_pubkey).map(|_| ())
+        Self::read_verified(path, expected_pubkey).map(|_| ())
+    }
+
+    /// Read a ledger file and return its records from **the same single read
+    /// that verified them**.
+    ///
+    /// This is the read path for consumers that display or forward verified
+    /// records: `Ledger::verify` plus a separate file read would leave a
+    /// window in which the file can be replaced between verification and the
+    /// read, and the records actually served would then never have been
+    /// verified. Here the bytes that pass every check are the bytes the
+    /// returned records are parsed from, so no such window exists.
+    ///
+    /// The verification contract is exactly [`Ledger::verify`]'s: same
+    /// signature, public-key, canonical-encoding and chain checks, reported
+    /// with the 1-based line of the first offender. An empty file is a valid
+    /// empty ledger.
+    pub fn read_verified(
+        path: impl AsRef<Path>,
+        expected_pubkey: &VerifyingKey,
+    ) -> Result<Vec<LedgerRecord>, LedgerError> {
+        read_and_verify(path.as_ref(), expected_pubkey).map(|verified| verified.records)
     }
 
     /// Seal, sign and append one record after re-verifying the on-disk tail.

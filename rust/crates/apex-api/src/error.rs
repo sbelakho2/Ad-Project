@@ -15,7 +15,8 @@ use serde_json::json;
 pub enum ApiError {
     /// A request the server refuses to interpret: the payload names the
     /// machine-readable reason (`unknown_platform`, `invalid_publisher`,
-    /// `platform_required`, `invalid_cycle_request`, `invalid_policy`).
+    /// `platform_required`, `invalid_cycle_request`, `invalid_policy`, and
+    /// `bad_request` for a malformed path/query or an oversized body).
     #[error("bad request: {0}")]
     BadRequest(&'static str),
 

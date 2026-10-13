@@ -6,7 +6,12 @@
 
 mod common;
 
-use apex_api::router;
+use apex_api::{router, MAX_BODY_BYTES};
+use apex_core::PlatformId;
+use apex_proof::{ChangeKind, LedgerRecord};
+use axum::body::Body;
+use axum::http::header::CONTENT_LENGTH;
+use axum::http::Request;
 use common::*;
 
 const HTML: &str = "text/html";
@@ -16,12 +21,15 @@ const HOSTILE: &str = "<script>alert(1)</script>";
 const HOSTILE_ENCODED: &str = "%3Cscript%3Ealert(1)%3C%2Fscript%3E";
 
 fn assert_no_raw_script(body: &str, context: &str) {
+    // Case-insensitive: a regression that re-introduced markup could emit
+    // `<SCRIPT>` just as well as `<script>`.
+    let lowercase = body.to_ascii_lowercase();
     assert!(
-        !body.contains("<script"),
+        !lowercase.contains("<script"),
         "{context}: page contains <script"
     );
     assert!(
-        !body.contains(HOSTILE),
+        !lowercase.contains(&HOSTILE.to_ascii_lowercase()),
         "{context}: page contains the raw hostile string"
     );
 }
@@ -302,4 +310,109 @@ async fn console_pages_are_html_and_contain_no_script_elements() {
         assert_no_raw_script(&response.body, &uri);
         assert!(response.body.contains("<!DOCTYPE html>"), "{uri}");
     }
+}
+
+// --- hardening regressions pinned from the adversarial verification report ---
+
+#[tokio::test]
+async fn console_duplicate_query_keys_are_html_bad_request() {
+    // Before the fix this was axum's plain-text QueryRejection; console
+    // refusals must stay HTML with the pinned error page.
+    let temp = TempDir::new("console-dup-query");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    for uri in [
+        "/console/audit?platform=admob&platform=admob",
+        "/console/ledger?publisher=a&publisher=b",
+    ] {
+        let response = send(&app, get(uri)).await;
+        assert_eq!(response.status, 400, "{uri}");
+        assert!(
+            response.content_type().starts_with(HTML),
+            "{uri}: {}",
+            response.content_type()
+        );
+        assert!(response.body.contains("<!DOCTYPE html>"), "{uri}");
+        assert!(
+            response.body.contains("could not be interpreted"),
+            "{uri}: {}",
+            response.body
+        );
+        assert_no_raw_script(&response.body, uri);
+    }
+}
+
+#[tokio::test]
+async fn oversized_request_body_is_html_413() {
+    let temp = TempDir::new("console-oversized");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let body = vec![b'x'; MAX_BODY_BYTES + 1];
+    let request = Request::builder()
+        .method("GET")
+        .uri("/console/audit")
+        .header(CONTENT_LENGTH, body.len().to_string())
+        .body(Body::from(body))
+        .expect("request");
+    let response = send(&app, request).await;
+    assert_eq!(response.status, 413);
+    assert!(
+        response.content_type().starts_with(HTML),
+        "{}",
+        response.content_type()
+    );
+    assert!(
+        response.body.contains("<!DOCTYPE html>"),
+        "{}",
+        response.body
+    );
+    assert!(
+        response.body.contains("exceeds the deployment"),
+        "{}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn hostile_ledger_record_fields_render_escaped() {
+    // The ledger table serializes each record as JSON and escapes the whole
+    // string, so hostile values in *any* record field (idempotency key,
+    // ad-unit id, rollback reason, ...) must come out inert.
+    let temp = TempDir::new("console-ledger-hostile-record");
+    write_snapshot(temp.path(), "admob", &minimal_snapshot(&["u1"]));
+    let hostile_key = "</code></td><script>alert(1)</script>";
+    let hostile_unit = "\" onmouseover=\"alert(1)";
+    write_ledger(
+        temp.path(),
+        PUBLISHER,
+        &seed_keypair(7),
+        vec![LedgerRecord::change_applied(
+            1_700_000_000_000,
+            PlatformId::Admob,
+            hostile_unit,
+            ChangeKind::CountryFloorSet {
+                country: "EE".into(),
+                floor_ecpm: 2_500_000,
+            },
+            hostile_key,
+        )],
+    );
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    assert_eq!(response.status, 200);
+    assert!(
+        response
+            .body
+            .contains("&lt;/code&gt;&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "escaped idempotency key missing"
+    );
+    assert!(
+        // serde_json escapes the embedded quotes, then `html_escape` maps the
+        // resulting `"` characters; the raw `onmouseover="alert(1)"` form is
+        // unreachable.
+        response
+            .body
+            .contains("\\&quot; onmouseover=\\&quot;alert(1)"),
+        "escaped ad-unit id missing"
+    );
+    assert!(!response.body.contains("onmouseover=\"alert(1)\""));
+    assert_no_raw_script(&response.body, "hostile ledger record fields");
 }

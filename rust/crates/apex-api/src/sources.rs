@@ -6,12 +6,18 @@
 //!   `apex_audit::Snapshot`. A missing file is `404`; an unparseable or
 //!   mismatched file is a logged internal error (an operator problem, not a
 //!   client one).
-//! - [`FileLedgerSource`] reads `<root>/<publisher>.jsonl` and re-verifies the
-//!   whole chain with `apex_proof::Ledger::verify` before serving any record.
-//!   A verification failure is `422 ledger_unverified` with the 1-based first
-//!   offending line quoted from the verifier.
+//! - [`FileLedgerSource`] reads `<root>/<publisher>.jsonl` through
+//!   [`apex_proof::Ledger::read_verified`], the single read that both verifies
+//!   and returns the records. There is deliberately no second whole-file read:
+//!   records are only ever parsed from bytes that passed verification. A
+//!   verification failure is `422 ledger_unverified` with the 1-based first
+//!   offending line quoted from the verifier; a ledger above
+//!   [`MAX_LEDGER_BYTES`] is refused before any read.
 //!
-//! ## Path traversal is structurally impossible
+//! All filesystem work is synchronous and runs on `tokio`'s blocking pool via
+//! [`tokio::task::spawn_blocking`], so handlers never block a runtime worker.
+//!
+//! ## Path traversal is structurally impossible, and symlinks cannot escape
 //!
 //! Publisher names are the only URL-derived file names, and
 //! [`is_valid_publisher`] restricts them to `^[A-Za-z0-9_-]{1,64}$` (ASCII
@@ -20,16 +26,22 @@
 //! is built; the sources re-check the name so they are safe even when called
 //! directly (pinned by tests). Platform names are matched against the closed
 //! set `applovin_max | levelplay | admob`.
+//!
+//! As defense in depth over that allow-list, each source canonicalizes its
+//! configured root once at construction and requires every file path to
+//! canonicalize inside that root before reading: a symlink planted inside the
+//! root that points elsewhere resolves outside and is reported as `404`, and a
+//! dangling path is a `404` as well.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use apex_audit::Snapshot;
 use apex_core::PlatformId;
 use apex_proof::{Ledger, LedgerError, LedgerRecord, VerifyingKey};
 use async_trait::async_trait;
-use serde::Deserialize;
 
 use crate::error::ApiError;
 
@@ -39,6 +51,10 @@ pub const PLATFORM_NAMES: [(&str, &str); 3] = [
     ("levelplay", "LevelPlay"),
     ("admob", "AdMob"),
 ];
+
+/// Read cap for one ledger file: a ledger larger than this is refused before
+/// any bytes are read, so a hostile or runaway file cannot exhaust memory.
+pub const MAX_LEDGER_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Parse a URL/platform-file name into a [`PlatformId`].
 pub fn parse_platform(name: &str) -> Option<PlatformId> {
@@ -60,6 +76,41 @@ pub fn is_valid_publisher(publisher: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// Resolve `path` and require the result to stay under `canonical_root`.
+///
+/// A missing (or dangling) path is [`ApiError::NotFound`], an unresolvable
+/// path is a logged internal error, and a path that resolves outside the
+/// canonical root — e.g. through a symlink planted in the root — is reported
+/// as `NotFound` rather than served.
+fn contained_in(canonical_root: &Path, path: PathBuf) -> Result<PathBuf, ApiError> {
+    let resolved = path.canonicalize().map_err(|error| match error.kind() {
+        ErrorKind::NotFound => ApiError::NotFound,
+        _ => ApiError::Internal(format!("resolve {}: {error}", path.display())),
+    })?;
+    if resolved.starts_with(canonical_root) {
+        Ok(resolved)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+/// Refuse a file whose on-disk size exceeds `cap` before it is read.
+fn ensure_within_cap(size: u64, cap: u64) -> Result<(), ApiError> {
+    if size > cap {
+        return Err(ApiError::Internal(format!(
+            "ledger is {size} bytes, above the {cap}-byte read cap"
+        )));
+    }
+    Ok(())
+}
+
+/// Canonicalize a configured root once, falling back to the configured path
+/// when it does not resolve yet (every later containment check then fails
+/// closed until the root exists).
+fn canonical_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+}
+
 /// An audit snapshot provider (one snapshot per platform).
 #[async_trait]
 pub trait AuditSource: Send + Sync + std::fmt::Debug {
@@ -79,12 +130,18 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Clone)]
 pub struct JsonFileAuditSource {
     root: PathBuf,
+    canonical_root: PathBuf,
 }
 
 impl JsonFileAuditSource {
-    /// A source rooted at `root`.
+    /// A source rooted at `root`; the root is canonicalized here, once.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let canonical_root = canonical_root(&root);
+        Self {
+            root,
+            canonical_root,
+        }
     }
 
     /// The directory snapshots are read from.
@@ -98,7 +155,7 @@ impl JsonFileAuditSource {
     }
 
     fn load(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
-        let path = self.path_for(platform);
+        let path = contained_in(&self.canonical_root, self.path_for(platform))?;
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
@@ -127,7 +184,10 @@ impl JsonFileAuditSource {
 #[async_trait]
 impl AuditSource for JsonFileAuditSource {
     async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
-        self.load(platform)
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load(platform))
+            .await
+            .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
     }
 }
 
@@ -159,23 +219,30 @@ impl AuditSource for StaticAuditSource {
     }
 }
 
-/// Reads and re-verifies `<root>/<publisher>.jsonl` against the pinned key.
+/// Reads and verifies `<root>/<publisher>.jsonl` against the pinned key.
 ///
 /// The key map is the allow-list of onboarded publishers: an unknown (but
 /// well-formed) publisher is a `404`, never an attempt at some other file.
+/// Records are parsed from the one read that verification accepted, so a file
+/// swapped after an earlier check can never be served from a stale
+/// verification.
 #[derive(Debug, Clone)]
 pub struct FileLedgerSource {
-    keys: HashMap<String, VerifyingKey>,
+    keys: Arc<HashMap<String, VerifyingKey>>,
     root: PathBuf,
+    canonical_root: PathBuf,
 }
 
 impl FileLedgerSource {
     /// Build a source from the publisher -> public-key allow-list and the
-    /// ledger root.
+    /// ledger root; the root is canonicalized here, once.
     pub fn new(root: impl Into<PathBuf>, keys: HashMap<String, VerifyingKey>) -> Self {
+        let root = root.into();
+        let canonical_root = canonical_root(&root);
         Self {
-            root: root.into(),
-            keys,
+            keys: Arc::new(keys),
+            root,
+            canonical_root,
         }
     }
 
@@ -194,9 +261,9 @@ impl FileLedgerSource {
             return Err(ApiError::BadRequest("invalid_publisher"));
         }
         let expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
-        let path = self.path_for(publisher);
-        match std::fs::metadata(&path) {
-            Ok(_) => {}
+        let path = contained_in(&self.canonical_root, self.path_for(publisher))?;
+        let size = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.len(),
             Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
             Err(error) => {
                 return Err(ApiError::Internal(format!(
@@ -204,22 +271,25 @@ impl FileLedgerSource {
                     path.display()
                 )));
             }
-        }
-        Ledger::verify(&path, expected_key).map_err(|error| match ledger_error_line(&error) {
-            Some(line) => ApiError::LedgerUnverified { line },
-            None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
-        })?;
-        let bytes = std::fs::read(&path).map_err(|error| {
-            ApiError::Internal(format!("read ledger {}: {error}", path.display()))
-        })?;
-        parse_verified_records(&bytes)
+        };
+        ensure_within_cap(size, MAX_LEDGER_BYTES)?;
+        Ledger::read_verified(&path, expected_key).map_err(|error| {
+            match ledger_error_line(&error) {
+                Some(line) => ApiError::LedgerUnverified { line },
+                None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
+            }
+        })
     }
 }
 
 #[async_trait]
 impl LedgerSource for FileLedgerSource {
     async fn records(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError> {
-        self.load(publisher)
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load(&publisher))
+            .await
+            .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
     }
 }
 
@@ -252,38 +322,6 @@ impl LedgerSource for StaticLedgerSource {
             .cloned()
             .ok_or(ApiError::NotFound)
     }
-}
-
-/// One persisted ledger line, mirroring the byte-exact format documented and
-/// enforced by `apex_proof` (`{"record":...,"signature":...,"pubkey":...}`).
-/// Only `record` is read here: `Ledger::verify` has already re-derived the
-/// canonical bytes and checked the signature and chain, so the extra fields
-/// need no second look.
-#[derive(Debug, Deserialize)]
-struct PersistedLine {
-    record: LedgerRecord,
-}
-
-/// Parse the records out of a file that `Ledger::verify` has already accepted.
-///
-/// The verified file always ends with a newline and every chunk is a canonical
-/// `PersistedLine`; a parse failure here therefore means the file changed
-/// between verification and this read, which is reported as an internal error.
-fn parse_verified_records(bytes: &[u8]) -> Result<Vec<LedgerRecord>, ApiError> {
-    let mut records = Vec::new();
-    if bytes.is_empty() {
-        return Ok(records);
-    }
-    let Some((complete, _)) = bytes.split_at_checked(bytes.len() - 1) else {
-        return Err(ApiError::Internal("ledger ended unexpectedly".into()));
-    };
-    for (index, chunk) in complete.split(|byte| *byte == b'\n').enumerate() {
-        let line: PersistedLine = serde_json::from_slice(chunk).map_err(|error| {
-            ApiError::Internal(format!("parse verified ledger line {}: {error}", index + 1))
-        })?;
-        records.push(line.record);
-    }
-    Ok(records)
 }
 
 /// The 1-based line of the first offending record, for every `LedgerError`
@@ -385,6 +423,59 @@ mod tests {
             ledger_error_line(&LedgerError::Validation("x".into())),
             None
         );
+    }
+
+    #[test]
+    fn ledger_size_cap_boundaries_are_pinned() {
+        // Synthetic sizes: the guard is pure, so no file is needed.
+        assert!(ensure_within_cap(0, MAX_LEDGER_BYTES).is_ok());
+        assert!(ensure_within_cap(MAX_LEDGER_BYTES - 1, MAX_LEDGER_BYTES).is_ok());
+        assert!(ensure_within_cap(MAX_LEDGER_BYTES, MAX_LEDGER_BYTES).is_ok());
+        let error = ensure_within_cap(MAX_LEDGER_BYTES + 1, MAX_LEDGER_BYTES)
+            .expect_err("one byte above the cap is refused");
+        assert!(matches!(error, ApiError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("read cap"), "{error}");
+        assert_eq!(MAX_LEDGER_BYTES, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn containment_requires_the_canonical_root_prefix() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-api-contained-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).expect("create root");
+        let inside = root.join("pub1.jsonl");
+        std::fs::write(&inside, b"").expect("write inside");
+        let canonical = canonical_root(&root);
+        assert_eq!(
+            contained_in(&canonical, inside).expect("inside"),
+            canonical.join("pub1.jsonl")
+        );
+        // A sibling path that merely shares a textual prefix must not pass.
+        let sibling = root.with_file_name(format!(
+            "{}-sibling",
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .expect("root name")
+        ));
+        std::fs::create_dir_all(&sibling).expect("create sibling");
+        let escaped = sibling.join("pub1.jsonl");
+        std::fs::write(&escaped, b"").expect("write sibling");
+        assert!(matches!(
+            contained_in(&canonical, escaped),
+            Err(ApiError::NotFound)
+        ));
+        assert!(matches!(
+            contained_in(&canonical, root.join("missing.jsonl")),
+            Err(ApiError::NotFound)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
     }
 
     #[tokio::test]
