@@ -534,3 +534,27 @@ All checks below ran locally on 2026-10-13 from the repository root.
 | site perf budget (`tools/site/perf-budget.mjs`) | 7 pages, css 3213B (budget 12000B), zero JS, robots+sitemap present |
 | console a11y (`tools/ui-ux/console-a11y.mjs` over `render-fixtures` output) | axe-core WCAG 2.0/2.1 A+AA pass over 4 rendered pages; structure contract clean |
 | Woodpecker configs | 17/17 parse; 16 lanes wired into the aggregate |
+
+### 9.6 Blind-spot sweep results (all gates executed locally, in order)
+
+| gate | result |
+|---|---|
+| tools test suites | 59/59 |
+| manifest | 2,946 files, zero unclassified |
+| walker parity | PASS, one gitlink accounted and one case-folded name noted |
+| orphan gate | PASS at the 100% phase ceiling |
+| floor ratchet and floors sync | PASS, 30 domains in lockstep |
+| assertion presence | PASS |
+| stub ban | PASS over rust, tooling and site |
+| mutation floor | PASS, sample kills 6/6 against a 60% floor |
+| policy gates, shell and full | PASS |
+| contract checks: ci-reference, openapi, content guard, samples, docs references | PASS |
+| docs links | PASS, 171 frozen rows |
+| i18n parity | PASS |
+| css contract | PASS |
+| docs-lint prose ratchet | OK, 7,941 at or below 8,005 with every row in budget |
+| Woodpecker YAML | all valid |
+| rust workspace | 366 tests, clippy warnings-free, formatted |
+| site | perf budget PASS, 21 claims PASS |
+| console a11y | WCAG 2.0 and 2.1 A plus AA clean |
+| aggregate verdict | PASS |
