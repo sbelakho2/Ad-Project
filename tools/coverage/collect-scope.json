@@ -10,7 +10,7 @@
   "react-native-sdk": { "dir": "sdk/react-native", "collectCoverageFrom": ["src/**/*.tsx", "src/**/*.ts", "!src/**/*.d.ts", "!src/**/__tests__/**"] },
   "js-tools": {
     "dir": "tools",
-    "collectCoverageFrom": ["coverage/*.mjs", "content-guard.js"],
+    "collectCoverageFrom": ["coverage/*.mjs", "site/*.mjs", "content-guard.js"],
     "__scope": "declared c8-measured subset of the js-tools domain; widened as phase-1 suites land (tools/package.json test:cov must read this list)"
   }
 }

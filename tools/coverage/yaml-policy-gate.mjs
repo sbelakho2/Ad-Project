@@ -9,7 +9,7 @@
 //   - a violation listed in the baseline for its category is tolerated;
 //   - a violation NOT in the baseline fails the gate;
 //   - a baseline entry that is no longer a violation FAILS ("stale entry") so the
-//     baseline can only shrink — fixes must remove their entry.
+//     baseline can only shrink — a closed entry must leave the baseline.
 import fs from 'node:fs';
 import path from 'node:path';
 import { walkRepo, REPO_ROOT } from './coverage-lib.mjs';
@@ -40,9 +40,9 @@ if (shell || full) {
       const hasSetEu = /set\s+-eu(o\s+pipefail)?/.test(firstHundred);
       if (!hasSetEu && !shellAllowlistNoSetEu.some((p) => rel.startsWith(p))) actual.shell.push(`${rel}: set -eu missing`);
     }
-    // Word-boundary destructive keywords: 'dropped' must not match DROP (the
-    // docs-lint port surfaced that substring false positive), and deploy-all.sh
-    // as a FILE name is not content; only actual words count.
+    // Word-boundary destructive keywords. A substring hit like "dropped"
+    // matching the drop keyword is a false positive (found by the docs-lint
+    // port itself). Filenames in text do not count; only whole words do.
     if (/\b(deploy|ssh|kubectl|docker|pm2|systemctl|helm|terraform|migrate|drop|truncate)\b/i.test(text) && !/DOGFOOD_DRY_RUN/.test(text)) {
       actual.shell.push(`${rel}: destructive without DOGFOOD_DRY_RUN guard`);
     }

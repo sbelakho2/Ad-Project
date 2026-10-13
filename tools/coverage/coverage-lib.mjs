@@ -109,7 +109,7 @@ export const DOMAINS = [
   { id: 'tvos-swift', kind: 'code', include: ['sdk/ctv/tvos/Sources/**/*.swift'] },
   { id: 'flutter', kind: 'code', include: ['sdk/flutter/lib/**/*.dart'] },
   { id: 'go-quality', kind: 'code', include: ['quality/**/*.go'], exclude: ['**/*_test.go'] },
-  { id: 'js-tools', kind: 'code', include: ['tools/**/*.js', 'backend/*.js', 'backend/scripts/**/*.js', 'control-plane/scripts/**/*.js', 'quality/**/*.js', 'scripts/**/*.js', 'console/scripts/*.js', 'tools/coverage/**/*.mjs'], exclude: ['**/*.min.js'] },
+  { id: 'js-tools', kind: 'code', include: ['tools/**/*.js', 'tools/**/*.mjs', 'backend/*.js', 'backend/scripts/**/*.js', 'control-plane/scripts/**/*.js', 'quality/**/*.js', 'scripts/**/*.js', 'console/scripts/*.js'], exclude: ['**/*.min.js'] },
   { id: 'shell', kind: 'code', include: ['**/*.sh', '.husky/pre-commit'] },
   // py-scripts second block: none (scripts/**/*.py above already covers scripts/ml)
   // --- docs: link/reference contract ---
@@ -119,6 +119,7 @@ export const DOMAINS = [
   { id: 'contract-iac', kind: 'contract', include: ['monitoring/**/*.{yml,yaml,json}', 'infrastructure/**/*.{yml,yaml,toml,conf,service,tf}', 'infrastructure/**/grafana/**/*.json', '**/Dockerfile*', '**/docker-compose*.yml', '**/docker-compose*.yaml', '.github/**/*.yml', '.github/**/*.json', '**/.github/workflows/*.yml', '.woodpecker/*.yml', '**/helm/**', '**/*.service', '**/*.service.example', '**/*.timer.example', 'infrastructure/database/cron/*', 'ML/**/*.yaml', '**/*.proto', 'scripts/**/*.conf', '**/AndroidManifest.xml', '**/link.xml', '**/Caddyfile', 'docs/**/evidence/**/*.{yml,yaml}'] },
   { id: 'contract-openapi', kind: 'contract', include: ['backend/src/openapi/**/*.yaml', 'backend/openapi.yaml', '**/openapi*.yaml'] },
   { id: 'contract-i18n', kind: 'contract', include: ['**/i18n/**/*.json', '**/messages/**/*.json'] },
+  { id: 'contract-site', kind: 'contract', include: ['site/**'] },
   { id: 'contract-css', kind: 'contract', include: ['**/*.css', '**/*.scss'] },
   { id: 'contract-build', kind: 'contract', include: ['**/package.json', '**/build.gradle', '**/settings.gradle', '**/gradle.properties', '**/*.properties', '**/*.pro', '**/Package.swift', '**/Cargo.toml', '**/*.toml', '**/pubspec.yaml', '**/*.csproj', '**/*.asmdef', '**/Makefile', 'Makefile', '**/tsconfig*.json', 'pytest.ini', '**/pytest.ini', 'pyproject.toml', '**/pyproject.toml', '**/go.mod', 'tools/coverage/*', '**/*.config.{js,cjs,mjs,ts}', '**/.eslintrc.{js,cjs,json,yml,yaml}', '.husky/*'] },
 ];
