@@ -914,3 +914,95 @@ fn http_body_from_json_value_is_json() {
     assert_eq!(body.as_json(), Some(&serde_json::json!({"a": 1})));
     assert!(body.as_form().is_none());
 }
+
+// ---------------- verifier-round 2 regressions ----------------
+
+#[tokio::test]
+async fn admob_duplicate_ad_unit_ids_inside_a_group_fail_closed() {
+    let body = r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"n","format":"interstitial",
+        "adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2},
+                          {"adUnitId":"u1","network":"facebook","ecpm":1}]}]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let err = admob_client(mock)
+        .list_mediation_groups()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");
+}
+
+#[tokio::test]
+async fn max_experiment_ecpm_overflow_is_a_schema_error_not_zero() {
+    // revenue 9007199254740992 over 1 impression: ecpm must overflow i64 micros.
+    let body = r#"{"state":"completed","variants":[
+        {"variant_id":"v1","impressions":1,"revenue":9007199254740992}
+    ]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let err = max_client(mock, Arc::new(RecordingSleeper::default()))
+        .get_experiment("exp-1")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");
+}
+
+#[tokio::test]
+async fn lp_negative_positions_are_refused() {
+    let body =
+        r#"{"waterfall":[{"entry_id":"e1","network":"admob","position":-5,"price_ecpm":1}]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let err = lp_client(mock).list_waterfall("u1").await.unwrap_err();
+    assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");
+}
+
+#[tokio::test]
+async fn http_204_with_a_body_still_reads_as_null() {
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        204,
+        Some("{\"a\":1}"),
+    ))]));
+    let sleeper = Arc::new(RecordingSleeper::default());
+    let value = caller(mock, sleeper, 0)
+        .call("op", HttpMethod::Delete, "/x", None, Some("k"))
+        .await
+        .unwrap();
+    assert!(
+        value.is_null(),
+        "204 must never surface a parsed body: {value}"
+    );
+}
+
+#[tokio::test]
+async fn admob_missing_format_defaults_to_banner_and_unknown_fails_closed() {
+    let no_format = r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"n",
+        "adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2}]}]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(no_format),
+    ))]));
+    let groups = admob_client(mock).list_mediation_groups().await.unwrap();
+    assert_eq!(
+        groups[0].format,
+        AdFormat::Banner,
+        "missing format pins the TS-parity default"
+    );
+
+    let unknown = r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"n","format":"video360",
+        "adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2}]}]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(unknown),
+    ))]));
+    let err = admob_client(mock)
+        .list_mediation_groups()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");
+}

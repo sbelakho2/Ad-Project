@@ -60,6 +60,10 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
     }
 
     // Configured floors on enabled units; keep the minimum on duplicates.
+    // Deliberate asymmetry with missing_floor: there, an enabled duplicate
+    // cannot hide behind a disabled one (OR-merge); here, floors carried only
+    // by a disabled duplicate of an enabled unit id are ignored, because a
+    // disabled unit cannot earn and its floors are not leaks.
     let mut floors: BTreeMap<(&str, String), Micros> = BTreeMap::new();
     for unit in &snapshot.ad_units {
         if !unit.enabled {
@@ -104,6 +108,7 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
         // impressions, and an i128->i64 overflow are different operator stories.
         let (expected_ecpm, unavailable_reason) = match unit_ecpm {
             Some(value) if value > 0 => (value, None),
+            Some(value) if value < 0 => (0, Some("negative_ecpm")),
             Some(_) => (0, Some("zero_ecpm")),
             None if unit_total_impressions == 0 => (0, Some("no_impressions")),
             None => (0, Some("ecpm_overflow")),
@@ -119,7 +124,7 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
         };
         let message = if expected_ecpm > 0 {
             format!(
-                "stale floor on ad unit {unit_id} in country {country}: floor {floor_ecpm} micros \
+                "stale floor on ad unit `{unit_id}` in country `{country}`: floor {floor_ecpm} micros \
                  set, pair revenue 0 micros over {impressions} impressions; ad unit eCPM \
                  {expected_ecpm} micros implies {recovery} micros/month recoverable \
                  (model: {recovery_model})"
@@ -127,11 +132,12 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
         } else {
             let why = match unavailable_reason {
                 Some("zero_ecpm") => "ad unit eCPM is 0 micros",
+                Some("negative_ecpm") => "ad unit eCPM is negative",
                 Some("no_impressions") => "ad unit has no impressions",
                 _ => "ad unit eCPM overflows the representable micros range",
             };
             format!(
-                "stale floor on ad unit {unit_id} in country {country}: floor {floor_ecpm} micros \
+                "stale floor on ad unit `{unit_id}` in country `{country}`: floor {floor_ecpm} micros \
                  set, pair revenue 0 micros over {impressions} impressions; {why}, recovery capped \
                  at 0 micros/month and severity downgraded one level (model: {recovery_model})"
             )

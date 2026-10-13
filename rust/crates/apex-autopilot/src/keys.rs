@@ -52,13 +52,14 @@ fn action_slug(action: &Action) -> String {
         Action::CreateWaterfallEntry {
             ad_unit_id,
             network,
-            instance_name: _,
+            instance_name,
             price_ecpm,
         } => {
             format!(
-                "wfc-{}-{}-{}",
+                "wfc-{}-{}-{}-{}",
                 slug(ad_unit_id),
                 slug(network),
+                slug(instance_name),
                 slug(&apex_core::format_micros_short(*price_ecpm))
             )
         }

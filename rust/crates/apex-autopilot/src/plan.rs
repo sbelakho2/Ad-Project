@@ -2,7 +2,6 @@
 //! Daily accounting reads the signed ledger, never caller state.
 
 use apex_audit::{Finding, Severity};
-use apex_core::PlatformError;
 use apex_proof::{ChangeKind, InMemoryLedger, LedgerRecord};
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
@@ -64,17 +63,69 @@ fn change_kind_of(action: &Action) -> ChangeKind {
     }
 }
 
+/// Bound the action's own values before any side effect: the step cap bounds
+/// the caller's estimate, and this bounds the actual write.
+fn validate_action_values(action: &Action) -> Result<(), PlanError> {
+    match action {
+        Action::SetCountryFloor {
+            country,
+            floor_ecpm,
+            ..
+        } => {
+            apex_core::normalize_country(country)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+            apex_core::validate_floor(*floor_ecpm)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
+        Action::SetMappingEcpm { ecpm, .. } => {
+            apex_core::validate_ecpm(*ecpm).map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
+        Action::SetWaterfallPrice { price_ecpm, .. } => {
+            apex_core::validate_ecpm(*price_ecpm)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
+        Action::CreateWaterfallEntry {
+            network,
+            instance_name,
+            price_ecpm,
+            ..
+        } => {
+            if network.trim().is_empty() || instance_name.trim().is_empty() {
+                return Err(PlanError::Validation(
+                    "network and instanceName are required".into(),
+                ));
+            }
+            apex_core::validate_ecpm(*price_ecpm)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
+        Action::RemoveWaterfallEntry { .. } => {}
+    }
+    Ok(())
+}
+
 /// True when the same change (equal idempotency key and equal payload)
 /// is already in the ledger; a rerun must never re-apply it, and a rerun with
 /// a different value under a colliding key must never be mistaken for it.
 pub fn already_applied(ledger: &InMemoryLedger, key: &str, action: &Action) -> bool {
     let expected = change_kind_of(action);
-    ledger.records().iter().any(|record| {
-        matches!(
-            record,
-            LedgerRecord::ChangeApplied { idempotency_key, change, .. }
-                if idempotency_key == key && *change == expected
-        )
+    let rolled_back: std::collections::HashSet<u64> = ledger
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::RollbackPerformed {
+                rolled_back_seq, ..
+            } => Some(*rolled_back_seq),
+            _ => None,
+        })
+        .collect();
+    ledger.records().iter().any(|record| match record {
+        LedgerRecord::ChangeApplied {
+            seq,
+            idempotency_key,
+            change,
+            ..
+        } => idempotency_key == key && *change == expected && !rolled_back.contains(seq),
+        _ => false,
     })
 }
 
@@ -106,14 +157,28 @@ pub async fn run_cycle(
     }
 
     let day = utc_day(now_unix_ms);
+    let rolled_back: std::collections::HashSet<u64> = ledger
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::RollbackPerformed {
+                rolled_back_seq, ..
+            } => Some(*rolled_back_seq),
+            _ => None,
+        })
+        .collect();
+    // Clock skew must not consume the day: only records at or before `now`
+    // count, and a change that was rolled back frees its slot for a retry.
     let mut applied_today: u32 = ledger
         .records()
         .iter()
-        .filter(|record| {
-            matches!(
-                record,
-                LedgerRecord::ChangeApplied { at_unix_ms, .. } if utc_day(*at_unix_ms) == day
-            )
+        .filter(|record| match record {
+            LedgerRecord::ChangeApplied { at_unix_ms, .. } => {
+                utc_day(*at_unix_ms) == day
+                    && *at_unix_ms <= now_unix_ms
+                    && !rolled_back.contains(&record.seq())
+            }
+            _ => false,
         })
         .count()
         .try_into()
@@ -145,9 +210,9 @@ pub async fn run_cycle(
             });
         }
 
-        let key = idempotency_key(&proposal.action).map_err(|source| PlanError::ApplyFailed {
-            source: PlatformError::Validation(source.to_string()),
-        })?;
+        validate_action_values(&proposal.action)?;
+        let key = idempotency_key(&proposal.action)
+            .map_err(|source| PlanError::Validation(source.to_string()))?;
         if already_applied(ledger, &key, &proposal.action) {
             skipped_this_cycle += 1;
             outcomes.push(ActionOutcome::Skipped {

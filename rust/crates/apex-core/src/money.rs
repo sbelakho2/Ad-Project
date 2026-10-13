@@ -107,6 +107,10 @@ mod tests {
     fn fee_overflow_is_error_not_wrap() {
         let huge = i64::MAX / 2;
         assert!(lift_fee_micros(huge, 2_000).is_ok()); // fits
-        assert_eq!(lift_fee_micros(i64::MAX, 2_000).map(|v| v >= 0), Ok(true));
+                                                       // Exact integer arithmetic, pinned: i64::MAX * 2000 / 10000 floor-divides.
+        assert_eq!(
+            lift_fee_micros(i64::MAX, 2_000),
+            Ok(1_844_674_407_370_955_161)
+        );
     }
 }

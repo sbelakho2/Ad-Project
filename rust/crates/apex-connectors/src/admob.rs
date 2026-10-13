@@ -183,6 +183,8 @@ impl AdmobClient {
                 ecpm,
             });
         }
+        // Missing 'format' defaults to banner for parity with the TypeScript
+        // reference; an unknown string fails closed instead (the TS cast did not).
         let format = match item.get("format").and_then(|v| v.as_str()) {
             Some("banner") | None => AdFormat::Banner,
             Some("interstitial") => AdFormat::Interstitial,
@@ -193,6 +195,21 @@ impl AdmobClient {
                 return Err(self.schema("listMediationGroups", format!("unknown format '{other}'")))
             }
         };
+        // Duplicate adUnitId entries make the read-modify-write ambiguous
+        // (which mapping does "the" update target, and the platform would
+        // receive both changed). Refuse rather than guess.
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for mapping in &mappings {
+            if !seen_ids.insert(mapping.ad_unit_id.as_str()) {
+                return Err(self.schema(
+                    "listMediationGroups",
+                    format!(
+                        "duplicate adUnitId '{}' inside group '{id}'",
+                        mapping.ad_unit_id
+                    ),
+                ));
+            }
+        }
         Ok(MediationGroup {
             mediation_group_id: id.to_string(),
             name: name.to_string(),

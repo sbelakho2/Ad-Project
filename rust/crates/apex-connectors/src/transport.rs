@@ -150,6 +150,11 @@ impl HttpResponse {
     }
 
     fn parse_json(&self, req: &HttpRequest) -> Result<serde_json::Value, PlatformError> {
+        // RFC 7230 forbids a body on 204; treat the response as empty even if a
+        // server misbehaves, so a stray body cannot become parsed "data".
+        if self.status == 204 {
+            return Ok(serde_json::Value::Null);
+        }
         if self.body.is_empty() {
             return Ok(serde_json::Value::Null);
         }

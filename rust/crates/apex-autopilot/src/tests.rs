@@ -299,7 +299,7 @@ async fn daily_cap_is_counted_from_the_ledger() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     for i in 0..3 {
-        seed_change(&mut l, NOW + i, &format!("seed-{i}"));
+        seed_change(&mut l, NOW - i, &format!("seed-{i}"));
     }
     let err = run_cycle(
         &ops,
@@ -1372,4 +1372,207 @@ async fn settle_unknown_experiment_is_an_apply_failure() {
     .await
     .expect_err("unknown experiment");
     assert!(matches!(err, PlanError::ApplyFailed { .. }));
+}
+
+// ---------------- verifier-round 2 regressions ----------------
+
+#[tokio::test]
+async fn repeated_settlement_is_refused_before_any_side_effect() {
+    // Double-settlement falsifier: a repeat must not append a second
+    // ExperimentObserved or a second billing proof (double billing).
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = seed_change(&mut l, NOW, "k1");
+    ops.put_experiment(
+        "exp-1",
+        finished_experiment(
+            vec![
+                variant("control", 50_000_000, 50_000),
+                variant("v2", 51_250_000, 50_000),
+            ],
+            Some("v2"),
+            Some(9_800),
+        ),
+    );
+    let first = settle_experiment(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        "pub",
+        "exp-1",
+        seq,
+        NOW,
+    )
+    .await
+    .expect("first settle keeps");
+    assert!(matches!(first, SettleOutcome::Kept { .. }));
+    let len_after_first = l.len();
+
+    let second = settle_experiment(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        "pub",
+        "exp-1",
+        seq,
+        NOW + 1,
+    )
+    .await
+    .expect_err("second settle must be refused");
+    assert!(matches!(second, PlanError::Validation(_)), "got {second}");
+    assert_eq!(l.len(), len_after_first, "no extra observed/proof records");
+    let proofs = l
+        .records()
+        .iter()
+        .filter(|r| matches!(r, LedgerRecord::BillingProof { .. }))
+        .count();
+    assert_eq!(proofs, 1, "exactly one billing proof per proven lift");
+    let rollbacks = ops
+        .call_log()
+        .iter()
+        .filter(|e| e.starts_with("rollback:"))
+        .count();
+    assert_eq!(rollbacks, 0, "refusal costs zero platform calls");
+}
+
+#[test]
+fn create_entry_experiments_are_distinct_per_instance_name() {
+    let base = Action::CreateWaterfallEntry {
+        ad_unit_id: "u3".into(),
+        network: "mintegral".into(),
+        instance_name: "MTG_1".into(),
+        price_ecpm: 2_000_000,
+    };
+    let other = Action::CreateWaterfallEntry {
+        ad_unit_id: "u3".into(),
+        network: "mintegral".into(),
+        instance_name: "MTG_2".into(),
+        price_ecpm: 2_000_000,
+    };
+    assert_ne!(experiment_name(&base), experiment_name(&other));
+    assert_eq!(
+        experiment_name(&base),
+        "max-experiment:autopilot-wfc-u3-mintegral-mtg-1-2:u3"
+    );
+}
+
+#[tokio::test]
+async fn action_values_are_bounded_before_any_platform_call() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let wild = Proposal {
+        action: Action::SetCountryFloor {
+            ad_unit_id: "u1".into(),
+            country: "EE".into(),
+            floor_ecpm: i64::MAX,
+        },
+        rationale: "absurd floor".into(),
+        expected_effect_bp: 1,
+    };
+    let err = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![wild],
+        NOW,
+    )
+    .await
+    .expect_err("absurd value refused");
+    assert!(matches!(err, PlanError::Validation(_)), "got {err}");
+    assert!(ops.call_log().is_empty());
+    assert!(l.is_empty());
+}
+
+#[tokio::test]
+async fn future_dated_records_do_not_consume_the_daily_cap() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    for i in 0..3 {
+        seed_change(&mut l, NOW + 3_600_000 + i, &format!("future-{i}"));
+    }
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("future-dated slots do not count");
+    assert_eq!(outcome.applied, 1);
+}
+
+#[tokio::test]
+async fn rolled_back_changes_free_the_cap_slot_and_retry_applies() {
+    // Start-failure path: rollback, then the same proposal must apply again
+    // (the rolled-back slot is neither a cap slot nor 'already applied').
+    let ops = crate::ops::RecordingOps::new();
+    ops.script_start(vec![Err(apex_core::PlatformError::Http {
+        platform: apex_core::PlatformId::AppLovinMax,
+        operation: "createExperiment".into(),
+        status: 503,
+    })]);
+    let mut l = ledger();
+    let policy = AutopilotPolicy {
+        max_actions_per_day: 1,
+        ..AutopilotPolicy::conservative()
+    };
+    let first = run_cycle(
+        &ops,
+        &mut l,
+        &policy,
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("first cycle rolls back");
+    assert!(matches!(
+        first.outcomes[0],
+        ActionOutcome::RolledBack { .. }
+    ));
+
+    let second = run_cycle(
+        &ops,
+        &mut l,
+        &policy,
+        &[],
+        vec![proposal(floor_action())],
+        NOW + 1,
+    )
+    .await
+    .expect("retry runs");
+    assert_eq!(
+        second.applied, 1,
+        "the rolled-back change must be re-appliable"
+    );
+}
+
+#[tokio::test]
+async fn invalid_country_is_a_validation_error_not_an_apply_failure() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let bad = Proposal {
+        action: Action::SetCountryFloor {
+            ad_unit_id: "u1".into(),
+            country: "EST".into(),
+            floor_ecpm: 1_000_000,
+        },
+        rationale: "bad country".into(),
+        expected_effect_bp: 100,
+    };
+    let err = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![bad],
+        NOW,
+    )
+    .await
+    .expect_err("bad country refused");
+    assert!(matches!(err, PlanError::Validation(_)), "got {err}");
+    assert!(ops.call_log().is_empty());
 }

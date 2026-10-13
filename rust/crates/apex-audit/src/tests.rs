@@ -62,6 +62,11 @@ fn rich_snapshot() -> Snapshot {
 /// - strict: a standalone digit run that does not parse as i128 panics, so an
 ///   unparseable run can never be silently ignored (verifier finding A4).
 fn message_numbers(message: &str) -> Vec<i128> {
+    let ticks = message.matches('`').count();
+    assert!(
+        ticks.is_multiple_of(2),
+        "unbalanced backticks in message (parity contract unenforceable): {message}"
+    );
     let mut outside = String::new();
     for (index, chunk) in message.split('`').enumerate() {
         if index % 2 == 0 {
@@ -486,5 +491,74 @@ fn total_saturates_at_i64_max_without_wrap() {
         report.total_estimated_monthly_recovery,
         i64::MAX,
         "the total saturates at i64::MAX"
+    );
+}
+
+// ---------------- verifier-round 2 regressions ----------------
+
+#[test]
+fn digit_only_ad_unit_ids_stay_out_of_the_parity_contract() {
+    let mut snapshot = empty_snapshot();
+    snapshot.platform_totals_30d = totals(1_000_000, 1_000);
+    snapshot.mediation_totals_30d = totals(1_000_000, 1_000);
+    snapshot.ad_units = vec![unit("1", true, vec![floor("EE", 1_000_000)])];
+    snapshot.country_revenue = vec![row("EE", "1", 0, 100_000), row("US", "1", 5_000_000, 1_000)];
+    let report = run(&snapshot);
+    let stale = report
+        .findings
+        .iter()
+        .find(|f| f.rule == RuleId::StaleFloor)
+        .expect("stale floor fires with a digit-only unit id");
+    assert!(
+        stale.message.contains("`1`"),
+        "unit id must be backticked: {}",
+        stale.message
+    );
+    for finding in &report.findings {
+        let mut backed = Vec::new();
+        evidence_numbers(&finding.evidence, &mut backed);
+        for number in message_numbers(&finding.message) {
+            assert!(
+                backed.contains(&number),
+                "unbackticked number escaped evidence: {} ({})",
+                finding.message,
+                finding.subject
+            );
+        }
+    }
+}
+
+#[test]
+fn negative_unit_ecpm_reports_the_negative_story() {
+    let mut snapshot = empty_snapshot();
+    snapshot.platform_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1_000_000)])];
+    snapshot.country_revenue = vec![
+        row("EE", "uA", 0, 100_000),
+        row("US", "uA", -101_000, 101_000),
+    ];
+    let report = run(&snapshot);
+    let stale = report
+        .findings
+        .iter()
+        .find(|f| f.rule == RuleId::StaleFloor)
+        .expect("stale floor fires");
+    assert_eq!(stale.evidence["ecpm_unavailable_reason"], "negative_ecpm");
+    assert!(
+        stale.message.contains("is negative"),
+        "message must name negativity: {}",
+        stale.message
+    );
+}
+
+#[test]
+fn parity_scanner_panics_on_unbalanced_backticks() {
+    let panicked =
+        std::panic::catch_unwind(|| message_numbers("country `E`E` contributes 500 micros"))
+            .is_err();
+    assert!(
+        panicked,
+        "unbalanced backticks must not silently drop message tails"
     );
 }

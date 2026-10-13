@@ -120,6 +120,14 @@ impl LevelPlayClient {
                 .ok_or_else(|| {
                     self.schema("listWaterfall", format!("entry missing position: {item}"))
                 })?;
+            if position < 0 {
+                // -1 is the local sentinel for unknown-until-refetch; a server
+                // value must never alias it.
+                return Err(self.schema(
+                    "listWaterfall",
+                    format!("entry position {position} is negative: {item}"),
+                ));
+            }
             let price_raw = item.get("price_ecpm").ok_or_else(|| {
                 self.schema("listWaterfall", format!("entry missing price_ecpm: {item}"))
             })?;

@@ -123,6 +123,25 @@ pub async fn settle_experiment(
         ));
     }
 
+    // One settlement per experiment, ever: a repeat would append a second
+    // ExperimentObserved and a second billing proof, double-billing the same
+    // proven lift. Refuse before touching the platform, so a retried settle
+    // cannot issue a second rollback either.
+    let already_settled = ledger.records().iter().any(|record| match record {
+        LedgerRecord::ExperimentObserved {
+            experiment_id: e, ..
+        }
+        | LedgerRecord::BillingProof {
+            experiment_id: e, ..
+        } => e == experiment_id,
+        _ => false,
+    });
+    if already_settled {
+        return Err(PlanError::Validation(format!(
+            "experiment {experiment_id} is already settled"
+        )));
+    }
+
     let (lift_bp, confidence_bp, winner_variant_id, control, winner) = evaluate_result(&result)?;
 
     let keep = lift_bp >= policy.min_lift_bp && confidence_bp >= policy.min_confidence_bp;

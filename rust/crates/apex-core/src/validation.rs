@@ -11,10 +11,13 @@ const MAX_ECPM_MICROS: Micros = MAX_ECPM_UNITS * MICROS_PER_UNIT;
 
 /// Trim + uppercase; reject anything that is not ISO 3166-1 alpha-2.
 pub fn normalize_country(input: &str) -> Result<String, PlatformError> {
-    let up = input.trim().to_uppercase();
-    let ok = up.len() == 2 && up.bytes().all(|b| b.is_ascii_uppercase());
-    if ok {
-        Ok(up)
+    // Shape-check the RAW input first: uppercasing can expand one non-ASCII
+    // character into two ASCII letters (ligatures such as "fi" and the sharp s
+    // map to real country codes), which would silently accept junk.
+    let trimmed = input.trim();
+    let shape_ok = trimmed.len() == 2 && trimmed.bytes().all(|b| b.is_ascii_alphabetic());
+    if shape_ok {
+        Ok(trimmed.to_ascii_uppercase())
     } else {
         Err(PlatformError::Validation(format!(
             "invalid country code '{input}' (expected ISO 3166-1 alpha-2)"
@@ -45,7 +48,9 @@ pub fn validate_floor(micros: Micros) -> Result<Micros, PlatformError> {
 }
 
 /// Micros -> shortest decimal string, matching JS number formatting for the values
-/// that occur in idempotency keys (up to 2 decimals from the TS layer).
+/// that occur in idempotency keys (up to 2 decimals from the TS layer). Beyond
+/// 2^53 micros the JS number rendering loses precision and this exact integer
+/// rendering intentionally wins: key uniqueness must never depend on floats.
 pub fn format_micros_short(micros: Micros) -> String {
     if micros % MICROS_PER_UNIT == 0 {
         return (micros / MICROS_PER_UNIT).to_string();
@@ -72,9 +77,17 @@ pub fn max_experiment_key(name: &str, ad_unit_id: &str) -> String {
 /// reference, which had no value in these keys and no rerun-dedupe logic.
 pub fn levelplay_price_key(ad_unit_id: &str, entry_id: &str, price_ecpm: Micros) -> String {
     format!(
-        "levelplay-price:{ad_unit_id}:{entry_id}:{}",
-        format_micros_short(price_ecpm)
+        "levelplay-price:{k1}:{k2}:{k3}",
+        k1 = key_field(ad_unit_id),
+        k2 = key_field(entry_id),
+        k3 = format_micros_short(price_ecpm)
     )
+}
+
+/// Escape the key separator inside a field so distinct argument tuples can
+/// never produce the same key string (platforms dedupe on the key alone).
+fn key_field(raw: &str) -> String {
+    raw.replace(':', "%3A")
 }
 
 pub fn levelplay_create_key(
@@ -84,8 +97,11 @@ pub fn levelplay_create_key(
     price_ecpm: Micros,
 ) -> String {
     format!(
-        "levelplay-create:{ad_unit_id}:{network}:{instance_name}:{}",
-        format_micros_short(price_ecpm)
+        "levelplay-create:{k1}:{k2}:{k3}:{k4}",
+        k1 = key_field(ad_unit_id),
+        k2 = key_field(network),
+        k3 = key_field(instance_name),
+        k4 = format_micros_short(price_ecpm)
     )
 }
 
@@ -99,20 +115,26 @@ pub fn max_floor_key(
 ) -> Result<String, PlatformError> {
     Ok(format!(
         "max-floor:{}:{}:{}",
-        ad_unit_id,
+        key_field(ad_unit_id),
         normalize_country(country)?,
         format_micros_short(floor_ecpm)
     ))
 }
 
 pub fn levelplay_remove_key(ad_unit_id: &str, entry_id: &str) -> String {
-    format!("levelplay-remove:{ad_unit_id}:{entry_id}")
+    format!(
+        "levelplay-remove:{k1}:{k2}",
+        k1 = key_field(ad_unit_id),
+        k2 = key_field(entry_id)
+    )
 }
 
 pub fn admob_ecpm_key(mediation_group_id: &str, ad_unit_id: &str, ecpm: Micros) -> String {
     format!(
-        "admob-ecpm:{mediation_group_id}:{ad_unit_id}:{}",
-        format_micros_short(ecpm)
+        "admob-ecpm:{k1}:{k2}:{k3}",
+        k1 = key_field(mediation_group_id),
+        k2 = key_field(ad_unit_id),
+        k3 = format_micros_short(ecpm)
     )
 }
 
@@ -142,6 +164,11 @@ mod tests {
         assert!(normalize_country("1!").is_err());
         assert!(normalize_country("").is_err());
         assert!(normalize_country("ÉÉ").is_err());
+        // Uppercasing ligatures expands them into real country letters; the
+        // raw-shape check must reject before any case mapping runs.
+        assert!(normalize_country("ﬁ").is_err());
+        assert!(normalize_country("ß").is_err());
+        assert!(normalize_country("ﬅ").is_err());
     }
 
     #[test]
@@ -195,6 +222,32 @@ mod tests {
             "max-floor:u1:EE:2.5"
         );
         assert!(max_floor_key("u1", "EST", 1).is_err());
+    }
+
+    #[test]
+    fn key_fields_cannot_cross_separator_boundaries() {
+        // Distinct argument tuples must never share one key string: fields
+        // containing the separator are escaped.
+        assert_ne!(
+            levelplay_create_key("a:b", "c", "d", 1_000_000),
+            levelplay_create_key("a", "b:c", "d", 1_000_000)
+        );
+        assert_ne!(
+            admob_ecpm_key("g:a", "u", 1_000_000),
+            admob_ecpm_key("g", "a:u", 1_000_000)
+        );
+        assert_ne!(
+            levelplay_price_key("u:x", "e", 1_000_000),
+            levelplay_price_key("u", "x:e", 1_000_000)
+        );
+        assert_ne!(
+            max_floor_key("u:1", "EE", 1_000_000).unwrap(),
+            max_floor_key("u", "1:EE", 1_000_000).unwrap_or_default()
+        );
+        assert_eq!(
+            levelplay_price_key("a:b", "e", 2_350_000),
+            "levelplay-price:a%3Ab:e:2.35"
+        );
     }
 
     #[test]

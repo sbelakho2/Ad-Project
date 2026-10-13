@@ -941,3 +941,54 @@ fn forged_billing_records_are_refused_at_append() {
     ledger.append(good).expect("legitimate proof");
     assert_eq!(ledger.len(), 1);
 }
+
+// ---------------- verifier-round 2 regressions ----------------
+
+#[test]
+fn append_refuses_on_same_length_prefix_tamper() {
+    // The length-equality fast path once let this through: rewrite the payload
+    // in place with identical byte count, then append on the open handle.
+    let dir = TempDir::new("samelen-append");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(60);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    append_sample(&mut ledger);
+    append_sample(&mut ledger);
+
+    let mut lines = read_lines(&path);
+    lines[0] = lines[0].replacen("admob-ecpm:g1:u1:0", "admob-ecpm:g1:u1:9", 1);
+    let before = lines[0].len();
+    write_lines(&path, &lines);
+    let after = read_lines(&path)[0].len();
+    assert_eq!(
+        before, after,
+        "tamper must be same-length for this regression"
+    );
+
+    let err = ledger
+        .append(change(9))
+        .expect_err("append must refuse a same-length tampered prefix");
+    assert!(
+        matches!(err, LedgerError::HashMismatch { line: 1 }),
+        "{err}"
+    );
+}
+
+#[test]
+fn append_refuses_when_the_file_was_swapped_for_a_shorter_valid_chain() {
+    let dir = TempDir::new("shorter-swap");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(61);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    append_sample(&mut ledger);
+    append_sample(&mut ledger);
+
+    let only_first = {
+        let mut short = Ledger::open(dir.file("short.jsonl"), keys.clone()).expect("short");
+        short.append(change(0)).expect("one record");
+        std::fs::read(dir.file("short.jsonl")).expect("bytes")
+    };
+    std::fs::write(&path, only_first).expect("swap file");
+    let err = ledger.append(change(9)).expect_err("shorter swap refused");
+    assert!(matches!(err, LedgerError::StateDiverged { .. }), "{err}");
+}

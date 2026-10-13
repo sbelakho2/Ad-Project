@@ -36,7 +36,7 @@
 //! their current mode.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use apex_core::PlatformId;
@@ -146,7 +146,7 @@ impl Ledger {
         read_and_verify(path.as_ref(), expected_pubkey).map(|verified| verified.records)
     }
 
-    /// Seal, sign and append one record after re-verifying the on-disk tail.
+    /// Seal, sign and append one record after re-verifying the whole file.
     /// Returns the sealed record. On any error the file and the handle state
     /// are unchanged (or the partial write is rolled back and reported).
     pub fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, LedgerError> {
@@ -234,71 +234,28 @@ impl Ledger {
         &self.verifying_key
     }
 
-    /// Fail closed: the file on disk must verify with our key and continue our
-    /// chain. The already-verified prefix is trusted (it was fully verified at
-    /// open and is only extended below); any NEW bytes are verified here, so a
-    /// rewritten history or tampered tail is caught before the write.
+    /// Fail closed: re-read and verify the whole file before any append.
+    ///
+    /// A tail-only fast path keyed on byte-length equality once let an
+    /// in-place, same-length rewrite of the verified prefix slip through (the
+    /// append succeeded on tampered history and only the next read failed).
+    /// Full re-verification costs O(history) per append, which is the right
+    /// trade for a single-writer, billing-critical log, and it yields the
+    /// truthful error taxonomy for every tamper class.
     fn refresh_from_disk(&mut self) -> Result<(), LedgerError> {
-        let len = self.file.metadata()?.len();
-        if len == self.verified_offset {
-            return Ok(());
-        }
-        if len < self.verified_offset {
-            // The file shrank below what we fully verified: it was cut/truncated.
-            let whole = std::fs::read(&self.path).unwrap_or_default();
-            let complete = whole.iter().filter(|byte| **byte == b'\n').count();
-            return Err(LedgerError::Truncated { line: complete + 1 });
-        }
-        let mut reader = File::open(&self.path)?;
-        reader.seek(SeekFrom::Start(self.verified_offset))?;
-        let mut tail = Vec::new();
-        reader.read_to_end(&mut tail)?;
-        let base_line = self.records.len();
-        if tail.last() != Some(&b'\n') {
-            let complete = tail.iter().filter(|byte| **byte == b'\n').count();
-            return Err(LedgerError::Truncated {
-                line: base_line + complete + 1,
+        let verified = read_and_verify(&self.path, &self.verifying_key)?;
+        if verified.records.len() < self.records.len() {
+            // The on-disk chain is valid but shorter than the history this
+            // handle already verified: never append on top of a swapped file.
+            return Err(LedgerError::StateDiverged {
+                line: verified.records.len() + 1,
             });
         }
-        let mut validator = ChainValidator::resume(self.last_hash, self.next_seq);
-        let mut tail_records = Vec::new();
-        let mut tail_error: Option<LedgerError> = None;
-        for (index, chunk) in tail[..tail.len() - 1]
-            .split(|byte| *byte == b'\n')
-            .enumerate()
-        {
-            let line = base_line + index + 1;
-            match verify_stored_chunk(chunk, line, &self.verifying_key)
-                .and_then(|record| validator.check(&record, line).map(|()| record))
-            {
-                Ok(record) => tail_records.push(record),
-                Err(error) => {
-                    tail_error = Some(error);
-                    break;
-                }
-            }
-        }
-        if let Some(error) = tail_error {
-            // The verified prefix is only trusted by offset, so a tamper that changes
-            // the prefix length can slice a line in half and surface as `Malformed`
-            // here. Fall back to a full re-verification to produce the truthful
-            // taxonomy (e.g. HashMismatch on the tampered line) before giving up.
-            return match read_and_verify(&self.path, &self.verifying_key) {
-                Err(truth) => Err(truth),
-                Ok(verified) if verified.records.len() > self.records.len() => {
-                    Err(LedgerError::StateDiverged {
-                        line: self.records.len() + 1,
-                    })
-                }
-                Ok(_) => Err(error),
-            };
-        }
-        for record in tail_records {
-            self.last_hash = record.hash();
-            self.next_seq = self.next_seq.saturating_add(1);
-            self.records.push(record);
-        }
-        self.verified_offset = len;
+        self.records = verified.records;
+        self.last_hash = verified.last_hash;
+        self.next_seq = u64::try_from(self.records.len())
+            .map_err(|_| LedgerError::Validation("ledger has too many records".into()))?;
+        self.verified_offset = verified.verified_offset;
         Ok(())
     }
 }

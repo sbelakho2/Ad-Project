@@ -245,7 +245,21 @@ impl MaxClient {
             let revenue = v.get("revenue").and_then(number_to_micros).ok_or_else(|| {
                 self.schema("getExperiment", format!("variant missing revenue: {v}"))
             })?;
-            let ecpm = apex_core::ecpm_micros(revenue, impressions).unwrap_or(0);
+            // Zero impressions is a legitimate 0 eCPM; a None for positive
+            // impressions can only mean the micros conversion overflowed, which
+            // must not masquerade as zero on a billing-critical number.
+            let ecpm = match apex_core::ecpm_micros(revenue, impressions) {
+                Some(value) => value,
+                None if impressions == 0 => 0,
+                None => {
+                    return Err(self.schema(
+                        "getExperiment",
+                        format!(
+                            "variant {variant_id} eCPM overflows micros for revenue {revenue} over {impressions} impressions"
+                        ),
+                    ))
+                }
+            };
             results.push(ExperimentVariantResult {
                 variant_id: variant_id.to_string(),
                 impressions,
