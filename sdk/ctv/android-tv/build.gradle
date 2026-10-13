@@ -3,6 +3,25 @@ plugins {
     id 'org.jetbrains.kotlin.android' version '1.9.23'
     id 'maven-publish'
     id 'org.jetbrains.kotlinx.binary-compatibility-validator' version '0.14.0'
+    // Coverage gate (100% line+branch, see .woodpecker/sdk-android-coverage.yml)
+    id 'org.jetbrains.kotlinx.kover' version '0.8.3'
+}
+
+kover {
+    verify {
+        rule {
+            bound {
+                minValue = 100
+                counter = kotlinx.kover.gradle.plugin.dsl.CounterType.LINE
+                aggregation = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
+            }
+            bound {
+                minValue = 100
+                counter = kotlinx.kover.gradle.plugin.dsl.CounterType.BRANCH
+                aggregation = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
+            }
+        }
+    }
 }
 
 android {

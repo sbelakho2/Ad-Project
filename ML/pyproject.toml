@@ -16,3 +16,15 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["ml_pipelines*"]
+
+# 100% coverage gate (see docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md 3.8).
+# NOTE: exclude_lines intentionally NOT configured - every "# pragma: no cover" marker
+# must be deleted and converted into a real test (meta-suite bans new markers).
+[tool.coverage.run]
+source = ["src/ml_pipelines", "scripts"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+precision = 2

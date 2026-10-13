@@ -1,0 +1,39 @@
+# Dogfood audit: the repo's own quality machinery, adversarially audited.
+# M-1 manifest orphans; M-2 floor ratchet; M-3 pragma/skip ban; M-4 ||true policy;
+# M-7 assertion-presence; M-8 self-coverage of tools/coverage; mutation floor.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  manifest-build-and-orphan-gate:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/build-coverage-manifest.mjs --out coverage-manifest.json
+      - node tools/coverage/dogfood-gates.mjs orphan-gate --manifest coverage-manifest.json --suites tools/coverage/suites.json
+
+  floor-ratchet-guard:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/dogfood-gates.mjs floor-ratchet
+
+  pragma-and-skip-ban:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/yaml-policy-gate.mjs --full
+
+  meta-assertion-presence:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/dogfood-gates.mjs assertion-presence
+
+  self-coverage:
+    image: node:20-bookworm
+    commands:
+      - npm --prefix tools ci --no-audit --no-fund
+      - npm --prefix tools run test:cov
+
+  mutation-floor:
+    image: node:20-bookworm
+    commands:
+      - node tools/coverage/dogfood-gates.mjs mutation-floor

@@ -1,0 +1,13 @@
+# Flutter (Dart) coverage: sdk/flutter via flutter test --coverage, lcov gated to 100% lines.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  flutter-coverage-100:
+    image: ghcr.io/cirruslabs/flutter:3.24.3
+    commands:
+      - cd sdk/flutter
+      - flutter pub get
+      - flutter test --coverage
+      - node "$CI_WORKSPACE/tools/coverage/lcov-gate.mjs" coverage/lcov.info 100

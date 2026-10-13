@@ -1,0 +1,20 @@
+# Android (Kotlin) coverage: sdk/core/android + sdk/ctv/android-tv via Kover.
+# koverVerify enforces LINE and BRANCH counters at 100; Robolectric covers
+# framework-coupled classes on the JVM (no emulator required for this gate).
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+matrix:
+  include:
+    - MODULE: sdk/core/android
+      VERIFY: koverVerify
+    - MODULE: sdk/ctv/android-tv
+      VERIFY: koverVerify
+
+steps:
+  android-coverage-100:
+    image: mobiledevops/android-sdk-image:34.0.0-jdk17
+    commands:
+      - cd "$CI_WORKSPACE/$MODULE"
+      - ./gradlew --no-daemon testDebugUnitTest koverXmlReport "$VERIFY"

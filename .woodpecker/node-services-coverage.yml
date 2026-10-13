@@ -1,0 +1,43 @@
+# Node services & libs: edge-worker, services/autopilot, sdk/web, sdk/react-native,
+# and root-level JS tooling (tools/, quality JS, scripts JS, console scripts) via c8+node:test.
+# Coverage floors are enforced by tools/coverage/coverage-gate.mjs from
+# tools/coverage/coverage-floor.json (ratchet-only).
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  edge-worker:
+    image: node:20-bookworm
+    commands:
+      - cd edge-worker && npm ci --no-audit --no-fund
+      - cd edge-worker && npx jest -c jest.coverage.config.cjs --runInBand
+      - node tools/coverage/coverage-gate.mjs --domain edge-worker --artifact edge-worker/coverage/coverage-summary.json --tool jest
+
+  autopilot:
+    image: node:20-bookworm
+    commands:
+      - cd services/autopilot && npm ci --no-audit --no-fund
+      - cd services/autopilot && npx jest -c jest.coverage.config.js --runInBand
+      - node tools/coverage/coverage-gate.mjs --domain autopilot --artifact services/autopilot/coverage/coverage-summary.json --tool jest
+
+  web-sdk:
+    image: node:20-bookworm
+    commands:
+      - cd sdk/web && npm ci --no-audit --no-fund
+      - cd sdk/web && npx jest -c jest.coverage.config.cjs --runInBand
+      - node tools/coverage/coverage-gate.mjs --domain web-sdk --artifact sdk/web/coverage/coverage-summary.json --tool jest
+
+  react-native-sdk:
+    image: node:20-bookworm
+    commands:
+      - cd sdk/react-native && npm install --no-audit --no-fund
+      - cd sdk/react-native && npx jest -c jest.coverage.config.cjs --runInBand
+      - node tools/coverage/coverage-gate.mjs --domain react-native-sdk --artifact sdk/react-native/coverage/coverage-summary.json --tool jest
+
+  js-tools:
+    image: node:20-bookworm
+    commands:
+      - npm --prefix tools ci --no-audit --no-fund
+      - npm --prefix tools run test:cov
+      - node tools/coverage/coverage-gate.mjs --domain js-tools --artifact tools/coverage/coverage/coverage-summary.json --tool c8

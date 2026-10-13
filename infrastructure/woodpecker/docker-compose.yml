@@ -1,0 +1,50 @@
+# Woodpecker CI server + Linux docker agent (design doc section 7.1).
+# Deploy on the app-server pattern (infrastructure/hetzner). Env comes from a
+# root-owned .env file next to this compose file (never committed).
+#
+# Required env:
+#   WOODPECKER_HOST          e.g. https://ci.apexmediation.ee
+#   WOODPECKER_AGENT_SECRET  shared agent registration secret (openssl rand -hex 32)
+#   WOODPECKER_GITHUB_CLIENT / WOODPECKER_GITHUB_SECRET  OAuth app credentials
+#
+# GitHub integration reports commit statuses; protect main with required status
+# contexts: coverage-gate, dogfood-audit, contract-coverage (mirrors
+# .github/required-checks.json policy).
+services:
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v2.8.2
+    restart: unless-stopped
+    ports:
+      - '8000:8000'
+      - '9000:9000'
+    environment:
+      WOODPECKER_OPEN: 'true'
+      WOODPECKER_HOST: ${WOODPECKER_HOST}
+      WOODPECKER_GITHUB: 'true'
+      WOODPECKER_GITHUB_CLIENT: ${WOODPECKER_GITHUB_CLIENT}
+      WOODPECKER_GITHUB_SECRET: ${WOODPECKER_GITHUB_SECRET}
+      WOODPECKER_ADMIN: 'sbelakho2'
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+    volumes:
+      - woodpecker-server-data:/var/lib/woodpecker
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:8000/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v2.8.2
+    restart: unless-stopped
+    depends_on:
+      - woodpecker-server
+    environment:
+      WOODPECKER_SERVER: 'woodpecker-server:9000'
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_MAX_PROCS: '4'
+      WOODPECKER_BACKEND: 'docker'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  woodpecker-server-data:

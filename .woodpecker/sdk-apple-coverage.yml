@@ -1,0 +1,25 @@
+# sdk-apple-coverage.yml — Apple (Swift) coverage: sdk/core/ios + sdk/ctv/tvos via
+# swift test + llvm-cov lcov export, gated to 100% lines by tools/coverage/lcov-gate.mjs.
+# NOTE: assumes a darwin Woodpecker agent using the LOCAL backend (swift/xcrun run natively
+# on macOS; the image field is ignored by the local backend and kept only as documentation).
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+labels:
+  platform: darwin/arm64
+
+matrix:
+  include:
+    - PROJECT: sdk/core/ios
+      TEST_BIN: .build/debug/RivalApexMediationSDKPackageTests.xctest/Contents/MacOS/RivalApexMediationSDKPackageTests
+    - PROJECT: sdk/ctv/tvos
+      TEST_BIN: .build/debug/CTVSDKPackageTests.xctest/Contents/MacOS/CTVSDKPackageTests
+
+steps:
+  swift-coverage-100:
+    commands:
+      - cd "$CI_WORKSPACE/$PROJECT"
+      - swift test --enable-code-coverage --parallel
+      - xcrun llvm-cov export -format=lcov "$TEST_BIN" -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
+      - node "$CI_WORKSPACE/tools/coverage/lcov-gate.mjs" coverage.lcov 100

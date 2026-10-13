@@ -1,0 +1,47 @@
+# Python coverage: ML (pipelines + scripts), services/fraud-inference, services/inference-ml.
+# All pragmas banned: `# pragma: no cover` markers are deleted/converted (design doc 3.8);
+# pytest-cov fails under 100% (branch coverage on).
+# ML runs with cwd=ML so its pyproject [tool.coverage] config is discovered.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: services_test
+
+steps:
+  ml-coverage-100:
+    image: python:3.11-slim
+    commands:
+      - pip install -c ML/constraints.txt -r ML/requirements.txt -e ML
+      - cd ML
+      - python -m pytest tests scripts/tests --cov --cov-branch --cov-fail-under=100 --cov-report=lcov --cov-report=term-missing
+      - cd "$CI_WORKSPACE"
+      - node tools/coverage/lcov-gate.mjs ML/coverage.lcov 100
+
+  fraud-inference-coverage-100:
+    image: python:3.11-slim
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/services_test
+    commands:
+      - pip install -r services/fraud-inference/requirements.txt
+      - cd services/fraud-inference
+      - python -m pytest tests --cov=main --cov-branch --cov-fail-under=100 --cov-report=lcov
+      - cd "$CI_WORKSPACE"
+      - node tools/coverage/lcov-gate.mjs services/fraud-inference/coverage.lcov 100
+
+  inference-ml-coverage-100:
+    image: python:3.11-slim
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/services_test
+    commands:
+      - pip install -r services/inference-ml/requirements.txt
+      - cd services/inference-ml
+      - python -m pytest tests --cov=main --cov-branch --cov-fail-under=100 --cov-report=lcov
+      - cd "$CI_WORKSPACE"
+      - node tools/coverage/lcov-gate.mjs services/inference-ml/coverage.lcov 100

@@ -1,0 +1,24 @@
+# Shell coverage: every first-party .sh (scripts/, tools/, infrastructure/, sdk/, quality/)
+# runs under kcov via bats suites; line coverage gated to 100 via the lcov gate.
+# Destructive scripts run only in DOGFOOD_DRY_RUN=1 mode (design doc 3.11).
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  shell-coverage-100:
+    image: kcov/kcov:40
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends bats
+      - mkdir -p /tmp/shell-cov
+      - kcov --include-path=scripts,tools,infrastructure,sdk,quality /tmp/shell-cov quality/shell/tests/*.bats
+  shell-gate:
+    image: node:20-bookworm
+    depends_on: [shell-coverage-100]
+    commands:
+      - node tools/coverage/lcov-gate.mjs /tmp/shell-cov/bats/lcov.info 100
+  shell-contract:
+    image: node:20-bookworm
+    depends_on: [shell-coverage-100]
+    commands:
+      - node tools/coverage/yaml-policy-gate.mjs --shell
