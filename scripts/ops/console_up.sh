@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 # Bring up the staging Console/API stack via docker compose on the droplet.
 # This is a convenience wrapper for checklist item 0.0.7 preflight.

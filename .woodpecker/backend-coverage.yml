@@ -1,21 +1,11 @@
-# Backend (TS) coverage gate: jest 100% over src+routes+services+scripts,
+# Backend (TS) coverage gate: jest 100%-floor over src+routes+services+scripts,
 # plus the SQL migration contract (apply/up/down round-trip, checksum tamper).
 # Mirrors the env matrix of .github/workflows/ci-all.yml job "backend".
 # NOTE: backend has no package-lock.json, so deps come from the root workspace install.
+# NOTE: Woodpecker does not support a top-level `environment:` block — env is per-step.
 when:
   - event: [push, pull_request]
     branch: [main, master]
-
-environment:
-  DATABASE_URL: postgresql://postgres:postgres@postgres:5432/apexmediation_test
-  TEST_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/apexmediation_test
-  REDIS_URL: redis://redis:6379
-  JWT_SECRET: test-access-secret
-  JWT_REFRESH_SECRET: test-refresh-secret
-  NODE_ENV: test
-  FORCE_DB_SETUP: 'true'
-  RUN_MIGRATIONS_IN_TEST: 'true'
-  SKIP_DB_SETUP: 'false'
 
 services:
   postgres:
@@ -43,15 +33,25 @@ steps:
     commands:
       - npm ci --no-audit --no-fund
 
-  coverage-jest-100:
+  coverage-jest:
     image: node:20-bookworm
     depends_on: [install]
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/apexmediation_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/apexmediation_test
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: test-access-secret
+      JWT_REFRESH_SECRET: test-refresh-secret
+      NODE_ENV: test
+      FORCE_DB_SETUP: 'true'
+      RUN_MIGRATIONS_IN_TEST: 'true'
+      SKIP_DB_SETUP: 'false'
     commands:
       - cd backend && npx jest -c jest.coverage.config.cjs --runInBand
 
   sql-migration-contract:
     image: node:20-bookworm
-    depends_on: [coverage-jest-100]
+    depends_on: [wait-services]
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/apexmediation_contract
       ALLOW_MIGRATION_DOWN: '1'
@@ -64,6 +64,6 @@ steps:
 
   gate:
     image: node:20-bookworm
-    depends_on: [coverage-jest-100]
+    depends_on: [coverage-jest]
     commands:
       - node tools/coverage/coverage-gate.mjs --domain backend --artifact backend/coverage/coverage-summary.json --tool jest

@@ -1,3 +1,4 @@
+// dogfood:skip:opt-in environment-gated suite — enabled in the live/staging lanes
 /**
  * Control Plane E2E Tests
  * 

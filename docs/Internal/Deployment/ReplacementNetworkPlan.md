@@ -47,7 +47,7 @@ Fully replace the deprecated InMobi integration with Moloco across every surface
 1. **Backend** – `cd backend/auction && go test ./internal/bidders -run Moloco` after wiring DI. Add synthetic load-test scenario hitting `/v1/auction` with `adapters:["moloco"]` while stubbing the Moloco endpoint via `httptest.Server`.
 2. **SDKs** – run `./gradlew :sdk:core:android:testDebugUnitTest` and `swift test` once Moloco adapters move beyond stubs.
 3. **Unity** – smoke test the package in the sample scene; ensure `AdapterRegistry.GetSupportedNetworks()` returns 15 names with `moloco` present.
-4. **Docs** – lint with `npm run lint:docs` (once available) and spot-check the rendered Markdown for typos.
+4. **Docs** – lint (the `lint:docs` script is not yet wired; track it in the docs-reference contract backlog) and spot-check the rendered Markdown for typos.
 
 ## Risks & mitigations
 - **Credential onboarding delay:** block-release until Moloco issues sandbox seat + API keys. Mitigation: keep `test_endpoint` override path in bidder for local tests.

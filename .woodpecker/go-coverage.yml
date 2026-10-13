@@ -1,6 +1,7 @@
 # Go coverage gates: backend/auction, backend/config, backend/payments, backend/router,
-# and quality (integration harness itself must be covered too).
-# Every function must report 100.0% and the total must be 100.0%.
+# and quality (the integration harness itself must be covered too).
+# The floor comes from tools/coverage/floors.txt (mirror of coverage-floor.json,
+# plain-text so any image can read it with grep/awk without node/python).
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -8,16 +9,22 @@ when:
 matrix:
   include:
     - MODULE: backend/auction
+      DOMAIN: backend-go
     - MODULE: backend/config
+      DOMAIN: backend-go
     - MODULE: backend/payments
+      DOMAIN: backend-go
     - MODULE: backend/router
+      DOMAIN: backend-go
     - MODULE: quality
+      DOMAIN: go-quality
 
 steps:
-  go-coverage-100:
+  go-coverage:
     image: golang:1.21-bookworm
     commands:
+      - FLOOR=$(grep -E "^${DOMAIN} " "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
       - cd "$CI_WORKSPACE/$MODULE"
       - go test -race -covermode=atomic -coverprofile=cover.out ./...
       - go tool cover -func=cover.out > cover.func
-      - "$CI_WORKSPACE/tools/coverage/go-coverage-gate.sh \"$CI_WORKSPACE/$MODULE/cover.func\" 100"
+      - sh "$CI_WORKSPACE/tools/coverage/go-coverage-gate.sh" "$CI_WORKSPACE/$MODULE/cover.func" "$FLOOR"

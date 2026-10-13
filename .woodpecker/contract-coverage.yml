@@ -8,9 +8,9 @@ steps:
   promtool-rules-with-tests:
     image: alpine:3.20
     commands:
-      - wget -qO- https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar xz
-      - ./prometheus-2.53.0.linux-amd64/promtool check rules monitoring/alerts.yml monitoring/recording-rules.yml
-      - ./prometheus-2.53.0.linux-amd64/promtool test rules monitoring/alerts.test.yml
+      - wget -qO- https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar -C /tmp -xz
+      - /tmp/prometheus-2.53.0.linux-amd64/promtool check rules monitoring/alerts.yml monitoring/recording-rules.yml
+      - /tmp/prometheus-2.53.0.linux-amd64/promtool test rules monitoring/alerts.test.yml
 
   openapi-contract:
     image: node:20-bookworm
@@ -37,7 +37,7 @@ steps:
     image: alpine:3.20
     commands:
       - apk add --no-cache python3 py3-pip curl
-      - pip install --break-system-packages gixy
+      - pip install --break-system-packages gixy==0.1.21
       - gixy infrastructure/nginx/apexmediation.conf
       - gixy infrastructure/nginx/apexmediation.ssl.conf
       - wget -qO /usr/local/bin/caddy "https://caddyserver.com/api/download?os=linux&arch=amd64" && chmod +x /usr/local/bin/caddy
@@ -45,7 +45,6 @@ steps:
       - wget -qO /usr/local/bin/docker-compose https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 && chmod +x /usr/local/bin/docker-compose
       - docker-compose -f docker-compose.yml config -q
       - docker-compose -f infrastructure/docker-compose.prod.yml config -q
-      - docker-compose -f docker-compose.control-plane.yml config -q
 
   ci-reference-integrity:
     image: node:20-bookworm

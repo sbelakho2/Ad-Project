@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - 'backend/**/*.ts'
-      - 'sdks/**'
+      - 'sdk/**'
       - 'docs/**'
     tags:
       - 'v*.*.*'
@@ -72,7 +72,7 @@ jobs:
         run: gem install jazzy
 
       - name: Generate Jazzy docs
-        working-directory: sdks/ios
+        working-directory: sdk/core/ios
         run: |
           jazzy \
             --clean \
@@ -88,7 +88,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: ios-docs
-          path: sdks/ios/docs/
+          path: sdk/core/ios/docs/
 
   generate-android-docs:
     name: Generate Android SDK Docs (Dokka)
@@ -107,14 +107,14 @@ jobs:
         uses: gradle/gradle-build-action@v2
 
       - name: Generate Dokka docs
-        working-directory: sdks/android
+        working-directory: sdk/core/android
         run: ./gradlew dokkaHtml
 
       - name: Upload Android docs
         uses: actions/upload-artifact@v3
         with:
           name: android-docs
-          path: sdks/android/build/dokka/html/
+          path: sdk/core/android/build/dokka/html/
 
   generate-unity-docs:
     name: Generate Unity SDK Docs (JSDoc)
@@ -132,7 +132,7 @@ jobs:
         run: npm install -g jsdoc
 
       - name: Generate JSDoc
-        working-directory: sdks/unity
+        working-directory: sdk/core/unity
         run: |
           jsdoc \
             -c jsdoc.json \
@@ -145,7 +145,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: unity-docs
-          path: sdks/unity/docs/
+          path: sdk/core/unity/docs/
 
   build-docs-site:
     name: Build Documentation Site

@@ -1,3 +1,4 @@
+// dogfood:skip:live/opt-in suite — requires a deployed environment (LIVE_E2E/CONSOLE_BASE_URL); enabled in the live lanes
 import { test, expect, Page, APIRequestContext } from '@playwright/test'
 
 type AuthResult =

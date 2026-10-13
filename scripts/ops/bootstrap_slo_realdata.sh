@@ -13,6 +13,11 @@
 # - repo synced with /opt/adproject on the app server
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 APP_SERVER_IP=${APP_SERVER_IP:-46.62.252.96}
 TEST_SERVER_IP=${TEST_SERVER_IP:-157.90.126.205}

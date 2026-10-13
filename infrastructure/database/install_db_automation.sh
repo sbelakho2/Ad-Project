@@ -8,6 +8,11 @@
 # - backup directories under /var/backups/postgresql
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC_DIR="$REPO_ROOT/infrastructure/database"

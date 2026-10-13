@@ -4,12 +4,12 @@ on:
   push:
     branches: [ main, develop ]
     paths:
-      - 'Packages/com.rivalapexmediation.sdk/**'
+      - 'sdk/core/unity/**'
       - '.github/workflows/unity-sdk.yml'
   pull_request:
     branches: [ main, develop ]
     paths:
-      - 'Packages/com.rivalapexmediation.sdk/**'
+      - 'sdk/core/unity/**'
       - '.github/workflows/unity-sdk.yml'
 
 jobs:
@@ -180,7 +180,7 @@ jobs:
       
       - name: Create Package
         run: |
-          cd Packages/com.rivalapexmediation.sdk
+          cd sdk/core/unity
           tar -czf ../../apex-mediation-sdk-${{ github.sha }}.tgz \
             --exclude='*.meta' \
             --exclude='.git*' \

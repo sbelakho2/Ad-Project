@@ -1,6 +1,7 @@
-# Python coverage: ML (pipelines + scripts), services/fraud-inference, services/inference-ml.
-# All pragmas banned: `# pragma: no cover` markers are deleted/converted (design doc 3.8);
-# pytest-cov fails under 100% (branch coverage on).
+# Python coverage: ML (pipelines + scripts), services/fraud-inference, services/inference-ml,
+# and the repo py-scripts domain (sitecustomize + scripts/**/*.py + tools/*.py + sdk metrics stub).
+# All pragmas banned: `# pragma: no cover` markers are deleted/converted (design doc 3.8).
+# Floors come from tools/coverage/floors.txt; --cov-fail-under plus the lcov gates enforce them.
 # ML runs with cwd=ML so its pyproject [tool.coverage] config is discovered.
 when:
   - event: [push, pull_request]
@@ -15,33 +16,61 @@ services:
       POSTGRES_DB: services_test
 
 steps:
-  ml-coverage-100:
+  ml-coverage:
     image: python:3.11-slim
     commands:
       - pip install -c ML/constraints.txt -r ML/requirements.txt -e ML
+      - FLOOR=$(grep -E '^ml ' tools/coverage/floors.txt | awk '{print $2}')
       - cd ML
-      - python -m pytest tests scripts/tests --cov --cov-branch --cov-fail-under=100 --cov-report=lcov --cov-report=term-missing
-      - cd "$CI_WORKSPACE"
-      - node tools/coverage/lcov-gate.mjs ML/coverage.lcov 100
+      - python -m pytest tests scripts/tests --cov --cov-branch --cov-report=lcov:coverage.lcov --cov-report=term-missing --cov-fail-under=$FLOOR
+  ml-gate:
+    image: node:20-bookworm
+    depends_on: [ml-coverage]
+    commands:
+      - FLOOR=$(grep -E '^ml ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs ML/coverage.lcov $FLOOR
 
-  fraud-inference-coverage-100:
+  fraud-inference-coverage:
     image: python:3.11-slim
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/services_test
     commands:
       - pip install -r services/fraud-inference/requirements.txt
+      - FLOOR=$(grep -E '^fraud-inference ' tools/coverage/floors.txt | awk '{print $2}')
       - cd services/fraud-inference
-      - python -m pytest tests --cov=main --cov-branch --cov-fail-under=100 --cov-report=lcov
-      - cd "$CI_WORKSPACE"
-      - node tools/coverage/lcov-gate.mjs services/fraud-inference/coverage.lcov 100
+      - python -m pytest tests --cov=main --cov-branch --cov-report=lcov:coverage.lcov --cov-fail-under=$FLOOR
+  fraud-inference-gate:
+    image: node:20-bookworm
+    depends_on: [fraud-inference-coverage]
+    commands:
+      - FLOOR=$(grep -E '^fraud-inference ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs services/fraud-inference/coverage.lcov $FLOOR
 
-  inference-ml-coverage-100:
+  inference-ml-coverage:
     image: python:3.11-slim
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/services_test
     commands:
       - pip install -r services/inference-ml/requirements.txt
+      - FLOOR=$(grep -E '^inference-ml ' tools/coverage/floors.txt | awk '{print $2}')
       - cd services/inference-ml
-      - python -m pytest tests --cov=main --cov-branch --cov-fail-under=100 --cov-report=lcov
-      - cd "$CI_WORKSPACE"
-      - node tools/coverage/lcov-gate.mjs services/inference-ml/coverage.lcov 100
+      - python -m pytest tests --cov=main --cov-branch --cov-report=lcov:coverage.lcov --cov-fail-under=$FLOOR
+  inference-ml-gate:
+    image: node:20-bookworm
+    depends_on: [inference-ml-coverage]
+    commands:
+      - FLOOR=$(grep -E '^inference-ml ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs services/inference-ml/coverage.lcov $FLOOR
+
+  py-scripts-coverage:
+    image: python:3.11-slim
+    commands:
+      - pip install pytest==8.3.3 pytest-cov==6.0.0
+      - FLOOR=$(grep -E '^py-scripts ' tools/coverage/floors.txt | awk '{print $2}')
+      - python -m pytest scripts/__tests__ --cov=sitecustomize --cov=scripts --cov=tools --cov="sdk/ctv/tvos/scripts" --cov-branch --cov-report=lcov:py-scripts.lcov --cov-fail-under=$FLOOR
+  py-scripts-gate:
+    image: node:20-bookworm
+    depends_on: [py-scripts-coverage]
+    commands:
+      - FLOOR=$(grep -E '^py-scripts ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs py-scripts.lcov $FLOOR

@@ -1,6 +1,7 @@
-import { test } from '@playwright/test'
+import { test, expect } from '@playwright/test'
 
 // Opt-in local debug helper.
+// dogfood:skip:opt-in debug helper — runs only when CONSOLE_E2E_* env vars are set.
 // To run:
 //   CONSOLE_E2E_BASE_URL=https://console.example.com \
 //   CONSOLE_E2E_EMAIL=you@example.com \
@@ -21,4 +22,5 @@ test.skip('Debug login and dashboard (opt-in)', async ({ page }) => {
   await page.fill('input[type="password"]', password)
   await page.click('button[type="submit"]')
   await page.waitForURL('**/dashboard', { timeout: 15000 })
+  await expect(page).toHaveURL(/\/dashboard/)
 })

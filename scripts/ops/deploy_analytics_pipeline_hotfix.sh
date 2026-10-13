@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
 echo "== Deploy: backend analytics pipeline hotfix =="
 
-# 1) Patch backend on app server, rebuild, restart
-./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail
+# 1) Patch backend on app server, rebuild, restart.
+# Payloads are transported as single-quoted heredocs (same pattern as hetzner_rollback.sh);
+# the previous inline double-quoted form was unparseable because the payload contains
+# double quotes and nested heredocs.
+payload_app=$(cat <<'REMOTE'
+set -euo pipefail
 FILE=/opt/adproject/backend/src/services/analyticsService.ts
 python3 - <<'PY'
 from pathlib import Path
@@ -28,10 +37,13 @@ cd /opt/adproject/backend
 npm run build
 pm2 restart backend
 pm2 status | sed -n '1,35p'
-"
+REMOTE
+)
+./scripts/ops/hetzner_ssh.sh app -- "$payload_app"
 
 # 2) Patch harness scripts on test server and restart services
-./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail
+payload_test=$(cat <<'REMOTE'
+set -euo pipefail
 python3 - <<'PY'
 from pathlib import Path
 
@@ -106,6 +118,8 @@ PY
 systemctl restart web-sdk-harness.service ios-tv-api-harness.service slo-continuous.service
 sleep 1
 systemctl --no-pager --full status web-sdk-harness.service ios-tv-api-harness.service | sed -n '1,80p'
-"
+REMOTE
+)
+./scripts/ops/hetzner_ssh.sh test -- "$payload_test"
 
 echo "== Deploy complete =="

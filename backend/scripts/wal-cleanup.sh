@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eu
 # WAL Archive Cleanup Script
 # Removes WAL archives older than 7 days to prevent disk fill
 # Should be run daily via cron

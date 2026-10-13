@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 # VRA Usefulness & Stability Test Suite
 # Tests that VRA correctly detects revenue discrepancies between SDK and network reports
 #

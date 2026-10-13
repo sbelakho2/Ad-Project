@@ -107,6 +107,11 @@ export async function executeWithWaterfall(
   // Waterfall through adapters by priority
   let currentDelay = waterfallConfig.initialRetryDelay;
 
+  // Cycle/duplicate guard (adversarial case R3): a misconfigured adapter list with repeated
+  // ids must never be queried twice; the indexed loop already bounds attempts, and this set
+  // makes the guarantee explicit and logs the detection.
+  const seenAdapterIds = new Set<string>();
+
   for (let attemptNum = 2; attemptNum <= waterfallConfig.maxAttempts && attemptNum <= adapters.length + 1; attemptNum++) {
     // Exponential backoff delay
     await sleep(currentDelay);
@@ -121,6 +126,16 @@ export async function executeWithWaterfall(
       });
       break;
     }
+
+    if (seenAdapterIds.has(adapterId)) {
+      logger.warn('Waterfall cycle detected: adapter already queried, skipping', {
+        requestId: request.id,
+        adapter: adapterId,
+        attemptNumber: attemptNum,
+      });
+      continue;
+    }
+    seenAdapterIds.add(adapterId);
 
     logger.info('Waterfall attempt', {
       requestId: request.id,

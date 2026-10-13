@@ -1,19 +1,22 @@
 # Rust coverage: services/mail-server (8 crates) via cargo-llvm-cov.
-# Lines enforced at 100 by --fail-under-lines; branch parity enforced by the lcov gate
+# Lines enforced at the floor by --fail-under-lines; branch parity enforced by the lcov gate
 # (BRH==BRF for every first-party source record; proto-generated code is GENERATED-excluded).
+# Floor comes from tools/coverage/floors.txt.
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
 steps:
-  rust-coverage-100:
-    image: rust:1.83-bookworm
+  rust-coverage:
+    image: rust:1.87-bookworm
     commands:
       - cargo install cargo-llvm-cov --locked
+      - FLOOR=$(grep -E '^mail-server ' "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
       - cd services/mail-server
-      - cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-under-lines 100
-  rust-branch-gate:
+      - cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-under-lines "$FLOOR"
+  rust-gate:
     image: node:20-bookworm
-    depends_on: [rust-coverage-100]
+    depends_on: [rust-coverage]
     commands:
-      - node tools/coverage/lcov-gate.mjs services/mail-server/lcov.info 100 --require-branches
+      - FLOOR=$(grep -E '^mail-server ' tools/coverage/floors.txt | awk '{print $2}')
+      - node tools/coverage/lcov-gate.mjs services/mail-server/lcov.info $FLOOR --require-branches

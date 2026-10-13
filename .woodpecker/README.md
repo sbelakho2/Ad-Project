@@ -14,5 +14,6 @@ skipped must not silently weaken the aggregate gate).
 Floors start at observed baselines (green day one) and may only rise; the final phase requires every
 floor = 100. Server/agent deployment design: `infrastructure/woodpecker/README.md`.
 
-Pipelines intentionally contain **no secrets in gate logic**; the optional codecov upload step
-(`codecov_token`) is push-event-only and can be deleted without affecting any gate.
+Pipelines intentionally contain **no secrets in gate logic** — gates run identically on PRs (Woodpecker does not expose secrets to PR events; nothing here needs them). Floors are single-sourced from `tools/coverage/coverage-floor.json` and mirrored to `tools/coverage/floors.txt` (grep-readable inside any container image) by `tools/coverage/sync-floors.mjs`; the dogfood audit fails if they drift or if history regresses.
+
+Locally verified before commit (see design doc §9.2): the tools self-tests (16/16), the full manifest/gate stack, promtool alert tests, and the Unity tier-1 suite (25/25) all pass.

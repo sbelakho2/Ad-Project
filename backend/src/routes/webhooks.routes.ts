@@ -82,11 +82,14 @@ router.post('/stripe', async (req: Request, res: Response) => {
 
   try {
     const stripe = getStripeClient();
-    // Verify webhook signature
+    // Verify webhook signature. Tolerance pinned explicitly to Stripe's 5-minute
+    // replay window (adversarial case B3): older events are rejected regardless of
+    // SDK default changes.
     event = stripe.webhooks.constructEvent(
       req.body,
       sig as string,
-      webhookSecret
+      webhookSecret,
+      300
     );
   } catch (err) {
     logger.error('Stripe webhook signature verification failed', {

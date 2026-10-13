@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 # Idempotently enable Transparency API and ensure required tables exist on Hetzner prod.
 # Runs on the app server (46.62.252.96) because that host has access to DATABASE_URL.

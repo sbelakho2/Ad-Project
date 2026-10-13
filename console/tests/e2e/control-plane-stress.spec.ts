@@ -1,3 +1,4 @@
+// dogfood:skip:opt-in stress/production suite — enabled manually against deployed environments
 /**
  * Control Plane Stress Tests
  * 

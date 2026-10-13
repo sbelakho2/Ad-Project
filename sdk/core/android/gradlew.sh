@@ -2,6 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Modules without a wrapper (sdk/ctv/android-tv) borrow this one:
+#   cd sdk/ctv/android-tv && GRADLE_PROJECT_DIR=. bash ../core/android/gradlew.sh ...
+PROJECT_DIR="${GRADLE_PROJECT_DIR:-${SCRIPT_DIR}}"
 GRADLE_VERSION="${GRADLE_VERSION:-8.7}"
 DIST_DIR="${SCRIPT_DIR}/.gradle-dist"
 GRADLE_HOME="${GRADLE_USER_HOME:-${SCRIPT_DIR}/.gradle-home}"
@@ -21,4 +24,4 @@ if [[ ! -x "${GRADLE_BIN}" ]]; then
 fi
 
 export GRADLE_USER_HOME="${GRADLE_HOME}"
-exec "${GRADLE_BIN}" --project-dir "${SCRIPT_DIR}" "$@"
+exec "${GRADLE_BIN}" --project-dir "${PROJECT_DIR}" "$@"

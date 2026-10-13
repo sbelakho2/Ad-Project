@@ -47,8 +47,8 @@ Docs (`*.md`) are NOT excluded: they form the `docs` domain with a link/referenc
 
 1. **Ratchet-only**: coverage floors live in `tools/coverage/coverage-floor.json` and may only be raised. Lowering a floor (or deleting a floor file) fails the dogfood-audit pipeline.
 2. **No bypasses**: `# pragma: no cover`, `istanbul ignore`, `c8 ignore`, `@CoverageIgnore`, jest `coveragePathIgnorePatterns` additions, `describe.skip`/`it.skip` without a manifest-registered reason, and `|| true` on test/coverage commands are all banned. The existing 21 `# pragma: no cover` markers in ML/services must be deleted or converted into real tests (§3.8). The existing `|| true` soft-fails in `ci-all.yml` are inventoried in §7.3.
-3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` currently executes only 40 of 197 `*.test.ts` files (anchor `backend/jest.config.cjs` — `testMatch: ['<rootDir>/tests/**/*.test.ts']`; 139 files under `src/**/__tests__/`, 15 under `scripts/__tests__/`, 2 under `routes/__tests__/`, 1 under `services/sales-automation/tests/` are silently unmatched). Phase 0 MANDATES consolidating testMatch; the coverage config in this change already does it.
-4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later".
+3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` ran only 40 of 197 `*.test.ts` files. Fixed in this change by the additive `backend/jest.coverage.config.cjs` (consolidated testMatch picking up `src/**/__tests__`, `scripts/__tests__`, `routes/__tests__`, `services/sales-automation/tests`). The Unity tier-1 suite had never compiled at all (see §5.11 U-1) and now runs 25/25 green.
+4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `sync-floors.mjs` + the dogfood audit).
 5. **Everything in this design is itself dogfooded**: the manifest builder, gates, and meta-tests are covered by `node --test` suites with their own 100% gate (§6.4).
 
 ---
@@ -68,7 +68,7 @@ Verbatim findings from the 2026-10-13 repo audit (anchors are real paths):
 | sdk/react-native | **0** tests | none | none |
 | sdk/core/android + sdk/ctv/android-tv (Kotlin) | 48 + 7 unit test files | **no jacoco/kover** | size gates only |
 | sdk/core/ios + sdk/ctv/tvos (Swift) | 21 + 3 XCTest | llvm-cov export only in dead `ci.yml` | none |
-| sdk/core/unity (C#) | 13 xunit files that **self-skip** without `UNITY_RUNNER` (anchor `sdk/core/unity/ApexMediation.Tests.csproj`) | Unity TF coverage in a workflow whose trigger path `Packages/...` does not exist | none |
+| sdk/core/unity (C#) | 13 xunit/NUnit files; previously **never compiled** (corrupted `MediationSDK.cs` — fixed, see §5.11 U-1); tier-1 now 25/25 green | coverlet lcov tier-1 (31% seeded baseline) | **tier-1 lcov gate via floors** |
 | sdk/flutter | **0** tests | none | none |
 | ML (Python) | 15 test files, 33 `def test_` | none; **19 `# pragma: no cover` markers** | none |
 | services/fraud-inference + inference-ml (Python) | 8 + 6 pytest fns | 1 `pragma: no cover` each | none |
@@ -89,7 +89,7 @@ Known broken references the meta-suite must catch and keep caught: `quality/chao
 ## 2. Architecture of the gate stack
 
 ```
-                 .woodpecker/*.yml (12 pipelines)
+                 .woodpecker/*.yml (14 pipelines)
   backend ─ frontend ─ node-services ─ go ─ sdk-* ─ python ─ rust ─
   scripts-shell ─ contract ─ dogfood-audit ─────────► coverage-gate
         │                │                │                │
@@ -170,8 +170,8 @@ and `sdk/ctv/tvos`; requires a darwin Woodpecker agent using the local backend.
 
 ### 3.7 Unity (C#) — pipeline `sdk-unity-coverage.yml` (two-tier)
 
-- Tier 1 (no Unity license required): `dotnet test` with `UNITY_RUNNER=true` on the net8 xunit project + `coverlet.collector` threshold 100 (all four metrics) — this covers everything compilable outside the Unity editor; the csproj's self-skip behavior (anchor `sdk/core/unity/ApexMediation.Tests.csproj`) is converted: `UNITY_RUNNER=true` makes `IsTestProject` true, enabling real execution.
-- Tier 2 (licensed Unity runner image): Unity Test Framework coverage with `assemblyFilters:+ApexMediation`, XML result, gated to 100 by the lcov/xml adapter. Files only compilable inside Unity (`Platforms/Android`+`Platforms/iOS` bridges calling `UnityEngine`) are owned by tier 2; while tier 2 is not yet wired, they are `planned` — the ratchet makes this visible, never silent.
+- Tier 1 (no Unity license, RUNS GREEN TODAY): the runtime builds as `sdk/core/unity/Runtime/ApexMediation.Runtime.csproj` (a tier-1-only project Unity never reads; `Tests/UnityStubs.cs` shims the plain-.NET UnityEngine surface), tests run as `dotnet test sdk/core/unity/Tests/ApexMediation.Tests.csproj` under `UNITY_RUNNER=true` (the csproj self-skip is inverted into real execution), and coverlet emits `sdk/core/unity/coverage/lcov.info` (verified locally: 25/25 tests, 47 files, 31% line baseline). The floor gate ratchets from that baseline.
+- Tier 2 (licensed Unity runner image, phase 2): Unity Test Framework coverage with `assemblyFilters:+ApexMediation` for the editor-coupled surface (`ApexMediationEntryPoint.cs`, `Core/MediationDebuggerOverlay.cs`, `Platforms/{Android,iOS}`, `Core/BannerHost.cs`). While tier 2 is not yet wired, those files are `planned` — the ratchet makes this visible, never silent.
 
 ### 3.8 Python — pipeline `python-coverage.yml`
 
@@ -256,7 +256,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 |---|---|---|---|---|
 | B1 | usage events for tenant | meter replay (same event id twice) | idempotent: charged once; duplicate dropped, metric `meter_duplicates_total` bumped | `backend/src/services/billing/UsageMetering*` AUDIT-REQUIRED |
 | B2 | negative/NaN/huge quantities (`1e308`, `-1`, `NaN`) | metering ingest | rejected by zod schema; no partial write; alert metric | `backend/src/config/env.ts` + billing schemas; AUDIT-REQUIRED (current accept/reject) |
-| B3 | Stripe webhook valid sig, `t` 10 min old | process | rejected (Stripe tolerance 5 min) | `backend/src/routes/*billing*` AUDIT-REQUIRED |
+| B3 | Stripe webhook valid sig, `t` 10 min old | process | rejected (Stripe tolerance 5 min). **IMPLEMENTED in this change**: tolerance pinned explicitly to 300s in `constructEvent` | `backend/src/routes/webhooks.routes.ts:86` |
 | B4 | invoice period boundary | usage at exact `periodEnd` timestamp | attributed to one period only; rounding = banker's rounding to cent, no float accumulation | `services/billing/platformFeeService` (top-level backend/services/billing/) AUDIT-REQUIRED |
 | B5 | payout already in `paid` state | duplicate payout request | 409 or no-op; ledger invariant `sum(entries)==0` holds | AUDIT-REQUIRED |
 
@@ -266,7 +266,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 |---|---|---|---|---|
 | R1 | OpenRTB bidrequest | `imp[]` empty / `bidfloor: -1` / `tmax: 0` | deterministic rejection (400) with no DSP fan-out | `backend/src/services/rtbEngine` AUDIT-REQUIRED |
 | R2 | DSP responds after internal deadline | hedge race | winning path returns before deadline; late response discarded and counted in timeout metrics | `backend/src/services/rtbEngine`, Go `backend/auction/internal/bidding` (hedge tests exist: anchor `backend/auction/internal/bidding/*_test.go`) |
-| R3 | waterfall with cycling adapters A→B→A | walk | cycle detected, no infinite loop, fallback wins fill | `backend/src/services/waterfallService` AUDIT-REQUIRED |
+| R3 | waterfall with cycling adapters A→B→A | walk | cycle detected, no infinite loop, fallback wins fill. **IMPLEMENTED in this change**: explicit `seenAdapterIds` guard (duplicate ids logged and skipped; indexed loop already bounds attempts) | `backend/src/services/waterfallService.ts` |
 | R4 | thompson sampling priors | adversarial click-fraud feedback (all clicks on one arm) | distribution stays bounded; no divide-by-zero when impressions=0 | `backend/src/services/thompsonSamplingService` AUDIT-REQUIRED |
 | R5 | Go auction p95 window empty | compute p95 | no NaN; documented sentinel | `backend/auction/internal/bidding` AUDIT-REQUIRED |
 
@@ -317,10 +317,10 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 | K1 | kill switch cached (Android) | flip mid-auction | next request honors switch; in-flight completes; cache TTL honored | existing `*KillSwitch*` tests (anchor `kill-switch-smoke-test.yml`) |
 | K2 | UMP consent | callback arrives AFTER ad request fired | request blocked or re-run post-consent; never both; GDPR region never serves unconsented | `sdk/core/android/src/main/kotlin/consent/*` AUDIT-REQUIRED |
 | K3 | OMSDK binary absent | ad render | degrade to image beacon path; no crash (existing `OmSdkAbsentTest` extended) | `sdk/ctv/android-tv/src/test/*OmSdkAbsentTest*` |
-| K4 | TCF string | malformed/oversized consent string | parser fails closed (no consent), never throws across API boundary | `sdk/ctv/android-tv/.../consent/TCFParser` + tvos `TCFParserTests` extension |
+| K4 | TCF string | malformed/oversized consent string | parser fails closed (no consent), never throws across API boundary. **IMPLEMENTED in this change**: `TCFParser.kt` now decodes the real TCF v2 bitfield (version==2, all 3 segments base64url-decoded, purpose-1 bit read MSB-first) and returns consent=false for everything it cannot decode — the previous "has a dot" heuristic failed OPEN | `sdk/ctv/android-tv/src/main/kotlin/com/rivalapexmediation/ctv/consent/TCFParser.kt` + tvos `TCFParserTests` extension |
 | K5 | Swift strict concurrency | ad request cancelled mid-flight | no detached-task leak; actor state consistent (`-strict-concurrency` build already on) | `sdk/core/ios/Package.swift` (StrictConcurrency) |
-| K6 | Web SDK SSAI parser | manifest with duplicate `#EXT-X-DISCONTINUITY`, zero-duration segments | parsed deterministically or rejected; no NaN in timeline | `sdk/web/src/ssai/SSAIManifestParser*` (existing tests extended) |
-| K7 | Unity xunit without Unity | `UNITY_RUNNER` unset | Tier-1 gate FAILS the build if `IsTestProject=false` observed (self-skip ban) | `sdk/core/unity/ApexMediation.Tests.csproj` |
+| K6 | Web SDK SSAI parser | manifest with duplicate `#EXT-X-DISCONTINUITY`, zero-duration segments | parsed deterministically or rejected; no NaN in timeline. **IMPLEMENTED in this change**: all 8 bare `parseFloat` sites in `SSAIManifestParser.ts` replaced with fail-closed `safeNumber` (malformed attrs → documented defaults, NaN eliminated) | `sdk/web/src/ssai/SSAIManifestParser.ts` |
+| K7 | Unity tier without Unity | `UNITY_RUNNER` unset | Tier-1 gate runs the suite for real (self-skip inverted: `UNITY_RUNNER=true` + `Tests/ApexMediation.Tests.csproj`); an empty/skipped run cannot produce the lcov the gate requires | `sdk/core/unity/Tests/ApexMediation.Tests.csproj` |
 
 ### 5.9 Contract domain suites
 
@@ -336,6 +336,24 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 ### 5.10 Docs domain (suite `S-DOCS`)
 
 Linkcheck (internal anchors + cross-references) + freshness contract: every doc referencing an npm script/Makefile target/env var references something that exists (same engine as `ci-reference-integrity`, applied to `docs/**`). Adversarial case S-DOCS-1: rename a script → docs contract fails.
+
+### 5.11 Findings implemented by the dogfooding run itself (this change)
+
+The first execution of this stack (Unity tier-1, promtool, shell/bats, contract checks, and the four design audits) found real pre-existing defects. All were FIXED in this change (never weakened or deleted):
+
+| id | defect found | fix |
+|---|---|---|
+| U-1 | `sdk/core/unity/Runtime/Core/MediationSDK.cs` did not parse at all (methods spliced into `InternalShow`'s body) — the entire Unity package had never compiled in CI | method bodies restored; missing `GetCircuitBreaker` body implemented from call sites; Unity tier-1 now compiles and 25/25 tests pass |
+| U-2 | `FallbackWaterfall.CreateSource` had an optional parameter before a required one (CS1737, uncompilable in Unity too) | 3-arg overload added + 4-arg shape preserved |
+| U-3 | `UsageMeter.cs` used LINQ without `using System.Linq` (uncompilable under Unity's compiler) | using added |
+| U-4 | `RenderableAd` had no constructor for the pre-`format` test API | backward-compatible overload added |
+| U-5 | `MediationSDK.Shutdown()` leaked pacing marks, circuit breakers, and cached ads across lifecycles (the adversarial network suite caught it: timeouts surfaced as "pacing") | Shutdown now resets all three; `AdCache.Clear()` added |
+| U-6 | `scripts/ops/deploy_analytics_pipeline_hotfix.sh` was unparseable (embedded quotes broke the outer string); would have failed deploy | rewritten with quoted-heredoc payloads (rollback.sh pattern); validated with `bash -n` under bash 5 |
+| U-7 | 51 shell scripts lacked `set -eu` and/or a dry-run guard | guards + strictness implemented script-by-script; bats suite now enforces both invariants |
+| U-8 | `tools/content-guard.js` was not importable (top-level side effects), so it could not be dogfooded | refactored to pure predicates + main-guard; adversarial payload matrix runs in the contract pipeline |
+| U-9 | 4 workflows referenced the pre-2025 `sdks/`/`packages/`/`Packages/` layout that has never existed (web-sdk, kill-switch web lane, docs-deployment, unity-ci/unity-sdk triggers) | paths repaired to the real `sdk/` tree; remaining legacy workflows baselined in `ci-ref-baseline.json` with ratchet |
+| U-10 | `Il2CppCompatibilityTests` used a removed NUnit-4 API | modernized to `Assert.That(..., Is.Not.Null)` with real public API types |
+| U-11 | `website/src/__tests__/security.headers.test.ts` was a 1-line stub that could never assert | implemented as the full TS twin of the JS suite |
 
 ---
 
@@ -387,9 +405,9 @@ Self-hosted design in `infrastructure/woodpecker/` (docker-compose for server+ag
 
 All pipelines trigger on `push`+`pull_request` to `main`/`master` with **no path filters** in phase 0 (rationale: path-filtered parents that are skipped must not silently weaken the aggregate gate; filters are a phase-4 optimization behind verified `depends_on`-skip semantics). Secrets: none required for gates; optional `codecov_token` push-only upload step per pipeline (PR events never receive secrets — kept out of gate logic by design).
 
-### 7.3 Existing `|| true` inventory (M-4 backlog, each must be converted or allowlisted with reason)
+### 7.3 Existing `|| true` inventory (M-4, frozen with ratchet)
 
-`ci-all.yml`: `console-a11y-perf` lighthouse, `billing-e2e-smoke` playwright, `website-a11y-perf` lighthouse+analyze, `website-visual-regression`; `nightly-billing-perf.yml` k6. None of these may guard coverage numbers.
+The legacy soft-fail inventory (38 occurrences across 12 workflows — `ci-all.yml` lighthouse/billing-e2e/website lanes, `ci.yml`, `compatibility-testing.yml`, `deploy-production.yml`, `ios-sdk.yml`, `ml-nightly.yml`, `nightly-billing-perf.yml`, `scripts-guardrails.yml`, `security.yml`, `synthetic-probes.yml`, `unity-sdk.yml`, `website-capture.yml`) is frozen in `tools/coverage/policy-baseline.json`. The policy gate fails on any NEW `|| true` on a test/coverage command, and fails on STALE baseline entries so each conversion must delete its entry (ratchet). None of these may guard coverage numbers.
 
 ### 7.4 Rollout phases
 
@@ -416,4 +434,32 @@ Findings are fixed before this design is considered final; the fix log is append
 
 ## 9. Verification fix log
 
-(appended after audits; empty at design time)
+### 9.1 Design audits (4 independent read-only subagent reviews)
+
+- **Woodpecker semantics audit**: found 15+ issues (top-level `environment` unsupported → moved per-step; matrix grading-cache build; gradlew absence in both Android modules; Unity csproj path wrong + coverlet missing; `podspec`; runtime-image gaps; `gixy` pin; promtool extraction pollution; env blocks; `apt-get` in kcov image; missing pytest-cov; `--require-branches` fail-open; `get()` parsing bug; etc.). All BLOCKER/MAJOR items fixed in the pipelines/configs.
+- **Completeness audit**: enumerated real repo files vs the classifier; found ~40 gap classes (root-anchored patterns, missing extensions, order hazards, `tools/coverage` self-skip, `**/test/**` over-match, `.md` nesting, etc.). Classifier rewritten; manifest now classifies 2,763 files with **0 unclassified**.
+- **Expectation-correctness audit**: verified every anchored catalog row; found and corrected: Unity csproj path, ML pragma counts (18 markers / 13 files, frozen in baseline), `|| true` counts (38/12 files), `webhooks.routes.ts:86` anchor, `README.md`@backend absence, `cron/create_future_rollup_partitions.sh` naming, `TCFParser` failing-open bug, `sales-scheduler.ts` path. Rows whose claims were contradicted by the code were made true by IMPLEMENTATION (§5.11, B3, R3, K4, K6), not by weakening.
+- **Mechanism audit**: verified jest/pytest/kover/llvm-cov/cargo-llvm-cov/kcov/c8 semantics; found the Kover 0.8 DSL conflict (resolved authoritatively against the 0.8.3 sources jar: `coverageUnits` + `aggregationForGroup`, `CounterType` does not exist), lcov branch fail-open (now fail-closed), coverage-gate unknown-domain hole (now fatal), c8 include/report-dir bugs (fixed), `assertion-presence` regex gaps (rewritten to classifier-driven test-case detection), `dogfood-gates` flag-parse bug (fixed).
+
+### 9.2 Dogfooding execution (this change, all local, no Woodpecker server needed)
+
+| check | result |
+|---|---|
+| `node --test tools/coverage/test/` | 16/16 PASS |
+| manifest build (2,763 files) | 0 unclassified |
+| orphan gate / floor-ratchet / floors-sync | PASS |
+| assertion-presence (M-7) | PASS (10 real always-green candidates fixed: 4 implemented assertions, 6 reclassified support files) |
+| policy gate `--shell` + `--full` (M-3/M-4) | PASS (51 scripts hardened, 22 skip markers implemented, ratchet baseline frozen for 13 pragma files + 12 `|| true` files) |
+| contract: ci-reference-integrity | PASS (51 workflow files; 6 legacy refs baselined with remediation reasons) |
+| contract: openapi-parity | PASS (5/5 paths, mount-prefix aware) |
+| contract: content-guard adversarial matrix | PASS (6 payload cases) |
+| contract: samples / docs-references | PASS |
+| promtool `test rules monitoring/alerts.test.yml` (real promtool v2.53 in docker) | **SUCCESS** (3 alert state-machine cases incl. exact labels+annotations) |
+| Unity tier-1 `dotnet test` (real dotnet) | **25/25 PASS**, lcov emitted (47 files, 31% baseline) |
+| all 15 Woodpecker/docker-compose YAML files parse | PASS |
+
+### 9.3 Residual items (by design, tracked by ratchet — not weakened)
+
+- Phase-1: delete the 13 pragma files' markers (tests to be written; baseline shrinks automatically via stale-entry failure), convert the 12 `|| true` inventories, rebuild the 2 legacy workflows behind `ci-ref-baseline.json`, implement the remaining AUDIT-REQUIRED catalog rows with the §0.2 protocol, populate `suites.json` so orphanFloorPercent can begin ratcheting below 100.
+- Phase-2: Unity tier-2 licensed lane, instrumented Android emulator lane, mutation floors.
+- Not locally executable here: the Woodpecker pipelines themselves (no server) and the GitHub-Actions-only toolchains (Android/iOS/Flutter/Kover gradle); their commands and configs were validated statically by the mechanism audit and the exact commands verified where a local tool existed (dotnet, promtool, bash, node).

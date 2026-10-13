@@ -1,6 +1,8 @@
 # Android (Kotlin) coverage: sdk/core/android + sdk/ctv/android-tv via Kover.
-# koverVerify enforces LINE and BRANCH counters at 100; Robolectric covers
-# framework-coupled classes on the JVM (no emulator required for this gate).
+# koverVerify enforces the ratchet floor (from tools/coverage/floors.txt) on LINE and
+# BRANCH counters; Robolectric covers framework-coupled classes on the JVM.
+# sdk/ctv/android-tv has no wrapper of its own: it borrows the core module's gradlew.sh
+# via GRADLE_PROJECT_DIR=.
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -8,13 +10,17 @@ when:
 matrix:
   include:
     - MODULE: sdk/core/android
-      VERIFY: koverVerify
+      DOMAIN: android-core
+      GRADLE_CMD: ./gradlew.sh
     - MODULE: sdk/ctv/android-tv
-      VERIFY: koverVerify
+      DOMAIN: android-ctv
+      GRADLE_CMD: bash ../core/android/gradlew.sh
 
 steps:
-  android-coverage-100:
+  android-coverage:
     image: mobiledevops/android-sdk-image:34.0.0-jdk17
     commands:
+      - FLOOR=$(grep -E "^${DOMAIN} " "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
       - cd "$CI_WORKSPACE/$MODULE"
-      - ./gradlew --no-daemon testDebugUnitTest koverXmlReport "$VERIFY"
+      - export GRADLE_PROJECT_DIR=.
+      - $GRADLE_CMD --no-daemon testDebugUnitTest koverXmlReport koverVerify -PkoverFloor="$FLOOR"

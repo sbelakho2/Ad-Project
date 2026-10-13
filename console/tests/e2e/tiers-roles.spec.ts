@@ -1,3 +1,4 @@
+// dogfood:skip:opt-in environment-gated suite — enabled in the live/staging lanes
 import { test, expect, Page, Route } from '@playwright/test';
 
 // This suite assumes real /api/v1* endpoints and is intended for integration-style runs.

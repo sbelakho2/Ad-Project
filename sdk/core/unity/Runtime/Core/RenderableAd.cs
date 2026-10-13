@@ -17,6 +17,12 @@ namespace Apex.Mediation.Core
             LoadedAt = _clock.Now;
         }
 
+        // Overload for callers/tests from before the format field existed.
+        public RenderableAd(string placementId, string adapter, TimeSpan ttl, IClock? clock = null)
+            : this(placementId, adapter, "unknown", ttl, clock)
+        {
+        }
+
         public string PlacementId { get; }
         public string Adapter { get; }
         public string Format { get; }

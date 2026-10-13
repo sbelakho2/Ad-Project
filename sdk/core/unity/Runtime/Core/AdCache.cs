@@ -12,6 +12,11 @@ namespace Apex.Mediation.Core
             return true;
         }
 
+        public void Clear()
+        {
+            _ads.Clear();
+        }
+
         public bool TryTake(string placementId, out RenderableAd renderable)
         {
             if (_ads.TryGetValue(placementId, out var cached))

@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tier-1 (no-editor) build of the Unity runtime. Unity itself compiles Runtime/**/*.cs via
+    .asmdef files and never reads this project; this csproj exists so the xunit/NUnit suite can
+    reference the runtime as a real dependency (which is also what lets coverlet instrument it).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ApexMediation.Runtime</AssemblyName>
+    <RootNamespace>Apex.Mediation</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="**/*.cs" />
+    <Compile Remove="obj/**/*.cs" />
+    <Compile Remove="bin/**/*.cs" />
+    <Compile Remove="Platforms/Android/**/*.cs" />
+    <Compile Remove="Platforms/iOS/**/*.cs" />
+    <Compile Remove="Core/BannerHost.cs" />
+    <!-- Tier-2 (Unity editor + IMGUI) surface: exercised by Unity Test Framework, not tier 1. -->
+    <Compile Remove="ApexMediationEntryPoint.cs" />
+    <Compile Remove="Core/MediationDebuggerOverlay.cs" />
+    <!-- UnityEngine surface shim for the plain .NET runtime (lives under Tests/ so Unity never sees it). -->
+    <Compile Include="../Tests/UnityStubs.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>ApexMediation.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

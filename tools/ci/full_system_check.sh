@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eu
 set -e
 
 ENV=${1:-local}

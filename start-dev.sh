@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eu
 
 # Rival ApexMediation Console - Development Test Script
 # This script starts the development server with mock data

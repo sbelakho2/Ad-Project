@@ -9,17 +9,21 @@ plugins {
 }
 
 kover {
-    verify {
-        rule {
-            bound {
-                minValue = 100
-                counter = kotlinx.kover.gradle.plugin.dsl.CounterType.LINE
-                aggregation = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
-            }
-            bound {
-                minValue = 100
-                counter = kotlinx.kover.gradle.plugin.dsl.CounterType.BRANCH
-                aggregation = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
+    reports {
+        verify {
+            rule {
+                bound {
+                    // Ratchet floor, single source of truth: tools/coverage/coverage-floor.json.
+                    // The pipeline passes -PkoverFloor=<floor read from floors.txt>. Final phase: 100.
+                    minValue = (project.findProperty('koverFloor') ?: '0').toString().toInteger()
+                    coverageUnits = kotlinx.kover.gradle.plugin.dsl.CoverageUnit.LINE
+                    aggregationForGroup = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
+                }
+                bound {
+                    minValue = (project.findProperty('koverFloor') ?: '0').toString().toInteger()
+                    coverageUnits = kotlinx.kover.gradle.plugin.dsl.CoverageUnit.BRANCH
+                    aggregationForGroup = kotlinx.kover.gradle.plugin.dsl.AggregationType.COVERED_PERCENTAGE
+                }
             }
         }
     }

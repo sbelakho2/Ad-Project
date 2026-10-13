@@ -4,6 +4,11 @@
 # Creates S3 bucket with Object Lock for 7-year document retention (Estonian Accounting Act compliance)
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 DRY_RUN=${DRY_RUN:-0}
 YES=${YES:-0}

@@ -10,6 +10,11 @@
 #   ./scripts/ops/ios_tv_api_harness.sh [duration_minutes] [events_per_minute]
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 if [[ -f "/opt/adproject/.env.slo" ]]; then set -a; source "/opt/adproject/.env.slo"; set +a; fi
 if [[ -f ".env.slo" ]]; then set -a; source ".env.slo"; set +a; fi

@@ -4,6 +4,11 @@
 # Deploy to: /usr/local/bin/pg_backup_apex.sh on DB server
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 BACKUP_DIR="/mnt/HC_Volume_104191119/postgresql-backups"
 DATE=$(date +%Y-%m-%d_%H%M%S)

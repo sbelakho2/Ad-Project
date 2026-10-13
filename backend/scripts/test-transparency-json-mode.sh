@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+set -eu
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 #
 # Test transparency-verify.ts --json mode with various scenarios
 # This script validates structured output format and exit codes

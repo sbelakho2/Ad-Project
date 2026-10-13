@@ -20,6 +20,7 @@ class SoakTest {
         val args = InstrumentationRegistry.getArguments()
         val minutes = args.getString("SOAK_MINUTES")?.toLongOrNull() ?: 2L
         val end = System.currentTimeMillis() + minutes * 60 * 1000L
+        var cycles = 0
         while (System.currentTimeMillis() < end) {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 // Initialize
@@ -48,7 +49,9 @@ class SoakTest {
 
                 // Recreate to simulate rotation
                 scenario.recreate()
+                cycles += 1
             }
         }
+        org.junit.Assert.assertTrue("Soak must complete at least one full cycle (cycles=$cycles)", cycles > 0)
     }
 }

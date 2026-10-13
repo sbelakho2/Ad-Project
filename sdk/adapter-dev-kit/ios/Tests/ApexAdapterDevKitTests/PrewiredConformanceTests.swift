@@ -40,18 +40,27 @@ final class PrewiredConformanceTests: XCTestCase {
     func testConformance_AdMob() async throws {
         await MediationSDK.shared.registerAdapter(networkName: "admob", adapterType: BYOTestAdMobAdapter.self)
         let suite = ConformanceSuite()
-        try await suite.runAll(adapterName: "admob", registerAdapter: {}, context: ctx())
+        var failure: Error?
+        do { try await suite.runAll(adapterName: "admob", registerAdapter: {}, context: ctx()) }
+        catch { failure = error }
+        XCTAssertNil(failure, "AdMob prewired adapter must pass the conformance suite: \(String(describing: failure))")
     }
 
     func testConformance_AppLovin() async throws {
         await MediationSDK.shared.registerAdapter(networkName: "applovin", adapterType: BYOTestAppLovinAdapter.self)
         let suite = ConformanceSuite()
-        try await suite.runAll(adapterName: "applovin", registerAdapter: {}, context: ctx())
+        var failure: Error?
+        do { try await suite.runAll(adapterName: "applovin", registerAdapter: {}, context: ctx()) }
+        catch { failure = error }
+        XCTAssertNil(failure, "AppLovin prewired adapter must pass the conformance suite: \(String(describing: failure))")
     }
 
     func testConformance_IronSource() async throws {
         await MediationSDK.shared.registerAdapter(networkName: "ironsource", adapterType: BYOTestIronSourceAdapter.self)
         let suite = ConformanceSuite()
-        try await suite.runAll(adapterName: "ironsource", registerAdapter: {}, context: ctx())
+        var failure: Error?
+        do { try await suite.runAll(adapterName: "ironsource", registerAdapter: {}, context: ctx()) }
+        catch { failure = error }
+        XCTAssertNil(failure, "IronSource prewired adapter must pass the conformance suite: \(String(describing: failure))")
     }
 }

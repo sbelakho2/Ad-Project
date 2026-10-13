@@ -10,11 +10,14 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(UnityRunner)' == 'true'">
-    <Compile Include="../Runtime/**/*.cs" />
+    <!-- The runtime compiles as its own project so coverlet can instrument it. -->
     <Compile Include="**/*.cs" />
-    <Compile Remove="../Runtime/Platforms/Android/**/*.cs" />
-    <Compile Remove="../Runtime/Platforms/iOS/**/*.cs" />
-    <Compile Remove="../Runtime/Core/BannerHost.cs" />
+    <Compile Remove="obj/**/*.cs" />
+    <Compile Remove="bin/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UnityRunner)' == 'true'">
+    <ProjectReference Include="../Runtime/ApexMediation.Runtime.csproj" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UnityRunner)' != 'true'">
@@ -40,5 +43,14 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
     <PackageReference Include="xunit" Version="2.7.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.8" />
+    <!-- Coverage for the tier-1 (no-editor) gate: enables /p:CollectCoverage. -->
+    <PackageReference Include="coverlet.msbuild" Version="6.0.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- The suite intentionally mixes xunit and NUnit (NUnit matches the Unity Test Framework
+         dialect used by Il2CppCompatibilityTests); both adapters run under dotnet test. -->
+    <PackageReference Include="NUnit" Version="4.2.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
   </ItemGroup>
 </Project>

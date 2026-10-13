@@ -114,6 +114,14 @@ namespace Apex.Mediation.Core
             _bridge?.Shutdown();
             _bridge = null;
             _initialized = false;
+
+            // Reset runtime guards/caches so a subsequent Initialize starts clean:
+            // stale pacing marks, circuit breakers, and cached ads must not leak
+            // across SDK lifecycles (found by the adversarial tier-1 network suite).
+            _pacingMarks.Clear();
+            _circuitBreakers.Clear();
+            _interstitialCache.Clear();
+            _rewardedCache.Clear();
         }
 
         public void ValidateAdapter(string network, IReadOnlyDictionary<string, object?> credentials, Action<AdapterValidationResult> callback)
@@ -202,7 +210,6 @@ namespace Apex.Mediation.Core
             var startedOmSdk = MaybeStartOmSdkSession(ad);
 
             var completion = CreateCompletion(callback, placementId, ad.Adapter, () => FinishOmSdkSessionIfStarted(startedOmSdk));
-            private AdapterCircuitBreaker GetCircuitBreaker(string key)
             try
             {
                 showAction(completion);
@@ -212,23 +219,34 @@ namespace Apex.Mediation.Core
                 Logger.LogError($"Show failed for {placementId}", ex);
                 FinishOmSdkSessionIfStarted(startedOmSdk);
                 completion(false, ex.Message ?? "show_failed");
+            }
+        }
 
-            private bool IsPaced(string key, long minRetryMs)
+        private AdapterCircuitBreaker GetCircuitBreaker(string key)
+        {
+            if (!_circuitBreakers.TryGetValue(key, out var breaker))
             {
-                var nowMs = (long)_clock.Now.TotalMilliseconds;
-                if (_pacingMarks.TryGetValue(key, out var last) && nowMs - last < minRetryMs)
-                {
-                    return true;
-                }
-
-                return false;
+                breaker = new AdapterCircuitBreaker(clock: _clock);
+                _circuitBreakers[key] = breaker;
             }
 
-            private void MarkPaced(string key)
+            return breaker;
+        }
+
+        private bool IsPaced(string key, long minRetryMs)
+        {
+            var nowMs = (long)_clock.Now.TotalMilliseconds;
+            if (_pacingMarks.TryGetValue(key, out var last) && nowMs - last < minRetryMs)
             {
-                _pacingMarks[key] = (long)_clock.Now.TotalMilliseconds;
+                return true;
             }
-            }
+
+            return false;
+        }
+
+        private void MarkPaced(string key)
+        {
+            _pacingMarks[key] = (long)_clock.Now.TotalMilliseconds;
         }
 
         private Dictionary<string, object?> CreateLoadExtras()

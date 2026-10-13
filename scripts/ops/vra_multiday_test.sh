@@ -4,6 +4,11 @@
 # Usage: ./scripts/ops/vra_multiday_test.sh
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 # Load optional env file for SLO runs if present
 if [[ -f "/opt/adproject/.env.slo" ]]; then

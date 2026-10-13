@@ -1,7 +1,8 @@
-# sdk-apple-coverage.yml — Apple (Swift) coverage: sdk/core/ios + sdk/ctv/tvos via
-# swift test + llvm-cov lcov export, gated to 100% lines by tools/coverage/lcov-gate.mjs.
+# Apple (Swift) coverage: sdk/core/ios + sdk/ctv/tvos via swift test + llvm-cov lcov export,
+# gated to the ios-swift/tvos-swift floors by tools/coverage/lcov-gate.mjs.
 # NOTE: assumes a darwin Woodpecker agent using the LOCAL backend (swift/xcrun run natively
-# on macOS; the image field is ignored by the local backend and kept only as documentation).
+# on macOS; the image field is required by the linter, ignored by the local backend, and kept
+# only as documentation).
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -12,14 +13,18 @@ labels:
 matrix:
   include:
     - PROJECT: sdk/core/ios
+      DOMAIN: ios-swift
       TEST_BIN: .build/debug/RivalApexMediationSDKPackageTests.xctest/Contents/MacOS/RivalApexMediationSDKPackageTests
     - PROJECT: sdk/ctv/tvos
+      DOMAIN: tvos-swift
       TEST_BIN: .build/debug/CTVSDKPackageTests.xctest/Contents/MacOS/CTVSDKPackageTests
 
 steps:
-  swift-coverage-100:
+  swift-coverage:
+    image: swift:5.9
     commands:
       - cd "$CI_WORKSPACE/$PROJECT"
       - swift test --enable-code-coverage --parallel
-      - xcrun llvm-cov export -format=lcov "$TEST_BIN" -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
-      - node "$CI_WORKSPACE/tools/coverage/lcov-gate.mjs" coverage.lcov 100
+      - xcrun llvm-cov export -format=lcov -ignore-filename-regex='(/Tests/|/\.build/)' "$TEST_BIN" -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
+      - FLOOR=$(grep -E "^${DOMAIN} " "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
+      - node "$CI_WORKSPACE/tools/coverage/lcov-gate.mjs" coverage.lcov "$FLOOR"

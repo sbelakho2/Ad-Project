@@ -1,7 +1,8 @@
 # Unity (C#) coverage, two tiers.
-# Tier 1 (this pipeline, no Unity license): the net8 xunit project is forced into
-# real execution via UNITY_RUNNER=true (defeats the csproj self-skip); coverlet
-# enforces 100% on line/branch/method for all editor-independent code.
+# Tier 1 (this pipeline, no Unity license): the runtime builds as ApexMediation.Runtime.csproj
+# (UnityStubs.cs provides the plain-.NET UnityEngine shim), xunit+NUnit tests run under
+# UNITY_RUNNER=true (defeats the csproj self-skip), coverlet emits lcov and the shared
+# lcov gate enforces the unity-tier1 floor from tools/coverage/coverage-floor.json.
 # Tier 2 (licensed Unity runner, phase 2): Unity Test Framework coverage with
 # assemblyFilters:+ApexMediation for UnityEngine-coupled bridges (see design doc 3.7).
 when:
@@ -9,16 +10,15 @@ when:
     branch: [main, master]
 
 steps:
-  unity-tier1-dotnet-100:
+  unity-tier1-dotnet:
     image: mcr.microsoft.com/dotnet/sdk:8.0
     environment:
       UNITY_RUNNER: 'true'
     commands:
       - cd sdk/core/unity
-      - dotnet restore ApexMediation.Tests.csproj
-      - dotnet test ApexMediation.Tests.csproj /p:CollectCoverage=true /p:CoverletOutputFormat=lcov /p:CoverletOutput=./coverage/lcov.info /p:Threshold=100 /p:ThresholdType=line,branch,method /p:ThresholdStat=total
+      - dotnet test Tests/ApexMediation.Tests.csproj /p:CollectCoverage=true /p:CoverletOutputFormat=lcov /p:CoverletOutput=../coverage/lcov.info
   unity-tier1-gate:
     image: node:20-bookworm
-    depends_on: [unity-tier1-dotnet-100]
+    depends_on: [unity-tier1-dotnet]
     commands:
       - node tools/coverage/coverage-gate.mjs --domain unity-tier1 --artifact sdk/core/unity/coverage/lcov.info --tool lcov

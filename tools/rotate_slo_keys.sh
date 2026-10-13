@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Rotate SDK keys for apps in /opt/adproject/.env.slo and verify ingestion
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 ENV_FILE=/opt/adproject/.env.slo
 if [[ ! -f "$ENV_FILE" ]]; then echo "missing $ENV_FILE" >&2; exit 2; fi

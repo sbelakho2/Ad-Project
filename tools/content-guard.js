@@ -3,6 +3,9 @@
  Provider Content Guard
  - Scans code/config areas of the repo to block accidental reintroduction of legacy managed PaaS providers.
  - Excludes docs/, quality/, node_modules/, and any file carrying a top-of-file "DEPRECATION NOTICE".
+ - Dogfood contract: this module is importable (CJS) and exports its pure predicates
+   (scanText, shouldScanFile) so tools/coverage/contract-checks.mjs can adversarially
+   test the guard itself without executing the repo scan.
 */
 
 const fs = require('fs');
@@ -51,6 +54,11 @@ const TEXT_EXT = new Set([
   '.json', '.yml', '.yaml', '.sh', '.bash',
   '.conf', '.toml', '.env', '.gradle', '.properties', '.xml', '.txt'
 ]);
+
+// Pure predicate: does this text contain a forbidden provider reference?
+function scanText(text) {
+  return FORBIDDEN.some((rx) => rx.test(text));
+}
 
 function shouldScanFile(filePath) {
   const rel = path.relative(repoRoot, filePath);
@@ -107,11 +115,8 @@ function scan() {
       } catch {
         continue;
       }
-      for (const rx of FORBIDDEN) {
-        if (rx.test(txt)) {
-          offenders.push(`${path.relative(repoRoot, f)} → ${rx}`);
-          break;
-        }
+      if (scanText(txt)) {
+        offenders.push(path.relative(repoRoot, f));
       }
     }
   }
@@ -126,4 +131,8 @@ function scan() {
   }
 }
 
-scan();
+module.exports = { FORBIDDEN, TEXT_EXT, EXCLUDE_DIRS, SCAN_DIRS, scanText, shouldScanFile, walk, scan };
+
+if (require.main === module) {
+  scan();
+}

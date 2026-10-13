@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 KEEP_BACKUPS=${KEEP_BACKUPS:-2}
 KEEP_DAYS_DOCKER=${KEEP_DAYS_DOCKER:-7}

@@ -241,7 +241,7 @@ jobs:
 
       - name: Run Web SDK kill switch tests
         if: matrix.sdk == 'web'
-        working-directory: Packages/web-sdk
+        working-directory: sdk/web
         run: |
           npm ci
           npm test -- --testPathPattern="killSwitch" --forceExit

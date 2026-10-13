@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 # Orchestrate the full staging run (0.0.7–0.0.12) and zip evidence for 0.0.13
 # Usage:

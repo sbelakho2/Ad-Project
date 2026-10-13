@@ -1,6 +1,7 @@
 # Dogfood audit: the repo's own quality machinery, adversarially audited.
-# M-1 manifest orphans; M-2 floor ratchet; M-3 pragma/skip ban; M-4 ||true policy;
-# M-7 assertion-presence; M-8 self-coverage of tools/coverage; mutation floor.
+# M-1 manifest orphans; M-2 floor ratchet (+ shell-readable floors.txt sync); M-3/M-4 policy
+# bans with ratchet baseline; M-7 assertion presence; M-8 self-coverage of tools/coverage;
+# mutation floor (phase 3).
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -12,10 +13,11 @@ steps:
       - node tools/coverage/build-coverage-manifest.mjs --out coverage-manifest.json
       - node tools/coverage/dogfood-gates.mjs orphan-gate --manifest coverage-manifest.json --suites tools/coverage/suites.json
 
-  floor-ratchet-guard:
+  floor-ratchet-and-sync:
     image: node:20-bookworm
     commands:
       - node tools/coverage/dogfood-gates.mjs floor-ratchet
+      - node tools/coverage/dogfood-gates.mjs floors-sync
 
   pragma-and-skip-ban:
     image: node:20-bookworm
@@ -30,8 +32,9 @@ steps:
   self-coverage:
     image: node:20-bookworm
     commands:
-      - npm --prefix tools ci --no-audit --no-fund
-      - npm --prefix tools run test:cov
+      - cd "$CI_WORKSPACE/tools" && npm install --no-audit --no-fund
+      - cd "$CI_WORKSPACE/tools" && npm run test:cov
+      - cd "$CI_WORKSPACE" && node tools/coverage/coverage-gate.mjs --domain js-tools --artifact tools/coverage/coverage/coverage-summary.json --tool c8
 
   mutation-floor:
     image: node:20-bookworm

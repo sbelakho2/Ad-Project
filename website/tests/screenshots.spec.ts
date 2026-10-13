@@ -1,4 +1,4 @@
-import { test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
 const pages = [
   { name: 'home', path: '/' },
@@ -13,17 +13,19 @@ const pages = [
 test.describe('Website screenshots', () => {
   for (const page of pages) {
     test(`screenshot ${page.name} page`, async ({ page: browserPage }) => {
-      await browserPage.goto(page.path, { waitUntil: 'networkidle' });
-      
+      const response = await browserPage.goto(page.path, { waitUntil: 'networkidle' });
+      expect(response, `no HTTP response for ${page.path}`).toBeTruthy();
+      expect(response!.status(), `expected a non-error status for ${page.path}`).toBeLessThan(400);
+
       // Wait for animations to settle
       await browserPage.waitForTimeout(1000);
-      
+
       // Take full page screenshot
       await browserPage.screenshot({
         path: `./screenshots/${page.name}-full.png`,
         fullPage: true,
       });
-      
+
       // Take viewport screenshot
       await browserPage.screenshot({
         path: `./screenshots/${page.name}-viewport.png`,

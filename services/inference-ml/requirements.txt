@@ -10,3 +10,5 @@ redis==5.0.1
 httpx==0.26.0
 structlog==24.1.0
 python-multipart==0.0.6
+pytest==8.3.3
+pytest-cov==6.0.0

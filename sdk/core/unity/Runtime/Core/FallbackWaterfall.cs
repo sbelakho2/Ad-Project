@@ -268,10 +268,21 @@ namespace RivalApex.SDK.Core
             }
         }
         
+        // Overload for the common case (no explicit timeout): keeps the natural 3-arg shape.
         public WaterfallSource CreateSource(
             string id,
             int priority,
-            int? timeoutMs = null,
+            Func<CancellationToken, Task<WaterfallResult<T>>> loader)
+        {
+            return CreateSource(id, priority, null, loader);
+        }
+
+        // Original 4-arg shape preserved: optional parameter now precedes the required loader,
+        // which is only legal as a complete method (the previous single signature was CS1737).
+        public WaterfallSource CreateSource(
+            string id,
+            int priority,
+            int? timeoutMs,
             Func<CancellationToken, Task<WaterfallResult<T>>> loader)
         {
             return new WaterfallSource(id, priority, timeoutMs ?? DefaultTimeoutMs, loader);

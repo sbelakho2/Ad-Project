@@ -3,13 +3,13 @@ name: Unity SDK — CI Matrix Testing
 on:
   pull_request:
     paths:
-      - 'Packages/com.rivalapexmediation.sdk/**'
+      - 'sdk/core/unity/**'
       - 'sdk/core/unity/**'
       - '.github/workflows/unity-ci.yml'
   push:
     branches: [main, master]
     paths:
-      - 'Packages/com.rivalapexmediation.sdk/**'
+      - 'sdk/core/unity/**'
       - 'sdk/core/unity/**'
     tags:
       - 'sdk-unity-v*'
@@ -150,7 +150,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Validate package.json
-        working-directory: Packages/com.rivalapexmediation.sdk
+        working-directory: sdk/core/unity
         run: |
           # Validate JSON syntax
           cat package.json | jq . > /dev/null
@@ -175,30 +175,30 @@ jobs:
           echo "Checking assembly definition files..."
           
           # Runtime asmdef
-          if [ -f "Packages/com.rivalapexmediation.sdk/Runtime/ApexMediation.asmdef" ]; then
+          if [ -f "sdk/core/unity/Runtime/ApexMediation.asmdef" ]; then
             echo "[OK] Runtime asmdef found"
-            cat Packages/com.rivalapexmediation.sdk/Runtime/ApexMediation.asmdef | jq .
+            cat sdk/core/unity/Runtime/ApexMediation.asmdef | jq .
           else
             echo "[ERROR] Runtime asmdef missing"; exit 1
           fi
           
           # Editor asmdef
-          if [ -f "Packages/com.rivalapexmediation.sdk/Editor/ApexMediationEditor.asmdef" ]; then
+          if [ -f "sdk/core/unity/Editor/ApexMediationEditor.asmdef" ]; then
             echo "[OK] Editor asmdef found"
-            cat Packages/com.rivalapexmediation.sdk/Editor/ApexMediationEditor.asmdef | jq .
+            cat sdk/core/unity/Editor/ApexMediationEditor.asmdef | jq .
           else
             echo "[ERROR] Editor asmdef missing"; exit 1
           fi
       
       - name: Check sample existence
         run: |
-          if [ -d "Packages/com.rivalapexmediation.sdk/Samples~/BasicIntegration" ]; then
+          if [ -d "sdk/core/unity/Samples~/BasicIntegration" ]; then
             echo "[OK] BasicIntegration sample found"
           else
             echo "[WARN] BasicIntegration sample missing"
           fi
           
-          if [ -d "Packages/com.rivalapexmediation.sdk/Samples~/AdvancedUsage" ]; then
+          if [ -d "sdk/core/unity/Samples~/AdvancedUsage" ]; then
             echo "[OK] AdvancedUsage sample found"
           else
             echo "[WARN] AdvancedUsage sample missing"
@@ -217,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/sdk-unity-v}"
-          PKG_DIR="Packages/com.rivalapexmediation.sdk"
+          PKG_DIR="sdk/core/unity"
           TAR="com.rivalapexmediation.sdk-${VERSION}.tgz"
           tar --exclude-vcs -czf "$TAR" -C "$PKG_DIR" .
           echo "$TAR" > tar_name.txt

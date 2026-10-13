@@ -4,6 +4,11 @@
 # This script handles local deployment and monitoring for ApexMediation website
 
 set -euo pipefail
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

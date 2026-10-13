@@ -6,6 +6,17 @@
 
 import { SSAIAdBreak, SSAIAd } from './types';
 
+/**
+ * Fail-closed numeric parse (adversarial case K6): malformed manifest attributes must
+ * never leak NaN into ad timelines — NaN comparisons silently corrupt break ordering.
+ * Returns undefined for malformed input; callers choose the documented default.
+ */
+function safeNumber(value: string | null | undefined): number | undefined {
+  if (value === null || value === undefined || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 type ManifestParseProtocol = 'hls' | 'dash';
 
 interface ManifestParseTelemetryOptions {
@@ -133,11 +144,11 @@ export class SSAIManifestParser {
     }
 
     if (attributes['DURATION']) {
-      cue.duration = parseFloat(attributes['DURATION']);
+      cue.duration = safeNumber(attributes['DURATION']);
     }
 
     if (attributes['PLANNED-DURATION']) {
-      cue.plannedDuration = parseFloat(attributes['PLANNED-DURATION']);
+      cue.plannedDuration = safeNumber(attributes['PLANNED-DURATION']);
     }
 
     if (attributes['SCTE35-CMD']) {
@@ -217,7 +228,7 @@ export class SSAIManifestParser {
         };
 
         if (cue.customAttributes['X-SKIP-OFFSET']) {
-          ad.skipOffset = parseFloat(cue.customAttributes['X-SKIP-OFFSET']);
+          ad.skipOffset = safeNumber(cue.customAttributes['X-SKIP-OFFSET']);
         }
 
         if (currentBreak) {
@@ -415,8 +426,8 @@ export class SSAIManifestParser {
     const dashEvent: DASHEvent = {
       id,
       schemeIdUri,
-      presentationTime: parseFloat(presentationTimeStr),
-      duration: durationStr ? parseFloat(durationStr) : undefined,
+      presentationTime: safeNumber(presentationTimeStr) ?? 0,
+      duration: safeNumber(durationStr),
       messageData: event.textContent || undefined,
     };
 
@@ -456,9 +467,9 @@ export class SSAIManifestParser {
 
     if (!match) return 0;
 
-    const hours = parseFloat(match[1] || '0');
-    const minutes = parseFloat(match[2] || '0');
-    const seconds = parseFloat(match[3] || '0');
+    const hours = safeNumber(match[1]) ?? 0;
+    const minutes = safeNumber(match[2]) ?? 0;
+    const seconds = safeNumber(match[3]) ?? 0;
 
     return hours * 3600 + minutes * 60 + seconds;
   }

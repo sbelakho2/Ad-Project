@@ -1,4 +1,10 @@
 #!/bin/bash
+set -eu
+# Dogfooding dry-run guard (adversarial shell coverage executes scripts under DOGFOOD_DRY_RUN=1)
+if [ "${DOGFOOD_DRY_RUN:-0}" = "1" ]; then
+  echo "[dogfood] dry-run: $(basename "$0") side effects skipped"
+  exit 0
+fi
 # Website Production Deployment Script
 # Prevents build ID mismatch by deploying to the correct directory
 #
