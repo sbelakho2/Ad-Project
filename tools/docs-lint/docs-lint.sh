@@ -159,6 +159,7 @@ website/src
 console/src
 tools/coverage
 tools/docs-lint
+tools/ui-ux
 site
 rust
 .woodpecker"

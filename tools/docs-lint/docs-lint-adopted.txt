@@ -92,3 +92,8 @@ site/content/how-it-works.md
 site/content/pricing.md
 site/content/proof.md
 site/content/security.md
+# Batch adoption 2: tools/ui-ux scan root + console fixture tooling, all rows at zero
+.woodpecker/ui-ux.yml
+rust/crates/apex-api/src/bin/render-fixtures.rs
+tools/ui-ux/console-a11y.mjs
+tools/ui-ux/test/console-a11y.test.mjs

@@ -78,7 +78,7 @@ const EXCLUSIONS = [
 // inside infrastructure/helm/ is a doc, not an IaC artifact.
 export const DOMAINS = [
   // --- test code: meta-audited, not line-covered (M-7 / meta suite) ---
-  { id: 'meta-test', kind: 'test', include: ['**/*.test.ts', '**/*.test.tsx', '**/*.test.js', '**/*.test.jsx', '**/*.test.mjs', '**/*.spec.ts', '**/*.spec.js', '**/*.spec.mjs', '**/*_test.go', '**/test_*.py', '**/*_test.py', '**/__tests__/**', '**/tests/**', '**/Tests/**', '**/src/test/**', '**/src/androidTest/**', 'sdk/flutter/test/**', '**/*.bats', '**/__mocks__/**', '**/*.stories.tsx', '**/*.stories.ts', '**/*.stories.jsx', '**/playwright*.config.ts', '**/jest.setup.ts', '**/setupTests.ts', '**/.storybook/**', '**/docs/**/*.tsx'] },
+  { id: 'meta-test', kind: 'test', include: ['**/fixtures/**', '**/*.test.ts', '**/*.test.tsx', '**/*.test.js', '**/*.test.jsx', '**/*.test.mjs', '**/*.spec.ts', '**/*.spec.js', '**/*.spec.mjs', '**/*_test.go', '**/test_*.py', '**/*_test.py', '**/__tests__/**', '**/tests/**', '**/Tests/**', '**/src/test/**', '**/src/androidTest/**', 'sdk/flutter/test/**', '**/*.bats', '**/__mocks__/**', '**/*.stories.tsx', '**/*.stories.ts', '**/*.stories.jsx', '**/playwright*.config.ts', '**/jest.setup.ts', '**/setupTests.ts', '**/.storybook/**', '**/docs/**/*.tsx'] },
   // --- sample apps: validated by build+smoke contract (S-SAMPLE), not line coverage ---
   { id: 'sample-app', kind: 'contract', include: ['sdk/samples/**', 'sdk/adapter-samples/**', 'sdk/core/ios/Demo/**', 'sdk/**/Demo/**', 'sdk/react-native/example/**', 'Test Apps/**'] },
   // --- code domains ---

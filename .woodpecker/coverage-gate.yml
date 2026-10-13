@@ -21,6 +21,7 @@ depends_on:
   - contract-coverage
   - dogfood-audit
   - site-perf
+  - ui-ux
 
 steps:
   aggregate-coverage-verdict:

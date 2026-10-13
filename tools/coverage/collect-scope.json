@@ -1,16 +1,80 @@
 {
   "__comment": "Single source for jest collectCoverageFrom scopes and the documented js-tools c8 scope. The stack-integrity test asserts every entry here matches the corresponding code domain in coverage-lib.mjs DOMAINS (resolved against the workspace dir). Configs MUST read from this file instead of hardcoding globs.",
-  "backend": { "dir": "backend", "collectCoverageFrom": ["src/**/*.ts", "routes/**/*.ts", "services/**/*.ts", "scripts/**/*.ts", "!src/**/*.d.ts", "!src/openapi/**", "!src/types/**"] },
-  "console": { "dir": "console", "collectCoverageFrom": ["src/**/*.{ts,tsx}", "scripts/**/*.ts", "!src/**/*.d.ts", "!src/tests/**"] },
-  "website": { "dir": "website", "collectCoverageFrom": ["src/**/*.{js,jsx,ts,tsx}", "!src/**/*.d.ts", "!src/**/__tests__/**"] },
-  "control-plane": { "dir": "control-plane", "collectCoverageFrom": ["src/**/*.ts", "scripts/**/*.ts", "test-*.ts", "!src/**/*.d.ts"] },
-  "edge-worker": { "dir": "edge-worker", "collectCoverageFrom": ["src/**/*.ts", "!src/**/*.d.ts"] },
-  "autopilot": { "dir": "services/autopilot", "collectCoverageFrom": ["src/**/*.ts", "!src/**/*.d.ts"] },
-  "web-sdk": { "dir": "sdk/web", "collectCoverageFrom": ["src/**/*.ts"] },
-  "react-native-sdk": { "dir": "sdk/react-native", "collectCoverageFrom": ["src/**/*.tsx", "src/**/*.ts", "!src/**/*.d.ts", "!src/**/__tests__/**"] },
+  "backend": {
+    "dir": "backend",
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "routes/**/*.ts",
+      "services/**/*.ts",
+      "scripts/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/openapi/**",
+      "!src/types/**"
+    ]
+  },
+  "console": {
+    "dir": "console",
+    "collectCoverageFrom": [
+      "src/**/*.{ts,tsx}",
+      "scripts/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/tests/**"
+    ]
+  },
+  "website": {
+    "dir": "website",
+    "collectCoverageFrom": [
+      "src/**/*.{js,jsx,ts,tsx}",
+      "!src/**/*.d.ts",
+      "!src/**/__tests__/**"
+    ]
+  },
+  "control-plane": {
+    "dir": "control-plane",
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "scripts/**/*.ts",
+      "test-*.ts",
+      "!src/**/*.d.ts"
+    ]
+  },
+  "edge-worker": {
+    "dir": "edge-worker",
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts"
+    ]
+  },
+  "autopilot": {
+    "dir": "services/autopilot",
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.d.ts"
+    ]
+  },
+  "web-sdk": {
+    "dir": "sdk/web",
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ]
+  },
+  "react-native-sdk": {
+    "dir": "sdk/react-native",
+    "collectCoverageFrom": [
+      "src/**/*.tsx",
+      "src/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/**/__tests__/**"
+    ]
+  },
   "js-tools": {
     "dir": "tools",
-    "collectCoverageFrom": ["coverage/*.mjs", "site/*.mjs", "content-guard.js"],
+    "collectCoverageFrom": [
+      "coverage/*.mjs",
+      "site/*.mjs",
+      "ui-ux/*.mjs",
+      "content-guard.js"
+    ],
     "__scope": "declared c8-measured subset of the js-tools domain; widened as phase-1 suites land (tools/package.json test:cov must read this list)"
   }
 }

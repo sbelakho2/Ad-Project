@@ -1,0 +1,21 @@
+# ui-ux: adversarial accessibility of the rendered console pages.
+# apex-api renders its console pages from checked-in fixtures, then axe-core
+# (under jsdom) runs the WCAG 2.0/2.1 A+AA tag set on that output. Layout-only
+# rules (color-contrast, target-size) are delegated: contrast is pinned in the
+# Rust palette test and on the marketing site's Lighthouse lane.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  render-console-pages:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust
+      - cargo run -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
+  console-a11y-scan:
+    image: node:20-bookworm
+    depends_on: [render-console-pages]
+    commands:
+      - npm --prefix tools install --no-audit --no-fund
+      - node tools/ui-ux/console-a11y.mjs rust/target/ui-fixtures

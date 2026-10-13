@@ -15,6 +15,7 @@
 0 .woodpecker/sdk-flutter-coverage.yml
 1 .woodpecker/sdk-unity-coverage.yml
 1 .woodpecker/site-perf.yml
+0 .woodpecker/ui-ux.yml
 0 DEVELOPMENT_TODO_CHECKLIST.md
 0 Plane/sensei-modern-style-guide.md
 0 Plane/sensei-rams-accessibility.md
@@ -490,6 +491,7 @@
 12 docs/runbooks/ROLLBACK.md
 30 docs/runbooks/SALES_AUTOMATION_OPERATIONS.md
 0 rust/crates/apex-api/benches/api_latency.rs
+0 rust/crates/apex-api/src/bin/render-fixtures.rs
 0 rust/crates/apex-api/src/clock.rs
 0 rust/crates/apex-api/src/cycle.rs
 0 rust/crates/apex-api/src/error.rs
@@ -572,6 +574,8 @@
 2 tools/coverage/yaml-policy-gate.mjs
 0 tools/docs-lint/docs-lint-one-shot-test.sh
 0 tools/docs-lint/docs-lint.sh
+0 tools/ui-ux/console-a11y.mjs
+0 tools/ui-ux/test/console-a11y.test.mjs
 0 website/src/__tests__/security.headers.test.js
 0 website/src/__tests__/security.headers.test.ts
 0 website/src/app/[...slug]/page.tsx
