@@ -179,7 +179,7 @@ npm run test:automation-cycle
 | **Churn Prevention** | Daily | Calculate health scores, send interventions, track outcomes | Weekly review (2 min) |
 | **Growth Opportunities** | Daily | Detect upgrades, send proposals, personalize journeys | Weekly review (1 min) |
 | **Value Multipliers** | Daily/Weekly | Network deals, premium upsells, marketplace, white-label | Weekly review (1 min) |
-| **Billing & Dunning** | Daily | Usage metering, Stripe sync, payment retries, lifecycle management | Monthly review (5 min) |
+| **Billing & Dunning** | Daily | Usage metering, Adyen sync, payment retries, lifecycle management | Monthly review (5 min) |
 | **Email Automation** | Every minute | Process queue, personalize content, A/B test, track performance | Weekly review (1 min) |
 | **First Customer Experience** | Daily | Milestones, referrals, testimonials, community rewards | None |
 

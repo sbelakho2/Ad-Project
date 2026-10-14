@@ -1,84 +1,46 @@
-# Adversarial promtool tests for monitoring/alerts.yml (contract suite S-IAC).
-# Runs via: promtool test rules monitoring/alerts.test.yml
-#
-# Scope note: firing cases use rules whose annotations have no templates so the expected
-# annotation strings are exact and stable across promtool versions. Template-rendered
-# alerts (HighErrorRate, HighLatency, HighPaymentFailureRate, ...) get pending/firing
-# state-machine cases here; exact-rendering cases are a phase-1 addition tracked in the
-# design doc (contract suite S-IAC).
 rule_files:
   - alerts.yml
+  - recording-rules.yml
 
 evaluation_interval: 1m
 
 tests:
-  # BackendAPIDown (for: 2m) must NOT fire while the condition has held < 2m (pending).
   - interval: 1m
     input_series:
-      - series: 'up{job="backend-api"}'
-        values: '0x5'
-    alert_rule_test:
-      - eval_time: 1m
-        alertname: BackendAPIDown
-        exp_alerts: []
-
-  # BackendAPIDown must FIRE once the condition has held for >= 2m, with exact labels+annotations.
-  - interval: 1m
-    input_series:
-      - series: 'up{job="backend-api"}'
+      - series: 'up{job="apex-api"}'
         values: '0x5'
     alert_rule_test:
       - eval_time: 3m
-        alertname: BackendAPIDown
+        alertname: ApexApiDown
         exp_alerts:
           - exp_labels:
               severity: critical
-              service: backend
-              job: backend-api
+              job: apex-api
             exp_annotations:
-              summary: "Backend API is down"
-              description: "Backend API has been down for more than 2 minutes."
+              summary: apex-api is down
+              description: No scrape has succeeded for two minutes.
 
-  # BackendAPIDown must NOT fire while the backend is up.
   - interval: 1m
     input_series:
-      - series: 'up{job="backend-api"}'
-        values: '1x10'
+      - series: 'apex_api_requests_total{status="2xx"}'
+        values: '0+600x20'
+      - series: 'apex_api_requests_total{status="5xx"}'
+        values: '0+60x20'
     alert_rule_test:
-      - eval_time: 5m
-        alertname: BackendAPIDown
-        exp_alerts: []
-
-  # BackendAPIDown must RESOLVE after recovery (red -> green transitions are adversarial).
-  - interval: 1m
-    input_series:
-      - series: 'up{job="backend-api"}'
-        values: '0x5 1x5'
-    alert_rule_test:
-      - eval_time: 6m
-        alertname: BackendAPIDown
-        exp_alerts: []
-
-  # HighErrorRate state machine: 5xx rate holding > 5% for >= 5m fires (expression and
-  # `for` both verified); a brief blip does not.
-  - interval: 1m
-    input_series:
-      - series: 'http_requests_total{status="500",job="backend-api"}'
-        values: '0+60x12'
-    alert_rule_test:
-      - eval_time: 4m
-        alertname: HighErrorRate
-        exp_alerts: []
-      - eval_time: 8m
-        alertname: HighErrorRate
+      - eval_time: 15m
+        alertname: ApexApiServerErrorRateHigh
         exp_alerts:
           - exp_labels:
-              severity: critical
-              service: backend
-              job: backend-api
-              status: "500"
+              severity: warning
             exp_annotations:
-              summary: "High error rate detected"
-              description: "Error rate is 100% over the last 5 minutes."
-              runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/http-error-spike.md"
-              dashboard: "https://grafana.rival.com/d/api-red-metrics"
+              summary: apex-api 5xx rate above 5 percent
+              description: The five-minute server error ratio stayed above 5 percent for ten minutes.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_api_requests_total{status="2xx"}'
+        values: '0+600x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ApexApiServerErrorRateHigh
+        exp_alerts: []

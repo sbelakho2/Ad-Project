@@ -57,7 +57,7 @@ Time:        13.357s
 **Passing Integration Tests:**
 - ✅ `analytics.integration.test.ts`: Event ingestion (impressions, clicks, revenue)
 - ✅ `corsPreflight.integration.test.ts`: CORS header validation
-- ✅ `billing.integration.test.ts`: Stripe webhook handling, invoice generation
+- ✅ `billing.integration.test.ts`: Adyen webhook handling, invoice generation
 
 **Failing Integration Tests:**
 - ❌ `auth.integration.test.ts`: Login failures (missing test user fixtures)

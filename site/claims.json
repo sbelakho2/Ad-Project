@@ -10,7 +10,7 @@
       "id": "max-management-api",
       "claim": "On AppLovin MAX, Apex reads and writes through MAX's own management API.",
       "anchor": "rust/crates/apex-connectors/src/max.rs",
-      "test": "max_set_country_floor_pins_path_and_body (rust/crates/apex-connectors/src/tests.rs)"
+      "test": "update_floors_sends_the_full_grouped_list (rust/crates/apex-connectors/src/max.rs)"
     },
     {
       "id": "levelplay-management-api",
@@ -64,7 +64,7 @@
       "id": "free-audit-read-only",
       "claim": "The audit runs read-only: it never mutates your platform settings, and the deployment holds no write credentials.",
       "anchor": "rust/crates/apex-api/src/cycle.rs",
-      "test": "defaults_are_read_only_with_the_stripe_tolerance_and_system_clock (rust/crates/apex-api/src/state.rs)"
+      "test": "defaults_are_read_only_without_adyen_and_with_the_system_clock (rust/crates/apex-api/src/state.rs)"
     },
     {
       "id": "audit-stale-floors",
@@ -125,6 +125,30 @@
       "claim": "Every invoice line is re-derived from the signed ledger proof before it is billed.",
       "anchor": "rust/crates/apex-billing/src/invoice.rs",
       "test": "invoice_never_trusts_the_stored_fee (rust/crates/apex-billing/src/tests.rs)"
+    },
+    {
+      "id": "lift-lower-bound",
+      "claim": "You are billed on the lower bound of the lift, never the point estimate.",
+      "anchor": "rust/crates/apex-lift/src/decision.rs",
+      "test": "a_clean_positive_test_is_kept_on_the_lower_bound (rust/crates/apex-lift/src/decision.rs)"
+    },
+    {
+      "id": "lift-no-lift-no-fee",
+      "claim": "No lift proven, no fee.",
+      "anchor": "rust/crates/apex-lift/src/records.rs",
+      "test": "a_flat_test_rolls_back_with_no_fee (rust/crates/apex-lift/src/decision.rs)"
+    },
+    {
+      "id": "lift-guardrails",
+      "claim": "User experience outranks revenue: the test stops when fill drops, whatever the revenue says.",
+      "anchor": "rust/crates/apex-lift/src/guardrails.rs",
+      "test": "fill_guardrails_need_two_consecutive_days (rust/crates/apex-lift/src/guardrails.rs)"
+    },
+    {
+      "id": "lift-signed-pre-registration",
+      "claim": "Every test is pre-registered and signed before it starts.",
+      "anchor": "rust/crates/apex-lift/src/records.rs",
+      "test": "canonical_json_is_stable_and_hashes_are_pinned (rust/crates/apex-lift/src/records.rs)"
     }
   ]
 }

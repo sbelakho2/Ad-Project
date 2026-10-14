@@ -1,4 +1,4 @@
-# Stripe-First Billing Policy Rollout Plan
+# Adyen-First Billing Policy Rollout Plan
 
 _Date:_ 2025-11-24  
 _Owner:_ Billing/Platform  
@@ -38,9 +38,9 @@ _Scope:_ Align backend, console, website, billing services, and QA workflows to 
 Each phase should land with feature flags (`billingPolicyVersion`) to stage changes safely.
 
 ## Progress Log
-- **2025-11-24:** Website pricing + signup copy now mirror `stripe-mandatory-2025-11` messaging (Starter free cap, autopay rails, Enterprise exception). Website lint/tests + production build executed post-change; screenshots pending capture for QA evidence folder.
-- **2025-11-24:** Customer-facing billing docs (`docs/Customer-Facing/Billing-Compliance/pricing.md`, `docs/Customer-Facing/Compliance/Invoicing-Payments.md`) now call out Starter no-card policy, autopay requirements for paid tiers, Stripe retry cadence, and the manual Wise rails as finance-approved exceptions. Next evidence: upload pricing + signup screenshots and link them in this log.
-- **2025-11-24:** Postfix/ApexMail billing notifications updated (`backend/services/email/EmailAutomationService.ts`) to include the 5-day billing preview email and Stripe autopay receipt/failed retry messaging per `billingPolicy.billingCycle.notifications`. Pending evidence: capture sample emails in `docs/Internal/QA/billing-policy/` once staging jobs fire.
+- **2025-11-24:** Website pricing + signup copy now mirror `adyen-mandatory-2025-11` messaging (Starter free cap, autopay rails, Enterprise exception). Website lint/tests + production build executed post-change; screenshots pending capture for QA evidence folder.
+- **2025-11-24:** Customer-facing billing docs (`docs/Customer-Facing/Billing-Compliance/pricing.md`, `docs/Customer-Facing/Compliance/Invoicing-Payments.md`) now call out Starter no-card policy, autopay requirements for paid tiers, Adyen retry cadence, and the manual Wise rails as finance-approved exceptions. Next evidence: upload pricing + signup screenshots and link them in this log.
+- **2025-11-24:** Postfix/ApexMail billing notifications updated (`backend/services/email/EmailAutomationService.ts`) to include the 5-day billing preview email and Adyen autopay receipt/failed retry messaging per `billingPolicy.billingCycle.notifications`. Pending evidence: capture sample emails in `docs/Internal/QA/billing-policy/` once staging jobs fire.
 - **2025-11-24:** Production readiness checklist reformatted into explicit checkboxes (`docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md`) with the QA evidence gate pointing at `docs/Internal/QA/billing-policy/` so rollout blockers stay visible.
 - **2025-11-25:** Extracted billing-email builders (`backend/services/email/billingEmailBuilders.ts`) + `npm run qa:billing-emails --workspace backend` to render HTML previews under `docs/Internal/QA/billing-policy/samples/` while waiting for live Postfix email captures.
 
@@ -48,10 +48,10 @@ Each phase should land with feature flags (`billingPolicyVersion`) to stage chan
 
 | Flow | Event / Template | Policy Clause | Evidence |
 | --- | --- | --- | --- |
-| Billing preview | `email.billing_preview` (`sendBillingPreviewEmail`) | `billingPolicy.billingCycle.notifications.preview` (5-day heads up, Stripe rails, Wise fallback) | Preview HTML: `docs/Internal/QA/billing-policy/samples/billing-preview-sample.html` (need live `.eml` + screenshot) |
+| Billing preview | `email.billing_preview` (`sendBillingPreviewEmail`) | `billingPolicy.billingCycle.notifications.preview` (5-day heads up, Adyen rails, Wise fallback) | Preview HTML: `docs/Internal/QA/billing-policy/samples/billing-preview-sample.html` (need live `.eml` + screenshot) |
 | Payment failed | `email.payment_failed` (`sendPaymentFailedEmail`) | Retry cadence + autopay rails from `billingPolicy.billingCycle.retries` | Preview HTML: `docs/Internal/QA/billing-policy/samples/payment-failed-sample.html` (need Postfix evidence) |
 | Payment retry | `email.payment_retry` (`sendPaymentRetryEmail`) | Final warning + remaining attempts notice per policy | Preview HTML: `docs/Internal/QA/billing-policy/samples/payment-retry-sample.html` (need attempt-2/3 email capture) |
 | Payment succeeded after retry | `email.payment_succeeded_after_retry` (`sendPaymentSucceededEmail`) | Receipt + rail confirmation text | Preview HTML: `docs/Internal/QA/billing-policy/samples/payment-succeeded-sample.html` (need real receipt email) |
-| Website pricing & signup | Console + marketing captures | Starter promise + autopay copy (`stripe-mandatory-2025-11`) | _Pending:_ screenshots per `docs/Internal/QA/billing-policy/README.md` |
+| Website pricing & signup | Console + marketing captures | Starter promise + autopay copy (`adyen-mandatory-2025-11`) | _Pending:_ screenshots per `docs/Internal/QA/billing-policy/README.md` |
 
 Reference: drop raw evidence files into `docs/Internal/QA/billing-policy/` and update the table links once uploaded. For interim reviews, run `npm run qa:billing-emails --workspace backend` to refresh the HTML previews under `docs/Internal/QA/billing-policy/samples/` (they use the exact email builders).

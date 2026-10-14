@@ -52,13 +52,13 @@ If you anticipate a delay, email **billing@apexmediation.ee** before the due dat
 ## Autopay Expectations
 
 - **Starter** — No autopay requirement. Stay on the free tier up to €10k per app per month without adding a payment method. We only prompt for billing details when you opt into Growth or when trailing 30-day revenue crosses the Starter cap.
-- **Growth / Scale** — Require an autopay-ready rail stored in Stripe. Accepted rails: credit/debit cards, Apple Pay / Google Pay wallets, ACH direct debit (US), and SEPA direct debit (EU/EEA). We auto-charge on the NET 30 due date, mirroring the Stripe retry schedule (day 0 / 3 / 5 / 7) so mediation never pauses for billing.
-- **Enterprise** — Defaults to the same autopay flow. If your procurement rules forbid auto-charges, email billing@apexmediation.ee for an exception; we keep a Stripe payment method on file as a backstop even when invoice + wire terms are approved.
+- **Growth / Scale** — Require an autopay-ready rail stored in Adyen. Accepted rails: credit/debit cards, Apple Pay / Google Pay wallets, ACH direct debit (US), and SEPA direct debit (EU/EEA). We auto-charge on the NET 30 due date, mirroring the Adyen retry schedule (day 0 / 3 / 5 / 7) so mediation never pauses for billing.
+- **Enterprise** — Defaults to the same autopay flow. If your procurement rules forbid auto-charges, email billing@apexmediation.ee for an exception; we keep a Adyen payment method on file as a backstop even when invoice + wire terms are approved.
 
 **Notification cadence:**
 1. Console banner + email when invoices draft (1st of the month)
 2. Email reminder 5 days before autopay (“We will auto-charge €X on DATE unless you update payment details.”)
-3. Real-time email + console event when Stripe charges succeed or fail. Failed attempts surface instructions for updating the payment method or requesting Wise wire instructions.
+3. Real-time email + console event when Adyen charges succeed or fail. Failed attempts surface instructions for updating the payment method or requesting Wise wire instructions.
 
 If you prefer to pay via Wise wire every month, contact us to flag the account. We’ll note finance approval and keep the autopay method as a safety net for dunning.
 
@@ -288,14 +288,14 @@ curl "https://api.apexmediation.ee/v1/invoices/INV-2025-11/download?format=csv" 
 
 ## Payment Methods
 
-> **Default rails:** Stripe autopay. Growth, Scale, and Enterprise tiers keep a Stripe payment method on file (card/wallet worldwide, ACH in the US, SEPA direct debit in the EU/EEA). We auto-charge on the due date so mediation never pauses for billing. Wise/SEPA/ACH wires are available for finance-approved exceptions and still reference the same invoices.
+> **Default rails:** Adyen autopay. Growth, Scale, and Enterprise tiers keep a Adyen payment method on file (card/wallet worldwide, ACH in the US, SEPA direct debit in the EU/EEA). We auto-charge on the due date so mediation never pauses for billing. Wise/SEPA/ACH wires are available for finance-approved exceptions and still reference the same invoices.
 
-### Default: Stripe autopay (cards, wallets, ACH, SEPA)
+### Default: Adyen autopay (cards, wallets, ACH, SEPA)
 
 - **Cards & wallets (global):** Visa, Mastercard, AMEX, Apple Pay, Google Pay. Add/update via Console → Billing → Payment Method.
-- **ACH direct debit (US):** Provide routing + account number once; Stripe stores it tokenized. Suitable for USD settlements.
+- **ACH direct debit (US):** Provide routing + account number once; Adyen stores it tokenized. Suitable for USD settlements.
 - **SEPA direct debit (EU/EEA):** Provide IBAN + mandate. Works for EUR-denominated invoices.
-- **Retry cadence:** Stripe attempts immediately on the NET 30 due date, then retries on days 3, 5, and 7 before marking the invoice delinquent. Console + email notifications fire on each attempt.
+- **Retry cadence:** Adyen attempts immediately on the NET 30 due date, then retries on days 3, 5, and 7 before marking the invoice delinquent. Console + email notifications fire on each attempt.
 
 You can update the autopay rail anytime before the due date. Enterprise customers that prefer manual invoices still keep an autopay method on file as a fallback/dunning rail.
 
@@ -343,9 +343,9 @@ Reference: INV-XXXX
 
 Use the Wise payment link in your invoice email for instant funding (mid-market FX, 0.41% avg fee). Ideal for CAD/GBP/SGD wires when SEPA/ACH is unavailable.
 
-### Secondary: Stripe hosted payment link
+### Secondary: Adyen hosted payment link
 
-Pay by card (Visa, Mastercard, AMEX) or wallets (Apple Pay, Google Pay). Fees: 2.9% + €0.30 per charge. Access via Console → Billing → “Pay via card/Stripe”.
+Pay by card (Visa, Mastercard, AMEX) or wallets (Apple Pay, Google Pay). Fees: 2.9% + €0.30 per charge. Access via Console → Billing → “Pay via card/Adyen”.
 
 ### Secondary: PayPal
 
@@ -619,7 +619,7 @@ Yes—**€100**. If your platform fee for a period is below €100, we roll it 
 
 ### Can I change how I pay?
 
-Yes. Go to **Dashboard → Settings → Billing → Payment Method** to request SEPA, ACH, Stripe card, PayPal, or Wise link access. Changes apply to future invoices.
+Yes. Go to **Dashboard → Settings → Billing → Payment Method** to request SEPA, ACH, Adyen card, PayPal, or Wise link access. Changes apply to future invoices.
 
 ### What if my payment will be late?
 

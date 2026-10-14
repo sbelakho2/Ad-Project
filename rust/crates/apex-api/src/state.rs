@@ -8,18 +8,12 @@
 
 use std::sync::Arc;
 
-use apex_billing::StripeClient;
+use apex_billing::AdyenClient;
 
 use crate::clock::{Clock, SystemClock};
 use crate::cycle::{CycleRunner, LedgerOnlyRunner};
 use crate::live::LiveAuditor;
 use crate::sources::{AuditSource, LedgerSource};
-
-/// The webhook freshness tolerance used when [`AppState::new`] builds the
-/// state: the single billing-side default
-/// ([`apex_billing::DEFAULT_TOLERANCE_SECS`], 300 seconds), re-exported so the
-/// API cannot drift from the verifier it calls.
-pub use apex_billing::DEFAULT_TOLERANCE_SECS as DEFAULT_STRIPE_TOLERANCE_SECS;
 
 /// The complete dependency set of the HTTP surface.
 #[derive(Clone, Debug)]
@@ -28,28 +22,26 @@ pub struct AppState {
     pub audit_source: Arc<dyn AuditSource>,
     /// Where verified ledger records come from.
     pub ledger_source: Arc<dyn LedgerSource>,
-    /// Stripe API client. When configured, the webhook route takes **both**
-    /// the signing secret and the freshness tolerance from it; the state's
-    /// `webhook_secret` / `stripe_tolerance_secs` are the fallback for
-    /// deployments without a client.
-    pub stripe: Option<Arc<StripeClient>>,
-    /// Explicit webhook secret, used only when no Stripe client is
+    /// Adyen client. When configured, the webhook route takes the HMAC key
+    /// from it; the state's explicit `adyen_hmac_key` is the fallback for
+    /// deployments that hold only the key.
+    pub adyen: Option<Arc<AdyenClient>>,
+    /// Explicit webhook HMAC key, used only when no Adyen client is
     /// configured.
-    pub webhook_secret: Option<Vec<u8>>,
-    /// Maximum accepted Stripe signature timestamp skew, in seconds, used
-    /// only when no Stripe client is configured (a client carries its own).
-    pub stripe_tolerance_secs: u64,
-    /// The clock used for Stripe signature freshness.
+    pub adyen_hmac_key: Option<Vec<u8>>,
+    /// The clock, used by the live auditor for snapshot timestamps.
     pub clock: Arc<dyn Clock>,
     /// The cycle runner behind `POST /v1/cycle/{publisher}`.
     pub cycle_runner: Arc<dyn CycleRunner>,
     /// The live read-only auditor behind `POST /v1/audit/{platform}`. `None`
     /// makes the route answer `503 live_audit_not_configured`.
     pub live_auditor: Option<Arc<LiveAuditor>>,
+    /// Process request counters behind `GET /metrics`.
+    pub metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl AppState {
-    /// Build state from the two sources: no Stripe credentials, a
+    /// Build state from the two sources: no Adyen credentials, a
     /// [`SystemClock`], the default tolerance and a [`LedgerOnlyRunner`] over
     /// the given sources.
     pub fn new(audit_source: Arc<dyn AuditSource>, ledger_source: Arc<dyn LedgerSource>) -> Self {
@@ -60,12 +52,12 @@ impl AppState {
         Self {
             audit_source,
             ledger_source,
-            stripe: None,
-            webhook_secret: None,
-            stripe_tolerance_secs: DEFAULT_STRIPE_TOLERANCE_SECS,
+            adyen: None,
+            adyen_hmac_key: None,
             clock: Arc::new(SystemClock),
             cycle_runner,
             live_auditor: None,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
 
@@ -76,24 +68,17 @@ impl AppState {
         self
     }
 
-    /// Attach a Stripe client.
+    /// Attach an Adyen client.
     #[must_use]
-    pub fn with_stripe(mut self, stripe: Arc<StripeClient>) -> Self {
-        self.stripe = Some(stripe);
+    pub fn with_adyen(mut self, adyen: Arc<AdyenClient>) -> Self {
+        self.adyen = Some(adyen);
         self
     }
 
-    /// Set an explicit webhook secret (preferred over the client's secret).
+    /// Attach the webhook HMAC key alone (no Adyen client).
     #[must_use]
-    pub fn with_webhook_secret(mut self, secret: impl Into<Vec<u8>>) -> Self {
-        self.webhook_secret = Some(secret.into());
-        self
-    }
-
-    /// Override the webhook freshness tolerance.
-    #[must_use]
-    pub fn with_stripe_tolerance_secs(mut self, secs: u64) -> Self {
-        self.stripe_tolerance_secs = secs;
+    pub fn with_adyen_hmac_key(mut self, hmac_key: impl Into<Vec<u8>>) -> Self {
+        self.adyen_hmac_key = Some(hmac_key.into());
         self
     }
 
@@ -121,21 +106,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_read_only_with_the_stripe_tolerance_and_system_clock() {
+    fn defaults_are_read_only_without_adyen_and_with_the_system_clock() {
         let state = AppState::new(
             Arc::new(StaticAuditSource::default()),
             Arc::new(StaticLedgerSource::default()),
         );
-        assert!(state.stripe.is_none());
-        assert!(state.webhook_secret.is_none());
-        assert_eq!(state.stripe_tolerance_secs, DEFAULT_STRIPE_TOLERANCE_SECS);
-        // The API default equals the billing verifier's default by construction;
-        // not a second copy of the number.
-        assert_eq!(
-            DEFAULT_STRIPE_TOLERANCE_SECS,
-            apex_billing::DEFAULT_TOLERANCE_SECS
-        );
-        assert!(state.stripe_tolerance_secs > 0);
+        assert!(state.adyen.is_none());
+        assert!(state.adyen_hmac_key.is_none());
         assert!(format!("{:?}", state.clock).contains("SystemClock"));
     }
 
@@ -145,11 +122,9 @@ mod tests {
             Arc::new(StaticAuditSource::default()),
             Arc::new(StaticLedgerSource::default()),
         )
-        .with_webhook_secret(b"whsec".to_vec())
-        .with_stripe_tolerance_secs(60)
+        .with_adyen_hmac_key(b"hmac-key".to_vec())
         .with_clock(Arc::new(FixedClock::new(5)));
-        assert_eq!(state.webhook_secret.as_deref(), Some(&b"whsec"[..]));
-        assert_eq!(state.stripe_tolerance_secs, 60);
+        assert_eq!(state.adyen_hmac_key.as_deref(), Some(&b"hmac-key"[..]));
         assert_eq!(state.clock.now_unix_s(), 5);
     }
 }

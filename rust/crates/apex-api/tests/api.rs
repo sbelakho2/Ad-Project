@@ -1,5 +1,5 @@
 //! Adversarial integration tests for the JSON API: routing, status codes,
-//! content types, path-traversal refusal and the Stripe webhook matrix.
+//! content types, path-traversal refusal and the Adyen webhook matrix.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -7,8 +7,8 @@ mod common;
 
 use std::sync::Arc;
 
-use apex_api::{router, FixedClock, MAX_BODY_BYTES};
-use apex_billing::StripeClient;
+use apex_api::{router, MAX_BODY_BYTES};
+
 use axum::body::Body;
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::Request;
@@ -393,57 +393,57 @@ async fn webhook_without_configuration_is_503() {
     let response = send(
         &app,
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             WEBHOOK_BODY,
         ),
     )
     .await;
     assert_eq!(response.status, 503);
-    assert_eq!(response.json(), json!({"error": "webhook_not_configured"}));
+    assert_eq!(
+        response.json(),
+        json!({"error": "adyen_webhook_not_configured"})
+    );
 }
 
 #[tokio::test]
-async fn webhook_valid_signature_is_200_with_fixed_clock() {
+async fn webhook_valid_signature_is_200() {
     let temp = TempDir::new("webhook-200");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
     let response = send(
         &app,
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             WEBHOOK_BODY,
         ),
     )
     .await;
     assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(
-        response.json(),
-        json!({"received": true, "timestamp": WEBHOOK_TIMESTAMP})
-    );
+    assert_eq!(response.json(), json!({"received": true}));
 }
 
 #[tokio::test]
-async fn webhook_secret_can_come_from_the_stripe_client() {
+async fn webhook_key_can_come_from_the_adyen_client() {
     let temp = TempDir::new("webhook-client");
-    // `StripeClient::new` became fallible upstream (it now refuses an empty
-    // secret); the pinned non-empty test secret still constructs.
-    let state = file_state(temp.path(), pub1_keys())
-        .with_stripe(Arc::new(
-            StripeClient::new(WEBHOOK_SECRET, 300).expect("pinned secret is non-empty"),
-        ))
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+    let state = file_state(temp.path(), pub1_keys()).with_adyen(Arc::new(
+        apex_billing::AdyenClient::new(
+            "AQEyhmfx_test_key",
+            "ApexMerchant",
+            WEBHOOK_HMAC_KEY.to_vec(),
+            "https://checkout-test.adyen.com",
+        )
+        .expect("client"),
+    ));
     let app = router(state);
     let response = send(
         &app,
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             WEBHOOK_BODY,
         ),
@@ -454,82 +454,27 @@ async fn webhook_secret_can_come_from_the_stripe_client() {
 }
 
 #[tokio::test]
-async fn webhook_accepts_the_exact_tolerance_edge() {
-    let temp = TempDir::new("webhook-edge");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_stripe_tolerance_secs(300)
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 300)));
+async fn webhook_missing_header_is_400() {
+    let temp = TempDir::new("webhook-no-header");
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
-    assert_eq!(response.status, 200, "{}", response.body);
-}
-
-#[tokio::test]
-async fn webhook_stale_timestamp_is_400() {
-    let temp = TempDir::new("webhook-stale");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_stripe_tolerance_secs(300)
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 301)));
-    let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
+    let response = send(&app, post("/v1/adyen/webhook")).await;
     assert_eq!(response.status, 400);
     assert_eq!(response.json(), json!({"error": "invalid_signature"}));
 }
 
 #[tokio::test]
-async fn webhook_future_timestamp_is_also_400() {
-    let temp = TempDir::new("webhook-future");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP - 400)));
-    let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
-    assert_eq!(response.status, 400);
-}
-
-#[tokio::test]
 async fn webhook_tampered_body_is_400() {
     let temp = TempDir::new("webhook-tampered");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
     let mut tampered = WEBHOOK_BODY.to_vec();
     tampered.push(b' ');
     let response = send(
         &app,
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             &tampered,
         ),
@@ -540,69 +485,43 @@ async fn webhook_tampered_body_is_400() {
 }
 
 #[tokio::test]
-async fn webhook_wrong_secret_is_400() {
-    let temp = TempDir::new("webhook-wrong-secret");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(b"whsec_other".to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+async fn webhook_wrong_key_is_400() {
+    let temp = TempDir::new("webhook-wrong-key");
+    let state =
+        file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(b"some_other_key".to_vec());
     let app = router(state);
     let response = send(
         &app,
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             WEBHOOK_BODY,
         ),
     )
     .await;
     assert_eq!(response.status, 400);
+    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
 }
 
 #[tokio::test]
-async fn webhook_missing_header_is_400() {
-    let temp = TempDir::new("webhook-no-header");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+async fn webhook_malformed_events_are_refused() {
+    let temp = TempDir::new("webhook-event");
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
-    let response = send(&app, post_json("/v1/stripe/webhook", WEBHOOK_BODY)).await;
-    assert_eq!(response.status, 400);
-    assert_eq!(response.json()["error"], "invalid_signature");
-}
-
-#[tokio::test]
-async fn webhook_malformed_headers_are_400() {
-    let temp = TempDir::new("webhook-bad-header");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
-    let app = router(state);
-    for header in [
-        "",
-        "garbage",
-        "t=notanumber",
-        "v1=ab",
-        "t=1700000000",
-        "t=1700000000,v1=",
-        "t=1700000000,v1=zz",
+    for body in [
+        b"not json".to_vec(),
+        br#"{"eventCode":"AUTHORISATION"}"#.to_vec(),
+        br#"{"pspReference":"9916934567890123"}"#.to_vec(),
     ] {
+        let header = apex_billing::sign_adyen_payload(WEBHOOK_HMAC_KEY, &body);
         let response = send(
             &app,
-            post_with_header(
-                "/v1/stripe/webhook",
-                "stripe-signature",
-                header,
-                WEBHOOK_BODY,
-            ),
+            post_with_header("/v1/adyen/webhook", "x-adyen-hmac-sha256", &header, &body),
         )
         .await;
-        assert_eq!(response.status, 400, "header {header:?}");
-        assert_eq!(
-            response.json()["error"],
-            "invalid_signature",
-            "header {header:?}"
-        );
+        assert_eq!(response.status, 400, "body {body:?}");
+        assert_eq!(response.json(), json!({"error": "malformed_event"}));
     }
 }
 
@@ -622,9 +541,7 @@ async fn unknown_routes_fall_back_to_json_not_found() {
 async fn every_api_success_carries_application_json() {
     let temp = TempDir::new("content-types");
     write_standard_fixture(temp.path());
-    let state = file_state(temp.path(), pub1_keys())
-        .with_webhook_secret(WEBHOOK_SECRET.to_vec())
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP)));
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
     let requests = [
         get("/healthz"),
@@ -632,8 +549,8 @@ async fn every_api_success_carries_application_json() {
         get(&format!("/v1/ledger/{PUBLISHER}")),
         post(&format!("/v1/cycle/{PUBLISHER}?platform=admob")),
         post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
+            "/v1/adyen/webhook",
+            "x-adyen-hmac-sha256",
             &webhook_header(),
             WEBHOOK_BODY,
         ),
@@ -651,60 +568,6 @@ async fn every_api_success_carries_application_json() {
 }
 
 // --- hardening regressions pinned from the adversarial verification report ---
-
-#[tokio::test]
-async fn webhook_client_tolerance_beats_a_wider_state_tolerance() {
-    // Falsifier from the verification report: a client configured with a 10 s
-    // tolerance must refuse a delivery 100 s old even though the state
-    // tolerance (600 s here, had it been consulted) would accept it.
-    let temp = TempDir::new("webhook-client-tight");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_stripe(Arc::new(
-            StripeClient::new(WEBHOOK_SECRET, 10).expect("pinned secret is non-empty"),
-        ))
-        .with_stripe_tolerance_secs(600)
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 100)));
-    let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
-    assert_eq!(response.status, 400, "{}", response.body);
-    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
-}
-
-#[tokio::test]
-async fn webhook_client_tolerance_beats_a_narrower_state_tolerance() {
-    // The converse direction: a client with a 300 s tolerance accepts a
-    // delivery 100 s old even though the state tolerance is 10 s, proving the
-    // client's value (not the state's) is the one used.
-    let temp = TempDir::new("webhook-client-wide");
-    let state = file_state(temp.path(), pub1_keys())
-        .with_stripe(Arc::new(
-            StripeClient::new(WEBHOOK_SECRET, 300).expect("pinned secret is non-empty"),
-        ))
-        .with_stripe_tolerance_secs(10)
-        .with_clock(Arc::new(FixedClock::new(WEBHOOK_TIMESTAMP + 100)));
-    let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/stripe/webhook",
-            "stripe-signature",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
-    assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(response.json()["received"], true);
-}
 
 #[tokio::test]
 async fn cycle_duplicate_query_keys_are_json_bad_request() {

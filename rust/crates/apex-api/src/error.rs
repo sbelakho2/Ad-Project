@@ -2,7 +2,7 @@
 //!
 //! Every variant maps to exactly one status and one small JSON body. Internal
 //! detail is logged (never serialized) so responses cannot leak file paths,
-//! parser messages or secret material; the Stripe webhook collapses its whole
+//! parser messages or secret material; the Adyen webhook collapses its whole
 //! verification taxonomy to the single `invalid_signature` code on purpose.
 
 use axum::http::StatusCode;
@@ -30,9 +30,9 @@ pub enum ApiError {
     #[error("ledger verification failed at line {line}")]
     LedgerUnverified { line: usize },
 
-    /// No Stripe webhook secret is configured in this deployment.
-    #[error("stripe webhook is not configured")]
-    WebhookNotConfigured,
+    /// No Adyen webhook HMAC key is configured in this deployment.
+    #[error("adyen webhook is not configured")]
+    AdyenWebhookNotConfigured,
 
     /// No live-audit account store is configured in this deployment.
     #[error("live audit is not configured")]
@@ -65,7 +65,7 @@ impl ApiError {
             ApiError::BadRequest(code) => code,
             ApiError::NotFound => "not_found",
             ApiError::LedgerUnverified { .. } => "ledger_unverified",
-            ApiError::WebhookNotConfigured => "webhook_not_configured",
+            ApiError::AdyenWebhookNotConfigured => "adyen_webhook_not_configured",
             ApiError::LiveAuditNotConfigured => "live_audit_not_configured",
             ApiError::Unauthorized => "unauthorized",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
@@ -80,7 +80,7 @@ impl ApiError {
             ApiError::BadRequest(_) | ApiError::InvalidSignature => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::LedgerUnverified { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::WebhookNotConfigured | ApiError::LiveAuditNotConfigured => {
+            ApiError::AdyenWebhookNotConfigured | ApiError::LiveAuditNotConfigured => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
@@ -102,7 +102,9 @@ impl IntoResponse for ApiError {
             ApiError::LedgerUnverified { line } => {
                 json!({ "error": "ledger_unverified", "line": line })
             }
-            ApiError::WebhookNotConfigured => json!({ "error": "webhook_not_configured" }),
+            ApiError::AdyenWebhookNotConfigured => {
+                json!({ "error": "adyen_webhook_not_configured" })
+            }
             ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
@@ -150,9 +152,9 @@ mod tests {
                 "ledger_unverified",
             ),
             (
-                ApiError::WebhookNotConfigured,
+                ApiError::AdyenWebhookNotConfigured,
                 503,
-                "webhook_not_configured",
+                "adyen_webhook_not_configured",
             ),
             (
                 ApiError::LiveAuditNotConfigured,

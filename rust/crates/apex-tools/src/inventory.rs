@@ -52,8 +52,8 @@ pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
         .filter(|p| p.starts_with(".woodpecker/") && p.ends_with(".yml"))
         .collect();
     sources.push("Makefile".to_string());
-    for rel in sources {
-        let Ok(text) = repo.read(&rel) else { continue };
+    for rel in &sources {
+        let Ok(text) = repo.read(rel) else { continue };
         for sub in referenced_subcommands(&text)? {
             checked += 1;
             if !crate::SUBCOMMANDS.contains(&sub.as_str()) {
@@ -67,7 +67,69 @@ pub fn check_pipeline_inventory(repo: &Repo) -> Result<(), String> {
             unknown.join("\n  - ")
         ));
     }
-    println!("pipeline inventory PASS: {checked} apex-tools invocations across lanes and Makefile");
+    // The reverse direction matters too: a subcommand with no caller in any
+    // lane or the Makefile is dead scaffolding and must be removed or wired.
+    let referenced: std::collections::BTreeSet<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        for rel in &sources {
+            if let Ok(text) = repo.read(rel) {
+                for sub in referenced_subcommands(&text)? {
+                    set.insert(sub);
+                }
+            }
+        }
+        set
+    };
+    let dead: Vec<&str> = crate::SUBCOMMANDS
+        .iter()
+        .copied()
+        .filter(|sub| !referenced.contains(*sub))
+        .collect();
+    if !dead.is_empty() {
+        return Err(format!(
+            "PIPELINE INVENTORY FAILED: subcommands with no lane or Makefile caller: {}",
+            dead.join(", ")
+        ));
+    }
+    // The coverage lane's matrix must name every workspace crate, so a new
+    // crate cannot exist without its gate and a deleted crate cannot linger.
+    let lane = repo
+        .read(".woodpecker/apex-rs-coverage.yml")
+        .unwrap_or_default();
+    let matrix = re(r"CRATE:\s*([a-z0-9-]+)")?;
+    let in_matrix: std::collections::BTreeSet<String> = matrix
+        .captures_iter(&lane)
+        .map(|c| c[1].to_string())
+        .collect();
+    let workspace: std::collections::BTreeSet<String> = repo
+        .walk()
+        .into_iter()
+        .filter(|p| {
+            p.starts_with("rust/crates/")
+                && p.ends_with("/Cargo.toml")
+                && p.matches('/').count() == 3
+        })
+        .filter_map(|p| p.split('/').nth(2).map(str::to_string))
+        .collect();
+    let missing: Vec<String> = workspace.difference(&in_matrix).cloned().collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "PIPELINE INVENTORY FAILED: workspace crates missing from the coverage lane matrix: {}",
+            missing.join(", ")
+        ));
+    }
+    let stale: Vec<String> = in_matrix.difference(&workspace).cloned().collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "PIPELINE INVENTORY FAILED: lane matrix names crates that do not exist: {}",
+            stale.join(", ")
+        ));
+    }
+    println!(
+        "pipeline inventory PASS: {checked} apex-tools invocations across lanes and Makefile; all {} subcommands referenced; {} workspace crates in the coverage matrix",
+        crate::SUBCOMMANDS.len(),
+        workspace.len()
+    );
     Ok(())
 }
 

@@ -46,6 +46,7 @@ pub mod cycle;
 pub mod error;
 pub mod html;
 pub mod live;
+pub mod metrics;
 pub mod routes;
 pub mod sources;
 pub mod state;
@@ -69,4 +70,4 @@ pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,
 };
-pub use state::{AppState, DEFAULT_STRIPE_TOLERANCE_SECS};
+pub use state::AppState;

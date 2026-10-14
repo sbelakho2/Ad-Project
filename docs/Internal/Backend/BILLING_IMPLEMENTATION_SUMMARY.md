@@ -13,7 +13,7 @@ Successfully implemented complete billing platform infrastructure covering:
 - Backend billing APIs with authentication and RBAC
 - Usage metering with overage detection
 - Invoice generation with PDF support
-- Stripe webhook integration
+- Adyen webhook integration
 - Reconciliation service
 - Console UI with 3 pages (usage, invoices list, invoice detail)
 - Comprehensive test coverage
@@ -120,14 +120,14 @@ Successfully implemented complete billing platform infrastructure covering:
   - Line item breakdown
   - Subtotal, tax, and total calculations
   - Payment terms and due date
-- **createStripeInvoice()** - Creates invoice in Stripe with line items
-- **syncInvoiceFromStripe()** - Syncs Stripe invoice to local database
+- **createStripeInvoice()** - Creates invoice in Adyen with line items
+- **syncInvoiceFromStripe()** - Syncs Adyen invoice to local database
 
 ### Reconciliation Service Implementation
 ✅ **ReconciliationService** (`backend/src/services/reconciliationService.ts`)
 - **reconcile()** - Main reconciliation logic comparing usage records
   - Fetches active subscriptions
-  - Compares internal usage vs Stripe billing
+  - Compares internal usage vs Adyen billing
   - Calculates discrepancies with 0.5% tolerance threshold
   - Alerts if total discrepancy > $1000
   - Logs all findings to `billing_audit`
@@ -135,10 +135,10 @@ Successfully implemented complete billing platform infrastructure covering:
 - **storeIdempotencyKey()** - Stores reconciliation result for replay protection
 - **getReconciliationHistory()** - Returns last N reconciliations
 
-### Stripe Webhook Handler
+### Adyen Webhook Handler
 ✅ **Webhook Routes** (`backend/src/routes/webhooks.routes.ts`)
 - **Raw Body Parsing** - Uses `express.raw()` middleware BEFORE `express.json()` in `src/index.ts` to provide raw body buffer for signature verification (fix applied 2025-12-12, commit `89945f5`)
-- **Signature Verification** - `stripe.webhooks.constructEvent()` prevents unauthorized events
+- **Signature Verification** - `adyen.webhooks.constructEvent()` prevents unauthorized events
 - **Idempotency** - Deduplication via `stripe_webhook_events` table
 - **Production Testing (2025-12-12):** All 12 event types tested and returning 200 OK
 
@@ -225,7 +225,7 @@ Successfully implemented complete billing platform infrastructure covering:
 - Session management via existing `useSession` hook
 
 ### Payment Processing
-- Stripe SDK v2025-10-29.clover API integration
+- Adyen SDK v2025-10-29.clover API integration
 - Webhook signature verification via `STRIPE_WEBHOOK_SECRET`
 - Idempotency at multiple layers: HTTP headers, webhook events, reconciliation
 
@@ -260,7 +260,7 @@ TRANSPARENCY_ENABLED=true
 FRAUD_DETECTION_ENABLED=true
 AB_TESTING_ENABLED=false
 
-# Stripe
+# Adyen
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_WEBHOOK_SECRET=whsec_...
 
@@ -296,7 +296,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ### Pre-Deployment
 - [ ] Run database migrations (017 and 018)
 - [ ] Set environment variables in production
-- [ ] Configure Stripe webhook endpoint URL
+- [ ] Configure Adyen webhook endpoint URL
 - [ ] Test webhook signature verification
 - [ ] Review RBAC permissions for admin users
 - [ ] Enable feature flags in production
@@ -304,7 +304,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ### Deployment Steps
 1. Deploy backend with new routes and services
 2. Run database migrations via migration script
-3. Configure Stripe webhook in dashboard
+3. Configure Adyen webhook in dashboard
 4. Deploy console with billing UI
 5. Verify feature flags endpoint returns correct values
 6. Test end-to-end invoice flow
@@ -329,7 +329,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 
 ### Integration Tests
 - ⏳ Billing API endpoints with authentication
-- ⏳ Stripe webhook event processing
+- ⏳ Adyen webhook event processing
 - ⏳ Reconciliation discrepancy detection
 - ⏳ PDF generation and caching
 
@@ -355,7 +355,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 
 ### API Rate Limiting
 - Express rate limiter on billing endpoints (100 req/15min per user)
-- Stripe API rate limiting handled via SDK retry logic
+- Adyen API rate limiting handled via SDK retry logic
 - Idempotency prevents duplicate processing
 
 ---
@@ -372,7 +372,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 ✅ Customer data scoped by authenticated user  
 ✅ SQL injection prevention via parameterized queries  
 ✅ XSS prevention via React auto-escaping  
-✅ Sensitive data excluded from logs (Stripe keys redacted)
+✅ Sensitive data excluded from logs (Adyen keys redacted)
 
 ### Webhook Security
 ✅ Signature verification prevents unauthorized events  
@@ -400,7 +400,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - Self-service plan upgrades/downgrades
 - Usage forecast and budgeting alerts
 - Multi-currency support (EUR, GBP, JPY)
-- Tax calculation integration (Stripe Tax or TaxJar)
+- Tax calculation integration (Adyen Tax or TaxJar)
 
 ### Phase 3 (Q3 2025)
 - Dunning management for failed payments
@@ -423,7 +423,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - [Backend API Reference](./backend/openapi.yaml)
 - [Database Schema](./backend/migrations/)
 - [Environment Variables](./README.md)
-- [Stripe Webhook Guide](https://stripe.com/docs/webhooks)
+- [Adyen Webhook Guide](https://adyen.com/docs/webhooks)
 
 ---
 
@@ -431,13 +431,13 @@ NEXT_PUBLIC_USE_MOCK_API=false
 
 ### Key Decisions Made
 1. **Idempotency at Multiple Layers** - Prevents duplicate charges and data corruption
-2. **0.5% Reconciliation Tolerance** - Balances accuracy with Stripe rounding differences
+2. **0.5% Reconciliation Tolerance** - Balances accuracy with Adyen rounding differences
 3. **ETag Caching for PDFs** - Reduces bandwidth and improves UX for repeat downloads
 4. **Feature Flag Architecture** - Enables gradual rollout and A/B testing
 5. **Admin-Only Reconciliation** - Protects sensitive financial operations
 
 ### Lessons Learned
-- Stripe TypeScript definitions incomplete - use type assertions for missing properties
+- Adyen TypeScript definitions incomplete - use type assertions for missing properties
 - Feature flags must be implemented before gated features
 - Migration order matters - audit tables must reference existing schema
 - PDFKit requires Buffer handling for blob URLs in frontend
@@ -474,7 +474,7 @@ The billing platform implementation (sections 7.1-7.4) is **fully complete** wit
 
 **Next Steps:**
 1. Run database migrations in staging/production
-2. Configure Stripe webhooks
+2. Configure Adyen webhooks
 3. Deploy backend and console
 4. Complete unit/integration test suite
 5. Conduct security audit and penetration testing

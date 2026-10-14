@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 apex-core = { path = "../apex-core" }
+apex-lift = { path = "../apex-lift" }
 apex-audit = { path = "../apex-audit" }
 apex-proof = { path = "../apex-proof" }
 serde.workspace = true

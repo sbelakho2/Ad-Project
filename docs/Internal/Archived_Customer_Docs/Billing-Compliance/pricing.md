@@ -41,10 +41,10 @@ All tiers are based on **gross mediated revenue per app portfolio per month** (w
 ### Payment rails & autopay expectations
 
 - **Starter** &mdash; stays free up to $10k per app per month and does **not** require a payment method on file. Keep shipping until you decide to upgrade.
-- **Growth & Scale** &mdash; require an autopay-ready rail (Stripe card or wallet globally, ACH in the US, SEPA in the EU/EEA). We store the method in Stripe and auto-charge as soon as the monthly invoice finalizes so mediation never pauses for billing.
-- **Enterprise** &mdash; defaults to the same autopay setup, but finance can approve invoice + wire terms if your procurement process mandates it. Even then, we keep a Stripe rail on file for dunning/backstop charges.
+- **Growth & Scale** &mdash; require an autopay-ready rail (Adyen card or wallet globally, ACH in the US, SEPA in the EU/EEA). We store the method in Adyen and auto-charge as soon as the monthly invoice finalizes so mediation never pauses for billing.
+- **Enterprise** &mdash; defaults to the same autopay setup, but finance can approve invoice + wire terms if your procurement process mandates it. Even then, we keep a Adyen rail on file for dunning/backstop charges.
 
-Invoices follow NET 30 terms, but the actual collection happens automatically on the due date via the selected autopay rail. Reminder emails post 5 days before the charge and again the moment Stripe attempts the payment.
+Invoices follow NET 30 terms, but the actual collection happens automatically on the due date via the selected autopay rail. Reminder emails post 5 days before the charge and again the moment Adyen attempts the payment.
 
 ### Worked Examples
 
@@ -92,17 +92,17 @@ Balances below **€100** automatically roll forward until the cumulative fee me
 ### How to Pay
 
 1. **Autopay (default once you leave Starter)**
-	- Growth/Scale customers add a Stripe payment method (card, Apple/Google Pay wallet, ACH in the US, SEPA direct debit in the EU). We auto-charge on the NET 30 due date using Stripe&rsquo;s retry schedule (day 0/3/5/7) so mediation keeps running without manual steps.
+	- Growth/Scale customers add a Adyen payment method (card, Apple/Google Pay wallet, ACH in the US, SEPA direct debit in the EU). We auto-charge on the NET 30 due date using Adyen&rsquo;s retry schedule (day 0/3/5/7) so mediation keeps running without manual steps.
 	- Enterprise keeps the same default autopay rail. If your finance team needs invoice + wire terms, request approval via billing@apexmediation.ee and we&rsquo;ll flag the account while still retaining the autopay method as a fallback.
 2. **Manual wires (approved exceptions only)**
 	- **SEPA (EUR default)** – Wise Europe SA IBAN (fee-free, same/next-day)
 	- **ACH (USD default)** – Wise US / Community Federal Savings Bank account (1–3 US banking days)
 3. **Other secondary rails**
-	- **Stripe hosted payment link** – great for ad-hoc card payments or wallet top-ups.
+	- **Adyen hosted payment link** – great for ad-hoc card payments or wallet top-ups.
 	- **PayPal** – 2% pass-through fee; gross up to cover their network fee.
 	- **Wise multi-currency link** – ideal for CAD/GBP/SGD wires at mid-market FX.
 
-Invoices are denominated in **EUR**. We display your mediated revenue in your local currency for convenience, but the payable amount is converted using the **ECB daily rate** on the invoice date. Autopay charges occur in EUR; Stripe handles the FX automatically if your card settles in another currency.
+Invoices are denominated in **EUR**. We display your mediated revenue in your local currency for convenience, but the payable amount is converted using the **ECB daily rate** on the invoice date. Autopay charges occur in EUR; Adyen handles the FX automatically if your card settles in another currency.
 
 ---
 

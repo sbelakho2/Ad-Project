@@ -1,13 +1,19 @@
-//! Experiment settlement: keep only platform-proven lift; otherwise roll back.
-//! The comparison is computed from the platform's own variant results; the
-//! autopilot never trusts its own expected_effect_bp (it is a planning input,
-//! never evidence).
+//! Experiment settlement through the Apex Lift Engine.
+//!
+//! The engine measures lift as the mean daily log ratio of revenue per user,
+//! bounds it with a one-sided 90% (or 99% interim) t quantile, enforces the
+//! eight guardrails, and applies the six keep conditions. Billable lift is
+//! the lower bound, never the point estimate. The platform's own reporting is
+//! the only data source.
 
-use apex_core::{lift_basis_points, ExperimentResult, ExperimentState};
+use apex_lift::decision::{decide, Decision, DecisionInput, PreRegistration};
+use apex_lift::error::LiftError;
+use apex_lift::guardrails::{evaluate, FillFormat};
+use apex_lift::window::{build_window, incident_runs};
 use apex_proof::{ChangeKind, InMemoryLedger, LedgerRecord};
 
 use crate::keys::platform_of;
-use crate::model::{Action, AutopilotPolicy, PlanError, SettleOutcome};
+use crate::model::{Action, PlanError, SettleOutcome};
 use crate::ops::PlatformOps;
 
 /// Rebuild the action a change record applied (used to roll back on settle).
@@ -60,14 +66,18 @@ fn change_to_action(change: &ChangeKind) -> Option<Action> {
     }
 }
 
-/// Keep iff the platform measured lift >= policy.min_lift_bp AND the platform's
-/// confidence >= policy.min_confidence_bp; otherwise roll the change back and
-/// record it. A kept change with positive lift also emits the billing proof.
+/// Settle one experiment through the Apex Lift Engine.
+///
+/// The engine measures the daily log ratio of revenue per user from the
+/// platform's reporting pulls, enforces the guardrails, applies the six keep
+/// conditions and returns the decision. Only a `Keep` appends records that
+/// carry a billable lambda; rollbacks and voids never bill.
+#[allow(clippy::too_many_arguments)]
 pub async fn settle_experiment(
     ops: &dyn PlatformOps,
     ledger: &mut InMemoryLedger,
-    policy: &AutopilotPolicy,
-    publisher_id: &str,
+    prereg: &PreRegistration,
+    fill_format: FillFormat,
     experiment_id: &str,
     change_seq: u64,
     now_unix_ms: i64,
@@ -77,7 +87,7 @@ pub async fn settle_experiment(
         .await
         .map_err(|source| PlanError::ApplyFailed { source })?;
 
-    if result.state != ExperimentState::Completed {
+    if result.state != apex_core::ExperimentState::Completed {
         return Err(PlanError::PolicyViolation {
             reason: format!(
                 "experiment {experiment_id} is still {:?}; never assume completion",
@@ -86,7 +96,7 @@ pub async fn settle_experiment(
         });
     }
 
-    let (action, platform, ad_unit_id) = {
+    let (action, platform, ad_unit_id, prev_value) = {
         let records = ledger.records();
         let record = records
             .into_iter()
@@ -99,16 +109,15 @@ pub async fn settle_experiment(
                 change,
                 platform,
                 ad_unit_id,
+                prev_value,
                 ..
             } => {
                 let mut action = change_to_action(change)
                     .ok_or_else(|| PlanError::Validation("unknown change kind".into()))?;
-                // CountryFloorSet records do not carry the ad unit in the change
-                // itself; take it from the record so rollback targets the right unit.
                 if let Action::SetCountryFloor { ad_unit_id: a, .. } = &mut action {
                     *a = ad_unit_id.clone();
                 }
-                (action, *platform, ad_unit_id.clone())
+                (action, *platform, ad_unit_id.clone(), prev_value.clone())
             }
             _ => {
                 return Err(PlanError::NoBaseline {
@@ -123,18 +132,17 @@ pub async fn settle_experiment(
         ));
     }
 
-    // One settlement per experiment, ever: a repeat would append a second
-    // ExperimentObserved and a second billing proof, double-billing the same
-    // proven lift. Refuse before touching the platform, so a retried settle
-    // cannot issue a second rollback either.
-    let already_settled = ledger.records().iter().any(|record| match record {
-        LedgerRecord::ExperimentObserved {
-            experiment_id: e, ..
-        }
-        | LedgerRecord::BillingProof {
-            experiment_id: e, ..
-        } => e == experiment_id,
-        _ => false,
+    let already_settled = ledger.records().iter().any(|record| {
+        matches!(
+            record,
+            LedgerRecord::ExperimentObserved { experiment_id: e, .. } if e == experiment_id
+        ) || matches!(
+            record,
+            LedgerRecord::BillingProof { experiment_id: e, .. } if e == experiment_id
+        ) || matches!(
+            record,
+            LedgerRecord::LiftRecord { payload, .. } if payload.contains(experiment_id)
+        )
     });
     if already_settled {
         return Err(PlanError::Validation(format!(
@@ -142,33 +150,120 @@ pub async fn settle_experiment(
         )));
     }
 
-    let (lift_bp, confidence_bp, winner_variant_id, control, winner) = evaluate_result(&result)?;
+    let days = ops
+        .experiment_days(experiment_id)
+        .await
+        .map_err(|source| PlanError::ApplyFailed { source })?;
 
-    let keep = lift_bp >= policy.min_lift_bp && confidence_bp >= policy.min_confidence_bp;
-    if !keep {
-        if ops.rollback(&action).await.is_err() {
-            return Err(PlanError::RollbackFailed {
-                reason: format!(
-                    "lift {lift_bp} bp / confidence {confidence_bp} below policy and rollback failed"
-                ),
+    // Build the pre-registration from the policy, the applied change's prior
+    // value, and the engine's analysis version. In production this record is
+    // written before the first platform call; at settle it is re-emitted so
+    // the ledger carries the full sequence.
+    let prereg = PreRegistration {
+        experiment_id: experiment_id.to_string(),
+        scope: ad_unit_id.clone(),
+        change_description: prereg.change_description.clone(),
+        before_value: prev_value,
+        test_share: prereg.test_share,
+        metric: apex_lift::decision::Metric::RevenuePerUser,
+        burn_in_days: prereg.burn_in_days,
+        window_days: prereg.window_days,
+        interim_look: prereg.interim_look,
+        extension_allowed: prereg.extension_allowed,
+        code_version_hash: prereg.code_version_hash.clone(),
+        rate_bp: prereg.rate_bp,
+        thresholds: prereg.thresholds.clone(),
+    };
+
+    let window = build_window(
+        &days.control,
+        &days.test,
+        prereg.window_days,
+        prereg.test_share,
+    );
+    let incidents = incident_runs(&days.control, &days.test);
+    let arm_counts: Vec<(u64, u64)> = window
+        .days
+        .iter()
+        .enumerate()
+        .filter_map(|(i, _)| {
+            let c = days.control.get(i + 3)?;
+            let t = days.test.get(i + 3)?;
+            Some((t.users?, c.users?))
+        })
+        .collect();
+    let guardrails = evaluate(
+        &prereg,
+        &window.days,
+        &arm_counts,
+        fill_format,
+        &[],
+        0,
+        &incidents,
+    );
+
+    let ratios: Vec<f64> = window.days.iter().map(|d| d.log_ratio).collect();
+    let input = DecisionInput {
+        window: &window,
+        guardrails: &guardrails,
+        observed_scope: prereg.scope.clone(),
+        observed_change_description: prereg.change_description.clone(),
+        at_final_look: window.complete,
+        extension_used: false,
+        bootstrap_iterations: 2000,
+        bootstrap_block_len: 7,
+        bootstrap_seed: now_unix_ms as u64,
+    };
+    let decision = decide(&prereg, &input);
+
+    match &decision {
+        Decision::Rollback { reason } => {
+            if ops.rollback(&action).await.is_err() {
+                return Err(PlanError::RollbackFailed {
+                    reason: format!("rollback failed: {reason}"),
+                });
+            }
+            let rollback = ledger
+                .append_rollback(
+                    now_unix_ms,
+                    platform,
+                    &ad_unit_id,
+                    change_seq,
+                    &format!("lift engine: {reason}"),
+                )
+                .map_err(PlanError::Ledger)?;
+            return Ok(SettleOutcome::RolledBack {
+                lift: estimate_lift(&ratios).unwrap_or(0.0),
+                reason: reason.clone(),
+                rollback_seq: rollback.seq(),
             });
         }
-        let rollback = ledger
-            .append_rollback(
-                now_unix_ms,
-                platform,
-                &ad_unit_id,
-                change_seq,
-                "below_policy",
-            )
-            .map_err(PlanError::Ledger)?;
-        return Ok(SettleOutcome::RolledBack {
-            lift_bp,
-            confidence_bp,
-            reason: "below_policy".into(),
-            rollback_seq: rollback.seq(),
-        });
+        Decision::Void { reason } => {
+            return Ok(SettleOutcome::Voided {
+                reason: reason.clone(),
+            });
+        }
+        Decision::Pending { reason } => {
+            return Ok(SettleOutcome::Pending {
+                reason: reason.clone(),
+            });
+        }
+        _ => {}
     }
+
+    let Decision::Keep {
+        lambda,
+        estimate,
+        bootstrap_lower,
+        ..
+    } = decision
+    else {
+        // Extend was already handled above as a Pending outcome via the
+        // final-look path; any other non-keep decision is an engine bug.
+        return Err(PlanError::Validation(
+            "decide returned a non-keep decision after the keep match".into(),
+        ));
+    };
 
     ledger
         .append(LedgerRecord::experiment_observed(
@@ -179,92 +274,33 @@ pub async fn settle_experiment(
         ))
         .map_err(PlanError::Ledger)?;
 
-    let (fee_micros, billing_seq) = if lift_bp > 0 && winner.revenue > control.revenue {
-        let proof = apex_proof::build_billing_proof(
-            publisher_id,
-            experiment_id,
-            control.revenue,
-            winner.revenue,
-            2_000,
-            now_unix_ms,
-        )
-        .map_err(|source| PlanError::ApplyFailed { source })?;
-        let fee = match &proof {
-            LedgerRecord::BillingProof { fee_micros, .. } => *fee_micros,
-            _ => 0,
-        };
-        let record = ledger.append(proof).map_err(PlanError::Ledger)?;
-        (Some(fee), Some(record.seq()))
-    } else {
-        (None, None)
-    };
+    // Emit the signed lift-engine result record into the ledger.
+    let result_record =
+        apex_lift::emit::result(&prereg, &decision, &estimate, ratios, bootstrap_lower)
+            .map_err(lift_to_plan)?;
+    let payload = result_record
+        .record
+        .canonical_json()
+        .map_err(lift_to_plan)?;
+    let sha = result_record.sha256.clone();
+    let lift_entry = ledger
+        .append(LedgerRecord::lift_record(now_unix_ms, &sha, &payload))
+        .map_err(PlanError::Ledger)?;
 
     Ok(SettleOutcome::Kept {
-        lift_bp,
-        confidence_bp,
-        winner_variant_id,
-        fee_micros,
-        billing_seq,
+        experiment_id: experiment_id.to_string(),
+        lift: estimate.lift,
+        lambda,
+        lower_90: estimate.lower_90,
+        bootstrap_lower,
+        result_seq: lift_entry.seq(),
     })
 }
 
-fn evaluate_result(
-    result: &ExperimentResult,
-) -> Result<
-    (
-        i64,
-        i32,
-        String,
-        apex_core::ExperimentVariantResult,
-        apex_core::ExperimentVariantResult,
-    ),
-    PlanError,
-> {
-    let control = result
-        .results
-        .first()
-        .cloned()
-        .ok_or_else(|| PlanError::NoBaseline {
-            reason: "experiment has no control (first) variant".into(),
-        })?;
-    if control.ecpm <= 0 {
-        return Err(PlanError::NoBaseline {
-            reason: format!("control ecpm {} is not positive", control.ecpm),
-        });
-    }
-    let winner = match &result.winner_variant_id {
-        Some(id) => result
-            .results
-            .iter()
-            .find(|variant| &variant.variant_id == id)
-            .cloned()
-            .ok_or_else(|| PlanError::NoBaseline {
-                reason: format!("winner variant '{id}' is not among the results"),
-            })?,
-        None => result
-            .results
-            .iter()
-            .filter(|variant| variant.variant_id != control.variant_id)
-            .max_by(|a, b| {
-                a.ecpm
-                    .cmp(&b.ecpm)
-                    .then_with(|| b.variant_id.cmp(&a.variant_id))
-            })
-            .cloned()
-            .ok_or_else(|| PlanError::NoBaseline {
-                reason: "experiment has only the control variant".into(),
-            })?,
-    };
-    let lift_bp =
-        lift_basis_points(control.ecpm, winner.ecpm).ok_or_else(|| PlanError::NoBaseline {
-            reason: "lift is undefined for a non-positive control".into(),
-        })?;
-    let confidence_bp = result.confidence.unwrap_or(0);
-    Ok((
-        lift_bp,
-        confidence_bp,
-        winner.variant_id.clone(),
-        control,
-        winner,
-    ))
+fn estimate_lift(ratios: &[f64]) -> Option<f64> {
+    apex_lift::stats::estimate(ratios).map(|e| e.lift)
+}
+
+fn lift_to_plan(error: LiftError) -> PlanError {
+    PlanError::Validation(format!("lift engine: {error}"))
 }

@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use apex_api::html;
 use apex_api::sources::{AuditSource, FileLedgerSource, JsonFileAuditSource, LedgerSource};
-use apex_api::{html, DEFAULT_STRIPE_TOLERANCE_SECS};
 use apex_core::PlatformId;
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord, VerifyingKey};
 
@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ecpm: 1_750_000,
             },
             "admob-ecpm:g1:u1:1.75",
+            "1000000",
         ))?;
     }
 
@@ -77,10 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         html::render_error_page("Not found", "no such page"),
     )?;
 
-    println!(
-        "rendered 4 console pages to {} (tolerance default {}s)",
-        out.display(),
-        DEFAULT_STRIPE_TOLERANCE_SECS
-    );
+    println!("rendered 4 console pages to {}", out.display());
     Ok(())
 }

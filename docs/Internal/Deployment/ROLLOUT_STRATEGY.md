@@ -127,20 +127,20 @@ aws elasticache create-replication-group \
 #### Payment & Billing Setup (Week 2-3)
 
 ```bash
-# 1. Stripe Account
+# 1. Adyen Account
 # - Business account for Bel Consulting OÜ
-# - Enable Stripe Tax for automatic VAT handling
+# - Enable Adyen Tax for automatic VAT handling
 # - Configure billing portal
 # - Set up webhooks
 
-# 2. Create Stripe Products & Usage-Based Prices
-stripe products create \
+# 2. Create Adyen Products & Usage-Based Prices
+adyen products create \
   --name "ApexMediation Growth Tier" \
   --description "2.5% BYO platform fee on $10k-$100k mediated revenue"
 
-GROWTH_PRODUCT_ID=$(stripe products list --limit 1 | jq -r '.data[0].id')
+GROWTH_PRODUCT_ID=$(adyen products list --limit 1 | jq -r '.data[0].id')
 
-stripe prices create \
+adyen prices create \
   --product $GROWTH_PRODUCT_ID \
   --currency usd \
   --recurring[interval]=month \
@@ -151,8 +151,8 @@ stripe prices create \
 
 # Repeat for Scale (0.02) and Enterprise (custom contract + minimum via subscriptions / invoices)
 
-# 3. Configure Stripe Webhooks
-# Endpoint: https://api.apexmediation.ee/webhooks/stripe
+# 3. Configure Adyen Webhooks
+# Endpoint: https://api.apexmediation.ee/webhooks/adyen
 # Events:
 #   - customer.subscription.created
 #   - customer.subscription.updated
@@ -161,14 +161,14 @@ stripe prices create \
 #   - invoice.payment_failed
 #   - charge.refunded
 
-# 4. Test with Stripe Test Mode
+# 4. Test with Adyen Test Mode
 # - Test cards: 4242 4242 4242 4242
 # - Verify webhook delivery
 # - Test failed payment scenarios
 
 # 5. Publish Billing Policy Snapshot
 # - Endpoint: https://api.apexmediation.ee/api/v1/billing/policy
-# - Source of truth: backend/src/config/billingPolicy.ts (Stripe-first rail + Wise/ACH fallbacks)
+# - Source of truth: backend/src/config/billingPolicy.ts (Adyen-first rail + Wise/ACH fallbacks)
 # - Consumers: console billing pages + docs/Customer-Facing/Compliance/Invoicing-Payments.md (cache bust after changes)
 ```
 
@@ -361,8 +361,8 @@ psql -h apexmediation-prod.xxx.eu-north-1.rds.amazonaws.com -U apexadmin -c "SEL
 # ✅ Redis Connection
 redis-cli -h apexmediation-prod.xxx.cache.amazonaws.com ping
 
-# ✅ Stripe Webhooks
-curl -X POST https://api.apexmediation.ee/webhooks/stripe/test
+# ✅ Adyen Webhooks
+curl -X POST https://api.apexmediation.ee/webhooks/adyen/test
 
 # ✅ Email Sending
 # Send test email to yourself via SendGrid
@@ -548,12 +548,12 @@ jobs:
       # Send trial ending emails (7 days, 3 days, 1 day before)
       node scripts/send-trial-reminders.js
 
-  - name: usage-sync-to-stripe
+  - name: usage-sync-to-adyen
     schedule: "0 2 * * *"  # 2 AM daily
     script: |
       #!/bin/bash
-      # Sync usage data to Stripe for billing
-      node scripts/sync-usage-to-stripe.js
+      # Sync usage data to Adyen for billing
+      node scripts/sync-usage-to-adyen.js
 
   - name: database-backup-verify
     schedule: "0 4 * * *"  # 4 AM daily
@@ -1463,7 +1463,7 @@ export class CompetitorMonitoringService {
 
 - [ ] Infrastructure provisioned (AWS, database, Redis, ClickHouse)
 - [ ] Monitoring configured (Datadog, Sentry, UptimeRobot, PagerDuty)
-- [ ] Stripe account + products configured
+- [ ] Adyen account + products configured
 - [ ] Email templates created (10+ templates)
 - [ ] Documentation site published
 - [ ] SDK downloads hosted on S3/CDN

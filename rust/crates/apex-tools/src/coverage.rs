@@ -1,8 +1,6 @@
 //! Coverage artifact parsers and gates, ported from coverage-gate.mjs and
 //! lcov-gate.mjs (fail-closed semantics preserved).
 
-use std::path::Path;
-
 use crate::policy::Floors;
 use crate::repo::Repo;
 
@@ -23,24 +21,6 @@ pub struct LcovFile {
     pub brf: u64,
     pub fnh: u64,
     pub fnf: u64,
-}
-
-pub fn parse_jest_summary(json: &str) -> Result<Metrics, String> {
-    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let t = v
-        .get("total")
-        .ok_or("coverage-summary.json missing total")?;
-    let pct = |key: &str| {
-        t.get(key)
-            .and_then(|x| x.get("pct"))
-            .and_then(serde_json::Value::as_f64)
-    };
-    Ok(Metrics {
-        lines: pct("lines").ok_or("missing lines")?,
-        branches: pct("branches").ok_or("missing branches")?,
-        functions: pct("functions").ok_or("missing functions")?,
-        statements: pct("statements").ok_or("missing statements")?,
-    })
 }
 
 pub fn parse_lcov(text: &str) -> Vec<LcovFile> {
@@ -128,47 +108,31 @@ pub fn lcov_totals(files: &[LcovFile], require_branches: bool) -> LcovTotals {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GoRow {
-    pub func: String,
-    pub pct: f64,
-}
-
-pub fn parse_go_func(text: &str) -> (Vec<GoRow>, Option<f64>) {
-    let mut rows = Vec::new();
-    let mut total = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("total:") {
-            if let Some(p) = rest
-                .rsplit('\t')
-                .next()
-                .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
-            {
-                total = Some(p);
-            }
-            continue;
-        }
-        let mut parts = line.rsplitn(3, '\t');
-        if let (Some(pct_s), Some(name), Some(_loc)) = (parts.next(), parts.next(), parts.next()) {
-            if let Ok(pct) = pct_s.trim_end_matches('%').trim().parse::<f64>() {
-                rows.push(GoRow {
-                    func: name.to_string(),
-                    pct,
-                });
-            }
-        }
-    }
-    (rows, total)
-}
-
 /// Standalone lcov gate: same rules as the retired lcov-gate.mjs, including
 /// the worst-files listing and the pass summary line format.
-pub fn lcov_gate(path: &str, floor: f64, require_branches: bool) -> Result<(), String> {
+pub fn lcov_gate(
+    path: &str,
+    floor: f64,
+    require_branches: bool,
+    expect_crate: Option<&str>,
+) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("lcov not found: {path} ({e})"))?;
     let files = parse_lcov(&text);
     if files.is_empty() {
         return Err("lcov contains no records".into());
+    }
+    // The artifact must cover the crate the matrix entry names: a wrong PKG
+    // or a stale row must fail loudly instead of gating another crate's file.
+    if let Some(crate_name) = expect_crate {
+        let needle = format!("/crates/{crate_name}/");
+        if !files.iter().any(|file| {
+            file.file.contains(&needle) || file.file.starts_with(&format!("crates/{crate_name}/"))
+        }) {
+            return Err(format!(
+                "LCOV GATE FAILED ({path}): no records under crates/{crate_name}; the artifact does not cover the named crate"
+            ));
+        }
     }
     let (pass, message) = evaluate_lcov_gate(&files, floor, require_branches);
     if pass {
@@ -229,125 +193,6 @@ fn pct(h: u64, t: u64) -> f64 {
     }
 }
 
-/// Standalone Go function-coverage gate: the total line and every function row
-/// must be at or above the floor. Parsing goes through `parse_go_func` so the
-/// row grammar matches the coverage artifact exactly; a file with no total or
-/// no rows fails closed instead of reading as an empty pass.
-pub fn go_func_gate(path: &str, floor: f64) -> Result<(), String> {
-    if !Path::new(path).is_file() {
-        return Err(format!("go coverage file not found: {path}"));
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let (rows, total) = parse_go_func(&text);
-    let Some(total) = total else {
-        return Err(format!(
-            "GO COVERAGE GATE FAILED (floor={floor}%): {path} has no total line"
-        ));
-    };
-    if rows.is_empty() {
-        return Err(format!(
-            "GO COVERAGE GATE FAILED (floor={floor}%): {path} has no function rows"
-        ));
-    }
-    let mut offenders: Vec<String> = Vec::new();
-    if total < floor {
-        offenders.push(format!("  - total: {total}%"));
-    }
-    for r in rows.iter().filter(|r| r.pct < floor) {
-        offenders.push(format!("  - {}: {}%", r.func, r.pct));
-    }
-    if !offenders.is_empty() {
-        return Err(format!(
-            "GO COVERAGE GATE FAILED (floor={floor}%) — offenders:\n{}",
-            offenders.join("\n")
-        ));
-    }
-    println!(
-        "go coverage gate PASS (floor={floor}%): {} rows checked plus the total ({total}%)",
-        rows.len()
-    );
-    Ok(())
-}
-
-pub fn coverage_gate(
-    repo: &Repo,
-    domain: &str,
-    artifact: &str,
-    tool: &str,
-    require_branches: bool,
-) -> Result<(), String> {
-    let floors = Floors::load(repo)?;
-    if !floors.domains.contains_key(domain) {
-        return Err(format!(
-            "unknown domain '{domain}' (not present in coverage-floor.json)"
-        ));
-    }
-    let floor = floors.floor_for(domain);
-    let text = repo
-        .read(artifact)
-        .map_err(|e| format!("artifact not found: {artifact}: {e}"))?;
-    let mut violations = Vec::new();
-    match tool {
-        "jest" | "c8" => {
-            let m = parse_jest_summary(&text)?;
-            for (name, value) in [
-                ("lines", m.lines),
-                ("branches", m.branches),
-                ("functions", m.functions),
-                ("statements", m.statements),
-            ] {
-                if value < floor {
-                    violations.push(format!("{name}: {value}% < floor {floor}%"));
-                }
-            }
-        }
-        "lcov" => {
-            let files = parse_lcov(&text);
-            if files.is_empty() {
-                return Err("lcov contains no records".into());
-            }
-            let t = lcov_totals(&files, require_branches);
-            violations.extend(t.violations.iter().cloned());
-            for (name, value) in [
-                ("lines", t.metrics.lines),
-                ("branches", t.metrics.branches),
-                ("functions", t.metrics.functions),
-            ] {
-                if value < floor {
-                    violations.push(format!("{name}: {value:.2}% < floor {floor}%"));
-                }
-            }
-            if floor > 0.0 && !t.zero_line_files.is_empty() {
-                violations.push(format!(
-                    "files with zero executable lines in record: {}",
-                    t.zero_line_files.join(", ")
-                ));
-            }
-        }
-        "go-func" => {
-            let (rows, total) = parse_go_func(&text);
-            let total = total.ok_or("cover.func has no total line")?;
-            if total < floor {
-                violations.push(format!("total: {total}% < floor {floor}%"));
-            }
-            for r in rows.iter().filter(|r| r.pct < floor) {
-                violations.push(format!("{}: {}%", r.func, r.pct));
-            }
-        }
-        other => return Err(format!("unknown tool '{other}' (use jest|c8|lcov|go-func)")),
-    }
-    if violations.is_empty() {
-        println!("gate PASS [{domain}] floor={floor} ({tool})");
-        Ok(())
-    } else {
-        Err(format!(
-            "COVERAGE GATE FAILED [{domain}] {}:\n  - {}",
-            tool,
-            violations.join("\n  - ")
-        ))
-    }
-}
-
 /// Aggregate verdict: re-validates manifest completeness, orphan ceiling and the
 /// floor ratchet, then writes the markdown report.
 pub fn aggregate_verdict(repo: &Repo, report_rel: &str) -> Result<(), String> {
@@ -390,31 +235,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jest_summary_reads_totals() {
-        let m = parse_jest_summary(
-            r#"{"total":{"lines":{"pct":100},"branches":{"pct":99.1},"functions":{"pct":100},"statements":{"pct":100}}}"#,
-        )
-        .unwrap();
-        assert_eq!(m.lines, 100.0);
-        assert_eq!(m.branches, 99.1);
-    }
-
-    #[test]
     fn lcov_totals_and_fail_closed_branches() {
         let files = parse_lcov("SF:a.ts\nLF:10\nLH:10\nFNF:1\nFNH:1\nend_of_record\n");
         assert_eq!(files.len(), 1);
         let t = lcov_totals(&files, true);
         assert!(!t.violations.is_empty());
         assert_eq!(lcov_totals(&files, false).metrics.lines, 100.0);
-    }
-
-    #[test]
-    fn go_func_parses_tabs() {
-        let (rows, total) =
-            parse_go_func("github.com/x/a.go:10:\tDo\t85.7%\ntotal:\t(statements)\t92.3%");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pct, 85.7);
-        assert_eq!(total, Some(92.3));
     }
 
     #[test]
@@ -457,6 +283,23 @@ mod tests {
     }
 
     #[test]
+    fn lcov_gate_requires_the_named_crate() {
+        let dir = std::env::temp_dir().join(format!("apex-lcov-crate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.lcov");
+        std::fs::write(
+            &path,
+            "SF:/w/rust/crates/apex-lift/src/stats.rs\nLF:10\nLH:10\nend_of_record\n",
+        )
+        .unwrap();
+        let file = path.to_str().unwrap();
+        assert!(lcov_gate(file, 90.0, false, Some("apex-lift")).is_ok());
+        let err = lcov_gate(file, 90.0, false, Some("apex-tools")).unwrap_err();
+        assert!(err.contains("does not cover the named crate"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lcov_gate_fails_below_floor_and_lists_worst() {
         let lcov = [
             "SF:ok.ts",
@@ -494,49 +337,6 @@ mod tests {
         assert!(!pass);
         assert!(msg.contains("no branch data"), "{msg}");
         assert!(!msg.contains("branches: "), "{msg}");
-    }
-
-    #[test]
-    fn go_func_gate_counts_rows_and_total() {
-        let dir = std::env::temp_dir().join(format!("apex-gofunc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cover.func");
-        std::fs::write(
-            &path,
-            "github.com/x/a.go:10:\tDo\t85.7%\ntotal:\t(statements)\t92.3%\n",
-        )
-        .unwrap();
-        let ok = go_func_gate(path.to_str().unwrap(), 85.0);
-        assert!(ok.is_ok());
-        let err = go_func_gate(path.to_str().unwrap(), 90.0).unwrap_err();
-        assert!(
-            err.contains("GO COVERAGE GATE FAILED (floor=90%) — offenders:"),
-            "{err}"
-        );
-        assert!(err.contains("85.7%"), "{err}");
-        assert!(
-            !err.contains("92.3%"),
-            "a row at or above the floor is not an offender: {err}"
-        );
-        let missing = go_func_gate(path.join("nope").to_str().unwrap(), 1.0).unwrap_err();
-        assert!(missing.contains("go coverage file not found"), "{missing}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn go_func_gate_fails_closed_without_total_or_rows() {
-        let dir = std::env::temp_dir().join(format!("apex-gofunc2-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cover.func");
-        // No total line: an empty artifact must not read as a pass.
-        std::fs::write(&path, "not a coverage row at all\n").unwrap();
-        let err = go_func_gate(path.to_str().unwrap(), 100.0).unwrap_err();
-        assert!(err.contains("no total line"), "{err}");
-        // Total present but zero function rows: still fail closed.
-        std::fs::write(&path, "total:\t(statements)\t100.0%\n").unwrap();
-        let err = go_func_gate(path.to_str().unwrap(), 100.0).unwrap_err();
-        assert!(err.contains("no function rows"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

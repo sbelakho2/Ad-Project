@@ -33,14 +33,14 @@
 
 #### 3. Services
 - `backend/src/services/invoiceService.ts` (390 lines)
-  - Invoice management, PDF generation, Stripe integration
+  - Invoice management, PDF generation, Adyen integration
 
 - `backend/src/services/reconciliationService.ts` (240 lines)
   - Usage reconciliation, discrepancy detection, idempotency
 
 #### 4. Webhook Handler
 - `backend/src/routes/webhooks.routes.ts` (310 lines)
-  - Stripe webhook handler with 8 event types
+  - Adyen webhook handler with 8 event types
   - Signature verification and idempotency
 
 #### 5. Database Migrations
@@ -135,7 +135,7 @@
 |------|-------|---------|
 | `meta.routes.ts` | 43 | Feature flag API |
 | `billing.routes.ts` | 52 | Billing endpoints |
-| `webhooks.routes.ts` | 310 | Stripe webhooks |
+| `webhooks.routes.ts` | 310 | Adyen webhooks |
 
 ### Backend Controllers
 | File | Lines | Purpose |
@@ -182,7 +182,7 @@
 - ✅ 100% - All files use TypeScript
 - ✅ 0 compilation errors
 - ✅ Strict type checking enabled
-- ✅ No `any` types except for Stripe SDK workarounds
+- ✅ No `any` types except for Adyen SDK workarounds
 
 ### Testing Coverage
 - ✅ Unit tests: Billing API client (7 test cases)
@@ -218,7 +218,7 @@
 3. **UsageMeteringService** - Extended with subscription details method
 
 ### New Dependencies Added
-- **Backend:** None (uses existing Stripe SDK, PDFKit, pg, axios)
+- **Backend:** None (uses existing Adyen SDK, PDFKit, pg, axios)
 - **Frontend:** None (uses existing axios, Next.js, React, lucide-react)
 
 ### Database Schema Changes
@@ -271,7 +271,7 @@
 
 ### Immediate (Pre-Launch)
 1. Run database migrations
-2. Configure Stripe webhooks
+2. Configure Adyen webhooks
 3. Set environment variables
 4. Deploy to staging
 5. Complete smoke tests

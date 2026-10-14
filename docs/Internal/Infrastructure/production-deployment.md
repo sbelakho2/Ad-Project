@@ -175,7 +175,7 @@ kubectl create secret generic api-keys \
 
 # Payment providers
 kubectl create secret generic payment-providers \
-  --from-literal=stripe-key=<stripe-secret-key> \
+  --from-literal=adyen-key=<adyen-secret-key> \
   --from-literal=paypal-client-id=<paypal-client-id> \
   --from-literal=paypal-secret=<paypal-secret> \
   -n rival

@@ -9,7 +9,9 @@ Our fee is 15% to 20% of the lift the platform itself measured. The rate is agre
 
 No lift, no fee is not a slogan; it is enforced by the billing path. Before anything is billed, each invoice line is re-derived from the signed ledger proof. The billed amount is recomputed from the platform-measured lift and the agreed rate, and an invoice that cannot re-derive every line from signed proof is refused rather than estimated. A zero-lift outcome triggers a rollback without creating a billable proof, so there is nothing to invoice in the first place.
 
-There is no subscription, no seat fee, no platform fee and no minimum commitment. The free read-only audit carries no obligation to continue.
+You are billed on the lower bound of the lift, never the point estimate. No lift proven, no fee. Every test is pre-registered and signed before it starts. User experience outranks revenue: the test stops when fill drops, whatever the revenue says.
+
+There is no required subscription, no seat fee, no platform fee and no minimum commitment. Continuous monitoring is an optional flat monthly plan you can start and stop. The free read-only audit carries no obligation to continue.
 
 ## Worked example
 

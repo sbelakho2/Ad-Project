@@ -241,6 +241,7 @@ pub async fn run_cycle(
                 proposal.action.ad_unit_id(),
                 change_kind_of(&proposal.action),
                 &key,
+                &proposal.prev_value,
             ))
             .map_err(PlanError::Ledger)?;
         let change_seq = change.seq();
@@ -249,6 +250,7 @@ pub async fn run_cycle(
 
         // A change never ships without its platform-native experiment.
         let spec = apex_core::ExperimentSpec {
+            test_group_allocation: 50,
             name: experiment_name(&proposal.action),
             ad_unit_id: proposal.action.ad_unit_id().to_string(),
             metric: apex_core::ExperimentMetric::Ecpm,

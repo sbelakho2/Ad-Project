@@ -1,5 +1,6 @@
-//! Sample-based mutation smoke for apex-core, replacing the retired
-//! rust-mutation-smoke.sh: six hand-picked mutants are applied to a throwaway
+//! Sample-based mutation smoke for the load-bearing logic, replacing the
+//! retired rust-mutation-smoke.sh: hand-picked mutants (apex-core money and
+//! validation, apex-lift decision, statistics, billing and windows) are applied to a throwaway
 //! copy of the crate (the repo is never mutated), the crate's own tests must
 //! kill each one, and the kill rate is written to mutation-results.json for
 //! mutation-floor to enforce.
@@ -22,9 +23,11 @@ license = "proprietary"
 publish = false
 
 [workspace.dependencies]
+apex-core = { path = "crates/apex-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -34,22 +37,42 @@ missing_debug_implementations = "deny"
 all = "deny"
 "#;
 
-pub const RESULTS_COMMENT: &str = "Sample-based mutation smoke for apex-core (money.rs + validation.rs). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.";
+pub const RESULTS_COMMENT: &str = "Sample-based mutation smoke for the load-bearing logic: apex-core (money, validation) and apex-lift (decision, stats, billing, window). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MutantFile {
-    Money,
-    Validation,
+pub struct MutantFile {
+    pub crate_name: &'static str,
+    pub file_name: &'static str,
 }
 
-impl MutantFile {
-    pub fn name(self) -> &'static str {
-        match self {
-            MutantFile::Money => "money.rs",
-            MutantFile::Validation => "validation.rs",
-        }
-    }
-}
+pub const CORE_MONEY: MutantFile = MutantFile {
+    crate_name: "apex-core",
+    file_name: "money.rs",
+};
+pub const CORE_VALIDATION: MutantFile = MutantFile {
+    crate_name: "apex-core",
+    file_name: "validation.rs",
+};
+pub const LIFT_DECISION: MutantFile = MutantFile {
+    crate_name: "apex-lift",
+    file_name: "decision.rs",
+};
+pub const LIFT_STATS: MutantFile = MutantFile {
+    crate_name: "apex-lift",
+    file_name: "stats.rs",
+};
+pub const LIFT_BILLING: MutantFile = MutantFile {
+    crate_name: "apex-lift",
+    file_name: "billing.rs",
+};
+pub const LIFT_RUN: MutantFile = MutantFile {
+    crate_name: "apex-lift",
+    file_name: "run.rs",
+};
+pub const LIFT_WINDOW: MutantFile = MutantFile {
+    crate_name: "apex-lift",
+    file_name: "window.rs",
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Mutant {
@@ -61,40 +84,64 @@ pub struct Mutant {
 
 pub const MUTANTS: &[Mutant] = &[
     Mutant {
-        file: MutantFile::Money,
+        file: CORE_MONEY,
         find: "MIN_LIFT_RATE_BP: u16 = 1_500",
         replace: "MIN_LIFT_RATE_BP: u16 = 1_400",
         description: "min lift rate 1500 -> 1400",
     },
     Mutant {
-        file: MutantFile::Money,
+        file: CORE_MONEY,
         find: "MAX_LIFT_RATE_BP: u16 = 2_000",
         replace: "MAX_LIFT_RATE_BP: u16 = 2_100",
         description: "max lift rate 2000 -> 2100",
     },
     Mutant {
-        file: MutantFile::Money,
+        file: CORE_MONEY,
         find: "checked_mul(10_000)",
         replace: "checked_mul(100)",
         description: "lift basis-points scale 10_000 -> 100",
     },
     Mutant {
-        file: MutantFile::Money,
+        file: CORE_MONEY,
         find: "if impressions == 0 {",
         replace: "if impressions == 1 {",
         description: "zero-impressions guard == 0 -> == 1",
     },
     Mutant {
-        file: MutantFile::Validation,
+        file: CORE_VALIDATION,
         find: "!(1..=MAX_ECPM_MICROS).contains(&micros)",
         replace: "!(0..=MAX_ECPM_MICROS).contains(&micros)",
         description: "ecpm lower bound 1 -> 0",
     },
     Mutant {
-        file: MutantFile::Validation,
+        file: CORE_VALIDATION,
         find: "trimmed.len() == 2",
         replace: "trimmed.len() != 2",
         description: "country shape check inverted",
+    },
+    Mutant {
+        file: LIFT_DECISION,
+        find: "lambda: current.lower_90.max(0.0),",
+        replace: "lambda: current.upper_90.max(0.0),",
+        description: "bill the upper bound instead of the lower bound",
+    },
+    Mutant {
+        file: LIFT_STATS,
+        find: "(iterations as f64 - 1.0) * 0.10",
+        replace: "(iterations as f64 - 1.0) * 0.50",
+        description: "bootstrap 10th percentile -> median",
+    },
+    Mutant {
+        file: LIFT_RUN,
+        find: "Ok(to.saturating_sub(from) + 1)",
+        replace: "Ok(to.saturating_sub(from))",
+        description: "pro-rate inclusive day count off by one",
+    },
+    Mutant {
+        file: LIFT_WINDOW,
+        find: "diff <= FINALITY_TOLERANCE",
+        replace: "diff <= 0.5",
+        description: "0.5 percent finality tolerance -> 50 percent",
     },
 ];
 
@@ -157,9 +204,9 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_tests(workdir: &Path) -> Result<bool, String> {
+fn run_tests(workdir: &Path, crate_name: &str) -> Result<bool, String> {
     let output = Command::new("cargo")
-        .args(["test", "-p", "apex-core", "--offline", "--quiet"])
+        .args(["test", "-p", crate_name, "--offline", "--quiet"])
         .current_dir(workdir)
         .output()
         .map_err(|e| format!("cargo test failed to spawn: {e}"))?;
@@ -171,32 +218,48 @@ fn json_string(value: &str) -> String {
 }
 
 pub fn mutation_smoke(repo: &Repo) -> Result<(), String> {
-    let crate_src = repo.path("rust/crates/apex-core");
-    if !crate_src.is_dir() {
-        return Err("mutation-smoke: rust/crates/apex-core not found".into());
+    let core_src = repo.path("rust/crates/apex-core");
+    let lift_src = repo.path("rust/crates/apex-lift");
+    if !core_src.is_dir() || !lift_src.is_dir() {
+        return Err("mutation-smoke: rust/crates/apex-core or apex-lift not found".into());
     }
     let work = unique_workdir();
     let crates_dir = work.join("crates");
     std::fs::create_dir_all(&crates_dir).map_err(|e| e.to_string())?;
-    copy_dir(&crate_src, &crates_dir.join("apex-core"))?;
+    copy_dir(&core_src, &crates_dir.join("apex-core"))?;
+    copy_dir(&lift_src, &crates_dir.join("apex-lift"))?;
     let workspace = WORKSPACE_TOML.replace("@STAR@", "*");
     std::fs::write(work.join("Cargo.toml"), workspace).map_err(|e| e.to_string())?;
 
-    let src_dir = crates_dir.join("apex-core/src");
-    let original_money =
-        std::fs::read_to_string(src_dir.join("money.rs")).map_err(|e| format!("money.rs: {e}"))?;
-    let original_validation = std::fs::read_to_string(src_dir.join("validation.rs"))
-        .map_err(|e| format!("validation.rs: {e}"))?;
+    // Pristine contents of every mutable file.
+    let mut originals: std::collections::BTreeMap<(&'static str, &'static str), String> =
+        std::collections::BTreeMap::new();
+    for mutant in MUTANTS {
+        let key = (mutant.file.crate_name, mutant.file.file_name);
+        if originals.contains_key(&key) {
+            continue;
+        }
+        let path = crates_dir
+            .join(mutant.file.crate_name)
+            .join("src")
+            .join(mutant.file.file_name);
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{}/{}: {e}", mutant.file.crate_name, mutant.file.file_name))?;
+        originals.insert(key, content);
+    }
 
-    let restore = |file: MutantFile| -> Result<(), String> {
-        let (name, content) = match file {
-            MutantFile::Money => ("money.rs", original_money.as_str()),
-            MutantFile::Validation => ("validation.rs", original_validation.as_str()),
-        };
-        std::fs::write(src_dir.join(name), content).map_err(|e| format!("{name}: {e}"))
+    let restore = |file: &MutantFile| -> Result<(), String> {
+        let content = originals
+            .get(&(file.crate_name, file.file_name))
+            .ok_or_else(|| format!("no original for {}/{}", file.crate_name, file.file_name))?;
+        let path = crates_dir
+            .join(file.crate_name)
+            .join("src")
+            .join(file.file_name);
+        std::fs::write(&path, content).map_err(|e| format!("{}: {e}", file.file_name))
     };
 
-    if !run_tests(&work)? {
+    if !run_tests(&work, "apex-core")? || !run_tests(&work, "apex-lift")? {
         let _ = std::fs::remove_dir_all(&work);
         return Err("mutation-smoke: baseline test run failed; aborting".into());
     }
@@ -206,22 +269,27 @@ pub fn mutation_smoke(repo: &Repo) -> Result<(), String> {
     let mut total = 0usize;
     let mut results: Vec<(String, &'static str)> = Vec::new();
     for mutant in MUTANTS {
-        let pristine = match mutant.file {
-            MutantFile::Money => original_money.as_str(),
-            MutantFile::Validation => original_validation.as_str(),
-        };
+        let pristine = originals
+            .get(&(mutant.file.crate_name, mutant.file.file_name))
+            .ok_or("missing original")?;
         let mutated = match apply_mutant(pristine, mutant.find, mutant.replace) {
             Ok(m) => m,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&work);
-                return Err(format!("mutation-smoke: {e} in {}", mutant.file.name()));
+                return Err(format!(
+                    "mutation-smoke: {e} in {}/{}",
+                    mutant.file.crate_name, mutant.file.file_name
+                ));
             }
         };
-        restore(mutant.file)?;
-        std::fs::write(src_dir.join(mutant.file.name()), mutated)
-            .map_err(|e| format!("{}: {e}", mutant.file.name()))?;
+        restore(&mutant.file)?;
+        let path = crates_dir
+            .join(mutant.file.crate_name)
+            .join("src")
+            .join(mutant.file.file_name);
+        std::fs::write(&path, mutated).map_err(|e| format!("{}: {e}", mutant.file.file_name))?;
         total += 1;
-        let status = if run_tests(&work)? {
+        let status = if run_tests(&work, mutant.file.crate_name)? {
             eprintln!("SURVIVED: {}", mutant.description);
             "survived"
         } else {
@@ -229,10 +297,11 @@ pub fn mutation_smoke(repo: &Repo) -> Result<(), String> {
             "killed"
         };
         results.push((mutant.description.to_string(), status));
-        restore(mutant.file)?;
+        restore(&mutant.file)?;
     }
-    restore(MutantFile::Money)?;
-    restore(MutantFile::Validation)?;
+    for mutant in MUTANTS {
+        restore(&mutant.file)?;
+    }
     let _ = std::fs::remove_dir_all(&work);
 
     let score = (killed * 100).checked_div(total).unwrap_or(0);
@@ -251,7 +320,7 @@ pub fn mutation_smoke(repo: &Repo) -> Result<(), String> {
         "{{\n  \"__comment\": {},\n  \"generatedAt\": {},\n  \"target\": {},\n  \"mutants\": [\n{}\n  ],\n  \"killed\": {killed},\n  \"total\": {total},\n  \"killRatePercent\": {score}\n}}\n",
         json_string(RESULTS_COMMENT),
         json_string(&utc_now_iso()),
-        json_string("apex-core: money.rs, validation.rs"),
+        json_string("apex-core and apex-lift: money, validation, decision, stats, billing, window"),
         mutant_json
     );
     let out = repo.path("tools/coverage/mutation-results.json");
@@ -284,18 +353,20 @@ mod tests {
 
     #[test]
     fn all_mutants_apply_to_the_real_sources() {
-        let base =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/apex-core/src");
-        let money = std::fs::read_to_string(base.join("money.rs")).unwrap();
-        let validation = std::fs::read_to_string(base.join("validation.rs")).unwrap();
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+        let mut cache: std::collections::BTreeMap<(&str, &str), String> =
+            std::collections::BTreeMap::new();
         for mutant in MUTANTS {
-            let source = match mutant.file {
-                MutantFile::Money => &money,
-                MutantFile::Validation => &validation,
-            };
-            let mutated = apply_mutant(source, mutant.find, mutant.replace).unwrap();
+            let key = (mutant.file.crate_name, mutant.file.file_name);
+            let source = cache
+                .entry(key)
+                .or_insert_with(|| {
+                    std::fs::read_to_string(crates.join(key.0).join("src").join(key.1)).unwrap()
+                })
+                .clone();
+            let mutated = apply_mutant(&source, mutant.find, mutant.replace).unwrap();
             assert_ne!(
-                &mutated, source,
+                &mutated, &source,
                 "mutant must change the source: {}",
                 mutant.description
             );

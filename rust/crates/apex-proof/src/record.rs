@@ -90,7 +90,9 @@ pub enum ChangeKind {
     rename_all_fields = "camelCase"
 )]
 pub enum LedgerRecord {
-    /// A platform mutation was applied by the autopilot.
+    /// A platform mutation was applied by the autopilot. `prev_value` is the
+    /// setting's value as read from the platform immediately before the
+    /// write (principle 6: every change is reversible).
     ChangeApplied {
         seq: u64,
         at_unix_ms: i64,
@@ -98,6 +100,8 @@ pub enum LedgerRecord {
         ad_unit_id: String,
         change: ChangeKind,
         idempotency_key: String,
+        #[serde(default)]
+        prev_value: String,
         #[serde(with = "hash_hex")]
         prev_hash: [u8; 32],
         #[serde(with = "hash_hex")]
@@ -122,6 +126,19 @@ pub enum LedgerRecord {
         platform: PlatformId,
         experiment_id: String,
         result: ExperimentResult,
+        #[serde(with = "hash_hex")]
+        prev_hash: [u8; 32],
+        #[serde(with = "hash_hex")]
+        hash: [u8; 32],
+    },
+    /// A signed Apex Lift Engine record: the canonical JSON payload plus its
+    /// SHA-256, so a publisher can verify the exact bytes without trusting
+    /// this ledger. Chained and signed like every other record.
+    LiftRecord {
+        seq: u64,
+        at_unix_ms: i64,
+        payload_sha256: String,
+        payload: String,
         #[serde(with = "hash_hex")]
         prev_hash: [u8; 32],
         #[serde(with = "hash_hex")]
@@ -168,6 +185,7 @@ impl LedgerRecord {
         ad_unit_id: &str,
         change: ChangeKind,
         idempotency_key: &str,
+        prev_value: &str,
     ) -> Self {
         LedgerRecord::ChangeApplied {
             seq: 0,
@@ -176,6 +194,7 @@ impl LedgerRecord {
             ad_unit_id: ad_unit_id.to_string(),
             change,
             idempotency_key: idempotency_key.to_string(),
+            prev_value: prev_value.to_string(),
             prev_hash: UNSEALED,
             hash: UNSEALED,
         }
@@ -212,6 +231,19 @@ impl LedgerRecord {
             platform,
             experiment_id: experiment_id.to_string(),
             result,
+            prev_hash: UNSEALED,
+            hash: UNSEALED,
+        }
+    }
+
+    /// Build an unsealed `liftRecord`: the signed payload is the engine's
+    /// canonical JSON and the SHA-256 pins it byte for byte.
+    pub fn lift_record(at_unix_ms: i64, payload_sha256: &str, payload: &str) -> Self {
+        LedgerRecord::LiftRecord {
+            seq: 0,
+            at_unix_ms,
+            payload_sha256: payload_sha256.to_string(),
+            payload: payload.to_string(),
             prev_hash: UNSEALED,
             hash: UNSEALED,
         }
@@ -270,7 +302,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { seq, .. }
             | LedgerRecord::ExperimentObserved { seq, .. }
             | LedgerRecord::RollbackPerformed { seq, .. }
-            | LedgerRecord::BillingProof { seq, .. } => *seq,
+            | LedgerRecord::BillingProof { seq, .. }
+            | LedgerRecord::LiftRecord { seq, .. } => *seq,
         }
     }
 
@@ -281,7 +314,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { at_unix_ms, .. }
             | LedgerRecord::ExperimentObserved { at_unix_ms, .. }
             | LedgerRecord::RollbackPerformed { at_unix_ms, .. }
-            | LedgerRecord::BillingProof { at_unix_ms, .. } => *at_unix_ms,
+            | LedgerRecord::BillingProof { at_unix_ms, .. }
+            | LedgerRecord::LiftRecord { at_unix_ms, .. } => *at_unix_ms,
         }
     }
 
@@ -294,7 +328,7 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { platform, .. }
             | LedgerRecord::ExperimentObserved { platform, .. }
             | LedgerRecord::RollbackPerformed { platform, .. } => Some(*platform),
-            LedgerRecord::BillingProof { .. } => None,
+            LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. } => None,
         }
     }
 
@@ -305,7 +339,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { prev_hash, .. }
             | LedgerRecord::ExperimentObserved { prev_hash, .. }
             | LedgerRecord::RollbackPerformed { prev_hash, .. }
-            | LedgerRecord::BillingProof { prev_hash, .. } => *prev_hash,
+            | LedgerRecord::BillingProof { prev_hash, .. }
+            | LedgerRecord::LiftRecord { prev_hash, .. } => *prev_hash,
         }
     }
 
@@ -316,7 +351,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { hash, .. }
             | LedgerRecord::ExperimentObserved { hash, .. }
             | LedgerRecord::RollbackPerformed { hash, .. }
-            | LedgerRecord::BillingProof { hash, .. } => *hash,
+            | LedgerRecord::BillingProof { hash, .. }
+            | LedgerRecord::LiftRecord { hash, .. } => *hash,
         }
     }
 
@@ -326,7 +362,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { seq: s, .. }
             | LedgerRecord::ExperimentObserved { seq: s, .. }
             | LedgerRecord::RollbackPerformed { seq: s, .. }
-            | LedgerRecord::BillingProof { seq: s, .. } => *s = seq,
+            | LedgerRecord::BillingProof { seq: s, .. }
+            | LedgerRecord::LiftRecord { seq: s, .. } => *s = seq,
         }
     }
 
@@ -336,7 +373,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { prev_hash: p, .. }
             | LedgerRecord::ExperimentObserved { prev_hash: p, .. }
             | LedgerRecord::RollbackPerformed { prev_hash: p, .. }
-            | LedgerRecord::BillingProof { prev_hash: p, .. } => *p = prev_hash,
+            | LedgerRecord::BillingProof { prev_hash: p, .. }
+            | LedgerRecord::LiftRecord { prev_hash: p, .. } => *p = prev_hash,
         }
     }
 
@@ -346,7 +384,8 @@ impl LedgerRecord {
             | LedgerRecord::ExperimentStarted { hash: h, .. }
             | LedgerRecord::ExperimentObserved { hash: h, .. }
             | LedgerRecord::RollbackPerformed { hash: h, .. }
-            | LedgerRecord::BillingProof { hash: h, .. } => *h = hash,
+            | LedgerRecord::BillingProof { hash: h, .. }
+            | LedgerRecord::LiftRecord { hash: h, .. } => *h = hash,
         }
     }
 
@@ -378,6 +417,7 @@ mod tests {
             ad_unit_id: "u1".into(),
             metric: ExperimentMetric::Ecpm,
             variants: 2,
+            test_group_allocation: 50,
             change_description: "raise EE floor to 2.50".into(),
         }
     }
@@ -410,6 +450,7 @@ mod tests {
                     floor_ecpm: 2_500_000,
                 },
                 "max-experiment:floors-ee:u1",
+                "prev-value",
             ),
             LedgerRecord::change_applied(
                 1_700_000_001_000,
@@ -421,6 +462,7 @@ mod tests {
                     ecpm: 1_750_000,
                 },
                 "admob-ecpm:g1:u2:1.75",
+                "prev-value",
             ),
             LedgerRecord::change_applied(
                 1_700_000_002_000,
@@ -432,6 +474,7 @@ mod tests {
                     price_ecpm: 2_350_000,
                 },
                 "levelplay-price:u3:e1",
+                "prev-value",
             ),
             LedgerRecord::change_applied(
                 1_700_000_003_000,
@@ -444,6 +487,7 @@ mod tests {
                     price_ecpm: 2_000_000,
                 },
                 "levelplay-create:u3:mintegral:MTG_1",
+                "prev-value",
             ),
             LedgerRecord::change_applied(
                 1_700_000_004_000,
@@ -454,6 +498,7 @@ mod tests {
                     entry_id: "e9".into(),
                 },
                 "levelplay-remove:u3:e9",
+                "prev-value",
             ),
             LedgerRecord::experiment_started(
                 1_700_000_005_000,
@@ -531,6 +576,7 @@ mod tests {
                     ecpm: 1_750_000,
                 },
                 "admob-ecpm:g1:u1:1.75",
+                "prev-value",
             ),
             0,
             [0u8; 32],
@@ -573,6 +619,7 @@ mod tests {
                     floor_ecpm: 2_500_000,
                 },
                 "admob-floor:u1:EE",
+                "prev-value",
             ),
             0,
             [0u8; 32],
@@ -585,13 +632,14 @@ mod tests {
                 r#"{"adUnitId":"u1","atUnixMs":1700000000000,"#,
                 r#""change":{"country":"EE","floorEcpm":2500000,"type":"countryFloorSet"},"#,
                 r#""idempotencyKey":"admob-floor:u1:EE","platform":"admob","#,
-                r#""prevHash":"0000000000000000000000000000000000000000000000000000000000000000","seq":0,"#,
+                r#""prevHash":"0000000000000000000000000000000000000000000000000000000000000000","#,
+                r#""prevValue":"prev-value","seq":0,"#,
                 r#""type":"changeApplied"}"#
             )
         );
         assert_eq!(
             hex::encode(record.hash()),
-            "e0269bf352e97a1111e0c58939077d41d2756c9d6ae699d4103cbfcca7e766a3"
+            "dd9ee5327fcdc776f5400d37db60bce945594feb84778b4c30bba3cd70109ca2"
         );
     }
 }

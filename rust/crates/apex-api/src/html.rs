@@ -264,6 +264,7 @@ fn record_kind(record: &LedgerRecord) -> &'static str {
         LedgerRecord::ExperimentObserved { .. } => "experimentObserved",
         LedgerRecord::RollbackPerformed { .. } => "rollbackPerformed",
         LedgerRecord::BillingProof { .. } => "billingProof",
+        LedgerRecord::LiftRecord { .. } => "liftRecord",
     }
 }
 

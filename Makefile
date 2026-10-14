@@ -1,4 +1,4 @@
-.PHONY: test fmt lint dogfood
+.PHONY: test fmt lint sync-floors dogfood
 
 test:
 	cd rust && cargo test --workspace
@@ -8,6 +8,11 @@ fmt:
 
 lint:
 	cd rust && cargo clippy --workspace --all-targets -- -D warnings
+
+# Mirror coverage-floor.json into floors.txt after a deliberate floor change.
+sync-floors:
+	cd rust && cargo build -q -p apex-tools
+	cd rust && ./target/debug/apex-tools sync-floors
 
 # The local audit family: every invariant the Woodpecker lanes enforce, in one
 # pass. Build the tool first if needed.
@@ -29,6 +34,5 @@ dogfood:
 	cd rust && ./target/debug/apex-tools contract docs-references
 	cd rust && ./target/debug/apex-tools docs-links --baseline tools/coverage/docs-links-baseline.txt
 	cd rust && ./target/debug/apex-tools docs-lint --source --baseline tools/coverage/docs-lint-baseline.txt
-	cd rust && ./target/debug/apex-tools i18n-parity
 	cd rust && ./target/debug/apex-tools css-lint
 	cd rust && ./target/debug/apex-tools aggregate-verdict --report coverage-report.md

@@ -18,23 +18,23 @@ Complete step-by-step instructions for obtaining and configuring all required AP
 
 ## Payment Providers
 
-### 1. Stripe (Primary Payout Solution)
+### 1. Adyen (Primary Payout Solution)
 
-**Purpose:** Process payouts to developers via Stripe Connect.
+**Purpose:** Process payouts to developers via Adyen Connect.
 
 #### Setup Instructions:
 
-1. **Create Stripe Account**
-   - Go to https://dashboard.stripe.com/register
+1. **Create Adyen Account**
+   - Go to https://dashboard.adyen.com/register
    - Sign up with email and password
    - Verify email address
 
-2. **Activate Stripe Connect**
+2. **Activate Adyen Connect**
    - Navigate to `Settings` → `Connect settings`
    - Enable "Express accounts" for publisher onboarding
    - Configure redirect URLs:
-     - Development: `http://localhost:3000/stripe-callback`
-     - Production: `https://console.apexmediation.ee/stripe-callback`
+     - Development: `http://localhost:3000/adyen-callback`
+     - Production: `https://console.apexmediation.ee/adyen-callback`
 
 3. **Get API Keys**
    - Go to `Developers` → `API keys`
@@ -49,13 +49,13 @@ Complete step-by-step instructions for obtaining and configuring all required AP
    - Simulate payouts without real money
 
 5. **For Production (Live)**
-   - Complete Stripe verification (business info, tax ID)
+   - Complete Adyen verification (business info, tax ID)
    - Switch to Live keys
    - Enable webhook signing
 
 6. **Set Webhook Endpoints**
    - Go to `Developers` → `Webhooks`
-   - Add endpoint: `https://api.apexmediation.ee/webhooks/stripe`
+   - Add endpoint: `https://api.apexmediation.ee/webhooks/adyen`
    - Subscribe to events:
      - `account.updated`
      - `charge.refunded`
@@ -70,8 +70,8 @@ STRIPE_WEBHOOK_SECRET=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 #### Documentation:
-- https://stripe.com/docs/connect
-- https://stripe.com/docs/connect/onboarding/hosted-onboarding
+- https://adyen.com/docs/connect
+- https://adyen.com/docs/connect/onboarding/hosted-onboarding
 
 ---
 
@@ -680,11 +680,11 @@ LOG_LEVEL=info
 
 ## Testing & Verification
 
-### 1. Test Stripe Integration
+### 1. Test Adyen Integration
 
 ```bash
-# Test creating a Stripe Connect account
-curl -X POST https://api.apexmediation.ee/v1/publishers/123/stripe-account \
+# Test creating a Adyen Connect account
+curl -X POST https://api.apexmediation.ee/v1/publishers/123/adyen-account \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -752,9 +752,9 @@ grep NEXT_PUBLIC website/.env.local
 
 ## Checklist Before Launch
 
-- [ ] Stripe account created and verified
-- [ ] Stripe Connect onboarding working
-- [ ] Stripe webhook configured
+- [ ] Adyen account created and verified
+- [ ] Adyen Connect onboarding working
+- [ ] Adyen webhook configured
 - [ ] PayPal credentials obtained
 - [ ] SendGrid account and API key ready
 - [ ] Google Analytics 4 property created
@@ -774,7 +774,7 @@ grep NEXT_PUBLIC website/.env.local
 
 ## Support & Documentation
 
-- **Stripe Support:** https://support.stripe.com/
+- **Adyen Support:** https://support.adyen.com/
 - **PayPal Support:** https://www.paypal.com/en/smarthelp
 - **SendGrid Support:** https://support.sendgrid.com/
 - **Google Analytics:** https://support.google.com/analytics/

@@ -9,7 +9,7 @@ Scope
 - SDKs: iOS/tvOS, Android/TV, Unity, Web (BYO-first)
 - Backend/API: request intake, telemetry, transparency exports, usage aggregation, VRA pipeline
 - Console: observability/explorer views, downloads
-- Third parties: Ad networks (BYO adapters), Stripe, Resend
+- Third parties: Ad networks (BYO adapters), Adyen, Resend
 
 ---
 
@@ -45,10 +45,10 @@ Scope
 
 2.1 Usage aggregation
 - Daily job computes app/network usage from `requests`/`auction_artifacts` and network callback logs.
-- Results stored in `usage_daily` and `usage_app_tiers` (Starter/Growth/Scale/Enterprise) and feed Stripe events in staging.
+- Results stored in `usage_daily` and `usage_app_tiers` (Starter/Growth/Scale/Enterprise) and feed Adyen events in staging.
 
-2.2 Billing/Stripe
-- Stripe events derive from `usage_daily` and tier policies. Webhooks update invoice states (open→paid) and are recorded in `billing_events` (no secrets stored).
+2.2 Billing/Adyen
+- Adyen events derive from `usage_daily` and tier policies. Webhooks update invoice states (open→paid) and are recorded in `billing_events` (no secrets stored).
 - PDFs are saved with operator payment text: Bel Consulting OÜ + Wise SEPA/ACH.
 
 2.3 VRA (Validation/Reconciliation/Audit)
@@ -98,7 +98,7 @@ Scope
 
 - Ensure apps/placements have coherent waterfall priorities in BYO mode; enable test networks only for sandbox.
 - Verify that consent snapshots are present for all requests in regulated geos; refusals imply no personalized IDs.
-- Confirm Stripe usage tiers and Starter cap transitions reflect `usage_daily` aggregations.
+- Confirm Adyen usage tiers and Starter cap transitions reflect `usage_daily` aggregations.
 - Confirm VRA delta categories align with contracts; investigate under‑reporting.
 - Regularly export transparency artifacts and VRA deltas for archives.
 

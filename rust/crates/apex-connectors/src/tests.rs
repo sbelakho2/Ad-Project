@@ -5,13 +5,14 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use apex_core::{
-    AdFormat, ExperimentMetric, ExperimentSpec, PlatformError, PlatformId, SourceVerification,
+    AdFormat, AdUnit, ExperimentMetric, ExperimentSpec, PlatformError, PlatformId,
+    SourceVerification,
 };
 use async_trait::async_trait;
 
 use crate::admob::{normalize_account_id, AdmobClient, ADMOB_ENDPOINTS};
 use crate::levelplay::{LevelPlayClient, LEVELPLAY_ENDPOINTS};
-use crate::max::{MaxClient, MAX_ENDPOINTS};
+use crate::max::{MaxClient, MaxReportClient, MAX_ENDPOINTS};
 use crate::transport::{
     HttpBody, HttpMethod, HttpRequest, HttpResponse, PlatformCaller, RecordingSleeper,
     RetryTransport, Transport, TransportError, FORM_CONTENT_TYPE,
@@ -358,234 +359,201 @@ async fn empty_success_body_becomes_null() {
 
 // ---------------- MAX client ----------------
 
+fn ok(status: u16, body: Option<&str>) -> Result<HttpResponse, TransportError> {
+    Ok(MockTransport::ok(status, body))
+}
+
 fn max_client(mock: Arc<MockTransport>, sleeper: Arc<RecordingSleeper>) -> MaxClient {
-    let retry = Arc::new(RetryTransport::new(mock, 0, sleeper));
-    MaxClient::new("key-1", "acct-1", "https://max.test", retry).expect("client")
+    let retry: Arc<dyn Transport> = Arc::new(RetryTransport::new(mock, 2, sleeper));
+    MaxClient::new("key-1", "https://max.test", retry).expect("client")
+}
+
+fn report_client(mock: Arc<MockTransport>) -> MaxReportClient {
+    MaxReportClient::new("report-key", "https://r.test", mock).expect("report client")
 }
 
 #[tokio::test]
 async fn max_credentials_required() {
-    let retry = Arc::new(RetryTransport::new(
-        Arc::new(MockTransport::scripted(vec![])),
-        0,
-        Arc::new(RecordingSleeper::default()),
-    ));
-    assert!(MaxClient::new("  ", "a", "https://x", retry.clone()).is_err());
-    assert!(MaxClient::new("k", "", "https://x", retry).is_err());
+    let transport: Arc<dyn Transport> = Arc::new(MockTransport::scripted(vec![]));
+    assert!(MaxClient::new("  ", "https://x", transport.clone()).is_err());
+    assert!(MaxReportClient::new("  ", "https://r.test", transport).is_err());
 }
 
 #[tokio::test]
-async fn max_list_ad_units_parses_and_validates() {
-    let body = r#"{"ad_units":[{"ad_unit_id":"u1","name":"Banner","format":"banner","enabled":true},{"id":"u2","name":"Rewarded","format":"rewarded"}]}"#;
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+async fn max_list_pins_header_and_top_level_array() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
         200,
-        Some(body),
-    ))]));
+        Some(
+            r#"[{"id":"u1","name":"Banner","platform":"ios","package_name":"com.x","ad_format":"BANNER"}]"#,
+        ),
+    )]));
     let units = max_client(mock.clone(), Arc::new(RecordingSleeper::default()))
-        .list_ad_units()
+        .list_ad_units(false)
         .await
-        .unwrap();
-    assert_eq!(units.len(), 2);
+        .expect("units");
+    assert_eq!(units.len(), 1);
     assert_eq!(units[0].format, AdFormat::Banner);
-    assert!(units[1].enabled, "enabled defaults true");
-    assert!(mock.calls()[0].header("X-API-Key") == Some("key-1"));
-
-    let drift = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(r#"{"ad_units":[{"name":"x"}]}"#),
-    ))]));
-    let err = max_client(drift, Arc::new(RecordingSleeper::default()))
-        .list_ad_units()
-        .await
-        .unwrap_err();
-    assert!(matches!(err, PlatformError::Schema { .. }));
-
-    let unknown_format = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(r#"{"ad_units":[{"ad_unit_id":"u","name":"n","format":"video360"}]}"#),
-    ))]));
-    let err = max_client(unknown_format, Arc::new(RecordingSleeper::default()))
-        .list_ad_units()
-        .await
-        .unwrap_err();
-    assert!(matches!(err, PlatformError::Schema { .. }));
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0]
+        .headers
+        .iter()
+        .any(|(k, v)| k == "Api-Key" && v == "key-1"));
+    assert!(calls[0].url.contains("/ad_units"), "{}", calls[0].url);
+    assert!(!calls[0].url.contains("bid_floors"), "{}", calls[0].url);
 }
 
 #[tokio::test]
-async fn max_set_country_floor_pins_path_and_body() {
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200, None,
-    ))]));
-    let floor = max_client(mock.clone(), Arc::new(RecordingSleeper::default()))
-        .set_country_floor("unit/a b", " ee ", 2_500_000)
+async fn max_list_rejects_the_old_envelope() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
+        200,
+        Some(r#"{"ad_units":[]}"#),
+    )]));
+    let err = max_client(mock, Arc::new(RecordingSleeper::default()))
+        .list_ad_units(true)
         .await
-        .unwrap();
-    assert_eq!(floor.country, "EE");
-    let call = &mock.calls()[0];
-    assert_eq!(call.method, HttpMethod::Put);
+        .expect_err("must fail");
+    assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn max_get_ad_unit_requests_floors_via_fields() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
+        200,
+        Some(
+            r#"{"id":"u1","name":"B","platform":"ios","package_name":"com.x","ad_format":"BANNER","bid_floors":[{"country_group_name":"t1","cpm":"2.5","countries":{"type":"INCLUDE","values":["ee"]}}]}"#,
+        ),
+    )]));
+    let unit = max_client(mock.clone(), Arc::new(RecordingSleeper::default()))
+        .get_ad_unit("u1")
+        .await
+        .expect("unit");
     assert_eq!(
-        call.url,
-        "https://max.test/v1/max/ad_units/unit%2Fa%20b/floors/EE"
-    );
-    assert_eq!(
-        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["floor_ecpm"],
+        unit.country_floors.as_ref().unwrap()[0].floor_ecpm,
         2_500_000
     );
-}
-
-#[tokio::test]
-async fn max_set_country_floor_validation() {
-    let mock = Arc::new(MockTransport::scripted(vec![]));
-    let sleeper = Arc::new(RecordingSleeper::default());
-    let client = max_client(mock.clone(), sleeper);
-    assert!(matches!(
-        client.set_country_floor("u", "EST", 1).await,
-        Err(PlatformError::Validation(_))
-    ));
-    assert!(matches!(
-        client.set_country_floor("u", "EE", -1).await,
-        Err(PlatformError::Validation(_))
-    ));
-    assert!(matches!(
-        client.set_country_floor("u", "EE", 500_000_001).await,
-        Err(PlatformError::Validation(_))
-    ));
+    assert_eq!(unit.country_floors.as_ref().unwrap()[0].country, "ee");
+    let calls = mock.calls();
     assert!(
-        mock.calls().is_empty(),
-        "validation must not perform network calls"
+        calls[0].url.contains("fields=bid_floors"),
+        "{}",
+        calls[0].url
     );
 }
 
 #[tokio::test]
-async fn max_create_experiment_full_contract() {
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+async fn max_update_floors_requires_read_back_fields() {
+    let unit = AdUnit {
+        platform_unit_id: "u1".into(),
+        name: "B".into(),
+        format: AdFormat::Banner,
+        enabled: true,
+        country_floors: None,
+        platform: None,
+        package_name: None,
+    };
+    let client = max_client(
+        Arc::new(MockTransport::scripted(vec![])),
+        Arc::new(RecordingSleeper::default()),
+    );
+    let err = client
+        .update_floors(&unit, &[])
+        .await
+        .expect_err("must fail without platform/package");
+    assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn max_create_experiment_pins_path_allocation_and_description() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
         200,
-        Some(r#"{"experiment_id":"exp-9"}"#),
-    ))]));
+        Some(r#"{"id":"u1","experiment_name":"t"}"#),
+    )]));
     let client = max_client(mock.clone(), Arc::new(RecordingSleeper::default()));
     let spec = ExperimentSpec {
-        name: "floors-ee".into(),
+        name: "t".into(),
         ad_unit_id: "u1".into(),
         metric: ExperimentMetric::Ecpm,
         variants: 2,
-        change_description: "raise EE floor to 2.0".into(),
+        change_description: "raise t1 floor".into(),
+        test_group_allocation: 25,
     };
-    let id = client.create_experiment(&spec).await.unwrap();
-    assert_eq!(id, "exp-9");
-    let call = &mock.calls()[0];
-    assert_eq!(
-        call.header("Idempotency-Key"),
-        Some("max-experiment:floors-ee:u1")
+    let id = client.create_experiment(&spec, None).await.expect("create");
+    assert_eq!(id, "u1");
+    let calls = mock.calls();
+    assert!(
+        calls[0].url.contains("/ad_unit_experiment/u1"),
+        "{}",
+        calls[0].url
     );
-    let body = call.body.as_ref().and_then(HttpBody::as_json).unwrap();
-    assert_eq!(body["variant_count"], 2);
-    assert_eq!(body["metric"], "ecpm");
-
-    let bad = ExperimentSpec {
-        variants: 5,
-        ..spec.clone()
+    let body = match calls[0].body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
     };
-    assert!(matches!(
-        client.create_experiment(&bad).await,
-        Err(PlatformError::Schema { .. })
-    ));
-    let bad2 = ExperimentSpec {
-        change_description: "   ".into(),
-        ..spec
-    };
-    assert!(matches!(
-        client.create_experiment(&bad2).await,
-        Err(PlatformError::Schema { .. })
-    ));
-
-    let missing = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some("{}"),
-    ))]));
-    let err = max_client(missing, Arc::new(RecordingSleeper::default()))
-        .create_experiment(&bad2_spec())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, PlatformError::Schema { .. }));
-}
-
-fn bad2_spec() -> ExperimentSpec {
-    ExperimentSpec {
-        name: "n".into(),
-        ad_unit_id: "u".into(),
-        metric: ExperimentMetric::Revenue,
-        variants: 2,
-        change_description: "change".into(),
-    }
+    assert_eq!(body["test_group_allocation"], 25);
+    assert_eq!(body["experiment_name"], "t");
 }
 
 #[tokio::test]
-async fn max_get_experiment_math_and_state() {
-    let body = r#"{
-        "state": "completed",
-        "lift_percent": 7.5,
-        "confidence": 0.98,
-        "winner_variant_id": "v2",
-        "variants": [
-            {"variant_id":"v1","impressions":1000,"revenue":5},
-            {"variant_id":"v2","impressions":0,"revenue":0}
-        ]
-    }"#;
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(body),
-    ))]));
-    let result = max_client(mock, Arc::new(RecordingSleeper::default()))
-        .get_experiment("exp-1")
-        .await
-        .unwrap();
-    assert_eq!(result.state, apex_core::ExperimentState::Completed);
-    assert_eq!(result.lift_percent_bp, Some(750));
-    assert_eq!(result.confidence, Some(9_800));
-    assert_eq!(result.winner_variant_id.as_deref(), Some("v2"));
-    // revenue "5" is 5 currency units => 5_000_000 micros; 5_000_000 * 1000 / 1000 impressions
-    assert_eq!(result.results[0].ecpm, 5_000_000);
-    assert_eq!(
-        result.results[1].ecpm, 0,
-        "zero impressions -> zero ecpm, never divide"
+async fn max_create_experiment_rejects_bad_allocation_and_blank_description() {
+    let client = max_client(
+        Arc::new(MockTransport::scripted(vec![])),
+        Arc::new(RecordingSleeper::default()),
     );
-
-    for bad_body in [
-        r#"{"variants":[]}"#,
-        r#"{"state":"running"}"#,
-        r#"{"state":"running","variants":[{"variant_id":1}]}"#,
-    ] {
-        let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-            200,
-            Some(bad_body),
-        ))]));
-        let err = max_client(mock, Arc::new(RecordingSleeper::default()))
-            .get_experiment("e")
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, PlatformError::Schema { .. }),
-            "body {bad_body} must fail closed"
-        );
-    }
-
-    let weird = r#"{"state":"paused_by_platform","variants":[]}"#;
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(weird),
-    ))]));
-    let result = max_client(mock, Arc::new(RecordingSleeper::default()))
-        .get_experiment("e")
-        .await
-        .unwrap();
-    assert_eq!(
-        result.state,
-        apex_core::ExperimentState::Running,
-        "unknown states never count as finished"
-    );
+    let mut spec = ExperimentSpec {
+        name: "t".into(),
+        ad_unit_id: "u1".into(),
+        metric: ExperimentMetric::Ecpm,
+        variants: 2,
+        change_description: "raise t1 floor".into(),
+        test_group_allocation: 33,
+    };
+    assert!(matches!(
+        client.create_experiment(&spec, None).await,
+        Err(PlatformError::Validation(_))
+    ));
+    spec.test_group_allocation = 50;
+    spec.change_description = "  ".into();
+    assert!(matches!(
+        client.create_experiment(&spec, None).await,
+        Err(PlatformError::Validation(_))
+    ));
 }
 
-// ---------------- LevelPlay client ----------------
+#[tokio::test]
+async fn max_report_totals_sum_rows() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
+        200,
+        Some(
+            r#"{"code":200,"count":2,"results":[
+            {"day":"2026-10-01","estimated_revenue":"1.50","impressions":"10"},
+            {"day":"2026-10-02","estimated_revenue":"2.00","impressions":"5"}
+        ]}"#,
+        ),
+    )]));
+    let (revenue, impressions) = report_client(mock)
+        .totals("2026-10-01", "2026-10-02")
+        .await
+        .expect("totals");
+    assert_eq!(revenue, 3_500_000);
+    assert_eq!(impressions, 15);
+}
+
+#[tokio::test]
+async fn max_report_http_errors_surface() {
+    let mock = Arc::new(MockTransport::scripted(vec![ok(
+        200,
+        Some(r#"{"code":400,"results":[],"count":0}"#),
+    )]));
+    let err = report_client(mock)
+        .totals("2026-10-01", "2026-10-02")
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, PlatformError::Http { status: 400, .. }),
+        "{err}"
+    );
+}
 
 fn lp_client(mock: Arc<MockTransport>) -> LevelPlayClient {
     let retry = Arc::new(RetryTransport::new(
@@ -842,15 +810,18 @@ async fn admob_401_fails_fast() {
 
 #[test]
 fn endpoint_metas_are_pinned() {
-    assert_eq!(MAX_ENDPOINTS.len(), 5);
+    assert_eq!(MAX_ENDPOINTS.len(), 6);
+    // Reads are doc-verified; writes stay verify-live until a sandbox call
+    // confirms the shape.
     assert!(MAX_ENDPOINTS
         .iter()
+        .filter(|m| m.method == apex_core::endpoint::HttpMethod::Get)
         .all(|m| m.verification == SourceVerification::Documented));
     assert!(MAX_ENDPOINTS
         .iter()
-        .find(|m| m.name == "setCountryFloor")
-        .unwrap()
-        .writable());
+        .filter(|m| m.method != apex_core::endpoint::HttpMethod::Get)
+        .all(|m| m.verification == SourceVerification::VerifyLive));
+    assert!(!MAX_ENDPOINTS.iter().any(|m| m.writable()));
 
     assert_eq!(LEVELPLAY_ENDPOINTS.len(), 4);
     assert!(
@@ -934,17 +905,18 @@ async fn admob_duplicate_ad_unit_ids_inside_a_group_fail_closed() {
 }
 
 #[tokio::test]
-async fn max_experiment_ecpm_overflow_is_a_schema_error_not_zero() {
-    // revenue 9007199254740992 over 1 impression: ecpm must overflow i64 micros.
-    let body = r#"{"state":"completed","variants":[
-        {"variant_id":"v1","impressions":1,"revenue":9007199254740992}
+async fn max_report_revenue_overflow_is_a_schema_error_not_zero() {
+    // Revenue 9007199254740992 micros-worth overflows i64; it must fail closed
+    // instead of reading as a smaller number.
+    let body = r#"{"code":200,"count":1,"results":[
+        {"day":"2026-10-01","estimated_revenue":"9007199254740992.00","impressions":"1"}
     ]}"#;
     let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
         200,
         Some(body),
     ))]));
-    let err = max_client(mock, Arc::new(RecordingSleeper::default()))
-        .get_experiment("exp-1")
+    let err = report_client(mock)
+        .totals("2026-10-01", "2026-10-01")
         .await
         .unwrap_err();
     assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");

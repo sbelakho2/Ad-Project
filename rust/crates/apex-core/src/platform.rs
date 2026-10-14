@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::money::Micros;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlatformId {
     #[serde(rename = "applovin_max")]
@@ -44,6 +46,10 @@ pub enum AdFormat {
 pub struct CountryFloor {
     pub country: String,
     pub floor_ecpm: i64,
+    /// MAX country-group name this floor came from, when the platform models
+    /// floors as named groups of countries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +61,13 @@ pub struct AdUnit {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country_floors: Option<Vec<CountryFloor>>,
+    /// Platform enum value the unit was created for, e.g. `ios` or `android`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Store package / bundle id, required by write endpoints that replace
+    /// the whole resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +108,10 @@ pub enum ExperimentMetric {
     Arpdau,
 }
 
+fn default_test_allocation() -> u8 {
+    50
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExperimentSpec {
@@ -104,6 +121,10 @@ pub struct ExperimentSpec {
     pub variants: u8,
     /// Human-auditable description of the single change under test.
     pub change_description: String,
+    /// Percentage of users in the test group; the platform only accepts its
+    /// documented set (MAX: 5, 10, 25 or 50).
+    #[serde(default = "default_test_allocation")]
+    pub test_group_allocation: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +142,25 @@ pub struct ExperimentVariantResult {
     pub impressions: u64,
     pub revenue: i64,
     pub ecpm: i64,
+}
+
+/// One raw reporting row: what the platform's reporting API returns, before
+/// any aggregation. Numbers arrive as strings on every platform and are
+/// parsed to exact micros here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportRow {
+    /// `YYYY-MM-DD`, platform local day.
+    pub day: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_unit_id: Option<String>,
+    /// The experiment arm label, e.g. MAX `max_ad_unit_test` values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_group: Option<String>,
+    pub revenue: Micros,
+    pub impressions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,9 +202,12 @@ mod tests {
             name: "Banner".into(),
             format: AdFormat::Banner,
             enabled: true,
+            platform: None,
+            package_name: None,
             country_floors: Some(vec![CountryFloor {
                 country: "EE".into(),
                 floor_ecpm: 2_500_000,
+                group: None,
             }]),
         };
         let json = serde_json::to_string(&unit).expect("serialize");
@@ -181,6 +224,8 @@ mod tests {
             name: "n".into(),
             format: AdFormat::Rewarded,
             enabled: false,
+            platform: None,
+            package_name: None,
             country_floors: None,
         };
         let json = serde_json::to_string(&unit).expect("serialize");

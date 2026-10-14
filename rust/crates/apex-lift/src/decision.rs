@@ -1,0 +1,679 @@
+//! The keep rule: six conditions at the pre-registered final look, a single
+//! stricter interim look at the whole-week midpoint, and one pre-registered
+//! extension offered only at the final look. Anything else rolls back or
+//! voids, and only a Keep produces a billable lambda.
+
+use crate::guardrails::GuardrailEvent;
+use crate::stats::{bootstrap_lower_bound, estimate, Estimate};
+use crate::window::{AnalysisWindow, WindowProblem};
+
+/// The pre-registered metric. The engine bills revenue per user only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metric {
+    RevenuePerUser,
+}
+
+/// Contract-tightenable guardrail thresholds. The defaults below are the
+/// loosest values the spec allows; a publisher may only tighten them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardrailThresholds {
+    /// Fast-harm point-lift stop. Default -0.05; a publisher may stop earlier,
+    /// never later: the value must be in (-0.05, 0].
+    pub harm_point: f64,
+    /// Rewarded and interstitial fill drop. Default 0.02; tighten downward.
+    pub fill_rewarded: f64,
+    /// Banner fill drop. Default 0.05; tighten downward.
+    pub fill_banner: f64,
+    /// Split-mismatch chi-square threshold. Default 10.8276 (p = 0.001);
+    /// tighten downward (stop more easily), never upward.
+    pub split_chi_square: f64,
+}
+
+impl Default for GuardrailThresholds {
+    fn default() -> Self {
+        Self {
+            harm_point: -0.05,
+            fill_rewarded: 0.02,
+            fill_banner: 0.05,
+            split_chi_square: 10.8276,
+        }
+    }
+}
+
+impl GuardrailThresholds {
+    /// Refuse anything looser than the spec defaults.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.harm_point <= 0.0 && self.harm_point >= -0.05) {
+            return Err(format!(
+                "harm_point {} must be in (-0.05, 0]: tighter is allowed, looser is not",
+                self.harm_point
+            ));
+        }
+        if !(self.fill_rewarded >= 0.0 && self.fill_rewarded <= 0.02) {
+            return Err(format!(
+                "fill_rewarded {} must be in [0, 0.02]",
+                self.fill_rewarded
+            ));
+        }
+        if !(self.fill_banner >= 0.0 && self.fill_banner <= 0.05) {
+            return Err(format!(
+                "fill_banner {} must be in [0, 0.05]",
+                self.fill_banner
+            ));
+        }
+        if !(self.split_chi_square > 0.0 && self.split_chi_square <= 10.8276) {
+            return Err(format!(
+                "split_chi_square {} must be in (0, 10.8276]",
+                self.split_chi_square
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// What was written to the signed ledger before the first platform call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreRegistration {
+    pub experiment_id: String,
+    pub scope: String,
+    /// Human-auditable description of the single change under test.
+    pub change_description: String,
+    /// The setting's value before the change, as read from the platform
+    /// before the first write. Signed in the pre-registration record.
+    pub before_value: String,
+    /// Planned test-arm share of users: 0.5, 0.25 or 0.10.
+    pub test_share: f64,
+    pub metric: Metric,
+    pub burn_in_days: u32,
+    /// 7, 14, 21 or 28.
+    pub window_days: usize,
+    /// Whether the single interim look is allowed.
+    pub interim_look: bool,
+    /// Whether the one-week extension is allowed.
+    pub extension_allowed: bool,
+    /// Hash of the analysis-code version that will run.
+    pub code_version_hash: String,
+    /// Contract rate in basis points, 1500..=2000.
+    pub rate_bp: u16,
+    /// Tightenable guardrail thresholds.
+    pub thresholds: GuardrailThresholds,
+}
+
+impl PreRegistration {
+    /// Refuse a registration the engine could not honor; decide() voids with
+    /// this reason so an invalid registration never reaches billing.
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(self.test_share, s if s == 0.5 || s == 0.25 || s == 0.10) {
+            return Err(format!(
+                "test_share {} must be one of 0.5, 0.25, 0.10",
+                self.test_share
+            ));
+        }
+        if !crate::window::ALLOWED_WINDOW_DAYS.contains(&self.window_days) {
+            return Err(format!(
+                "window_days {} must be one of 7, 14, 21, 28",
+                self.window_days
+            ));
+        }
+        if !(1500..=2000).contains(&self.rate_bp) {
+            return Err(format!(
+                "rate_bp {} must be in the contracted 1500..=2000 band",
+                self.rate_bp
+            ));
+        }
+        if self.code_version_hash.trim().is_empty() {
+            return Err("code_version_hash must not be empty".into());
+        }
+        if self.before_value.trim().is_empty() {
+            return Err("before_value must carry the prior platform value".into());
+        }
+        self.thresholds.validate()
+    }
+}
+
+/// The inputs to the decision: the analyzed window, the guardrail events, the
+/// live scope identity (condition six) and the cross-check parameters.
+#[derive(Debug, Clone)]
+pub struct DecisionInput<'a> {
+    pub window: &'a AnalysisWindow,
+    pub guardrails: &'a [GuardrailEvent],
+    /// The scope as it exists on the platform right now; must equal the
+    /// pre-registered scope.
+    pub observed_scope: String,
+    /// The change values as they exist on the platform right now; must equal
+    /// the pre-registered change.
+    pub observed_change_description: String,
+    /// Whether the test has reached its planned final look.
+    pub at_final_look: bool,
+    pub extension_used: bool,
+    pub bootstrap_iterations: usize,
+    pub bootstrap_block_len: usize,
+    pub bootstrap_seed: u64,
+}
+
+/// The decision. `Keep` is the only variant that carries a billable lambda.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decision {
+    /// Keep the change; bill on `lambda` (the lower bound used).
+    Keep {
+        lambda: f64,
+        estimate: Estimate,
+        used_interim_99: bool,
+        /// The bootstrap cross-check lower bound, or the interim's analytic
+        /// 99% bound when the interim keep ran before a full window.
+        bootstrap_lower: f64,
+    },
+    /// Roll back; no fee.
+    Rollback { reason: String },
+    /// Void; no decision, no fee.
+    Void { reason: String },
+    /// The window is not complete; wait.
+    Pending { reason: String },
+    /// One pre-registered extra week, offered only at the final look.
+    Extend { reason: String },
+}
+
+const MIN_POINT_LIFT: f64 = 0.01;
+const BOOTSTRAP_AGREEMENT: f64 = 0.01;
+
+fn has_incomplete_day(problems: &[WindowProblem]) -> bool {
+    problems.iter().any(|p| {
+        matches!(
+            p,
+            WindowProblem::NotFinal { .. }
+                | WindowProblem::MissingDay { .. }
+                | WindowProblem::Sequence { .. }
+        )
+    })
+}
+
+/// Decide. Registration validity first, then guardrails (void beats
+/// rollback), then the six keep conditions at the final look; the interim
+/// look is offered once, at the whole-week midpoint, with the 99% bound.
+pub fn decide(prereg: &PreRegistration, input: &DecisionInput) -> Decision {
+    if let Err(reason) = prereg.validate() {
+        return Decision::Void {
+            reason: format!("invalid pre-registration: {reason}"),
+        };
+    }
+    // A 10% split is exploratory only and can never be billed, at any look.
+    if prereg.test_share == 0.10 {
+        return Decision::Rollback {
+            reason: "10% splits are exploratory and never billed".into(),
+        };
+    }
+    if let Some(event) = input.guardrails.iter().find(|e| e.voids()) {
+        return Decision::Void {
+            reason: format!("{event:?}"),
+        };
+    }
+    if let Some(event) = input.guardrails.iter().find(|e| e.rolls_back()) {
+        return Decision::Rollback {
+            reason: format!("{event:?}"),
+        };
+    }
+    // A reporting gap pauses the window until it resolves, and three stale
+    // days void it: the gap event carries the count.
+    if let Some(event) = input.guardrails.iter().find(|e| e.pauses()) {
+        return Decision::Pending {
+            reason: format!("{event:?}"),
+        };
+    }
+
+    let ratios: Vec<f64> = input.window.days.iter().map(|d| d.log_ratio).collect();
+    let Some(current) = estimate(&ratios) else {
+        return Decision::Pending {
+            reason: "fewer than two analysis days have accumulated".into(),
+        };
+    };
+
+    // The midpoint interim look is the largest whole week at or below half
+    // the window: none for a 7-day window, day 7 for 14 and 21, day 14 for
+    // 28.
+    let interim_days = (prereg.window_days / 2 / 7) * 7;
+    if prereg.interim_look
+        && interim_days > 0
+        && input.window.days.len() == interim_days
+        && !has_incomplete_day(&input.window.problems)
+        && current.lower_99 > 0.0
+        && current.lift >= MIN_POINT_LIFT
+    {
+        let totals: Vec<(f64, f64)> = input
+            .window
+            .days
+            .iter()
+            .map(|d| (d.test_value, d.control_value))
+            .collect();
+        let Some(bootstrap) = bootstrap_lower_bound(
+            &totals,
+            input.bootstrap_block_len,
+            input.bootstrap_iterations,
+            input.bootstrap_seed,
+        ) else {
+            return Decision::Pending {
+                reason: "the bootstrap cross-check could not run".into(),
+            };
+        };
+        return Decision::Keep {
+            lambda: current.lower_99,
+            estimate: current,
+            used_interim_99: true,
+            bootstrap_lower: bootstrap,
+        };
+    }
+
+    // The extension is a final-look decision only: a positive point with a
+    // non-positive bound, allowed and unused, buys exactly one extra week of
+    // data before the rollback.
+    if input.window.complete
+        && input.at_final_look
+        && current.lift > 0.0
+        && current.lower_90 <= 0.0
+        && prereg.extension_allowed
+        && !input.extension_used
+        && !has_incomplete_day(&input.window.problems)
+    {
+        return Decision::Extend {
+            reason: "positive estimate, bound not above zero: one extra week".into(),
+        };
+    }
+
+    if !input.window.complete || !input.at_final_look {
+        return Decision::Pending {
+            reason: format!(
+                "{} of {} analysis days are final",
+                input.window.days.len(),
+                prereg.window_days
+            ),
+        };
+    }
+
+    // The six keep conditions.
+    let mut failed: Vec<String> = Vec::new();
+    if has_incomplete_day(&input.window.problems) {
+        failed.push("the window has non-final, missing or non-consecutive days".into());
+    }
+    if input.observed_scope != prereg.scope {
+        failed.push(format!(
+            "the scope changed since pre-registration: {} vs {}",
+            input.observed_scope, prereg.scope
+        ));
+    }
+    if input.observed_change_description != prereg.change_description {
+        failed.push(format!(
+            "the change values changed since pre-registration: {} vs {}",
+            input.observed_change_description, prereg.change_description
+        ));
+    }
+    if current.lift < MIN_POINT_LIFT {
+        failed.push("point lift is below 1%".into());
+    }
+    if current.lower_90 <= 0.0 {
+        failed.push("the 90% lower bound is not above zero".into());
+    }
+    let totals: Vec<(f64, f64)> = input
+        .window
+        .days
+        .iter()
+        .map(|d| (d.test_value, d.control_value))
+        .collect();
+    let Some(bootstrap) = bootstrap_lower_bound(
+        &totals,
+        input.bootstrap_block_len,
+        input.bootstrap_iterations,
+        input.bootstrap_seed,
+    ) else {
+        return Decision::Pending {
+            reason: "the bootstrap cross-check could not run".into(),
+        };
+    };
+    if (bootstrap - current.lower_90).abs() > BOOTSTRAP_AGREEMENT + 1e-9 {
+        if prereg.extension_allowed
+            && !input.extension_used
+            && current.lift > 0.0
+            && !has_incomplete_day(&input.window.problems)
+        {
+            return Decision::Extend {
+                reason: "the bootstrap and analytic bounds differ by more than one point".into(),
+            };
+        }
+        failed.push("the bootstrap cross-check disagrees by more than one point".into());
+    }
+    if !failed.is_empty() {
+        return Decision::Rollback {
+            reason: failed.join("; "),
+        };
+    }
+    Decision::Keep {
+        lambda: current.lower_90.max(0.0),
+        estimate: current,
+        used_interim_99: false,
+        bootstrap_lower: bootstrap,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::window::{AnalysisDay, AnalysisWindow, WindowProblem};
+
+    fn prereg() -> PreRegistration {
+        PreRegistration {
+            experiment_id: "exp-1".into(),
+            scope: "u1".into(),
+            change_description: "raise t1 floor by 10%".into(),
+            before_value: "{\"floor\": 1000000}".into(),
+            test_share: 0.25,
+            metric: Metric::RevenuePerUser,
+            burn_in_days: 3,
+            window_days: 14,
+            interim_look: true,
+            extension_allowed: true,
+            code_version_hash: "abc123".into(),
+            rate_bp: 2000,
+            thresholds: GuardrailThresholds::default(),
+        }
+    }
+
+    fn window(days: usize, ratio: f64, complete: bool) -> AnalysisWindow {
+        AnalysisWindow {
+            days: (0..days)
+                .map(|i| AnalysisDay {
+                    day: format!("2026-10-{i:02}"),
+                    test_value: ratio.exp(),
+                    control_value: 1.0,
+                    log_ratio: ratio,
+                    fill_delta: None,
+                    calendar_index: i,
+                })
+                .collect(),
+            problems: Vec::new(),
+            complete,
+        }
+    }
+
+    fn input<'a>(
+        window: &'a AnalysisWindow,
+        guardrails: &'a [GuardrailEvent],
+        at_final_look: bool,
+    ) -> DecisionInput<'a> {
+        DecisionInput {
+            window,
+            guardrails,
+            observed_scope: "u1".into(),
+            observed_change_description: "raise t1 floor by 10%".into(),
+            at_final_look,
+            extension_used: false,
+            bootstrap_iterations: 2000,
+            bootstrap_block_len: 7,
+            bootstrap_seed: 99,
+        }
+    }
+
+    #[test]
+    fn a_clean_positive_test_is_kept_on_the_lower_bound() {
+        let days = window(14, 0.02, true);
+        match decide(&prereg(), &input(&days, &[], true)) {
+            Decision::Keep {
+                lambda,
+                used_interim_99,
+                ..
+            } => {
+                let expected = 0.02f64.exp() - 1.0;
+                assert!((lambda - expected).abs() < 1e-9, "{lambda}");
+                assert!(!used_interim_99);
+            }
+            other => panic!("expected keep, got {other:?}"),
+        }
+        let mut noisy = window(14, 0.0, true);
+        noisy.days.clear();
+        for i in 0..14 {
+            let ratio: f64 = if i % 2 == 0 { 0.05 } else { -0.01 };
+            noisy.days.push(AnalysisDay {
+                day: format!("d{i}"),
+                test_value: ratio.exp(),
+                control_value: 1.0,
+                log_ratio: ratio,
+                fill_delta: None,
+                calendar_index: i,
+            });
+        }
+        match decide(&prereg(), &input(&noisy, &[], true)) {
+            Decision::Keep { lambda, .. } => {
+                let point = 0.02f64.exp() - 1.0;
+                assert!(lambda > 0.0 && lambda < point, "{lambda} vs {point}");
+            }
+            other => panic!("expected noisy keep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_flat_test_rolls_back_with_no_fee() {
+        let days = window(14, 0.0, true);
+        let decision = decide(&prereg(), &input(&days, &[], true));
+        assert!(
+            matches!(decision, Decision::Rollback { .. }),
+            "{decision:?}"
+        );
+    }
+
+    #[test]
+    fn the_extension_is_offered_only_at_the_final_look_and_only_once() {
+        // A positive point with a straddling bound at the completed final look.
+        let mut days = window(14, 0.0, true);
+        days.days.clear();
+        for i in 0..14 {
+            let ratio: f64 = if i % 2 == 0 { 0.10 } else { -0.092 };
+            days.days.push(AnalysisDay {
+                day: format!("d{i}"),
+                test_value: ratio.exp(),
+                control_value: 1.0,
+                log_ratio: ratio,
+                fill_delta: None,
+                calendar_index: i,
+            });
+        }
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &[], true)),
+            Decision::Extend { .. }
+        ));
+        let mut used = input(&days, &[], true);
+        used.extension_used = true;
+        assert!(matches!(
+            decide(&prereg(), &used),
+            Decision::Rollback { .. }
+        ));
+        // Mid-test the same numbers stay pending, never extending.
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &[], false)),
+            Decision::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn the_interim_look_uses_the_whole_week_midpoint() {
+        let days = window(7, 0.02, false);
+        match decide(&prereg(), &input(&days, &[], false)) {
+            Decision::Keep {
+                used_interim_99: true,
+                bootstrap_lower,
+                ..
+            } => {
+                assert!(bootstrap_lower.is_finite());
+            }
+            other => panic!("expected interim keep, got {other:?}"),
+        }
+        // 21-day windows take their interim at day 7, not day 10.
+        let mut twenty_one = prereg();
+        twenty_one.window_days = 21;
+        assert!(matches!(
+            decide(&twenty_one, &input(&days, &[], false)),
+            Decision::Keep { .. }
+        ));
+        // 7-day windows have no whole-week midpoint.
+        let mut seven = prereg();
+        seven.window_days = 7;
+        assert!(matches!(
+            decide(&seven, &input(&days, &[], false)),
+            Decision::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn an_incomplete_day_blocks_the_interim_keep() {
+        let mut days = window(7, 0.02, false);
+        days.problems
+            .push(WindowProblem::MissingDay { day: "d".into() });
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &[], false)),
+            Decision::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn guardrails_beat_every_keep_condition() {
+        let days = window(14, 0.02, true);
+        let rollback = [GuardrailEvent::FastHarm {
+            day: "d".into(),
+            point_lift: -0.06,
+        }];
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &rollback, true)),
+            Decision::Rollback { .. }
+        ));
+        let void = [GuardrailEvent::PublisherEdit { day: "d".into() }];
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &void, true)),
+            Decision::Void { .. }
+        ));
+        // A stale day pauses; three stale days void.
+        let pause = [GuardrailEvent::ReportingGap {
+            day: "d".into(),
+            stale_days: 1,
+        }];
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &pause, true)),
+            Decision::Pending { .. }
+        ));
+        let void_gap = [GuardrailEvent::ReportingGap {
+            day: "d".into(),
+            stale_days: 3,
+        }];
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &void_gap, true)),
+            Decision::Void { .. }
+        ));
+    }
+
+    #[test]
+    fn a_window_with_missing_days_is_never_kept() {
+        let mut days = window(14, 0.02, true);
+        days.problems
+            .push(WindowProblem::MissingDay { day: "d".into() });
+        assert!(matches!(
+            decide(&prereg(), &input(&days, &[], true)),
+            Decision::Rollback { .. }
+        ));
+    }
+
+    #[test]
+    fn a_changed_scope_or_value_fails_condition_six() {
+        let days = window(14, 0.02, true);
+        let mut moved_scope = input(&days, &[], true);
+        moved_scope.observed_scope = "u2".into();
+        assert!(matches!(
+            decide(&prereg(), &moved_scope),
+            Decision::Rollback { .. }
+        ));
+        let mut moved_value = input(&days, &[], true);
+        moved_value.observed_change_description = "raise t1 floor by 20%".into();
+        assert!(matches!(
+            decide(&prereg(), &moved_value),
+            Decision::Rollback { .. }
+        ));
+    }
+
+    #[test]
+    fn a_ten_percent_split_is_never_billed_at_any_look() {
+        let mut ten = prereg();
+        ten.test_share = 0.10;
+        let final_look = window(14, 0.02, true);
+        match decide(&ten, &input(&final_look, &[], true)) {
+            Decision::Rollback { reason } => assert!(reason.contains("exploratory"), "{reason}"),
+            other => panic!("expected rollback, got {other:?}"),
+        }
+        // The interim look must refuse it too: it runs before any final-look
+        // gate.
+        let interim = window(7, 0.02, false);
+        match decide(&ten, &input(&interim, &[], false)) {
+            Decision::Rollback { reason } => assert!(reason.contains("exploratory"), "{reason}"),
+            other => panic!("expected interim rollback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_invalid_registration_voids_before_anything_else() {
+        let days = window(14, 0.02, true);
+        for mutate in [
+            |p: &mut PreRegistration| p.test_share = 0.33,
+            |p: &mut PreRegistration| p.window_days = 10,
+            |p: &mut PreRegistration| p.rate_bp = 1000,
+            |p: &mut PreRegistration| p.code_version_hash = " ".into(),
+            |p: &mut PreRegistration| p.thresholds.harm_point = -0.10,
+            |p: &mut PreRegistration| p.before_value = "  ".into(),
+            |p: &mut PreRegistration| p.thresholds.split_chi_square = 12.0,
+        ] {
+            let mut bad = prereg();
+            mutate(&mut bad);
+            assert!(
+                matches!(
+                    decide(&bad, &input(&days, &[], true)),
+                    Decision::Void { .. }
+                ),
+                "invalid registration must void: {bad:?}"
+            );
+        }
+        // Tighter thresholds are allowed and keep working.
+        let mut tighter = prereg();
+        tighter.thresholds.harm_point = -0.02;
+        tighter.thresholds.split_chi_square = 8.0;
+        assert!(matches!(
+            decide(&tighter, &input(&days, &[], true)),
+            Decision::Keep { .. }
+        ));
+    }
+
+    #[test]
+    fn bootstrap_disagreement_is_gated_by_the_extension_flags() {
+        let mut days = window(14, 0.0, true);
+        days.days.clear();
+        for i in 0..14 {
+            let ratio: f64 = if i == 0 { 1.0 } else { 0.0 };
+            days.days.push(AnalysisDay {
+                day: format!("d{i}"),
+                test_value: ratio.exp(),
+                control_value: 1.0,
+                log_ratio: ratio,
+                fill_delta: None,
+                calendar_index: i,
+            });
+        }
+        let decision = decide(&prereg(), &input(&days, &[], true));
+        assert!(matches!(decision, Decision::Extend { .. }), "{decision:?}");
+        let mut used = input(&days, &[], true);
+        used.extension_used = true;
+        assert!(matches!(
+            decide(&prereg(), &used),
+            Decision::Rollback { .. }
+        ));
+        let mut forbidden = prereg();
+        forbidden.extension_allowed = false;
+        assert!(matches!(
+            decide(&forbidden, &input(&days, &[], true)),
+            Decision::Rollback { .. }
+        ));
+    }
+}

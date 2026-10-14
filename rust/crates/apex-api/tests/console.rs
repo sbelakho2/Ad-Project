@@ -393,6 +393,7 @@ async fn hostile_ledger_record_fields_render_escaped() {
                 floor_ecpm: 2_500_000,
             },
             hostile_key,
+            "0",
         )],
     );
     let app = router(file_state(temp.path(), pub1_keys()));

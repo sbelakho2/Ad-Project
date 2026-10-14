@@ -4,7 +4,7 @@ Purpose
 This document enumerates personal and business data processed by the Billing subsystem, storage locations, processors, retention windows, and data subject rights mechanisms (export/delete).
 
 Processors
-- Stripe: Payments, invoices, Customer Portal. No PAN/BIN/CVV processed server‑side (SAQ‑A via Stripe Elements/Portal).
+- Adyen: Payments, invoices, Customer Portal. No PAN/BIN/CVV processed server‑side (SAQ‑A via Adyen Elements/Portal).
 - Email (Postfix/ApexMail): Dunning and billing notifications.
 
 Storage locations
@@ -22,5 +22,5 @@ Retention
 - Config: `USAGE_RETENTION_MONTHS` (cron), `RETENTION_MONTHS` (manual script). Evidence: `backend/scripts/cron-jobs.ts`, migration `backend/migrations/postgres/20251112_023000_usage_retention_indexes.up.sql`.
 
 Security
-- Secrets stored via secret store (Infisical/GitHub Environments). Stripe key rotation runbook: `docs/Internal/Operations/STRIPE_KEYS_ROTATION.md`.
+- Secrets stored via secret store (Infisical/GitHub Environments). Adyen key rotation runbook: `docs/Internal/Operations/STRIPE_KEYS_ROTATION.md`.
 - Logs redact PII and secrets. Evidence: `backend/src/utils/logger.ts`, tests `backend/src/utils/__tests__/logger.redaction.test.ts`.

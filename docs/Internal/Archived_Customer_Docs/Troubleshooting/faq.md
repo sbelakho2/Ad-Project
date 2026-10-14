@@ -79,7 +79,7 @@ Because you bring your own demand, these fees simply cover the control plane, ob
 2. **ACH (USD)** – Wise US account (Community Federal Savings Bank), 1–3 US business days
 
 Need alternatives?
-3. **Stripe card/wallet** – 2.9% + fee, instant confirmation
+3. **Adyen card/wallet** – 2.9% + fee, instant confirmation
 4. **PayPal** – +2% fee, <48h settlement
 5. **Wise multi-currency link** – for CAD/GBP/SGD or rapid FX conversions
 

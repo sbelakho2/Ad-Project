@@ -1,26 +1,26 @@
-# Stripe Keys Rotation Runbook
+# Adyen Keys Rotation Runbook
 
 Last updated: 2025-11-12
 Owner: Platform/Operations
 
 Scope
-- Rotate Stripe API secret keys and webhook signing secrets without downtime.
+- Rotate Adyen API secret keys and webhook signing secrets without downtime.
 
 Pre‑checks
 - Confirm current usage of `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` in environments (dev/staging/prod).
-- Ensure `STRIPE_API_VERSION` is pinned (see backend/scripts/stripe-daily-usage-sync.ts).
+- Ensure `STRIPE_API_VERSION` is pinned (see backend/scripts/adyen-daily-usage-sync.ts).
 
 Procedure (per environment)
-1. In Stripe Dashboard, create a new Restricted API key with least‑privilege for Billing (meter events, invoices).
+1. In Adyen Dashboard, create a new Restricted API key with least‑privilege for Billing (meter events, invoices).
 2. Add the new key to the environment secret store:
    - GitHub Environments → {ENV} → Secrets → `STRIPE_SECRET_KEY`
    - Kubernetes/Helm: values or secret manager (avoid plaintext in repos)
 3. Update webhook endpoint signing secret (if regenerating):
-   - Stripe Dashboard → Developers → Webhooks → Select endpoint → Reveal/Rotate signing secret
+   - Adyen Dashboard → Developers → Webhooks → Select endpoint → Reveal/Rotate signing secret
    - Store as `STRIPE_WEBHOOK_SECRET` in secret store
 4. Deploy config change to dev → staging. Confirm:
    - Webhook verification succeeds (200 responses, no signature errors)
-   - `stripe-daily-usage-sync` job completes (success counters increment)
+   - `adyen-daily-usage-sync` job completes (success counters increment)
    - Reconcile endpoint works against test mode
 5. Flip production secrets during a quiet window. Verify health checks and logs.
 6. Revoke old keys after 24–48h observation window.

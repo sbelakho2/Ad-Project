@@ -31,7 +31,7 @@
 The ApexMediation sales automation system provides complete self-service customer lifecycle management:
 
 - **Usage Metering**: Track SDK usage (impressions, API calls, data transfer)
-- **Billing**: Automated Stripe integration with overage charges
+- **Billing**: Automated Adyen integration with overage charges
 - **Dunning**: Smart payment retry logic (3 attempts over 7 days)
 - **Email Automation**: Transactional emails via self-hosted Postfix (unlimited)
 - **Suspension**: Automatic service suspension after failed payments
@@ -55,12 +55,12 @@ The ApexMediation sales automation system provides complete self-service custome
                           ┌────────────┼────────────┐
                           ▼            ▼            ▼
                     ┌─────────┐  ┌──────────┐  ┌─────────┐
-                    │PostgreSQL│  │ClickHouse│  │  Stripe │
+                    │PostgreSQL│  │ClickHouse│  │  Adyen │
                     │(billing) │  │(analytics)│  │(metering)│
                     └─────────┘  └──────────┘  └─────────┘
 
 ┌──────────────┐
-│ Stripe       │ ── webhook ──> invoice.payment_failed
+│ Adyen       │ ── webhook ──> invoice.payment_failed
 │              │                        │
 └──────────────┘                        ▼
                             ┌──────────────────────┐
@@ -82,7 +82,7 @@ The ApexMediation sales automation system provides complete self-service custome
 ┌──────────────┐
 │ Cron Jobs    │ ── every minute ──> Email Queue Processing
 │              │ ── hourly ────────> Usage Limit Checks
-│              │ ── daily 2 AM ────> Stripe Usage Sync
+│              │ ── daily 2 AM ────> Adyen Usage Sync
 │              │ ── daily 3 AM ────> Dunning Retries
 │              │ ── daily 9 AM ────> Trial Reminders
 └──────────────┘
@@ -96,9 +96,9 @@ The ApexMediation sales automation system provides complete self-service custome
 
 1. **SDK sends telemetry**: `POST /api/usage/track`
 2. **Service records usage**: Inserts into PostgreSQL + ClickHouse
-3. **Daily sync to Stripe**: Cron job at 2 AM UTC
+3. **Daily sync to Adyen**: Cron job at 2 AM UTC
 4. **Hourly limit checks**: Alert at 80%, 90%, 100%, 110%
-5. **Monthly billing**: Stripe automatically charges overages
+5. **Monthly billing**: Adyen automatically charges overages
 
 ### Usage Tracking
 
@@ -167,7 +167,7 @@ LIMIT 10;
 "
 ```
 
-**Force Stripe sync for specific customer:**
+**Force Adyen sync for specific customer:**
 ```typescript
 // In Node.js console
 import { usageMeteringService } from './services/billing/UsageMeteringService';
@@ -370,7 +370,7 @@ WHERE id = 12345;
 |-----|-----------|-----------|---------|
 | Email Queue | Every minute | * * * * * | Process pending email events |
 | Usage Limits | Every hour | 0 * * * * | Check usage and send alerts |
-| Stripe Sync | Daily | 2:00 AM | Sync usage to Stripe for billing |
+| Adyen Sync | Daily | 2:00 AM | Sync usage to Adyen for billing |
 | Dunning Retries | Daily | 3:00 AM | Process payment retries |
 | Trial Reminders | Daily | 9:00 AM | Schedule trial ending emails |
 | Monthly Summaries | Monthly | 1st @ 10 AM | Send monthly usage reports |
@@ -440,7 +440,7 @@ spec:
 import { usageMeteringService } from './services/billing/UsageMeteringService';
 import { dunningManagementService } from './services/billing/DunningManagementService';
 
-// Sync usage to Stripe
+// Sync usage to Adyen
 await usageMeteringService.syncUsageToStripe();
 
 // Process dunning retries
@@ -557,7 +557,7 @@ Get plan limits and usage percentage.
 
 ## Troubleshooting
 
-### Issue: Usage not syncing to Stripe
+### Issue: Usage not syncing to Adyen
 
 **Check cron job:**
 ```bash
@@ -577,7 +577,7 @@ await usageMeteringService.syncUsageToStripe();
 ```
 
 **Common causes:**
-- Stripe API key missing or invalid
+- Adyen API key missing or invalid
 - Subscription doesn't have metered price item
 - ClickHouse connection failed
 
@@ -721,12 +721,12 @@ ORDER BY attempt_number;
 Before going live:
 
 - [ ] SMTP configured for ApexMail (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`)
-- [ ] Stripe API key configured (`STRIPE_SECRET_KEY`)
+- [ ] Adyen API key configured (`STRIPE_SECRET_KEY`)
 - [ ] ClickHouse database created and accessible
 - [ ] Database migrations run (`008_sales_automation.sql`)
 - [ ] Cron jobs deployed and running
 - [ ] Email templates tested (send to yourself)
-- [ ] Dunning workflow tested (use Stripe test mode)
+- [ ] Dunning workflow tested (use Adyen test mode)
 - [ ] Usage tracking tested (SDK telemetry endpoint)
 - [ ] Monitoring dashboard created (Grafana/Prometheus)
 - [ ] Alerting configured (failed payments, cron failures)

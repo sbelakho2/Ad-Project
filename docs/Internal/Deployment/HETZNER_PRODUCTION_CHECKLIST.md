@@ -363,7 +363,7 @@ UNION ALL
 SELECT 'billing_idempotency' AS t, count(*)::bigint AS n, max(created_at) AS max_created, NULL::timestamptz AS max_updated, NULL::timestamptz AS max_paid FROM billing_idempotency;\""
 ```
 
-Optional Stripe connectivity check (read-only, no secrets printed):
+Optional Adyen connectivity check (read-only, no secrets printed):
 
 ```bash
 ./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; \
@@ -372,15 +372,15 @@ Optional Stripe connectivity check (read-only, no secrets printed):
     const mode=key.startsWith('sk_live_')?'live':(key.startsWith('sk_test_')?'test':(key.length?'unknown':'missing')); \
     console.log('stripe_key_mode='+mode); \
     if (key.length===0) process.exit(0); \
-    const Stripe=require('stripe'); \
-    (async()=>{ const stripe=new Stripe(key,{apiVersion:'2023-10-16'}); const acct=await stripe.accounts.retrieve(); console.log('stripe_ok=true'); console.log('stripe_account_id='+acct.id); })().catch(e=>{ console.log('stripe_ok=false'); console.log('stripe_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
+    const Adyen=require('adyen'); \
+    (async()=>{ const adyen=new Adyen(key,{apiVersion:'2023-10-16'}); const acct=await adyen.accounts.retrieve(); console.log('stripe_ok=true'); console.log('stripe_account_id='+acct.id); })().catch(e=>{ console.log('stripe_ok=false'); console.log('stripe_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
 ```
 
-If you suspect billing is misconfigured, check backend logs for Stripe config errors (no secrets printed):
+If you suspect billing is misconfigured, check backend logs for Adyen config errors (no secrets printed):
 
 ```bash
 ./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; (pm2 logs backend --lines 2000 --nostream --raw 2>/dev/null || true) | \
-  grep -F 'Stripe secret key not configured' | tail -n 20 || true"
+  grep -F 'Adyen secret key not configured' | tail -n 20 || true"
 ```
 
 ---

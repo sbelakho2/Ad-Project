@@ -1,0 +1,16 @@
+[Unit]
+Description=Apex API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=apex
+EnvironmentFile=/etc/apex/api.env
+ExecStart=/usr/local/bin/apex-api
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex
+
+[Install]
+WantedBy=multi-user.target

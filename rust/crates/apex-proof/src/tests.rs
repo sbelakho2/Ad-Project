@@ -26,6 +26,7 @@ fn change(op: u64) -> LedgerRecord {
             ecpm: 1_750_000 + op,
         },
         &format!("admob-ecpm:g1:u1:{op}"),
+        "prev-value",
     )
 }
 
@@ -35,6 +36,7 @@ fn spec() -> ExperimentSpec {
         ad_unit_id: "u1".into(),
         metric: ExperimentMetric::Ecpm,
         variants: 2,
+        test_group_allocation: 50,
         change_description: "raise EE floor to 2.50".into(),
     }
 }
@@ -833,7 +835,14 @@ fn hex_case_and_whitespace_edits_are_rejected() {
     let sig_marker = "\"signature\":\"";
     let start = line.find(sig_marker).expect("signature present") + sig_marker.len();
     let mut bytes = line.into_bytes();
-    bytes[start] = bytes[start].to_ascii_uppercase();
+    // Flip a hex *letter*, not a digit: digits have no case, so uppercasing
+    // one is a no-op that would make the tampering invisible.
+    for byte in bytes[start..].iter_mut() {
+        if byte.is_ascii_alphabetic() {
+            *byte ^= 0x20;
+            break;
+        }
+    }
     upper[0] = String::from_utf8(bytes).expect("utf8");
     write_lines(&path, &upper);
     let err = Ledger::verify(&path, &keys.verifying_key()).expect_err("uppercase hex");

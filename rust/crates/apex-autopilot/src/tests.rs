@@ -7,12 +7,15 @@ use apex_core::{
     ExperimentMetric, ExperimentResult, ExperimentSpec, ExperimentState, ExperimentVariantResult,
     PlatformError, PlatformId,
 };
+use apex_lift::decision::{GuardrailThresholds, Metric, PreRegistration};
+use apex_lift::guardrails::FillFormat;
+use apex_lift::window::ArmDay;
 use apex_proof::{ChangeKind, InMemoryLedger, Keypair, LedgerRecord};
 use serde_json::json;
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, PlanError, Proposal, SettleOutcome};
-use crate::ops::PlatformOps;
+use crate::ops::{ExperimentDays, PlatformOps};
 use crate::{run_cycle, settle_experiment};
 
 // ---------- fixtures ----------
@@ -101,6 +104,7 @@ fn proposal(action: Action) -> Proposal {
         action,
         rationale: "raise the value after the audit found a stale baseline".into(),
         expected_effect_bp: 500,
+        prev_value: "{\"cpm\":1.0}".into(),
     }
 }
 
@@ -141,9 +145,94 @@ fn seed_change(ledger: &mut InMemoryLedger, at: i64, key: &str) -> u64 {
                 ecpm: 1_000_000,
             },
             key,
+            "{\"cpm\":1.0}",
         ))
         .expect("seed change")
         .seq()
+}
+
+// ---------- lift-engine fixtures ----------
+
+/// A seven-day analysis window needs the three calendar burn-in days plus the
+/// seven analyzed days: ten pulls per arm.
+const WINDOW_PULL_DAYS: usize = 10;
+
+fn prereg() -> PreRegistration {
+    PreRegistration {
+        experiment_id: "exp-1".into(),
+        scope: "u1".into(),
+        change_description: "raise the value after the audit found a stale baseline".into(),
+        before_value: "{\"cpm\":1.0}".into(),
+        test_share: 0.25,
+        metric: Metric::RevenuePerUser,
+        burn_in_days: 3,
+        window_days: 7,
+        interim_look: false,
+        extension_allowed: false,
+        code_version_hash: "sha256:autopilot-test".into(),
+        rate_bp: 2000,
+        thresholds: GuardrailThresholds::default(),
+    }
+}
+
+fn arm_day(index: usize, revenue: i64) -> ArmDay {
+    ArmDay {
+        day: format!("2026-10-{:02}", index + 1),
+        revenue,
+        users: None,
+        second_pull_revenue: Some(revenue),
+        second_pull_users: None,
+        fill: None,
+    }
+}
+
+/// Constant daily arm values. MAX derives the per-user value by dividing the
+/// reported revenue by the arm's allocated share (0.75 control, 0.25 test),
+/// so the raw revenue is scaled back to make the *values* exactly the pair.
+fn constant_days(control_value: i64, test_value: i64) -> ExperimentDays {
+    ExperimentDays {
+        control: (0..WINDOW_PULL_DAYS)
+            .map(|i| arm_day(i, control_value / 4 * 3))
+            .collect(),
+        test: (0..WINDOW_PULL_DAYS)
+            .map(|i| arm_day(i, test_value / 4))
+            .collect(),
+    }
+}
+
+/// Both arms collapse by more than half on two consecutive days: a platform
+/// incident that voids the test.
+fn incident_days() -> ExperimentDays {
+    let mut control: Vec<ArmDay> = (0..WINDOW_PULL_DAYS)
+        .map(|i| arm_day(i, 4_000_000))
+        .collect();
+    let mut test: Vec<ArmDay> = (0..WINDOW_PULL_DAYS)
+        .map(|i| arm_day(i, 1_100_000))
+        .collect();
+    control[7] = arm_day(7, 1_800_000);
+    control[8] = arm_day(8, 800_000);
+    test[7] = arm_day(7, 500_000);
+    test[8] = arm_day(8, 220_000);
+    ExperimentDays { control, test }
+}
+
+async fn settle(
+    ops: &crate::ops::RecordingOps,
+    ledger: &mut InMemoryLedger,
+    experiment_id: &str,
+    change_seq: u64,
+    at: i64,
+) -> Result<SettleOutcome, PlanError> {
+    settle_experiment(
+        ops,
+        ledger,
+        &prereg(),
+        FillFormat::Rewarded,
+        experiment_id,
+        change_seq,
+        at,
+    )
+    .await
 }
 
 // ---------- keys & attribution ----------
@@ -387,6 +476,7 @@ async fn step_cap_refuses_before_any_platform_call() {
     let mut l = ledger();
     let aggressive = Proposal {
         action: floor_action(),
+        prev_value: "{\"floor\": 1000000}".into(),
         rationale: "too big a step".into(),
         expected_effect_bp: 2_001,
     };
@@ -410,6 +500,7 @@ async fn step_cap_boundary_is_inclusive() {
     let mut l = ledger();
     let at_cap = Proposal {
         action: floor_action(),
+        prev_value: "{\"floor\": 1000000}".into(),
         rationale: "exactly at the cap".into(),
         expected_effect_bp: 2_000,
     };
@@ -432,6 +523,7 @@ async fn zero_expected_effect_is_refused() {
     let mut l = ledger();
     let nil = Proposal {
         action: floor_action(),
+        prev_value: "{\"floor\": 1000000}".into(),
         rationale: "no stated effect".into(),
         expected_effect_bp: 0,
     };
@@ -804,108 +896,22 @@ async fn settle_refuses_a_running_experiment() {
             winner_variant_id: None,
         },
     );
-    let err = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect_err("running");
+    let err = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect_err("running");
     assert!(matches!(err, PlanError::PolicyViolation { .. }));
 }
 
 #[tokio::test]
-async fn settle_no_baseline_cases() {
+async fn settle_refuses_a_change_sequence_that_is_not_in_the_ledger() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-
-    ops.put_experiment("empty", finished_experiment(vec![], None, Some(9_900)));
-    assert!(matches!(
-        settle_experiment(
-            &ops,
-            &mut l,
-            &AutopilotPolicy::conservative(),
-            "pub",
-            "empty",
-            seq,
-            NOW
-        )
-        .await,
-        Err(PlanError::NoBaseline { .. })
-    ));
-
-    ops.put_experiment(
-        "zero-control",
-        finished_experiment(vec![variant("control", 0, 1_000)], None, Some(9_900)),
-    );
-    assert!(matches!(
-        settle_experiment(
-            &ops,
-            &mut l,
-            &AutopilotPolicy::conservative(),
-            "pub",
-            "zero-control",
-            seq,
-            NOW
-        )
-        .await,
-        Err(PlanError::NoBaseline { .. })
-    ));
-
-    ops.put_experiment(
-        "missing-winner",
-        finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("b", 1_100_000, 1_000),
-            ],
-            Some("ghost"),
-            Some(9_900),
-        ),
-    );
-    assert!(matches!(
-        settle_experiment(
-            &ops,
-            &mut l,
-            &AutopilotPolicy::conservative(),
-            "pub",
-            "missing-winner",
-            seq,
-            NOW
-        )
-        .await,
-        Err(PlanError::NoBaseline { .. })
-    ));
-
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_100_000, 1_000),
-            ],
-            Some("v2"),
-            Some(9_900),
-        ),
-    );
-    assert!(matches!(
-        settle_experiment(
-            &ops,
-            &mut l,
-            &AutopilotPolicy::conservative(),
-            "pub",
-            "exp-1",
-            999,
-            NOW
-        )
-        .await,
-        Err(PlanError::NoBaseline { .. })
-    ));
+    seed_change(&mut l, NOW, "k1");
+    ops.put_experiment("exp-1", finished_experiment(vec![], None, Some(9_900)));
+    let err = settle(&ops, &mut l, "exp-1", 999, NOW)
+        .await
+        .expect_err("unknown change");
+    assert!(matches!(err, PlanError::NoBaseline { .. }));
 }
 
 #[tokio::test]
@@ -917,6 +923,7 @@ async fn settle_refuses_a_non_change_sequence() {
         PlatformId::Admob,
         "exp-x",
         ExperimentSpec {
+            test_group_allocation: 50,
             name: "n".into(),
             ad_unit_id: "u1".into(),
             metric: ExperimentMetric::Ecpm,
@@ -928,167 +935,92 @@ async fn settle_refuses_a_non_change_sequence() {
     ops.put_experiment(
         "exp-x",
         finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_100_000, 1_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_900),
         ),
     );
-    let err = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-x",
-        0,
-        NOW,
-    )
-    .await
-    .expect_err("not a change");
+    let err = settle(&ops, &mut l, "exp-x", 0, NOW)
+        .await
+        .expect_err("not a change");
     assert!(matches!(err, PlanError::NoBaseline { .. }));
 }
 
 #[tokio::test]
-async fn settle_keep_golden_arithmetic_and_billing_proof() {
-    // control ecpm 1.000000, winner ecpm 1.025000 => lift 250 bp; confidence 9800.
+async fn settle_keep_records_the_signed_lift_and_never_bills_directly() {
+    // A constant +10% revenue-per-user ratio across the window: point lift
+    // 0.10 with zero spread, so the 90% lower bound equals the point estimate
+    // and the bootstrap cross-check agrees exactly.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 50_000_000, 50_000),
-                variant("v2", 51_250_000, 50_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_800),
         ),
     );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW + 1,
-    )
-    .await
-    .expect("settle");
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect("settle");
     match outcome {
         SettleOutcome::Kept {
-            lift_bp,
-            confidence_bp,
-            winner_variant_id,
-            fee_micros,
-            billing_seq,
+            experiment_id,
+            lift,
+            lambda,
+            result_seq,
+            ..
         } => {
-            assert_eq!(lift_bp, 250);
-            assert_eq!(confidence_bp, 9_800);
-            assert_eq!(winner_variant_id, "v2");
-            // proven lift = 51_250_000 - 50_000_000 = 1_250_000 micros; 20% -> 250_000
-            assert_eq!(fee_micros, Some(250_000));
-            assert_eq!(billing_seq, Some(2));
+            assert_eq!(experiment_id, "exp-1");
+            assert!((lift - 0.1).abs() < 1e-9, "lift {lift}");
+            assert!((lambda - 0.1).abs() < 1e-9, "lambda {lambda}");
+            assert_eq!(result_seq, 2);
         }
         other => panic!("expected Kept, got {other:?}"),
     }
-    assert_eq!(l.len(), 3, "seeded change + observed + billing proof");
-    match l.get(2) {
-        Some(LedgerRecord::BillingProof {
-            fee_micros,
-            rate_bp,
-            proven_lift,
-            ..
-        }) => {
-            assert_eq!(*fee_micros, 250_000);
-            assert_eq!(*rate_bp, 2_000);
-            assert_eq!(*proven_lift, 1_250_000);
-        }
-        other => panic!("expected billing proof, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn settle_keep_boundaries_are_inclusive() {
-    let ops = crate::ops::RecordingOps::new();
-    let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    // Exactly +100 bp and confidence exactly 9500.
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_010_000, 1_000),
-            ],
-            Some("v2"),
-            Some(9_500),
-        ),
-    );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
+    // changeApplied + experimentObserved + signed liftRecord, and nothing that
+    // bills: the fee is computed monthly by the billing engine, not here.
+    assert_eq!(l.len(), 3, "change + observed + lift record");
     assert!(matches!(
-        outcome,
-        SettleOutcome::Kept {
-            lift_bp: 100,
-            confidence_bp: 9_500,
-            ..
-        }
+        l.get(1),
+        Some(LedgerRecord::ExperimentObserved { .. })
     ));
+    assert!(matches!(l.get(2), Some(LedgerRecord::LiftRecord { .. })));
+    assert!(
+        !l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::BillingProof { .. })),
+        "settlement never writes a billing proof"
+    );
 }
 
 #[tokio::test]
-async fn settle_rolls_back_below_lift_floor() {
+async fn settle_rolls_back_below_the_point_lift_floor() {
+    // +0.75% point lift is positive but under the 1% keep floor.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_009_000, 1_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_900),
         ),
     );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    match outcome {
-        SettleOutcome::RolledBack {
-            lift_bp,
-            rollback_seq,
-            reason,
-            ..
-        } => {
-            assert_eq!(lift_bp, 90);
-            assert_eq!(reason, "below_policy");
-            assert_eq!(rollback_seq, 1);
-        }
-        other => panic!("expected RolledBack, got {other:?}"),
-    }
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_030_000));
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect("settle");
+    let SettleOutcome::RolledBack { rollback_seq, .. } = outcome else {
+        panic!("expected RolledBack, got {outcome:?}");
+    };
+    assert_eq!(rollback_seq, 1);
     let rollbacks = ops
         .call_log()
         .iter()
@@ -1096,47 +1028,12 @@ async fn settle_rolls_back_below_lift_floor() {
         .count();
     assert_eq!(rollbacks, 1);
     assert!(
-        !l.records()
-            .iter()
-            .any(|r| matches!(r, LedgerRecord::BillingProof { .. })),
-        "rolled-back lift never bills"
+        !l.records().iter().any(|r| matches!(
+            r,
+            LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. }
+        )),
+        "a rolled-back change never emits a lift record or a billing proof"
     );
-}
-
-#[tokio::test]
-async fn settle_rolls_back_below_confidence_floor() {
-    let ops = crate::ops::RecordingOps::new();
-    let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_100_000, 1_000),
-            ],
-            Some("v2"),
-            Some(9_499),
-        ),
-    );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    assert!(matches!(
-        outcome,
-        SettleOutcome::RolledBack {
-            confidence_bp: 9_499,
-            ..
-        }
-    ));
 }
 
 #[tokio::test]
@@ -1147,29 +1044,17 @@ async fn settle_rolls_back_zero_lift_without_billing() {
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_000_000, 1_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_900),
         ),
     );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    assert!(matches!(
-        outcome,
-        SettleOutcome::RolledBack { lift_bp: 0, .. }
-    ));
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_000_000));
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect("settle");
+    assert!(matches!(outcome, SettleOutcome::RolledBack { .. }));
     assert!(!l
         .records()
         .iter()
@@ -1178,138 +1063,59 @@ async fn settle_rolls_back_zero_lift_without_billing() {
 
 #[tokio::test]
 async fn settle_rolls_back_negative_lift() {
+    // -10% revenue per user trips the fast-harm guardrail.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 900_000, 1_000),
-            ],
-            Some("v2"),
-            Some(9_900),
-        ),
-    );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    // 900k vs 1.0M micros of eCPM is -10% = -1000 basis points.
-    assert!(
-        matches!(
-            outcome,
-            SettleOutcome::RolledBack {
-                lift_bp: -1_000,
-                ..
-            }
-        ),
-        "actual: {outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn settle_winner_fallback_picks_highest_ecpm_non_control() {
-    let ops = crate::ops::RecordingOps::new();
-    let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("worse", 900_000, 1_000),
-                variant("best", 1_300_000, 1_000),
-            ],
+            vec![variant("control", 1_000_000, 1_000)],
             None,
             Some(9_900),
         ),
     );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    // 1.3M vs 1.0M micros of eCPM is +30% = 3000 basis points; the proven
-    // revenue delta 300_000 micros at 20% bills 60_000 micros.
-    assert!(
-        matches!(
-            outcome,
-            SettleOutcome::Kept {
-                lift_bp: 3_000,
-                fee_micros: Some(60_000),
-                ..
-            } if outcome_winner(&outcome) == "best"
-        ),
-        "actual: {outcome:?}"
-    );
-}
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 3_600_000));
 
-fn outcome_winner(outcome: &SettleOutcome) -> &str {
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect("settle");
     match outcome {
-        SettleOutcome::Kept {
-            winner_variant_id, ..
-        } => winner_variant_id,
-        SettleOutcome::RolledBack { .. } => "",
+        SettleOutcome::RolledBack { lift, .. } => {
+            assert!((lift - (-0.1)).abs() < 1e-9, "lift {lift}");
+        }
+        other => panic!("expected RolledBack, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn settle_keep_without_revenue_delta_has_no_fee() {
-    // Winner ecpm is higher (fewer impressions, same revenue): no incremental
-    // revenue, so no billing proof even though the change is kept.
+async fn settle_voids_on_a_platform_incident_and_costs_no_platform_call() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 5_000_000, 10_000),
-                variant("v2", 5_000_000, 5_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_900),
         ),
     );
-    let outcome = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("settle");
-    match outcome {
-        SettleOutcome::Kept {
-            lift_bp,
-            fee_micros,
-            billing_seq,
-            ..
-        } => {
-            assert_eq!(lift_bp, 10_000);
-            assert_eq!(fee_micros, None);
-            assert_eq!(billing_seq, None);
-        }
-        other => panic!("expected Kept, got {other:?}"),
-    }
+    ops.put_experiment_days("exp-1", incident_days());
+
+    let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect("settle");
+    assert!(
+        matches!(outcome, SettleOutcome::Voided { .. }),
+        "got {outcome:?}"
+    );
+    let rollbacks = ops
+        .call_log()
+        .iter()
+        .filter(|entry| entry.starts_with("rollback:"))
+        .count();
+    assert_eq!(rollbacks, 0, "a void never touches the platform");
 }
 
 #[tokio::test]
@@ -1327,31 +1133,21 @@ async fn settle_rejects_a_ledger_platform_mismatch() {
                 ecpm: 1_750_000,
             },
             "admob-ecpm:g1:u2:1.75",
+            "{\"cpm\":1.0}",
         ))
         .expect("seed")
         .seq();
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 1_000_000, 1_000),
-                variant("v2", 1_100_000, 1_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_900),
         ),
     );
-    let err = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect_err("platform mismatch");
+    let err = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect_err("platform mismatch");
     assert!(matches!(err, PlanError::Validation(_)));
 }
 
@@ -1360,73 +1156,73 @@ async fn settle_unknown_experiment_is_an_apply_failure() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
-    let err = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "nope",
-        seq,
-        NOW,
-    )
-    .await
-    .expect_err("unknown experiment");
+    let err = settle(&ops, &mut l, "nope", seq, NOW)
+        .await
+        .expect_err("unknown experiment");
     assert!(matches!(err, PlanError::ApplyFailed { .. }));
 }
 
-// ---------------- verifier-round 2 regressions ----------------
-
 #[tokio::test]
-async fn repeated_settlement_is_refused_before_any_side_effect() {
-    // Double-settlement falsifier: a repeat must not append a second
-    // ExperimentObserved or a second billing proof (double billing).
+async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
+    // Fail closed: an adapter that cannot read reporting must not settle.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let seq = seed_change(&mut l, NOW, "k1");
     ops.put_experiment(
         "exp-1",
         finished_experiment(
-            vec![
-                variant("control", 50_000_000, 50_000),
-                variant("v2", 51_250_000, 50_000),
-            ],
-            Some("v2"),
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
+            Some(9_900),
+        ),
+    );
+    let err = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect_err("no reporting");
+    assert!(matches!(err, PlanError::ApplyFailed { .. }));
+    assert!(
+        !l.records().iter().any(|r| matches!(
+            r,
+            LedgerRecord::ExperimentObserved { .. } | LedgerRecord::LiftRecord { .. }
+        )),
+        "no settlement records when the window could not be built"
+    );
+}
+// ---------------- verifier-round 2 regressions ----------------
+
+#[tokio::test]
+async fn repeated_settlement_is_refused_before_any_side_effect() {
+    // Double-settlement falsifier: a repeat must not append a second
+    // ExperimentObserved or a second signed lift record (double billing).
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let seq = seed_change(&mut l, NOW, "k1");
+    ops.put_experiment(
+        "exp-1",
+        finished_experiment(
+            vec![variant("control", 1_000_000, 1_000)],
+            None,
             Some(9_800),
         ),
     );
-    let first = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW,
-    )
-    .await
-    .expect("first settle keeps");
+    ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+    let first = settle(&ops, &mut l, "exp-1", seq, NOW)
+        .await
+        .expect("first settle keeps");
     assert!(matches!(first, SettleOutcome::Kept { .. }));
     let len_after_first = l.len();
 
-    let second = settle_experiment(
-        &ops,
-        &mut l,
-        &AutopilotPolicy::conservative(),
-        "pub",
-        "exp-1",
-        seq,
-        NOW + 1,
-    )
-    .await
-    .expect_err("second settle must be refused");
+    let second = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
+        .await
+        .expect_err("second settle must be refused");
     assert!(matches!(second, PlanError::Validation(_)), "got {second}");
-    assert_eq!(l.len(), len_after_first, "no extra observed/proof records");
-    let proofs = l
+    assert_eq!(l.len(), len_after_first, "no extra observed/lift records");
+    let lifts = l
         .records()
         .iter()
-        .filter(|r| matches!(r, LedgerRecord::BillingProof { .. }))
+        .filter(|r| matches!(r, LedgerRecord::LiftRecord { .. }))
         .count();
-    assert_eq!(proofs, 1, "exactly one billing proof per proven lift");
+    assert_eq!(lifts, 1, "exactly one signed lift record per proven lift");
     let rollbacks = ops
         .call_log()
         .iter()
@@ -1468,6 +1264,7 @@ async fn action_values_are_bounded_before_any_platform_call() {
         },
         rationale: "absurd floor".into(),
         expected_effect_bp: 1,
+        prev_value: "{\"floor\":0}".into(),
     };
     let err = run_cycle(
         &ops,
@@ -1555,6 +1352,7 @@ async fn invalid_country_is_a_validation_error_not_an_apply_failure() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let bad = Proposal {
+        prev_value: "{}".into(),
         action: Action::SetCountryFloor {
             ad_unit_id: "u1".into(),
             country: "EST".into(),

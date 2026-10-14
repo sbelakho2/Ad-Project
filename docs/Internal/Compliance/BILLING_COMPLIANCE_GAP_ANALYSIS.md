@@ -33,7 +33,7 @@ The ApexMediation billing and compliance system is **65% complete**. Strong foun
 | 7-year document retention | ✅ | S3 Object Lock COMPLIANCE mode (eu-north-1) |
 | VAT calculation logic | ✅ | 20% EE domestic, 0% EU B2B reverse charge, 0% non-EU |
 | Double-entry bookkeeping | ✅ | `backend/database/migrations/007_accounting_system.sql` |
-| Payment reconciliation | ✅ | Stripe webhook integration (5 event types) |
+| Payment reconciliation | ✅ | Adyen webhook integration (5 event types) |
 | Dunning management | ✅ | `DunningManagementService.ts` - 3 retry sequence (1, 3, 7 days) |
 | Refunds table | ✅ | `refunds` table with full/partial types |
 | Credits table | ✅ | `credits` table (referral, goodwill, promotional) |
@@ -46,7 +46,7 @@ The ApexMediation billing and compliance system is **65% complete**. Strong foun
 | Terms of Service | ✅ | `website/src/app/terms/page.tsx` |
 | Privacy Policy | ✅ | GDPR-compliant with data categories |
 | Data Processing Addendum (DPA) | ✅ | `website/src/app/dpa/page.tsx` |
-| Subprocessor list | ✅ | Hetzner (hosting), Stripe (billing), Resend (email) |
+| Subprocessor list | ✅ | Hetzner (hosting), Adyen (billing), Resend (email) |
 | Legal entity config | ✅ | `website/src/config/legal.ts` - single source of truth |
 | DPA Annex 1 (Processing Description) | ✅ | Data categories, subjects, purposes |
 | DPA Annex 2 (Security Measures) | ✅ | TLS, access controls, audit logging |

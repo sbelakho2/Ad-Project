@@ -1,5 +1,5 @@
 {
-  "__comment": "Policy tables for the coverage classifier (all-Rust platform plus the SDK ecosystem). DOMAINS: first-match-wins include/exclude patterns per domain. EXCLUSIONS: reason-coded file patterns checked before domains. Validated against the live tree by apex-tools manifest.",
+  "__comment": "Policy tables for the coverage classifier of the Rust product. DOMAINS: first-match-wins include/exclude patterns per domain. EXCLUSIONS: reason-coded file patterns checked before domains. Validated against the live tree by apex-tools manifest.",
   "domains": [
     {
       "id": "meta-test",
@@ -18,7 +18,6 @@
         "**/*.test.tsx",
         "**/*.spec.ts",
         "**/src/androidTest/**",
-        "sdk/flutter/test/**",
         "**/setupTests.ts"
       ]
     },
@@ -79,71 +78,10 @@
       ]
     },
     {
-      "id": "mail-server",
+      "id": "apex-lift",
       "kind": "code",
       "include": [
-        "services/mail-server/**/*.rs"
-      ]
-    },
-    {
-      "id": "android-core",
-      "kind": "code",
-      "include": [
-        "sdk/core/android/src/main/**/*.kt",
-        "sdk/core/android/strictmode-sample/src/main/**/*.kt"
-      ]
-    },
-    {
-      "id": "android-ctv",
-      "kind": "code",
-      "include": [
-        "sdk/ctv/android-tv/src/main/**/*.kt"
-      ]
-    },
-    {
-      "id": "ios-swift",
-      "kind": "code",
-      "include": [
-        "sdk/core/ios/Sources/**/*.swift",
-        "sdk/adapter-dev-kit/ios/Sources/**/*.swift"
-      ]
-    },
-    {
-      "id": "tvos-swift",
-      "kind": "code",
-      "include": [
-        "sdk/ctv/tvos/Sources/**/*.swift"
-      ]
-    },
-    {
-      "id": "flutter",
-      "kind": "code",
-      "include": [
-        "sdk/flutter/lib/**/*.dart"
-      ]
-    },
-    {
-      "id": "web-sdk",
-      "kind": "code",
-      "include": [
-        "sdk/web/src/**/*.ts",
-        "sdk/web/src/**/*.tsx"
-      ]
-    },
-    {
-      "id": "react-native-sdk",
-      "kind": "code",
-      "include": [
-        "sdk/react-native/src/**/*.ts",
-        "sdk/react-native/src/**/*.tsx"
-      ]
-    },
-    {
-      "id": "unity-tier1",
-      "kind": "code",
-      "include": [
-        "sdk/core/unity/Runtime/**/*.cs",
-        "sdk/core/unity/Editor/**/*.cs"
+        "rust/crates/apex-lift/**/*.rs"
       ]
     },
     {
@@ -157,28 +95,7 @@
       "id": "contract-sql",
       "kind": "contract",
       "include": [
-        "services/mail-server/**/*.sql",
         "tools/sql/**/*.sql"
-      ]
-    },
-    {
-      "id": "sample-app",
-      "kind": "contract",
-      "include": [
-        "sdk/samples/**",
-        "sdk/adapter-samples/**",
-        "sdk/core/ios/Demo/**",
-        "sdk/**/Demo/**",
-        "sdk/react-native/example/**",
-        "sdk/core/android/strictmode-sample/**"
-      ]
-    },
-    {
-      "id": "sdk-scripts",
-      "kind": "contract",
-      "include": [
-        "sdk/**/*.sh",
-        "sdk/**/scripts/**"
       ]
     },
     {
@@ -197,7 +114,6 @@
         "infrastructure/hetzner/*.service",
         "docs/**/evidence/**/*.{yml,yaml}",
         "infrastructure/**/grafana/**/*.json",
-        "services/mail-server/config/**/*.toml",
         "**/*.service"
       ]
     },
@@ -218,29 +134,6 @@
         "rust/Cargo.lock",
         "tools/coverage/*",
         "**/*.toml",
-        "sdk/**/package.json",
-        "sdk/**/build.gradle",
-        "sdk/**/build.gradle.kts",
-        "sdk/**/settings.gradle",
-        "sdk/**/settings.gradle.kts",
-        "sdk/**/gradle.properties",
-        "sdk/**/*.properties",
-        "sdk/**/*.pro",
-        "sdk/**/Package.swift",
-        "sdk/**/*.csproj",
-        "sdk/**/*.asmdef",
-        "sdk/**/pubspec.yaml",
-        "sdk/**/tsconfig*.json",
-        "sdk/**/*.config.cjs",
-        "sdk/**/*.config.mjs",
-        "sdk/**/rollup.config.mjs",
-        "sdk/**/.eslintrc.json",
-        "sdk/**/project.yml",
-        "sdk/**/AndroidManifest.xml",
-        "sdk/**/*.plist",
-        "sdk/**/link.xml",
-        "sdk/**/Package.resolved",
-        "sdk/**/.eslintrc*",
         ".github/required-checks.json"
       ]
     }
@@ -371,36 +264,12 @@
       "code": "SAMPLE_APP"
     },
     {
-      "code": "NON_EXECUTABLE",
-      "glob": "sdk/**/src/main/res/**"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/**/coverage/**"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/core/unity/**/bin/**"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/core/unity/**/obj/**"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/react-native/lib/**"
-    },
-    {
       "code": "BUILD_ARTIFACT",
       "glob": "**/*.hprof"
     },
     {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/**/.build/**"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "sdk/**/.swiftpm/**"
+      "code": "FUTURE_SURFACE",
+      "glob": "future/**"
     }
   ],
   "exclusionCodes": [
@@ -409,6 +278,7 @@
     "BUILD_ARTIFACT",
     "SAMPLE_APP",
     "DATA_ARTIFACT",
-    "NON_EXECUTABLE"
+    "NON_EXECUTABLE",
+    "FUTURE_SURFACE"
   ]
 }

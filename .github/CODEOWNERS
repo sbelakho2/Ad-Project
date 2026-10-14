@@ -4,8 +4,6 @@
 
 # Domain-specific ownership (single maintainer)
 rust/ @sbelakho2
-sdk/ @sbelakho2
-services/ @sbelakho2
 infrastructure/ @sbelakho2
 tools/coverage/coverage-floor.json @sbelakho2
 tools/coverage/suites.json @sbelakho2

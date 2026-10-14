@@ -2,7 +2,7 @@
 //!
 //! Every refusal is typed and names the offending ledger `seq` (or the
 //! `experiment_id` for duplicate experiments) so an operator can go straight
-//! to the record that caused it. Stripe transport errors are re-classified at
+//! to the record that caused it. Adyen transport errors are re-classified at
 //! this boundary: auth failures stay auth failures (and are never retried),
 //! rate limits/5xx are retried by the shared transport policy before they can
 //! surface here.
@@ -34,7 +34,7 @@ pub enum BillingError {
     #[error("invoice total overflows i64 micros")]
     Overflow,
 
-    /// Stripe amounts are integer minor units (cents): the fee must convert
+    /// Adyen amounts are integer minor units (cents): the fee must convert
     /// exactly (`fee_micros % 10_000 == 0`).
     #[error("invoice line seq {seq}: fee is not an exact cent amount (fee_micros % 10_000 != 0)")]
     SubCentAmount { seq: u64 },
@@ -68,10 +68,10 @@ pub enum BillingError {
         cause: String,
     },
 
-    /// An identifier cannot be placed in a Stripe header: it contains a
-    /// control character (including CR/LF) or the derived idempotency key
-    /// exceeds the length cap. Refused before any request is sent.
-    #[error("invoice line seq {seq} has an identifier unusable in a Stripe header: {detail}")]
+    /// An identifier cannot be placed in an Adyen reference: it contains a
+    /// control character (including CR/LF) or the derived reference exceeds
+    /// the length cap. Refused before any request is sent.
+    #[error("invoice line seq {seq} has an identifier unusable in an Adyen reference: {detail}")]
     UnsafeIdentifier { seq: u64, detail: String },
 
     /// The signature header could not be parsed (or a ledger record was not a
@@ -79,13 +79,9 @@ pub enum BillingError {
     #[error("malformed input: {0}")]
     Malformed(String),
 
-    /// The `v1` HMAC did not match the signed payload.
-    #[error("stripe signature verification failed")]
+    /// The HMAC digest did not match the signed payload.
+    #[error("adyen signature verification failed")]
     InvalidSignature,
-
-    /// `|now - t|` exceeded the caller's tolerance.
-    #[error("stripe signature timestamp {timestamp} outside tolerance (now {now_unix_s})")]
-    StaleTimestamp { timestamp: i64, now_unix_s: i64 },
 }
 
 impl From<PlatformError> for BillingError {

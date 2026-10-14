@@ -1,52 +1,12 @@
-{
-  # Global options
-  # Set these env vars on the host/systemd unit:
-  # - CADDY_EMAIL=hello@apexmediation.ee
-  email {env.CADDY_EMAIL}
-
-  # Prefer modern defaults
-  servers {
-    protocols h1 h2
-  }
+# Edge for the current product. Set APEX_DOMAIN and SITE_DOMAIN in the
+# environment; the defaults are placeholders for local validation only.
+{$APEX_DOMAIN:apex.example} {
+	encode gzip
+	reverse_proxy 127.0.0.1:8787
 }
 
-# -----------------------------------------------------------------------------
-# Operator UI + Control Plane API
-# COMPLETELY SEPARATE from customer console (DO NOT MIX)
-# This is the internal operator admin panel + control-plane API.
-# - UI is served by the Control Plane service on :4000 (NOT the customer console)
-# - API is also served by the Control Plane service on :4000
-# -----------------------------------------------------------------------------
-admin.apexmediation.ee {
-  reverse_proxy 127.0.0.1:4000
-}
-
-# -----------------------------------------------------------------------------
-# Customer API
-# -----------------------------------------------------------------------------
-api.apexmediation.ee {
-  reverse_proxy 127.0.0.1:8080
-}
-
-# -----------------------------------------------------------------------------
-# Customer Console - Customer-facing dashboard
-# Access: console.apexmediation.ee → Console service on port 3000
-# -----------------------------------------------------------------------------
-console.apexmediation.ee {
-  reverse_proxy 127.0.0.1:3000
-}
-
-# -----------------------------------------------------------------------------
-# Grafana (monitoring UI)
-# -----------------------------------------------------------------------------
-grafana.apexmediation.ee {
-  reverse_proxy 127.0.0.1:3001
-}
-
-# -----------------------------------------------------------------------------
-# Marketing Website
-# -----------------------------------------------------------------------------
-apexmediation.ee, www.apexmediation.ee {
-  # Next.js standalone served by PM2 on the app server
-  reverse_proxy 127.0.0.1:3002
+{$SITE_DOMAIN:www.apex.example} {
+	encode gzip
+	root * /srv/site/public
+	file_server
 }

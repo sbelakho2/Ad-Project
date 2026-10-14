@@ -30,7 +30,7 @@ pub use money::{
 pub use platform::{
     AdFormat, AdUnit, CountryFloor, ExperimentMetric, ExperimentResult, ExperimentSpec,
     ExperimentState, ExperimentVariantResult, Mapping, MediationGroup, MediationMapping,
-    PlatformId, WaterfallEntry,
+    PlatformId, ReportRow, WaterfallEntry,
 };
 pub use validation::{
     admob_ecpm_key, format_micros_short, levelplay_create_key, levelplay_price_key,

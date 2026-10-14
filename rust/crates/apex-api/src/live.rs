@@ -230,7 +230,6 @@ impl LiveAuditor {
             PlatformId::AppLovinMax => {
                 let client = MaxClient::new(
                     &credentials.api_key,
-                    &credentials.account_id,
                     &credentials.base_url,
                     Arc::clone(&self.transport),
                 )?;
@@ -445,7 +444,7 @@ mod tests {
             vec![
                 ok(
                     200,
-                    r#"{"ad_units":[{"ad_unit_id":"u1","name":"Banner","format":"banner","enabled":true}]}"#,
+                    r#"[{"id":"u1","name":"Banner","platform":"ios","package_name":"com.x","ad_format":"BANNER"}]"#,
                 ),
                 ok(200, "google.com, pub-1, DIRECT\n"),
             ],
@@ -602,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn live_audit_enforces_the_bearer_token_when_configured() {
         let raw = ScriptedTransport::new(vec![
-            ok(200, r#"{"ad_units":[]}"#),
+            ok(200, r#"[]"#),
             ok(
                 200,
                 "google.com, pub-1, DIRECT\nunityads.com, pub-2, DIRECT\n",
@@ -760,7 +759,7 @@ mod tests {
     async fn website_refusals_are_platform_unavailable_not_credential_errors() {
         let (auditor, _) = auditor_with(
             Some(max_account("studio.example.com")),
-            vec![ok(200, r#"{"ad_units":[]}"#), ok(403, "")],
+            vec![ok(200, r#"[]"#), ok(403, "")],
         );
         let (status, body) = post_audit(
             live_state(Some(auditor)),

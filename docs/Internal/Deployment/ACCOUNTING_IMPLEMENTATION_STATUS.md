@@ -22,7 +22,7 @@ We have implemented the foundational automated accounting system for Estonian le
 
 **Tables Created:**
 - `invoices` - Customer invoicing with sequential numbering
-- `payments` - Multi-source payment tracking (Stripe, Paddle, bank)
+- `payments` - Multi-source payment tracking (Adyen, Paddle, bank)
 - `ledger_entries` - Double-entry bookkeeping
 - `chart_of_accounts` - Pre-populated Estonian OÜ standard accounts
 - `vat_reports` - Quarterly VAT tracking and e-MTA submission
@@ -58,14 +58,14 @@ We have implemented the foundational automated accounting system for Estonian le
 **Status:** ✅ Feature-complete (minor dependency issue)
 
 **Capabilities:**
-- Stripe webhook processing (5 event types)
+- Adyen webhook processing (5 event types)
 - Automatic payment-to-invoice matching (±2% tolerance)
 - Double-entry ledger creation
 - Refund handling with reversal entries
 - Multi-currency support with ECB exchange rates
 - EventEmitter pattern for application integration
 
-**Stripe Events Handled:**
+**Adyen Events Handled:**
 - `invoice.paid` → Record payment + reconcile
 - `payment_intent.succeeded` → Record payment
 - `charge.succeeded` → Update payment record
@@ -81,12 +81,12 @@ We have implemented the foundational automated accounting system for Estonian le
 |             | VAT Liability (2200) |                      |
 
 **Known Issues:**
-- Missing dependency: `stripe` npm package
+- Missing dependency: `adyen` npm package
 - Type error: `findMatchingInvoice` returns `null` instead of `undefined`
 
 **Fix Required:**
 ```bash
-npm install stripe @types/stripe
+npm install adyen @types/adyen
 ```
 
 ```typescript
@@ -256,7 +256,7 @@ VAT Paid = Σ(expenses.vat_cents) WHERE is_vat_deductible=true AND quarter
 #### 1. Install Dependencies
 ```bash
 cd backend
-npm install stripe @types/stripe \
+npm install adyen @types/adyen \
             pdfkit @types/pdfkit \
             @aws-sdk/client-s3 \
             fast-xml-parser \
@@ -311,16 +311,16 @@ aws s3api put-bucket-versioning \
   --versioning-configuration Status=Enabled
 ```
 
-#### 6. Add Stripe Webhook Endpoint
+#### 6. Add Adyen Webhook Endpoint
 ```typescript
 // backend/routes/webhooks.ts
 import { PaymentReconciliationService } from '../services/accounting/PaymentReconciliationService';
 
-router.post('/webhooks/stripe', async (req, res) => {
-  const signature = req.headers['stripe-signature'];
+router.post('/webhooks/adyen', async (req, res) => {
+  const signature = req.headers['adyen-signature'];
   
   try {
-    const event = stripe.webhooks.constructEvent(
+    const event = adyen.webhooks.constructEvent(
       req.body,
       signature,
       process.env.STRIPE_WEBHOOK_SECRET
@@ -489,7 +489,7 @@ cron.schedule('0 0 1 2,5,8,11 *', async () => {
 | Category | Service | Cost |
 |----------|---------|------|
 | **Infrastructure** | AWS (EC2, RDS, S3) | €200 |
-| **Payment Processing** | Stripe fees (2.9% + €0.25) | Variable |
+| **Payment Processing** | Adyen fees (2.9% + €0.25) | Variable |
 | **Accounting** | Zero (self-service) | €0 |
 | **X-Road** | Service provider (future) | €0-300 |
 | **Mobile-ID** | Estonian SIM + subscription | €15 |
@@ -527,7 +527,7 @@ cron.schedule('0 0 1 2,5,8,11 *', async () => {
 
 ### This Month
 1. ⏳ Set up S3 bucket with Object Lock
-2. ⏳ Configure Stripe webhook
+2. ⏳ Configure Adyen webhook
 3. ⏳ Integration testing
 4. ⏳ Generate first production invoice
 5. ⏳ Process first payment

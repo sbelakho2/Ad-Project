@@ -27,7 +27,7 @@ This guide provides step-by-step instructions for operating the automated accoun
 The following happen automatically:
 
 ✅ **Payment Processing**
-- Stripe webhooks trigger payment reconciliation
+- Adyen webhooks trigger payment reconciliation
 - Payments matched to invoices (±2% tolerance)
 - Ledger entries created automatically
 - Customer invoices updated to 'paid' status
@@ -58,7 +58,7 @@ psql -h localhost -U rivalapexmediation -d rivalapexmediation -c \
 ```
 
 **If failures found:**
-- Check Stripe dashboard for details
+- Check Adyen dashboard for details
 - Contact customer if needed
 - Update payment method or retry
 
@@ -174,17 +174,17 @@ INSERT INTO expenses (
 - 5500: Office Expenses
 - 5600: Travel & Conferences
 
-### Stripe Fee Reconciliation
+### Adyen Fee Reconciliation
 
 **Monthly:**
 
 ```bash
-# Download Stripe balance transactions
-# Stripe Dashboard → Balance → Download CSV
+# Download Adyen balance transactions
+# Adyen Dashboard → Balance → Download CSV
 # Then import fees as expenses
 
-# Or use Stripe API
-curl https://api.stripe.com/v1/balance_transactions \
+# Or use Adyen API
+curl https://api.adyen.com/v1/balance_transactions \
   -u "sk_live_...:" \
   -d "created[gte]=$(date -v-1m +%s)" \
   -d "limit=100" \
@@ -192,7 +192,7 @@ curl https://api.stripe.com/v1/balance_transactions \
 ```
 
 ```sql
--- Record Stripe fees as expense
+-- Record Adyen fees as expense
 INSERT INTO expenses (
   vendor_name,
   description,
@@ -206,13 +206,13 @@ INSERT INTO expenses (
   account_code,
   status
 ) VALUES (
-  'Stripe',
+  'Adyen',
   'Payment processing fees - October 2025',
   5000,  -- €50.00
   'EUR',
   '2025-10-31',
   'software',
-  false,  -- Stripe fees don't include VAT
+  false,  -- Adyen fees don't include VAT
   0,
   'automatic_deduction',
   '5200',
@@ -438,7 +438,7 @@ WHERE year = 2025 AND quarter = 4;
 ### Payment Not Reconciled
 
 **Symptoms:**
-- Payment appears in Stripe
+- Payment appears in Adyen
 - No matching invoice in database
 - Ledger entries not created
 
@@ -516,7 +516,7 @@ HAVING SUM(debit_cents) != SUM(credit_cents);
 ### Webhook Failures
 
 **Symptoms:**
-- Stripe shows webhook attempts failed
+- Adyen shows webhook attempts failed
 - Payments not being processed
 
 **Diagnosis:**
@@ -525,7 +525,7 @@ HAVING SUM(debit_cents) != SUM(credit_cents);
 tail -f /var/log/rivalapexmediation/backend.log | grep Webhook
 
 # Test webhook endpoint
-curl -X POST https://yourdomain.com/api/webhooks/stripe \
+curl -X POST https://yourdomain.com/api/webhooks/adyen \
   -H "Content-Type: application/json" \
   -d '{"type":"ping"}'
 ```
@@ -539,13 +539,13 @@ curl -X POST https://yourdomain.com/api/webhooks/stripe \
 
 2. **Signature verification failing:**
    - Verify STRIPE_WEBHOOK_SECRET in .env
-   - Check Stripe dashboard for correct secret
+   - Check Adyen dashboard for correct secret
    - Ensure raw body is passed to webhook handler
 
 3. **Processing errors:**
    - Check application logs
    - Verify database connection
-   - Review error messages in Stripe dashboard
+   - Review error messages in Adyen dashboard
 
 ---
 
@@ -603,7 +603,7 @@ curl -X POST https://yourdomain.com/api/webhooks/stripe \
    ```
 
 3. **Replay missing transactions:**
-   - Check Stripe for payments after backup date
+   - Check Adyen for payments after backup date
    - Manually trigger webhooks for missing payments
    - Verify all transactions reconciled
 
@@ -656,7 +656,7 @@ curl -X POST https://yourdomain.com/api/webhooks/stripe \
 ### Monthly (30 min)
 - 📊 Review revenue
 - 📝 Record expenses
-- 💳 Reconcile Stripe fees
+- 💳 Reconcile Adyen fees
 
 ### Quarterly (1 hour)
 - 📄 Generate VAT report (1st of 2nd month)
@@ -670,7 +670,7 @@ curl -X POST https://yourdomain.com/api/webhooks/stripe \
 
 ### Key Contacts
 - **B2Baltics (Accounting):** [email/phone]
-- **Stripe Support:** https://support.stripe.com
+- **Adyen Support:** https://support.adyen.com
 - **e-MTA Helpdesk:** 880 0811, info@emta.ee
 
 ### Emergency SQL Queries

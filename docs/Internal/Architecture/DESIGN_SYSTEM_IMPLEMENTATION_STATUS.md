@@ -290,7 +290,7 @@ All pages need to be created with Design.md color scheme:
 
 8. **Settings Page** (`/dashboard/settings`)
    - Profile settings
-   - Payment methods (PayPal, Stripe, bank)
+   - Payment methods (PayPal, Adyen, bank)
    - Notification preferences
 
 ---

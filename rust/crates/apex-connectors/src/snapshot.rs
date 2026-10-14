@@ -52,7 +52,7 @@ pub async fn max_snapshot(
     fetched_at_unix_ms: i64,
 ) -> Result<Snapshot, PlatformError> {
     let site = require_developer_site(PlatformId::AppLovinMax, context)?;
-    let ad_units: Vec<AdUnit> = client.list_ad_units().await?;
+    let ad_units: Vec<AdUnit> = client.list_ad_units(true).await?;
     let app_ads_txt = fetcher
         .fetch(
             PlatformId::AppLovinMax,
@@ -253,12 +253,12 @@ mod tests {
     async fn max_snapshot_assembles_platform_reads_and_app_ads() {
         let transport = ScriptedTransport::new(vec![
             ok(
-                r#"{"ad_units":[{"ad_unit_id":"u1","name":"Banner","format":"banner","enabled":true}]}"#,
+                r#"[{"id":"u1","name":"Banner","platform":"ios","package_name":"com.x","ad_format":"BANNER"}]"#,
             ),
             ok("google.com, pub-1, DIRECT\n"),
         ]);
-        let client = MaxClient::new("key", "acct", "https://api.example.test", transport.clone())
-            .expect("client");
+        let client =
+            MaxClient::new("key", "https://api.example.test", transport.clone()).expect("client");
         let fetcher = AppAdsTxtFetcher::new(transport.clone());
         let snapshot = max_snapshot(&client, &fetcher, &context(), 1_700_000_000_000)
             .await
@@ -334,8 +334,8 @@ mod tests {
         let mut ctx = context();
         ctx.developer_site = None;
         let transport = ScriptedTransport::new(vec![]);
-        let client = MaxClient::new("key", "acct", "https://api.example.test", transport.clone())
-            .expect("client");
+        let client =
+            MaxClient::new("key", "https://api.example.test", transport.clone()).expect("client");
         let fetcher = AppAdsTxtFetcher::new(transport.clone());
         let err = max_snapshot(&client, &fetcher, &ctx, 1)
             .await

@@ -105,7 +105,7 @@ Acceptance criteria (P1)
 11) Revenue reconciliation & payments foundations
 - Event contracts for revenue reports and discrepancy analysis
 - Internal reconciliation jobs (mock providers); alerting on deviations
-- Payment processor integration stubs with contract tests (Stripe/Adyen mock APIs)
+- Payment processor integration stubs with contract tests (Adyen/Adyen mock APIs)
 
 12) Cohort/LTV analytics dashboards
 - Queries and APIs for cohort retention, ARPDAU, LTV by channel/placement

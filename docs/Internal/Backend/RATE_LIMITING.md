@@ -203,7 +203,7 @@ Our limits are based on industry standards:
 
 | Provider | Rate Limit | Notes |
 |----------|------------|-------|
-| **Stripe** | 100 req/sec (6,000/min) | Per-endpoint limits of 25 req/sec |
+| **Adyen** | 100 req/sec (6,000/min) | Per-endpoint limits of 25 req/sec |
 | **GitHub** | 5,000/hour (83/min) | Authenticated; 60/hour unauthenticated |
 | **Twitter/X Pro** | 900/15min (60/min) | Enterprise gets custom limits |
 | **AWS API Gateway** | 10,000/sec burst | 5,000/sec sustained |

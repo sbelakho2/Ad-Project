@@ -292,7 +292,7 @@ COMMIT;
 **Justification:**
 - Debugging webhook delivery issues
 - Replay capability for failed events
-- Stripe keeps events for 30 days, we match that
+- Adyen keeps events for 30 days, we match that
 
 **Configuration:**
 - Cleanup job runs daily at 4:00 AM UTC.

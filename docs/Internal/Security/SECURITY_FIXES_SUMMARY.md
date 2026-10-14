@@ -196,7 +196,7 @@ private generateCode(): string {
 | **Expensive** | 1 hour | 10 | Report exports, data processing |
 | **Upload** | 1 hour | 20 | File uploads |
 | **Standard** | 15 min | 100 | Default API endpoints |
-| **Webhook** | 1 min | 500 | Stripe, payment callbacks |
+| **Webhook** | 1 min | 500 | Adyen, payment callbacks |
 | **Read-Only** | 15 min | 1000 | GET endpoints |
 | **User** | 1 hour | 5000 | Per-user quota (authenticated) |
 | **Global** | 1 hour | 10,000 | Fallback global limit |
@@ -204,7 +204,7 @@ private generateCode(): string {
 **Features**:
 - ✅ **IP-based** rate limiting (default)
 - ✅ **User-based** rate limiting (authenticated endpoints)
-- ✅ **Trusted IP bypass** (webhooks from Stripe, etc.)
+- ✅ **Trusted IP bypass** (webhooks from Adyen, etc.)
 - ✅ **Automatic retry-after** headers (RFC 6585)
 - ✅ **Logging** for exceeded limits (PagerDuty integration ready)
 - ✅ **Graceful 429 responses** with upgrade CTA
@@ -332,7 +332,7 @@ const TransactionSchema = z.object({
 // Multi-factor country validation
 const validateCountry = async (req: Request) => {
   const ipCountry = await geoIP.lookup(req.ip); // MaxMind GeoIP2
-  const paymentCountry = req.body.payment_country; // Stripe card country
+  const paymentCountry = req.body.payment_country; // Adyen card country
   const appStoreCountry = req.body.app_store_country; // iOS/Android store
 
   // All 3 must match for geographic discount eligibility
@@ -415,7 +415,7 @@ const pool = new Pool({
 
 - [ ] **Migrate secrets to Infisical or AWS Secrets Manager**
 - [ ] Set `DATABASE_URL` in production environment
-- [ ] Configure `TRUSTED_WEBHOOK_IPS` for Stripe
+- [ ] Configure `TRUSTED_WEBHOOK_IPS` for Adyen
 - [ ] Set `APP_VERSION` environment variable
 - [ ] Apply all 16 migrations (001-016)
 - [ ] Verify health checks: `curl https://api.apexmediation.ee/ready`
@@ -426,7 +426,7 @@ const pool = new Pool({
 ### Post-Deployment Monitoring
 
 - [ ] **Week 1**: Daily review of `transaction_log` table growth
-- [ ] **Week 2**: Verify VAT calculations match Stripe revenue
+- [ ] **Week 2**: Verify VAT calculations match Adyen revenue
 - [ ] **Month 1**: Generate first quarterly VAT report for e-MTA
 - [ ] **Year 1**: Submit annual report to e-Business Register by March 31
 

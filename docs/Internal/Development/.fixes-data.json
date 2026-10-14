@@ -6981,7 +6981,7 @@
   },
   {
     "path": "src/services/reconciliationService.ts",
-    "risk": "`stripe.subscriptionItems.listUsageRecordSummaries` typed as `any`; ensure API available in current Stripe SDK version.",
+    "risk": "`adyen.subscriptionItems.listUsageRecordSummaries` typed as `any`; ensure API available in current Adyen SDK version.",
     "top_level": "src",
     "fix_id": "FIX-11",
     "fix_title": "Cross-cutting Misc Backlog",

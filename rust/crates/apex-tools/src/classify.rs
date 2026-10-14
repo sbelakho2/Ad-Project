@@ -102,6 +102,7 @@ pub fn build_manifest(repo: &Repo) -> Result<Manifest, String> {
                 "SAMPLE_APP",
                 "DATA_ARTIFACT",
                 "NON_EXECUTABLE",
+                "FUTURE_SURFACE",
             ]
             .contains(&reason.as_str())
             {
@@ -156,7 +157,7 @@ mod tests {
         let repo = Repo::discover().expect("repo");
         let policies = Policies::load(&repo).expect("policies");
         let c = Classifier::new(policies);
-        // Product crates and the mail-server workspace are code domains.
+        // Product crates are code domains.
         assert_eq!(
             c.classify("rust/crates/apex-core/src/money.rs")
                 .unwrap()
@@ -165,11 +166,11 @@ mod tests {
             Some("apex-core")
         );
         assert_eq!(
-            c.classify("services/mail-server/crates/smtp-edge/src/parser.rs")
+            c.classify("rust/crates/apex-connectors/src/max.rs")
                 .unwrap()
                 .domain
                 .as_deref(),
-            Some("mail-server")
+            Some("apex-connectors")
         );
         // Fixtures and test paths land in the meta-test domain.
         let helper = c

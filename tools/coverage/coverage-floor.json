@@ -1,5 +1,5 @@
 {
-  "comment": "Ratchet-only floors (apex-tools floor-ratchet). Domain floors are minimum percentages for the metrics the toolchain records; on stable cargo-llvm-cov, branch records are absent, so lines and functions carry the floor. The 2026-10-14 sweep measured every crate locally and pinned each domain at the floor of its measured minimum; values may only rise. orphanFloorPercent is pinned at 0 because the manifest measured zero orphans; mutationKillFloorPercent is pinned at 100 because the six-mutant sample kills six of six. Final phase: every domain floor = 100. SDK domains joined the table in the CI 100% sweep; android uses the kover line+branch minimum, node and unity use the lcov minimum, and 0 marks a lane whose coverage is not yet measured locally.",
+  "comment": "Ratchet-only floors (apex-tools floor-ratchet). Domain floors are minimum percentages for the metrics the toolchain records; cargo llvm-cov on stable emits no branch records, so lines and functions carry the floor. Values may only rise; code domains must all appear. The legacy SDK and mail-server domains were removed with their trees on 2026-10-14.",
   "orphanFloorPercent": 0,
   "mutationKillFloorPercent": 100,
   "history": [
@@ -64,6 +64,56 @@
         "tvos-swift": 0
       },
       "__note": "CI 100% sweep: SDK domains added. android floors are the kover line+branch minimum measured on the debug unit-test run; web and react-native are measured lcov minimums; unity, flutter and the apple lanes start at 0 until their lanes produce artifacts (unity re-measure pending, apple and flutter blocked on Xcode and flutter toolchains locally)"
+    },
+    {
+      "at": "2026-10-14",
+      "orphanFloorPercent": 0,
+      "mutationKillFloorPercent": 100,
+      "domains": {
+        "apex-core": 95,
+        "apex-connectors": 80,
+        "apex-audit": 99,
+        "apex-autopilot": 84,
+        "apex-proof": 91,
+        "apex-billing": 90,
+        "apex-api": 83,
+        "apex-tools": 54
+      },
+      "__note": "legacy sdk and mail-server trees removed; their domains left the table with the trees, every remaining code domain keeps its measured floor"
+    },
+    {
+      "at": "2026-10-14",
+      "orphanFloorPercent": 0,
+      "mutationKillFloorPercent": 100,
+      "domains": {
+        "apex-core": 95,
+        "apex-connectors": 80,
+        "apex-audit": 99,
+        "apex-autopilot": 84,
+        "apex-proof": 91,
+        "apex-billing": 90,
+        "apex-api": 83,
+        "apex-tools": 54,
+        "apex-lift": 94
+      },
+      "__note": "apex-lift (the Apex Lift Engine) joins at its measured floor: 94 percent lines, with 100 percent branch and 97.5 percent function coverage on the first run"
+    },
+    {
+      "at": "2026-10-14",
+      "orphanFloorPercent": 0,
+      "mutationKillFloorPercent": 100,
+      "domains": {
+        "apex-core": 95,
+        "apex-connectors": 80,
+        "apex-audit": 99,
+        "apex-autopilot": 84,
+        "apex-proof": 91,
+        "apex-billing": 90,
+        "apex-api": 83,
+        "apex-tools": 54,
+        "apex-lift": 96
+      },
+      "__note": "apex-lift floor raised 94 to 96 after the spec-completion pass: 96.09 percent lines and 98.12 percent functions with 81 tests"
     }
   ],
   "domains": {
@@ -75,14 +125,6 @@
     "apex-billing": 90,
     "apex-api": 83,
     "apex-tools": 54,
-    "mail-server": 9,
-    "android-core": 32,
-    "android-ctv": 11,
-    "web-sdk": 73,
-    "react-native-sdk": 22,
-    "unity-tier1": 0,
-    "flutter": 0,
-    "ios-swift": 0,
-    "tvos-swift": 0
+    "apex-lift": 96
   }
 }

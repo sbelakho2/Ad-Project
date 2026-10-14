@@ -224,7 +224,7 @@ node backend/services/automation/AutomatedGrowthEngine.js
 
 ### 15. Marketplace Launch ⏳
 - [ ] Ad network data products catalog
-- [ ] Subscription management (Stripe billing)
+- [ ] Subscription management (Adyen billing)
 - [ ] Data anonymization pipeline
 - [ ] Sales dashboard for ad networks
 - [ ] Revenue tracking & commission payouts

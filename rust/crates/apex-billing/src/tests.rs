@@ -1,301 +1,402 @@
-//! Adversarial tests: the pinned webhook wire vector, freshness boundaries,
-//! rotation candidates, every malformed-header shape, invoice re-verification
-//! refusals, and the Stripe invoice-item client over a recording mock
-//! transport.
+//! Adversarial suite for the Adyen billing surface: the webhook HMAC scheme
+//! and the payment-link client over a recording mock transport.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use apex_connectors::transport::{
-    HttpBody, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
+    HttpBody, HttpRequest, HttpResponse, RecordingSleeper, RetryTransport, Sleeper, Transport,
+    TransportError,
 };
-use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 use async_trait::async_trait;
 
-use crate::encode::encode_form_component;
+use crate::adyen::{
+    create_payment_links, sign_adyen_payload, verify_adyen_hmac, AdyenClient, AdyenClientError,
+    AdyenHmacError, BillingReceipt, InvoiceLineItem, PaymentLinkResponse, MAX_REFERENCE_LEN,
+};
 use crate::errors::BillingError;
 use crate::invoice::{compute_invoice, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine};
-use crate::stripe::{
-    bill_invoice, sign_stripe_payload, StripeClient, StripeClientError, StripeItemResponse,
-    StripeSignatureError, VerifiedEvent, MAX_IDEMPOTENCY_KEY_LEN, MICROS_PER_MINOR_UNIT,
-    STRIPE_API_BASE, STRIPE_CURRENCY,
-};
-use crate::webhook::{verify_stripe_signature, EventMeta, DEFAULT_TOLERANCE_SECS};
+use crate::webhook::verify_adyen_webhook;
+use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
-const SECRET: &[u8] = b"whsec_test_secret";
+const KEY: &[u8] = b"hmac-key";
+const PINNED_BODY: &[u8] = br#"{"eventCode":"AUTHORISATION"}"#;
+// base64(HMAC-SHA256(body, KEY)), computed independently.
+const PINNED_SIGNATURE: &str = "MFWKL2VdoZW+gays2ZQnfSUnj31xiSh2KghqSCoIR/0=";
 
-/// Body used for the pinned vector; the expected digest is quoted in the test
-/// and was computed independently with `openssl dgst -sha256 -hmac`.
-const PINNED_BODY: &[u8] = br#"{"id":"evt_1","type":"invoice.paid"}"#;
-const PINNED_TIMESTAMP: i64 = 1_492_774_577;
-const PINNED_DIGEST: &str = "f7a632a9ffdbb1ced2fc48e44c374ec2cb4292469db292862c06ae703e2befbd";
+struct MockTransport {
+    script: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
+    calls: Mutex<Vec<HttpRequest>>,
+}
 
-#[test]
-fn pinned_vector_verifies_and_returns_timestamp() {
-    let header = format!("t={PINNED_TIMESTAMP},v1={PINNED_DIGEST}");
-    let verified = verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, PINNED_TIMESTAMP)
-        .expect("pinned vector must verify");
-    assert_eq!(
-        verified,
-        EventMeta {
-            timestamp: PINNED_TIMESTAMP
+impl MockTransport {
+    fn new(items: Vec<Result<HttpResponse, TransportError>>) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(items.into()),
+            calls: Mutex::new(vec![]),
+        })
+    }
+
+    fn ok(status: u16, body: Option<&str>) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: vec![],
+            body: body.map(|b| b.as_bytes().to_vec()).unwrap_or_default(),
         }
+    }
+
+    fn calls(&self) -> Vec<HttpRequest> {
+        self.calls.lock().map(|c| c.clone()).unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl Transport for MockTransport {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        self.calls
+            .lock()
+            .map_err(|_| TransportError::Network("poisoned".into()))?
+            .push(req);
+        self.script
+            .lock()
+            .map_err(|_| TransportError::Network("poisoned".into()))?
+            .pop_front()
+            .unwrap_or(Err(TransportError::Network("script exhausted".into())))
+    }
+}
+
+fn client() -> AdyenClient {
+    AdyenClient::new(
+        "AQEyhmfx...test...key",
+        "ApexMerchant",
+        KEY.to_vec(),
+        "https://checkout-test.adyen.com",
+    )
+    .expect("client")
+}
+
+#[test]
+fn pinned_vector_verifies() {
+    verify_adyen_hmac(KEY, PINNED_BODY, PINNED_SIGNATURE)
+        .unwrap_or_else(|_| panic!("pinned digest must verify"));
+    verify_adyen_webhook(PINNED_BODY, PINNED_SIGNATURE, KEY).expect("billing boundary");
+}
+
+#[test]
+fn sign_helper_roundtrips() {
+    let header = sign_adyen_payload(KEY, PINNED_BODY);
+    verify_adyen_hmac(KEY, PINNED_BODY, &header).expect("roundtrip");
+}
+
+#[test]
+fn signature_is_sensitive_to_key_and_body() {
+    let header = sign_adyen_payload(KEY, PINNED_BODY);
+    assert_eq!(
+        verify_adyen_hmac(b"other", PINNED_BODY, &header),
+        Err(AdyenHmacError::NoMatchingSignature)
+    );
+    let tampered = br#"{"eventCode":"CANCELLED"}"#;
+    assert_eq!(
+        verify_adyen_hmac(KEY, tampered, &header),
+        Err(AdyenHmacError::NoMatchingSignature)
     );
 }
 
 #[test]
-fn sign_helper_reproduces_the_pinned_vector() {
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, PINNED_TIMESTAMP);
-    assert_eq!(header, format!("t={PINNED_TIMESTAMP},v1={PINNED_DIGEST}"));
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, 0, PINNED_TIMESTAMP).expect("roundtrip");
-}
-
-#[test]
-fn default_tolerance_is_the_customary_300_seconds() {
-    assert_eq!(DEFAULT_TOLERANCE_SECS, 300);
-}
-
-#[test]
-fn signature_is_sensitive_to_every_signed_input() {
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, PINNED_TIMESTAMP);
-    // Another secret.
+fn missing_and_malformed_headers_are_refused() {
     assert_eq!(
-        verify_stripe_signature(PINNED_BODY, &header, b"other", 300, PINNED_TIMESTAMP),
-        Err(BillingError::InvalidSignature)
-    );
-    // Another body (even one byte appended).
-    let mut tampered = PINNED_BODY.to_vec();
-    tampered.push(b' ');
-    assert_eq!(
-        verify_stripe_signature(&tampered, &header, SECRET, 300, PINNED_TIMESTAMP),
-        Err(BillingError::InvalidSignature)
-    );
-    // Another signed timestamp (the `t` inside the header is part of the MAC).
-    let replayed = header.replace("t=1492774577", "t=1492774600");
-    assert_eq!(
-        verify_stripe_signature(PINNED_BODY, &replayed, SECRET, 300, 1_492_774_600),
-        Err(BillingError::InvalidSignature)
-    );
-}
-
-#[test]
-fn freshness_boundary_is_inclusive_and_absolute() {
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, 1_000);
-    // Exactly at tolerance: accepted, in both directions.
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, 60, 1_060).expect("old edge");
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, 60, 940).expect("future edge");
-    // One second beyond tolerance: refused as a stale timestamp, with both
-    // sides of the comparison quoted.
-    assert_eq!(
-        verify_stripe_signature(PINNED_BODY, &header, SECRET, 60, 1_061),
-        Err(BillingError::StaleTimestamp {
-            timestamp: 1_000,
-            now_unix_s: 1_061
-        })
+        verify_adyen_hmac(KEY, PINNED_BODY, ""),
+        Err(AdyenHmacError::MissingHeader)
     );
     assert_eq!(
-        verify_stripe_signature(PINNED_BODY, &header, SECRET, 60, 939),
-        Err(BillingError::StaleTimestamp {
-            timestamp: 1_000,
-            now_unix_s: 939
-        })
+        verify_adyen_hmac(KEY, PINNED_BODY, "not base64!!"),
+        Err(AdyenHmacError::MalformedHeader)
     );
-    // Zero tolerance pins the exact second.
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, 0, 1_000).expect("exact second");
-    assert!(verify_stripe_signature(PINNED_BODY, &header, SECRET, 0, 1_001).is_err());
-}
-
-#[test]
-fn extreme_clock_values_do_not_wrap() {
-    // i128 skew arithmetic: the most distant clocks are stale, not wrapped
-    // into an accepted value.
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, i64::MIN);
-    assert_eq!(
-        verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, i64::MAX),
-        Err(BillingError::StaleTimestamp {
-            timestamp: i64::MIN,
-            now_unix_s: i64::MAX
-        })
-    );
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, i64::MAX);
     assert!(matches!(
-        verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, i64::MIN),
-        Err(BillingError::StaleTimestamp { .. })
+        verify_adyen_webhook(PINNED_BODY, "", KEY),
+        Err(BillingError::Malformed(_))
     ));
-    // With u64::MAX tolerance the skew is genuinely within tolerance and the
-    // signature is authentic, so it verifies (no artificial refusal either).
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, u64::MAX, i64::MIN)
-        .expect("max tolerance accepts the maximum representable skew");
-}
-
-#[test]
-fn every_v1_candidate_is_tried_for_rotation() {
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, PINNED_TIMESTAMP);
-    let parts: Vec<&str> = header.split(',').collect();
-    let rotated = format!(
-        "v1={},t={PINNED_TIMESTAMP},{},v0={}",
-        "00".repeat(32),
-        parts[1],
-        "ff".repeat(32),
-    );
-    verify_stripe_signature(PINNED_BODY, &rotated, SECRET, 300, PINNED_TIMESTAMP)
-        .expect("one matching candidate is enough");
-    // Whitespace around items is tolerated.
-    let spaced = format!("t={PINNED_TIMESTAMP}, v1={PINNED_DIGEST}");
-    verify_stripe_signature(PINNED_BODY, &spaced, SECRET, 300, PINNED_TIMESTAMP)
-        .expect("trimmed items");
-}
-
-#[test]
-fn malformed_headers_are_refused_as_malformed_input() {
-    for header in [
-        "",
-        "t=1492774577",
-        "v1=ab",
-        "t=notanumber,v1=ab",
-        "t=,v1=ab",
-        "t=1492774577,",
-        "t=1492774577,,v1=ab",
-        "t=1492774577,=ab",
-        "t=1492774577,v1=",
-        "no-equals-at-all",
-        "t=1492774577,v0=ff",
-    ] {
-        assert!(
-            matches!(
-                verify_stripe_signature(PINNED_BODY, header, SECRET, 300, PINNED_TIMESTAMP),
-                Err(BillingError::Malformed(_))
-            ),
-            "header {header:?} must be refused as malformed"
-        );
-    }
-}
-
-#[test]
-fn non_canonical_and_duplicate_timestamps_are_malformed() {
-    let zeros = "00".repeat(32);
-    for header in [
-        format!("t=+1000,v1={zeros}"),
-        format!("t=00001000,v1={zeros}"),
-        format!("t= 1000 ,v1={zeros}"),
-        format!("t=1000,t=2000,v1={zeros}"),
-    ] {
-        assert!(
-            matches!(
-                verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, 1_000),
-                Err(BillingError::Malformed(_))
-            ),
-            "header {header:?} must be malformed"
-        );
-    }
-    // The canonical spelling parses; only the MAC is then wrong.
+    assert!(matches!(
+        verify_adyen_webhook(PINNED_BODY, "!!", KEY),
+        Err(BillingError::Malformed(_))
+    ));
     assert_eq!(
-        verify_stripe_signature(
-            PINNED_BODY,
-            &format!("t=1000,v1={zeros}"),
-            SECRET,
-            300,
-            1_000
-        ),
+        verify_adyen_webhook(PINNED_BODY, PINNED_SIGNATURE, b"wrong"),
         Err(BillingError::InvalidSignature)
     );
 }
 
 #[test]
-fn undecodable_or_short_v1_values_never_match() {
-    for value in [
-        "zz".repeat(32),
-        "ab".to_string(),
-        PINNED_DIGEST[..62].to_string(),
-    ] {
-        let header = format!("t={PINNED_TIMESTAMP},v1={value}");
-        assert_eq!(
-            verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, PINNED_TIMESTAMP),
-            Err(BillingError::InvalidSignature),
-            "value {value:?} must never verify"
-        );
-    }
-}
-
-#[test]
-fn uppercase_hex_is_a_different_byte_string() {
-    // Uppercase hex is a different text string but decodes to the same bytes,
-    // and the comparison runs on the decoded bytes, so an uppercase digest of
-    // the same MAC still matches; behavior correct.
-    let header = format!("t={PINNED_TIMESTAMP},v1={}", PINNED_DIGEST.to_uppercase());
-    verify_stripe_signature(PINNED_BODY, &header, SECRET, 300, PINNED_TIMESTAMP)
-        .expect("hex case is an encoding detail, not a different MAC");
+fn wrong_length_digests_never_match() {
+    // 31 bytes of valid base64 cannot decode to the required 32-byte digest.
+    // A 31-byte digest cannot match a 32-byte HMAC, and base64 padding
+    // leftovers are refused as malformed rather than silently truncated.
+    let short = base64_of(&[0u8; 31]);
+    assert!(
+        verify_adyen_hmac(KEY, PINNED_BODY, &short).is_err(),
+        "31-byte digest must never verify"
+    );
+    let long = base64_of(&[0u8; 33]);
+    assert!(
+        verify_adyen_hmac(KEY, PINNED_BODY, &long).is_err(),
+        "33-byte digest must never verify"
+    );
 }
 
 #[test]
 fn empty_payload_is_signed_like_any_other() {
-    let header = sign_stripe_payload(SECRET, b"", 1_700_000_000);
-    verify_stripe_signature(b"", &header, SECRET, 0, 1_700_000_000).expect("empty body");
-    assert!(verify_stripe_signature(b" ", &header, SECRET, 0, 1_700_000_000).is_err());
+    let header = sign_adyen_payload(b"k", b"");
+    // independent value computed outside the crate
+    assert_eq!(header, "i7mQxAp9YcuXWXqUISUCW+UKyL63RDbjc1uYiTp/ZiA=");
+    verify_adyen_hmac(b"k", b"", &header).expect("empty body");
+}
+
+fn base64_of(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(triple >> 18) as usize & 63] as char);
+        out.push(TABLE[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(triple >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[triple as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 #[test]
-fn client_reuses_its_configured_secret_and_tolerance() {
-    let client = StripeClient::new(SECRET.to_vec(), 120).expect("non-empty secret");
-    assert_eq!(client.webhook_secret(), SECRET);
-    assert_eq!(client.tolerance_secs(), 120);
-    let header = sign_stripe_payload(SECRET, PINNED_BODY, 5_000);
+fn client_refuses_empty_credentials() {
     assert_eq!(
-        client
-            .verify(PINNED_BODY, &header, 5_120)
-            .expect("within tolerance"),
-        VerifiedEvent { timestamp: 5_000 }
+        AdyenClient::new("", "m", KEY.to_vec(), "https://x").unwrap_err(),
+        AdyenClientError::EmptyApiKey
     );
     assert_eq!(
-        client.verify(PINNED_BODY, &header, 5_121),
-        Err(StripeSignatureError::TimestampOutOfTolerance {
-            skew_secs: 121,
-            tolerance_secs: 120
-        })
+        AdyenClient::new("k", "", KEY.to_vec(), "https://x").unwrap_err(),
+        AdyenClientError::EmptyMerchantAccount
     );
     assert_eq!(
-        StripeClient::new(b"wrong".to_vec(), 120)
-            .expect("non-empty secret")
-            .verify(PINNED_BODY, &header, 5_000),
-        Err(StripeSignatureError::NoMatchingSignature)
+        AdyenClient::new("k", "m", Vec::<u8>::new(), "https://x").unwrap_err(),
+        AdyenClientError::EmptyHmacKey
     );
+    let ok = AdyenClient::new("k", "m", b" ".to_vec(), "https://x").expect("space is a key");
+    assert_eq!(ok.api_key(), "k");
+    assert_eq!(ok.merchant_account(), "m");
 }
 
 #[test]
-fn stripe_client_refuses_an_empty_secret() {
+fn client_debug_redacts_credentials() {
+    let debug = format!("{:?}", client());
+    assert!(!debug.contains("AQEyhmfx"), "{debug}");
+    assert!(!debug.contains("hmac-key"), "{debug}");
+    assert!(debug.contains("ApexMerchant"), "{debug}");
+}
+
+fn ok_item(id: &str) -> HttpResponse {
+    MockTransport::ok(
+        200,
+        Some(&format!(
+            r#"{{"id":"{id}","url":"https://checkoutshopper-test.adyen.com/checkoutshopper/payByLink.shtml?token=x"}}"#
+        )),
+    )
+}
+
+fn error_response(status: u16) -> HttpResponse {
+    MockTransport::ok(status, Some(r#"{"errorCode":"000","message":"nope"}"#))
+}
+
+fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
+    Invoice {
+        publisher_id: "pub-1".to_string(),
+        period: BillingPeriod {
+            year_month: "2026-10".to_string(),
+            start_unix_ms: 0,
+            end_unix_ms: 1,
+        },
+        total_micros: lines.iter().map(|l| l.fee_micros).sum(),
+        line_items: lines,
+    }
+}
+
+fn invoice_line(seq: u64, experiment: &str, fee_micros: i64) -> InvoiceLine {
+    InvoiceLine {
+        seq,
+        experiment_id: experiment.to_string(),
+        proven_lift: fee_micros * 2,
+        rate_bp: 1_500,
+        fee_micros,
+    }
+}
+
+fn retried(mock: Arc<MockTransport>) -> Arc<dyn Transport> {
+    let sleeper: Arc<dyn Sleeper> = Arc::new(RecordingSleeper::default());
+    Arc::new(RetryTransport::new(mock, 2, sleeper))
+}
+
+#[tokio::test]
+async fn payment_links_post_one_idempotent_link_per_line() {
+    let mock = MockTransport::new(vec![Ok(ok_item("PL-1")), Ok(ok_item("PL-2"))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![
+        invoice_line(1, "exp-a", 1_250_000),
+        invoice_line(2, "exp-b", 2_000_000),
+    ]);
+    let receipt = create_payment_links(&client(), &transport, &invoice)
+        .await
+        .expect("links");
+    assert_eq!(receipt.links.len(), 2);
+    assert_eq!(receipt.total_minor_units, 325);
+    assert_eq!(receipt.year_month, "2026-10");
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert!(call.url.contains("/v1/paymentLinks"), "{}", call.url);
+        assert!(call
+            .headers
+            .iter()
+            .any(|(k, v)| k == "X-API-Key" && v == client().api_key()));
+    }
+    let first = match calls[0].body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(first["reference"], "apex-fee:pub-1:exp-a:2026-10");
+    assert_eq!(first["amount"]["value"], 125);
+    assert_eq!(first["amount"]["currency"], "USD");
+    assert_eq!(first["merchantAccount"], "ApexMerchant");
+    assert_eq!(first["shopperReference"], "publisher-pub-1");
+    assert_eq!(first["recurringProcessingModel"], "Subscription");
+}
+
+#[tokio::test]
+async fn zero_invoice_sends_no_request_at_all() {
+    let mock = MockTransport::new(vec![]);
+    let transport = retried(mock.clone());
+    let receipt = create_payment_links(&client(), &transport, &invoice_with(vec![]))
+        .await
+        .expect("empty");
+    assert!(receipt.links.is_empty());
+    assert_eq!(receipt.total_minor_units, 0);
+    assert!(mock.calls().is_empty());
+}
+
+#[tokio::test]
+async fn zero_fee_lines_are_skipped_not_billed() {
+    let mock = MockTransport::new(vec![Ok(ok_item("PL-1"))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![
+        invoice_line(1, "exp-a", 1_000_000),
+        invoice_line(2, "exp-zero", 0),
+    ]);
+    let receipt = create_payment_links(&client(), &transport, &invoice)
+        .await
+        .expect("mixed");
+    assert_eq!(receipt.links.len(), 1);
+    assert_eq!(mock.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn sub_cent_fees_refuse_before_any_request() {
+    let mock = MockTransport::new(vec![]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_001)]);
+    assert_eq!(
+        create_payment_links(&client(), &transport, &invoice).await,
+        Err(BillingError::SubCentAmount { seq: 1 })
+    );
+    assert!(mock.calls().is_empty());
+}
+
+#[tokio::test]
+async fn unsafe_references_are_refused_before_any_request() {
+    let mock = MockTransport::new(vec![]);
+    let transport = retried(mock.clone());
+    let mut line = invoice_line(1, "exp-a", 1_000_000);
+    line.experiment_id = "x\r\n".to_string();
     assert!(matches!(
-        StripeClient::new(Vec::<u8>::new(), 300),
-        Err(StripeClientError::EmptySecret)
+        create_payment_links(&client(), &transport, &invoice_with(vec![line.clone()])).await,
+        Err(BillingError::UnsafeIdentifier { .. })
     ));
-    let client = StripeClient::new(b" ", 300).expect("a single space is still a key");
-    assert_eq!(client.webhook_secret(), b" ");
+    let mut long = invoice_line(2, "exp-a", 1_000_000);
+    long.experiment_id = "e".repeat(MAX_REFERENCE_LEN);
+    assert!(matches!(
+        create_payment_links(&client(), &transport, &invoice_with(vec![long])).await,
+        Err(BillingError::UnsafeIdentifier { .. })
+    ));
+}
+
+#[tokio::test]
+async fn auth_and_http_failures_are_typed() {
+    let mock = MockTransport::new(vec![Ok(error_response(401))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_000_000)]);
+    assert_eq!(
+        create_payment_links(&client(), &transport, &invoice).await,
+        Err(BillingError::Auth { status: 401 })
+    );
+    let mock = MockTransport::new(vec![Ok(error_response(422))]);
+    let transport = retried(mock.clone());
+    assert_eq!(
+        create_payment_links(&client(), &transport, &invoice).await,
+        Err(BillingError::Http { status: 422 })
+    );
+}
+
+#[tokio::test]
+async fn malformed_success_bodies_fail_closed() {
+    for body in [
+        Some(r#"{"id":"PL-1"}"#),
+        Some(r#"{"url":"https://x"}"#),
+        None,
+    ] {
+        let mock = MockTransport::new(vec![Ok(MockTransport::ok(200, body))]);
+        let transport = retried(mock.clone());
+        let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_000_000)]);
+        assert!(matches!(
+            create_payment_links(&client(), &transport, &invoice).await,
+            Err(BillingError::Malformed(_x))
+        ));
+    }
 }
 
 #[test]
-fn stripe_client_debug_redacts_the_secret() {
-    let client = StripeClient::new(b"whsec_SUPER_SECRET".to_vec(), 300).expect("non-empty");
-    let rendered = format!("{client:?}");
-    assert!(rendered.contains("[redacted]"), "{rendered}");
-    assert!(!rendered.contains("SUPER_SECRET"), "{rendered}");
-    assert!(!rendered.contains("whsec"), "{rendered}");
-    assert!(rendered.contains("tolerance_secs: 300"), "{rendered}");
+fn line_items_convert_only_exact_cents() {
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("exact");
+    assert_eq!(item.amount_minor_units, 125);
+    assert_eq!(item.reference, "apex-fee:pub-1:exp-a:2026-10");
+    assert_eq!(item.shopper_reference, "publisher-pub-1");
+    assert_eq!(item.currency, "USD");
 }
 
 #[test]
-fn error_messages_name_the_failure_without_secret_material() {
-    let header = format!("t=1000,v1={}", "00".repeat(32));
-    let error = verify_stripe_signature(PINNED_BODY, &header, SECRET, 10, 1_000).expect_err("no");
-    let rendered = error.to_string();
-    assert!(rendered.contains("verification failed"), "{rendered}");
-    assert!(!rendered.contains("whsec"), "{rendered}");
-    assert!(!rendered.contains(PINNED_DIGEST), "{rendered}");
+fn receipt_serializes_camel_case() {
+    let receipt = BillingReceipt {
+        publisher_id: "pub-1".into(),
+        year_month: "2026-10".into(),
+        currency: "USD".into(),
+        total_minor_units: 125,
+        links: vec![PaymentLinkResponse {
+            id: "PL-1".into(),
+            url: "https://x".into(),
+        }],
+    };
+    let json = serde_json::to_string(&receipt).expect("json");
+    assert!(json.contains("totalMinorUnits"), "{json}");
+    assert!(json.contains("PL-1"), "{json}");
 }
-
-// ---------------------------------------------------------------------------
-// Invoice construction
-// ---------------------------------------------------------------------------
 
 fn period() -> BillingPeriod {
     BillingPeriod {
@@ -429,7 +530,7 @@ fn invoice_refuses_duplicate_seqs_and_experiments() {
 
 #[test]
 fn billing_proof_flattening_roundtrips_sealed_records() {
-    let temp = TempDir::new("billing-proof");
+    let temp = tempfile::TempDir::new().expect("temp dir");
     let path = temp.path().join("pub-1.jsonl");
     let mut ledger = Ledger::open(&path, Keypair::from_bytes(&[7u8; 32])).expect("open ledger");
     let sealed = ledger
@@ -457,487 +558,11 @@ fn billing_proof_flattening_roundtrips_sealed_records() {
                 floor_ecpm: 2_500_000,
             },
             "admob-floor:u1:EE",
+            "0",
         ))
         .expect("append change");
     assert!(matches!(
         BillingProofRecord::from_ledger_record(&change),
-        Err(BillingError::Malformed(_))
+        Err(BillingError::Malformed(_x))
     ));
-}
-
-// ---------------------------------------------------------------------------
-// Form encoding
-// ---------------------------------------------------------------------------
-
-#[test]
-fn form_encoding_is_pinned() {
-    assert_eq!(encode_form_component("abcXYZ019-._~"), "abcXYZ019-._~");
-    assert_eq!(encode_form_component("a b"), "a%20b");
-    assert_eq!(encode_form_component("a+b&c=d"), "a%2Bb%26c%3Dd");
-    assert_eq!(
-        encode_form_component("stripe-item:pub:exp:2023-11"),
-        "stripe-item%3Apub%3Aexp%3A2023-11"
-    );
-    assert_eq!(encode_form_component("caf\u{00e9}"), "caf%C3%A9");
-}
-
-// ---------------------------------------------------------------------------
-// Stripe invoice-item client
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-struct MockTransport {
-    responses: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
-    requests: Mutex<Vec<HttpRequest>>,
-}
-
-impl MockTransport {
-    fn with(responses: Vec<Result<HttpResponse, TransportError>>) -> Self {
-        Self {
-            responses: Mutex::new(responses.into()),
-            requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn requests(&self) -> Vec<HttpRequest> {
-        self.requests.lock().expect("lock").clone()
-    }
-}
-
-#[async_trait]
-impl Transport for MockTransport {
-    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.requests.lock().expect("lock").push(req);
-        self.responses
-            .lock()
-            .expect("lock")
-            .pop_front()
-            .expect("mock transport exhausted")
-    }
-}
-
-fn ok_item(id: &str) -> HttpResponse {
-    HttpResponse {
-        status: 200,
-        headers: Vec::new(),
-        body: format!("{{\"id\":\"{id}\",\"object\":\"invoiceitem\"}}").into_bytes(),
-    }
-}
-
-fn error_response(status: u16) -> HttpResponse {
-    HttpResponse {
-        status,
-        headers: Vec::new(),
-        body: b"{\"error\":{\"type\":\"api_error\"}}".to_vec(),
-    }
-}
-
-fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
-    let total_micros = lines.iter().map(|line| line.fee_micros).sum();
-    Invoice {
-        publisher_id: "pub-1".to_string(),
-        period: period(),
-        line_items: lines,
-        total_micros,
-    }
-}
-
-fn invoice_line(seq: u64, experiment: &str, fee_micros: i64) -> InvoiceLine {
-    InvoiceLine {
-        seq,
-        experiment_id: experiment.to_string(),
-        proven_lift: fee_micros * 5,
-        rate_bp: 2_000,
-        fee_micros,
-    }
-}
-
-#[tokio::test]
-async fn bill_invoice_posts_one_idempotent_item_per_line() {
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1")), Ok(ok_item("ii_2"))]);
-    let invoice = invoice_with(vec![
-        invoice_line(1, "exp-a", 500_000),
-        invoice_line(2, "exp-b", 150_000),
-    ]);
-    let receipt = bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect("billing succeeds");
-    assert_eq!(
-        receipt
-            .items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["ii_1", "ii_2"]
-    );
-    assert_eq!(receipt.total_minor_units, 65);
-    assert_eq!(receipt.publisher_id, "pub-1");
-    assert_eq!(receipt.year_month, "2023-11");
-    assert_eq!(receipt.currency, STRIPE_CURRENCY);
-
-    let requests = transport.requests();
-    assert_eq!(requests.len(), 2);
-    let first = &requests[0];
-    assert_eq!(first.method, HttpMethod::Post);
-    assert_eq!(first.url, format!("{STRIPE_API_BASE}/v1/invoiceitems"));
-    assert_eq!(first.header("Authorization"), Some("Bearer sk_test_123"));
-    assert_eq!(first.header("Accept"), Some("application/json"));
-    assert_eq!(
-        first.header("Idempotency-Key"),
-        Some("stripe-item:pub-1:exp-a:2023-11")
-    );
-    assert_eq!(
-        first.header("Content-Type"),
-        Some("application/x-www-form-urlencoded")
-    );
-    assert!(
-        !first
-            .headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
-                && value.contains("application/json")),
-        "invoice items are form-encoded, never JSON: {:?}",
-        first.headers
-    );
-    let body = first
-        .body
-        .as_ref()
-        .and_then(HttpBody::as_form)
-        .expect("form body");
-    assert_eq!(
-        body,
-        "amount=50&currency=usd&description=Apex%20proven-lift%20fee%3A%20experiment%20exp-a%20%282000%20bp%20of%202500000%20micros%20proven%20lift%29"
-    );
-    assert!(first.retryable(), "the idempotency key makes retries safe");
-}
-
-#[tokio::test]
-async fn stripe_item_body_is_pinned_form_encoded() {
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
-    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 500_000)]);
-    bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect("billing succeeds");
-    let request = &transport.requests()[0];
-    assert_eq!(
-        request.body.as_ref().and_then(HttpBody::as_form),
-        Some(
-            "amount=50&currency=usd&description=Apex%20proven-lift%20fee%3A%20experiment%20exp-a%20%282000%20bp%20of%202500000%20micros%20proven%20lift%29"
-        )
-    );
-    assert_eq!(
-        request.header("Content-Type"),
-        Some("application/x-www-form-urlencoded")
-    );
-}
-
-#[tokio::test]
-async fn form_body_percent_encodes_injection_and_unicode() {
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
-    let invoice = invoice_with(vec![invoice_line(1, "exp&admin=1 +é", 500_000)]);
-    bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect("billing succeeds");
-    let body = transport.requests()[0]
-        .body
-        .as_ref()
-        .and_then(HttpBody::as_form)
-        .expect("form body")
-        .to_string();
-    assert!(
-        body.starts_with("amount=50&currency=usd&description="),
-        "{body}"
-    );
-    assert_eq!(
-        body.matches('&').count(),
-        2,
-        "only the two field separators: {body}"
-    );
-    assert!(body.contains("%26admin%3D1"), "{body}");
-    assert!(body.contains("%2B"), "{body}");
-    assert!(body.contains("%C3%A9"), "{body}");
-    assert!(!body.contains('\n') && !body.contains('\r'), "{body}");
-}
-
-#[tokio::test]
-async fn zero_invoice_sends_no_request_at_all() {
-    let transport = MockTransport::default();
-    let receipt = bill_invoice("sk_test_123", &transport, &invoice_with(Vec::new()))
-        .await
-        .expect("empty invoice");
-    assert!(receipt.items.is_empty());
-    assert_eq!(receipt.total_minor_units, 0);
-    assert!(
-        transport.requests().is_empty(),
-        "no request for a zero invoice"
-    );
-}
-
-#[tokio::test]
-async fn zero_fee_lines_are_skipped_not_billed() {
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
-    let invoice = invoice_with(vec![
-        invoice_line(1, "exp-zero", 0),
-        invoice_line(2, "exp-paid", 500_000),
-    ]);
-    let receipt = bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect("billing succeeds");
-    assert_eq!(
-        receipt.items,
-        vec![StripeItemResponse { id: "ii_1".into() }]
-    );
-    assert_eq!(receipt.total_minor_units, 50);
-    assert_eq!(transport.requests().len(), 1);
-}
-
-#[tokio::test]
-async fn sub_cent_fees_refuse_the_invoice_before_any_request() {
-    let transport = MockTransport::default();
-    let invoice = invoice_with(vec![invoice_line(9, "exp-a", 500_001)]);
-    assert_eq!(
-        bill_invoice("sk_test_123", &transport, &invoice).await,
-        Err(BillingError::SubCentAmount { seq: 9 })
-    );
-    assert!(
-        transport.requests().is_empty(),
-        "refusal happens before I/O"
-    );
-}
-
-#[tokio::test]
-async fn mixed_sub_cent_invoice_is_refused_before_any_request() {
-    // Falsifier from the adversarial review (probe G): a fully re-verified
-    // invoice can contain a line whose fee truncates to a sub-cent amount
-    // (lift 7 @1500bp -> 1 micro). Every item must be built before the first
-    // request so a later sub-cent line refuses the whole invoice with zero
-    // charges.
-    let invoice = compute_invoice(
-        "pub-1",
-        period(),
-        &[
-            proof(1, "exp-a", 2_500_000, 2_000),
-            proof(2, "exp-b", 7, 1_500),
-        ],
-    )
-    .expect("both proofs re-verify");
-    assert_eq!(invoice.line_items.len(), 2);
-    assert_eq!(invoice.line_items[0].fee_micros, 500_000);
-    assert_eq!(invoice.line_items[1].fee_micros, 1);
-    let transport = MockTransport::default();
-    assert_eq!(
-        bill_invoice("sk_test_123", &transport, &invoice).await,
-        Err(BillingError::SubCentAmount { seq: 2 })
-    );
-    assert!(
-        transport.requests().is_empty(),
-        "no line may be charged once any line is sub-cent"
-    );
-}
-
-#[tokio::test]
-async fn header_unsafe_identifiers_are_refused_before_any_request() {
-    let transport = MockTransport::default();
-    let injection = invoice_with(vec![invoice_line(1, "exp\r\nInjected: x", 500_000)]);
-    let error = bill_invoice("sk_test_123", &transport, &injection)
-        .await
-        .expect_err("CR/LF must be refused");
-    assert!(
-        matches!(error, BillingError::UnsafeIdentifier { seq: 1, .. }),
-        "{error:?}"
-    );
-    assert!(transport.requests().is_empty());
-
-    // Key length = 12 ("stripe-item:") + 5 ("pub-1") + 1 + experiment + 1 + 7.
-    let boundary = "y".repeat(MAX_IDEMPOTENCY_KEY_LEN - 26);
-    let accepted = invoice_with(vec![invoice_line(1, &boundary, 500_000)]);
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1"))]);
-    bill_invoice("sk_test_123", &transport, &accepted)
-        .await
-        .expect("a key at the cap is still usable");
-    assert_eq!(
-        transport.requests()[0]
-            .header("Idempotency-Key")
-            .expect("key")
-            .len(),
-        MAX_IDEMPOTENCY_KEY_LEN
-    );
-
-    let too_long = invoice_with(vec![invoice_line(
-        1,
-        &"y".repeat(MAX_IDEMPOTENCY_KEY_LEN - 25),
-        500_000,
-    )]);
-    let transport = MockTransport::default();
-    let error = bill_invoice("sk_test_123", &transport, &too_long)
-        .await
-        .expect_err("over-long key must be refused");
-    assert!(
-        matches!(error, BillingError::UnsafeIdentifier { seq: 1, .. }),
-        "{error:?}"
-    );
-    assert!(transport.requests().is_empty());
-}
-
-#[tokio::test]
-async fn zero_fee_line_is_in_the_invoice_but_not_in_the_receipt() {
-    // lift 3 @1500bp truncates to a zero fee (pinned by apex-core); the line
-    // stays on the invoice but intentionally bills nothing.
-    let invoice = compute_invoice("pub-1", period(), &[proof(1, "exp-zero", 3, 1_500)])
-        .expect("positive lift truncates to a zero fee");
-    assert_eq!(invoice.line_items.len(), 1);
-    assert_eq!(invoice.total_micros, 0);
-    let transport = MockTransport::default();
-    let receipt = bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect("zero invoice");
-    assert!(receipt.items.is_empty());
-    assert_eq!(receipt.total_minor_units, 0);
-    assert!(transport.requests().is_empty());
-}
-
-#[tokio::test]
-async fn first_item_failure_surfaces_the_underlying_error() {
-    for (status, expected) in [
-        (401u16, BillingError::Auth { status: 401 }),
-        (403, BillingError::Auth { status: 403 }),
-        (500, BillingError::Http { status: 500 }),
-        (402, BillingError::Http { status: 402 }),
-    ] {
-        let transport = MockTransport::with(vec![Ok(error_response(status))]);
-        let invoice = invoice_with(vec![invoice_line(1, "exp-a", 500_000)]);
-        assert_eq!(
-            bill_invoice("sk_test_123", &transport, &invoice).await,
-            Err(expected),
-            "status {status}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn partial_application_names_what_was_created() {
-    let transport = MockTransport::with(vec![Ok(ok_item("ii_1")), Ok(error_response(500))]);
-    let invoice = invoice_with(vec![
-        invoice_line(1, "exp-a", 500_000),
-        invoice_line(2, "exp-b", 150_000),
-    ]);
-    assert_eq!(
-        bill_invoice("sk_test_123", &transport, &invoice).await,
-        Err(BillingError::StripePartial {
-            completed: vec!["ii_1".to_string()],
-            failed_seq: 2,
-            cause: "stripe request failed (HTTP 500)".to_string(),
-        })
-    );
-}
-
-#[tokio::test]
-async fn unparseable_2xx_after_a_success_names_the_created_item() {
-    // Falsifier from the adversarial review (probe B): HTTP 200 with a body
-    // that is not a Stripe item is still a created charge; the error must
-    // carry the created id instead of a bare Schema refusal.
-    let transport = MockTransport::with(vec![
-        Ok(ok_item("ii_1")),
-        Ok(HttpResponse {
-            status: 200,
-            headers: Vec::new(),
-            body: b"not json".to_vec(),
-        }),
-    ]);
-    let invoice = invoice_with(vec![
-        invoice_line(1, "exp-a", 500_000),
-        invoice_line(2, "exp-b", 150_000),
-    ]);
-    let error = bill_invoice("sk_test_123", &transport, &invoice)
-        .await
-        .expect_err("second response is unparseable");
-    match &error {
-        BillingError::StripePartial {
-            completed,
-            failed_seq,
-            cause,
-        } => {
-            assert_eq!(completed, &vec!["ii_1".to_string()]);
-            assert_eq!(*failed_seq, 2);
-            assert!(cause.contains("seq 2"), "{cause}");
-            assert!(cause.contains("not a Stripe item object"), "{cause}");
-        }
-        other => panic!("expected StripePartial, got {other:?}"),
-    }
-    assert!(format!("{error:?}").contains("ii_1"), "{error:?}");
-    assert_eq!(
-        transport.requests().len(),
-        2,
-        "both requests reached Stripe"
-    );
-}
-
-#[tokio::test]
-async fn network_and_schema_failures_are_typed() {
-    let transport = MockTransport::with(vec![Err(TransportError::Network("reset".into()))]);
-    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 500_000)]);
-    assert!(matches!(
-        bill_invoice("sk_test_123", &transport, &invoice).await,
-        Err(BillingError::Network { .. })
-    ));
-
-    let transport = MockTransport::with(vec![Ok(HttpResponse {
-        status: 200,
-        headers: Vec::new(),
-        body: b"not json".to_vec(),
-    })]);
-    assert!(matches!(
-        bill_invoice("sk_test_123", &transport, &invoice).await,
-        Err(BillingError::Schema { .. })
-    ));
-}
-
-#[test]
-fn line_items_convert_only_exact_cents() {
-    let line = invoice_line(3, "exp-a", 123_450_000);
-    let item = crate::stripe::InvoiceLineItem::from_invoice_line(&line, "pub-1", "2023-11")
-        .expect("exact cents");
-    assert_eq!(item.amount_minor_units, 12_345);
-    assert_eq!(item.idempotency_key, "stripe-item:pub-1:exp-a:2023-11");
-    assert_eq!(item.currency, STRIPE_CURRENCY);
-
-    let off_cent = invoice_line(4, "exp-b", MICROS_PER_MINOR_UNIT - 1);
-    assert_eq!(
-        crate::stripe::InvoiceLineItem::from_invoice_line(&off_cent, "pub-1", "2023-11"),
-        Err(BillingError::SubCentAmount { seq: 4 })
-    );
-    let negative = invoice_line(5, "exp-c", -MICROS_PER_MINOR_UNIT);
-    assert!(matches!(
-        crate::stripe::InvoiceLineItem::from_invoice_line(&negative, "pub-1", "2023-11"),
-        Err(BillingError::TamperedProof { seq: 5, .. })
-    ));
-}
-
-/// Unique temporary directory removed on drop.
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let unique = format!(
-            "apex-billing-{tag}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }

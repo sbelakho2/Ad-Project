@@ -4,8 +4,8 @@
 
 use apex_tools::repo::Repo;
 use apex_tools::{
-    a11y, claims, contract, coverage, csslint, docs_lint, docslinks, dogfood, i18n, mutation,
-    perfbudget, policy::Floors,
+    a11y, claims, contract, coverage, csslint, docs_lint, docslinks, dogfood, mutation, perfbudget,
+    policy::Floors,
 };
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -112,13 +112,6 @@ fn main() {
             let shell = rest.iter().any(|a| a == "--shell");
             dogfood::yaml_policy(&repo, full, shell)
         }
-        "coverage-gate" => (|| {
-            let domain = flag(rest, "--domain").ok_or("--domain required")?;
-            let artifact = flag(rest, "--artifact").ok_or("--artifact required")?;
-            let tool = flag(rest, "--tool").unwrap_or_else(|| "jest".into());
-            let require_branches = rest.iter().any(|a| a == "--require-branches");
-            coverage::coverage_gate(&repo, &domain, &artifact, &tool, require_branches)
-        })(),
         "aggregate-verdict" => {
             let report = flag(rest, "--report").unwrap_or_else(|| "coverage-report.md".into());
             coverage::aggregate_verdict(&repo, &report)
@@ -126,33 +119,25 @@ fn main() {
         "lcov-gate" => (|| {
             let positional = positionals(rest);
             let file = positional.first().ok_or(
-                "usage: apex-tools lcov-gate <lcov.info> <floorPercent> [--require-branches]",
+                "usage: apex-tools lcov-gate <lcov.info> <floorPercent> [--require-branches] [--crate <name>]",
             )?;
             let floor_arg = positional.get(1).ok_or(
-                "usage: apex-tools lcov-gate <lcov.info> <floorPercent> [--require-branches]",
+                "usage: apex-tools lcov-gate <lcov.info> <floorPercent> [--require-branches] [--crate <name>]",
             )?;
             let floor = floor_arg
                 .parse::<f64>()
                 .map_err(|_| format!("invalid floor '{floor_arg}'"))?;
             let require_branches = rest.iter().any(|a| a == "--require-branches");
-            coverage::lcov_gate(file, floor, require_branches)
-        })(),
-        "go-func-gate" => (|| {
-            let positional = positionals(rest);
-            let file = positional
-                .first()
-                .ok_or("usage: apex-tools go-func-gate <cover.func> <floor>")?;
-            let floor_arg = positional
-                .get(1)
-                .ok_or("usage: apex-tools go-func-gate <cover.func> <floor>")?;
-            let floor = floor_arg
-                .parse::<f64>()
-                .map_err(|_| format!("invalid floor '{floor_arg}'"))?;
-            coverage::go_func_gate(file, floor)
+            let crate_name = rest
+                .iter()
+                .position(|a| a == "--crate")
+                .and_then(|index| rest.get(index + 1))
+                .map(String::as_str);
+            coverage::lcov_gate(file, floor, require_branches, crate_name)
         })(),
         "contract" => (|| {
             let check = positionals(rest).into_iter().next().ok_or(
-                "usage: apex-tools contract <ci-reference-integrity|openapi-parity|content-guard-adversarial|samples|docs-references|pipeline-paths> [--update-baseline]",
+                "usage: apex-tools contract <ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths|github-metadata> [--update-baseline]",
             )?;
             let update_baseline = rest.iter().any(|a| a == "--update-baseline");
             contract::contract(&repo, &check, update_baseline)
@@ -161,15 +146,6 @@ fn main() {
             Ok(mode) => docslinks::docs_links(&repo, &mode),
             Err(e) => Err(e),
         },
-        "i18n-parity" => {
-            let roots: Vec<String> = rest
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| a.as_str() == "--root")
-                .filter_map(|(i, _)| rest.get(i + 1).cloned())
-                .collect();
-            i18n::i18n_parity(&repo, &roots)
-        }
         "css-lint" => csslint::css_lint(&repo),
         "claims" => claims::claims_contract(&repo),
         "perf-budget" => {

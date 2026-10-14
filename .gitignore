@@ -51,7 +51,6 @@ out/
 .env.*
 *.pem
 *.key
-tools/android-sdk/
 secrets/
 
 # Logs
@@ -92,7 +91,6 @@ docs/Internal/QA/stripe-dry-run/**/invoice.pdf.url
 evidence-*/
 evidence-*/**
 .output.txt
-sdk/core/unity/Tests/TestResults/
 
 # k6
 k6-results.json
@@ -103,24 +101,18 @@ quality/**/results*.json
 *.aab
 *.ipa
 *.dSYM
-*.hprof
 *.xcuserstate
 *.xcworkspace
 xcuserdata/
 DerivedData/
 .build/
-sdk/core/ios/.build/
 .swiftpm/
 .xcresult/
 .gradle/
-sdk/core/android/.gradle/
-sdk/core/android/.gradle-home/
-sdk/core/android/*.hprof
 gradle/
 gradlew
 gradlew.bat
 !/sdk/core/android/gradlew.sh
-sdk/core/android/.gradle-dist/
 local.properties
 Package.resolved
 
@@ -212,12 +204,6 @@ coverage-manifest.json
 coverage-report.md
 shell-cov/
 tools/coverage/coverage/
-sdk/core/unity/coverage/
-sdk/core/unity/Tests/coverage/
-sdk/core/unity/Runtime/bin/
-sdk/core/unity/Runtime/obj/
-sdk/core/unity/Tests/bin/
-sdk/core/unity/Tests/obj/
 
 # The blanket `coverage/` rule above (earlier in this file) must never hide the
 # first-party gate tooling: re-include the tools/coverage directory and its contents,
@@ -225,13 +211,8 @@ sdk/core/unity/Tests/obj/
 !tools/coverage/
 !tools/coverage/**
 tools/coverage/coverage/
-sdk/core/unity/.gradle-home/
-sdk/core/unity/.gradle-dist/
-sdk/core/android/.gradle-home/
-sdk/core/android/.gradle-dist/
 # Rust build output (workspace target dirs)
 rust/target/
-services/mail-server/target/
 
 site/public/
 site/lhci-report/
@@ -242,10 +223,6 @@ lhci-report/
 site/chrome/
 # Kilo agent state (sessions, local tooling)
 .kilo/
-sdk/core/unity/**/bin/
-sdk/core/unity/**/obj/
-sdk/react-native/lib/
-sdk/**/.build/
-sdk/**/.swiftpm/
-sdk/**/coverage/
-sdk/**/TestResults/
+
+# Audit and design-spec PDFs are working inputs, not repo content.
+*.pdf

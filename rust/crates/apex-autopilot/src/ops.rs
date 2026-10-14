@@ -9,6 +9,15 @@ use async_trait::async_trait;
 
 use crate::model::Action;
 
+/// Daily per-arm pulls from the platform reporting APIs: the lift engine's
+/// measurement input. An adapter that cannot read reporting refuses instead
+/// of fabricating days.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExperimentDays {
+    pub control: Vec<apex_lift::window::ArmDay>,
+    pub test: Vec<apex_lift::window::ArmDay>,
+}
+
 #[async_trait]
 pub trait PlatformOps: Send + Sync {
     /// Verify-live gate: may the autopilot write through this operation?
@@ -16,6 +25,13 @@ pub trait PlatformOps: Send + Sync {
     async fn apply(&self, action: &Action, idempotency_key: &str) -> Result<(), PlatformError>;
     async fn start_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError>;
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError>;
+    /// Daily reporting pulls for the lift engine; adapters without reporting
+    /// access refuse, and the settle path then fails closed.
+    async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "experiment_days is not supported by this adapter for {experiment_id}"
+        )))
+    }
     async fn rollback(&self, action: &Action) -> Result<(), PlatformError>;
     /// Recorded call log (for the write adapters this is the audit trail the
     /// console shows; tests assert exact call sequences on it).
@@ -31,6 +47,7 @@ pub struct RecordingOps {
     start_script: Mutex<VecDeque<Result<String, PlatformError>>>,
     rollback_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
+    days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -71,6 +88,14 @@ impl RecordingOps {
     pub fn put_experiment(&self, id: &str, result: ExperimentResult) -> &Self {
         if let Ok(mut map) = self.experiments.lock() {
             map.insert(id.to_string(), result);
+        }
+        self
+    }
+
+    /// Script the daily reporting pulls for one experiment.
+    pub fn put_experiment_days(&self, id: &str, days: ExperimentDays) -> &Self {
+        if let Ok(mut map) = self.days.lock() {
+            map.insert(id.to_string(), days);
         }
         self
     }
@@ -135,6 +160,25 @@ impl PlatformOps for RecordingOps {
         }
     }
 
+    async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
+        push_log(&self.log, format!("days:{experiment_id}"));
+        match self.days.lock() {
+            Ok(map) => map
+                .get(experiment_id)
+                .cloned()
+                .ok_or(PlatformError::Schema {
+                    platform: apex_core::PlatformId::Admob,
+                    operation: "experimentDays".into(),
+                    detail: format!("no scripted days for {experiment_id}"),
+                }),
+            Err(_) => Err(PlatformError::Network {
+                platform: apex_core::PlatformId::Admob,
+                operation: "experimentDays".into(),
+                detail: "lock poisoned".into(),
+            }),
+        }
+    }
+
     async fn rollback(&self, action: &Action) -> Result<(), PlatformError> {
         push_log(&self.log, format!("rollback:{}", key_of(action)));
         pop_or_default(&self.rollback_script, Ok(()))
@@ -174,5 +218,72 @@ fn key_of(action: &Action) -> String {
             ad_unit_id,
             entry_id,
         } => format!("remove:{ad_unit_id}:{entry_id}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use apex_core::{ExperimentResult, ExperimentSpec};
+
+    /// An adapter with no reporting access: the default method must refuse.
+    struct BareOps;
+
+    #[async_trait]
+    impl PlatformOps for BareOps {
+        async fn writable(&self, _operation: &str) -> bool {
+            false
+        }
+        async fn apply(&self, _action: &Action, _key: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        async fn start_experiment(&self, _spec: &ExperimentSpec) -> Result<String, PlatformError> {
+            Ok(String::new())
+        }
+        async fn experiment(&self, _id: &str) -> Result<ExperimentResult, PlatformError> {
+            Err(PlatformError::Validation("none".into()))
+        }
+        async fn rollback(&self, _action: &Action) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn call_log(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn arm_day(day: &str, revenue: i64) -> apex_lift::window::ArmDay {
+        apex_lift::window::ArmDay {
+            day: day.to_string(),
+            revenue,
+            users: None,
+            second_pull_revenue: Some(revenue),
+            second_pull_users: None,
+            fill: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn adapters_without_reporting_refuse_instead_of_fabricating() {
+        let err = BareOps.experiment_days("exp-1").await.expect_err("refuse");
+        assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn recording_ops_returns_scripted_days_and_logs_the_pull() {
+        let ops = RecordingOps::new();
+        ops.put_experiment_days(
+            "exp-1",
+            ExperimentDays {
+                control: vec![arm_day("2026-10-01", 1_000_000)],
+                test: vec![arm_day("2026-10-01", 1_060_000)],
+            },
+        );
+        let days = ops.experiment_days("exp-1").await.expect("days");
+        assert_eq!(days.control.len(), 1);
+        assert_eq!(days.test[0].revenue, 1_060_000);
+        assert!(ops.call_log().iter().any(|line| line == "days:exp-1"));
+        assert!(ops.experiment_days("missing").await.is_err());
     }
 }

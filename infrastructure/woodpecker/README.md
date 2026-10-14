@@ -7,11 +7,7 @@ Self-hosted Woodpecker runs the gate stack. Lane inventory and expectations:
 ## Topology
 
 - Server and one Linux docker-backend agent run from this directory
-  (`docker-compose.yml`, `WOODPECKER_MAX_PROCS=4`). All docker lanes run there.
-- A darwin/arm64 agent (a macOS host with Xcode) runs `sdk-apple-coverage.yml`
-  through the local backend: `WOODPECKER_BACKEND=local` and the agent label
-  `platform=darwin/arm64`. The lane's steps select that label and use no
-  docker image.
+  (`docker-compose.yml`, `WOODPECKER_MAX_PROCS=4`). Every lane runs there.
 
 ## Secrets
 

@@ -102,7 +102,7 @@ The audit identified that **7 critical database migrations (007-013) were missin
 | AutomatedGrowthEngine | automation/AutomatedGrowthEngine.ts | 659 | ✅ COMPLETE | Migration 013, OpenAI API | ⚠️ AI features require OPENAI_API_KEY |
 | ValueMultiplierService | monetization/ValueMultiplierService.ts | 700 | ✅ COMPLETE | Migrations 007, 010 | None |
 | FirstCustomerExperienceService | growth/FirstCustomerExperienceService.ts | 557 | ✅ COMPLETE | Migration 009 | None |
-| UsageMeteringService | billing/UsageMeteringService.ts | 491 | ✅ COMPLETE | Migration 009, Stripe API | None |
+| UsageMeteringService | billing/UsageMeteringService.ts | 491 | ✅ COMPLETE | Migration 009, Adyen API | None |
 | DunningManagementService | billing/DunningManagementService.ts | 484 | ✅ COMPLETE | Migration 011 | None |
 | EmailAutomationService | email/EmailAutomationService.ts | 950 | ✅ COMPLETE | Migration 008 | ⚠️ Requires email provider config |
 | InfluenceBasedSalesService | sales/InfluenceBasedSalesService.ts | ~1200 | ✅ COMPLETE | Migration 014 | None |
@@ -124,7 +124,7 @@ Core Services (17 total)
 │
 ├── External APIs
 │   ├── OpenAI (optional for AI features)
-│   ├── Stripe (required for billing)
+│   ├── Adyen (required for billing)
 │   ├── Email Provider (Self-hosted Postfix/ApexMail)
 │   └── GitHub API (changelog generation)
 │
@@ -188,7 +188,7 @@ DELETE FROM api_logs WHERE created_at < NOW() - INTERVAL '90 days';
 |------|-----|-----------|---------|--------|
 | 00:00 | Email queue processing | Every minute | EmailAutomationService | ✅ |
 | 01:00 | Usage limit checks | Hourly | UsageMeteringService | ✅ |
-| 02:00 | Stripe usage sync | Daily 2 AM | UsageMeteringService | ✅ |
+| 02:00 | Adyen usage sync | Daily 2 AM | UsageMeteringService | ✅ |
 | 03:00 | Dunning retries | Daily 3 AM | DunningManagementService | ✅ |
 | 04:00 | ML model optimization | Daily 4 AM | MLModelOptimizationService | ✅ |
 | 05:00 | Geographic expansion discounts | Daily 5 AM | ComprehensiveAutomationService | ✅ |
@@ -878,7 +878,7 @@ logger.info({ customerId }, `Sent referral invitation to ${maskEmail(email)}`);
 
 ✅ **GOOD:** Dunning retries with exponential backoff  
 ✅ **GOOD:** Email queue retries (max 3)  
-⚠️ **CONCERN:** No circuit breaker for external APIs (Stripe, OpenAI)
+⚠️ **CONCERN:** No circuit breaker for external APIs (Adyen, OpenAI)
 
 **Recommendation:** Implement circuit breaker:
 
@@ -894,7 +894,7 @@ const options = {
 const breaker = new CircuitBreaker(stripeAPI.charges.create, options);
 
 breaker.on('open', () => {
-  logger.error('Circuit breaker opened for Stripe API');
+  logger.error('Circuit breaker opened for Adyen API');
   // Send alert to PagerDuty
 });
 ```

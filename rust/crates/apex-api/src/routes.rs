@@ -8,7 +8,7 @@
 //! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
-//! | `POST /v1/stripe/webhook` | `200 {"received":true,"timestamp":t}` | `400 invalid_signature`, `503 webhook_not_configured` |
+//! | `POST /v1/adyen/webhook` | `200 {"received":true}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
 //! with the wrong method is axum's `405` (asserted by tests).
@@ -53,16 +53,21 @@ pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/metrics", get(crate::metrics::metrics))
         .route("/v1/audit/{platform}", get(audit_report).post(live_audit))
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
-        .route("/v1/stripe/webhook", post(stripe_webhook))
+        .route("/v1/adyen/webhook", post(adyen_webhook))
         .route("/", get(console_overview))
         .route("/console/audit", get(console_audit))
         .route("/console/ledger", get(console_ledger))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(shape_oversized_responses))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::metrics::track_requests,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -248,43 +253,44 @@ fn parse_cycle_request(body: &[u8]) -> Result<CycleRequest, ApiError> {
     serde_json::from_value(value).map_err(|_| invalid())
 }
 
-async fn stripe_webhook(
+async fn adyen_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Precedence, pinned by tests: a configured `StripeClient` supplies both
-    // the signing secret and the freshness tolerance (its own
-    // `tolerance_secs`), so a stricter tolerance on the client is never
-    // silently widened. The state's explicit `webhook_secret` and
-    // `stripe_tolerance_secs` are the fallback for deployments that hold only
-    // a secret; with neither configured the route is 503.
-    let (secret, tolerance) = match &state.stripe {
-        Some(client) => (client.webhook_secret().to_vec(), client.tolerance_secs()),
-        None => match &state.webhook_secret {
-            Some(secret) => (secret.clone(), state.stripe_tolerance_secs),
-            None => return Err(ApiError::WebhookNotConfigured),
+    // Precedence, pinned by tests: a configured AdyenClient supplies the HMAC
+    // key; the state's explicit `adyen_hmac_key` is the fallback for
+    // deployments that hold only the key. With neither the route is 503.
+    let hmac_key = match &state.adyen {
+        Some(client) => client.hmac_key().to_vec(),
+        None => match &state.adyen_hmac_key {
+            Some(key) => key.clone(),
+            None => return Err(ApiError::AdyenWebhookNotConfigured),
         },
     };
     let signature_header = headers
-        .get("stripe-signature")
+        .get("x-adyen-hmac-sha256")
         .and_then(|value| value.to_str().ok())
         .ok_or(ApiError::InvalidSignature)?;
-    let now_unix_s = state.clock.now_unix_s();
-    let event = apex_billing::verify_stripe_signature(
-        &body,
-        signature_header,
-        &secret,
-        tolerance,
-        now_unix_s,
-    )
-    .map_err(|error| {
-        tracing::debug!(%error, "stripe signature refused");
+    apex_billing::verify_adyen_webhook(&body, signature_header, &hmac_key).map_err(|error| {
+        tracing::debug!(%error, "adyen signature refused");
         ApiError::InvalidSignature
     })?;
-    Ok(Json(
-        json!({ "received": true, "timestamp": event.timestamp }),
-    ))
+    // The event must be a shaped notification: every collected event carries
+    // an eventCode and a pspReference; anything else is refused so a malformed
+    // delivery can never masquerade as handled.
+    let event: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("malformed_event"))?;
+    let event_code = event
+        .get("eventCode")
+        .and_then(|v| v.as_str())
+        .ok_or(ApiError::BadRequest("malformed_event"))?;
+    let psp_reference = event
+        .get("pspReference")
+        .and_then(|v| v.as_str())
+        .ok_or(ApiError::BadRequest("malformed_event"))?;
+    tracing::info!(%event_code, %psp_reference, "adyen webhook accepted");
+    Ok(Json(json!({ "received": true })))
 }
 
 async fn console_overview() -> Html<String> {
@@ -416,6 +422,52 @@ mod tests {
     use crate::state::AppState;
 
     use super::*;
+
+    #[tokio::test]
+    async fn metrics_endpoint_counts_requests_and_exposes_uptime() {
+        let app = router(AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        ));
+        let health = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(health.status(), axum::http::StatusCode::OK);
+
+        let metrics = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/metrics")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(metrics.status(), axum::http::StatusCode::OK);
+        let content_type = metrics
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        let body = axum::body::to_bytes(metrics.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("apex_api_requests_total{status=\"2xx\"} 1"),
+            "{text}"
+        );
+        assert!(text.contains("apex_api_uptime_seconds"), "{text}");
+    }
 
     #[tokio::test]
     async fn fallback_and_method_mismatch_are_axum_defaults() {

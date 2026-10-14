@@ -1,5 +1,5 @@
 {
-  "__comment": "Suite registry: every code file must be claimed by exactly one suite. 'covers' are glob patterns relative to the repo root. Rust crates are covered by cargo test in the apex-rs-coverage lane; the SDK domains are covered by their platform suites (jest for web and react-native, gradle unit tests for android, swift test for ios and tvos, flutter test, and the Unity edit-mode suite) in the SDK lanes.",
+  "__comment": "Suite registry: every code file must be claimed by exactly one suite. 'covers' are glob patterns relative to the repo root; every suite runs through cargo test in the apex-rs-coverage lane.",
   "suites": [
     {
       "id": "apex-core-unit",
@@ -50,62 +50,9 @@
       ]
     },
     {
-      "id": "mail-server-tests",
+      "id": "apex-lift-tests",
       "covers": [
-        "services/mail-server/**/*.rs"
-      ]
-    },
-    {
-      "id": "android-core-tests",
-      "covers": [
-        "sdk/core/android/src/main/**/*.kt",
-        "sdk/core/android/strictmode-sample/src/main/**/*.kt"
-      ]
-    },
-    {
-      "id": "android-ctv-tests",
-      "covers": [
-        "sdk/ctv/android-tv/src/main/**/*.kt"
-      ]
-    },
-    {
-      "id": "ios-swift-tests",
-      "covers": [
-        "sdk/core/ios/Sources/**/*.swift",
-        "sdk/adapter-dev-kit/ios/Sources/**/*.swift"
-      ]
-    },
-    {
-      "id": "tvos-swift-tests",
-      "covers": [
-        "sdk/ctv/tvos/Sources/**/*.swift"
-      ]
-    },
-    {
-      "id": "flutter-sdk-tests",
-      "covers": [
-        "sdk/flutter/lib/**/*.dart"
-      ]
-    },
-    {
-      "id": "web-sdk-tests",
-      "covers": [
-        "sdk/web/src/**/*.ts",
-        "sdk/web/src/**/*.tsx"
-      ]
-    },
-    {
-      "id": "react-native-sdk-tests",
-      "covers": [
-        "sdk/react-native/src/**/*.ts",
-        "sdk/react-native/src/**/*.tsx"
-      ]
-    },
-    {
-      "id": "unity-tier1-tests",
-      "covers": [
-        "sdk/core/unity/Runtime/**/*.cs",
-        "sdk/core/unity/Editor/**/*.cs"
+        "rust/crates/apex-lift/**"
       ]
     }
   ]

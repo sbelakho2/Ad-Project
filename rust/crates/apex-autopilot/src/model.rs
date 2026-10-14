@@ -54,18 +54,35 @@ pub struct Proposal {
     pub rationale: String,
     /// Expected effect in basis points; must be in (0, policy.max_step_bp].
     pub expected_effect_bp: i64,
+    /// The setting's value as read from the platform immediately before
+    /// proposing, so the pre-registration can pin the prior state.
+    pub prev_value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutopilotPolicy {
     pub max_actions_per_day: u32,
     /// Magnitude cap per change in basis points (20% = 2000 bp).
     pub max_step_bp: i64,
-    /// Minimum platform-measured lift to keep a change (1% = 100 bp).
-    pub min_lift_bp: i64,
-    /// Minimum platform-reported confidence in basis points (95% = 9500).
-    pub min_confidence_bp: i32,
+    /// Pre-registration burn-in days (default 3).
+    pub burn_in_days: u32,
+    /// Analysis window in whole weeks (7, 14, 21 or 28 days).
+    pub window_days: usize,
+    /// Whether the single 99%-bound interim look at the window midpoint is
+    /// allowed.
+    pub interim_look: bool,
+    /// Whether the one-week extension is allowed when the point estimate is
+    /// positive but the bound is not.
+    pub extension_allowed: bool,
+    /// Planned test-arm share of users (0.25 default, 0.5 for low-risk
+    /// changes under 1% worst-case loss).
+    pub test_share: f64,
+    /// Minimum point lift to keep a change (1% = 0.01), from the spec's keep
+    /// condition 3.
+    pub min_point_lift: f64,
+    /// Guardrail thresholds, tightenable from the spec defaults.
+    pub thresholds: apex_lift::decision::GuardrailThresholds,
     /// Refuse every write while any Critical audit result exists.
     pub blackout_on_critical_findings: bool,
 }
@@ -76,8 +93,13 @@ impl AutopilotPolicy {
         Self {
             max_actions_per_day: 3,
             max_step_bp: 2_000,
-            min_lift_bp: 100,
-            min_confidence_bp: 9_500,
+            burn_in_days: 3,
+            window_days: 14,
+            interim_look: true,
+            extension_allowed: true,
+            test_share: 0.25,
+            min_point_lift: 0.01,
+            thresholds: Default::default(),
             blackout_on_critical_findings: true,
         }
     }
@@ -108,22 +130,33 @@ pub struct CycleOutcome {
     pub skipped: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "result")]
 pub enum SettleOutcome {
+    /// The change was kept: billable lambda comes from the engine's lower
+    /// bound, and the signed result record is already in the ledger.
     Kept {
-        lift_bp: i64,
-        confidence_bp: i32,
-        winner_variant_id: String,
-        fee_micros: Option<Micros>,
-        billing_seq: Option<u64>,
+        experiment_id: String,
+        /// Point lift from the log-ratio estimator.
+        lift: f64,
+        /// Billable lift: the one-sided 90% (or 99% interim) lower bound.
+        lambda: f64,
+        lower_90: f64,
+        bootstrap_lower: f64,
+        /// Ledger sequence of the signed result record.
+        result_seq: u64,
     },
+    /// The change was rolled back: no fee.
     RolledBack {
-        lift_bp: i64,
-        confidence_bp: i32,
+        lift: f64,
         reason: String,
         rollback_seq: u64,
     },
+    /// The window is not complete; wait.
+    Pending { reason: String },
+    /// The test was voided (publisher edit, split mismatch, incident); no
+    /// decision, no fee.
+    Voided { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

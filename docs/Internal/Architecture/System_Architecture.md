@@ -130,7 +130,7 @@ The core logic of the platform.
 - **Key Modules**:
     - `rtb/`: Real-Time Bidding engine. Handles auction logic.
     - `ssai/`: Server-Side Ad Insertion. Stitches ads into video streams.
-    - `billing/`: Stripe integration, invoice generation.
+    - `billing/`: Adyen integration, invoice generation.
     - `transparency/`: Cryptographic signing of auction logs.
     - `fraud/`: Integration with ML fraud detection.
 - **Configuration**: Environment variables managed via `docker-compose.prod.yml` or `.env`.
@@ -204,7 +204,7 @@ The platform implements **tier-aware rate limiting** with Redis backing. Limits 
 - `backend/src/middleware/tieredRateLimiter.ts` - Redis-backed middleware
 
 **Industry Benchmarks Used:**
-- Stripe: 100 req/sec (6,000/min)
+- Adyen: 100 req/sec (6,000/min)
 - GitHub: 5,000/hour (83/min authenticated)
 - Twitter/X Pro: 900/15min (60/min)
 

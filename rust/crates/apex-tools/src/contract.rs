@@ -26,13 +26,12 @@ pub const CI_GENERATED_PATH_PATTERNS: &[&str] = &[
 pub fn contract(repo: &Repo, check: &str, update_baseline: bool) -> Result<(), String> {
     match check {
         "ci-reference-integrity" => ci_reference_integrity(repo),
-        "openapi-parity" => openapi_parity(repo),
         "content-guard-adversarial" => content_guard_adversarial(repo),
-        "samples" => samples(repo),
         "docs-references" => docs_references(repo, update_baseline),
         "pipeline-paths" => pipeline_paths(repo),
+        "github-metadata" => github_metadata(repo),
         other => Err(format!(
-            "unknown contract check '{other}' (use ci-reference-integrity|openapi-parity|content-guard-adversarial|samples|docs-references|pipeline-paths)"
+            "unknown contract check '{other}' (use ci-reference-integrity|content-guard-adversarial|docs-references|pipeline-paths)"
         )),
     }
 }
@@ -144,100 +143,8 @@ pub fn ci_reference_integrity(repo: &Repo) -> Result<(), String> {
 /// OpenAPI parity: every documented path must resolve in route/controller
 /// sources. The TypeScript backend is absent from an all-Rust checkout, so an
 /// absent backend tree is reported rather than failed.
-pub fn openapi_parity(repo: &Repo) -> Result<(), String> {
-    if !repo.exists("backend") {
-        println!("openapi-parity: no backend tree in this checkout; nothing to verify (PASS)");
-        return Ok(());
-    }
-    let spec_path = "backend/src/openapi/billing.yaml";
-    if !repo.exists(spec_path) {
-        return Err(format!(
-            "contract gate failed [openapi-parity] {spec_path} missing"
-        ));
-    }
-    let spec = repo.read(spec_path)?;
-    let path_re = re(r"(?m)^\s{2}/([^\s:]+):")?;
-    let paths: Vec<String> = path_re
-        .captures_iter(&spec)
-        .map(|c| format!("/{}", &c[1]))
-        .collect();
-    if paths.is_empty() {
-        return Err("contract gate failed [openapi-parity] no paths found in billing.yaml (parsed incorrectly?)".into());
-    }
-    let src_re = re(r"^backend/(src/routes|routes|src/controllers)")?;
-    let ts_re = re(r"\.ts$")?;
-    let backend_src: Vec<String> = repo
-        .walk()
-        .into_iter()
-        .filter(|p| src_re.is_match(p) && ts_re.is_match(p))
-        .collect();
-    let mut blob = String::new();
-    for p in &backend_src {
-        if let Ok(text) = repo.read(p) {
-            blob.push_str(&text);
-            blob.push('\n');
-        }
-    }
-    let mut missing = Vec::new();
-    for doc_path in &paths {
-        let stripped = strip_version_prefix(doc_path);
-        if blob.contains(&stripped) {
-            continue;
-        }
-        if !route_regexes_match(doc_path, &blob)? {
-            missing.push(doc_path.clone());
-        }
-    }
-    if !missing.is_empty() {
-        let lines: Vec<String> = missing.iter().map(|m| format!("  - {m}")).collect();
-        return Err(format!(
-            "contract gate failed [openapi-parity] documented OpenAPI paths not found in route/controller sources:\n{}",
-            lines.join("\n")
-        ));
-    }
-    println!(
-        "openapi-parity PASS ({} documented paths all resolvable in sources)",
-        paths.len()
-    );
-    Ok(())
-}
-
-fn strip_version_prefix(path: &str) -> String {
-    let without = path
-        .strip_prefix("/v1/")
-        .or_else(|| path.strip_prefix("/api/v1/"));
-    match without {
-        Some(rest) => format!("/{rest}"),
-        None => path.to_string(),
-    }
-}
-
 /// Try suffixes of the documented path (routers mount sub-routers, so the
 /// mount prefix may be absent from the registrar call).
-fn route_regexes_match(doc_path: &str, blob: &str) -> Result<bool, String> {
-    let normalized = strip_version_prefix(doc_path);
-    let param_re = re(r"\{[^}]+\}")?;
-    let normalized = param_re.replace_all(&normalized, ":param").to_string();
-    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
-    // The JS loop walks suffixes that keep at least two segments;
-    // saturating_sub mirrors its Math.max guard for short paths.
-    let top = segments.len().saturating_sub(2);
-    let escape_re = re(r"[.*+?^${}()|\[\]\\]")?;
-    let param_rx = re(r":param")?;
-    for i in 0..=top {
-        let candidate = format!("/{}", segments[i..].join("/"));
-        let escaped = escape_re.replace_all(&candidate, "\\$0").to_string();
-        let body = param_rx
-            .replace_all(&escaped, ":[A-Za-z_][A-Za-z0-9_]*")
-            .to_string();
-        let pattern = format!("['\"`]{body}['\"`]");
-        if re(&pattern)?.is_match(blob) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// Forbidden provider list, ported from tools/content-guard.js. Word-boundary
 /// rules; split-token text is intentionally not fuzzy-matched.
 pub const FORBIDDEN_PATTERNS: &[&str] = &[
@@ -310,89 +217,71 @@ pub fn content_guard_adversarial(repo: &Repo) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct SamplesContract {
-    #[serde(rename = "shapeChecks")]
-    pub shape_checks: Vec<ShapeCheck>,
-    pub web: WebSample,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ShapeCheck {
-    pub dir: String,
-    pub required: Vec<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct WebSample {
-    #[serde(rename = "packageJson")]
-    pub package_json: String,
-    pub entry: String,
-}
-
-/// Pure: structural failures for the samples contract, given an existence
-/// predicate and a build-script reader.
-pub fn samples_failures(
-    spec: &SamplesContract,
-    exists: &dyn Fn(&str) -> bool,
-    read_pkg_script: &dyn Fn(&str) -> Option<String>,
-) -> Vec<String> {
+/// Pure: structural failures in the GitHub metadata files.
+pub fn github_metadata_failures(
+    required_checks: &str,
+    dependabot: &str,
+) -> Result<Vec<String>, String> {
     let mut failures = Vec::new();
-    for check in &spec.shape_checks {
-        if !exists(&check.dir) {
-            failures.push(format!("{}: sample directory missing", check.dir));
-            continue;
-        }
-        for rel in &check.required {
-            if !exists(&format!("{}/{}", check.dir, rel)) {
-                failures.push(format!("{}: required path missing: {rel}", check.dir));
+    match serde_json::from_str::<serde_json::Value>(required_checks) {
+        Ok(value) => match value.get("required").and_then(|v| v.as_array()) {
+            None => failures.push("required-checks.json needs a 'required' array".to_string()),
+            Some(list) => {
+                if list.is_empty() {
+                    failures.push("required-checks.json lists no checks".to_string());
+                }
+                let mut seen: Vec<String> = Vec::new();
+                for item in list {
+                    match item.as_str() {
+                        Some(name) if !name.trim().is_empty() => {
+                            if seen.contains(&name.to_string()) {
+                                failures.push(format!("required-checks.json repeats '{name}'"));
+                            }
+                            seen.push(name.to_string());
+                        }
+                        _ => {
+                            failures.push("required-checks.json has a blank check name".to_string())
+                        }
+                    }
+                }
             }
+        },
+        Err(error) => failures.push(format!("required-checks.json is not JSON: {error}")),
+    }
+    if !dependabot.contains("version: 2") {
+        failures.push("dependabot.yml is missing 'version: 2'".to_string());
+    }
+    let ecosystems = dependabot.matches("package-ecosystem:").count();
+    if ecosystems == 0 {
+        failures.push("dependabot.yml declares no package-ecosystem updates".to_string());
+    }
+    for (needle, label) in [
+        ("directory:", "directory"),
+        ("interval:", "schedule interval"),
+    ] {
+        if dependabot.matches(needle).count() < ecosystems {
+            failures.push(format!("dependabot.yml has updates without a {label}"));
         }
     }
-    if !exists(&spec.web.package_json) {
-        failures.push(format!("{}: missing", spec.web.package_json));
-    } else {
-        let build = read_pkg_script(&spec.web.package_json);
-        match build {
-            Some(b) if !b.trim().is_empty() => {}
-            _ => failures.push(format!(
-                "{}: no build script; the sample must be buildable",
-                spec.web.package_json
-            )),
-        }
-    }
-    if !exists(&spec.web.entry) {
-        failures.push(format!("{}: missing entry page", spec.web.entry));
-    }
-    failures
+    Ok(failures)
 }
 
-pub fn samples(repo: &Repo) -> Result<(), String> {
-    if !repo.exists("sdk") {
-        println!("samples: no sdk/ tree in this checkout; sample contract not applicable (PASS)");
-        return Ok(());
-    }
-    let spec_text = repo.read("tools/coverage/samples-contract.json")?;
-    // The contract file carries a __comment key; accept and ignore extras.
-    let spec: SamplesContract =
-        serde_json::from_str(&spec_text).map_err(|e| format!("samples-contract.json: {e}"))?;
-    let exists = |p: &str| repo.exists(p);
-    let read_script = |p: &str| -> Option<String> {
-        let text = repo.read(p).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-        v.get("scripts")?.get("build")?.as_str().map(str::to_string)
-    };
-    let failures = samples_failures(&spec, &exists, &read_script);
+/// Validate the GitHub metadata files in the repository.
+pub fn github_metadata(repo: &Repo) -> Result<(), String> {
+    let required = repo
+        .read(".github/required-checks.json")
+        .map_err(|e| format!(".github/required-checks.json: {e}"))?;
+    let dependabot = repo
+        .read(".github/dependabot.yml")
+        .map_err(|e| format!(".github/dependabot.yml: {e}"))?;
+    let failures = github_metadata_failures(&required, &dependabot)?;
     if !failures.is_empty() {
         return Err(format!(
-            "contract gate failed [samples] sample projects failed the structural contract:\n  - {}",
+            "contract gate failed [github-metadata]:\n  - {}",
             failures.join("\n  - ")
         ));
     }
-    println!(
-        "samples contract PASS: {} projects carry their buildable shape; compile execution is the phase-2 lane",
-        spec.shape_checks.len() + 1
-    );
+    println!("github-metadata contract PASS");
     Ok(())
 }
 
@@ -402,12 +291,13 @@ pub fn docs_reference_violations(
     md_texts: &[(String, String)],
     scripts: &BTreeSet<String>,
     make_targets: &BTreeSet<String>,
+    enforce_npm: bool,
 ) -> Result<Vec<String>, String> {
     let npm_re = re(r"`npm run ([a-z0-9:_-]+)`")?;
     let make_re = re(r"`make ([a-z0-9][a-z0-9_.-]*)`")?;
     let mut bad = Vec::new();
     for (rel, text) in md_texts {
-        for c in npm_re.captures_iter(text) {
+        for c in npm_re.captures_iter(text).filter(|_| enforce_npm) {
             if !scripts.contains(&c[1]) {
                 bad.push(format!(
                     "{rel}: references npm script '{}' which exists nowhere",
@@ -427,18 +317,7 @@ pub fn docs_reference_violations(
     Ok(bad)
 }
 
-pub const PKG_JSON_LIST: &[&str] = &[
-    "package.json",
-    "backend/package.json",
-    "console/package.json",
-    "website/package.json",
-    "control-plane/package.json",
-    "sdk/web/package.json",
-    "sdk/react-native/package.json",
-    "sdk/samples/web/apex-sandbox-web/package.json",
-    "sdk/core/unity/package.json",
-    "tools/package.json",
-];
+pub const PKG_JSON_LIST: &[&str] = &["package.json"];
 
 pub const DOCS_REFERENCES_BASELINE: &str = "tools/coverage/docs-references-baseline.txt";
 
@@ -478,13 +357,19 @@ pub fn make_targets(repo: &Repo) -> Result<BTreeSet<String>, String> {
 pub fn docs_references(repo: &Repo, update_baseline: bool) -> Result<(), String> {
     let scripts = known_scripts(repo)?;
     let targets = make_targets(repo)?;
+    // With no npm project anywhere in the tree, npm mentions are historical
+    // prose, not tool references; the check says so instead of flagging them.
+    let enforce_npm = PKG_JSON_LIST.iter().any(|path| repo.exists(path));
+    if !enforce_npm {
+        println!("docs-references: no package.json exists in this checkout; npm-run mentions are not checked");
+    }
     // Fail closed: an unreadable document might hide a stale reference.
     let mut md_texts: Vec<(String, String)> = Vec::new();
     for p in repo.walk().into_iter().filter(|p| p.ends_with(".md")) {
         let text = repo.read(&p)?;
         md_texts.push((p, text));
     }
-    let bad = docs_reference_violations(&md_texts, &scripts, &targets)?;
+    let bad = docs_reference_violations(&md_texts, &scripts, &targets, enforce_npm)?;
     let mut per_file: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for message in &bad {
         let file = message
@@ -702,13 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn openapi_route_suffixes_resolve_mounted_routers() {
-        let blob = "router.get('/invoices/:id/pdf', handler);\napp.use('/billing', router);\n";
-        assert!(route_regexes_match("/billing/invoices/{id}/pdf", blob).unwrap());
-        assert!(!route_regexes_match("/billing/refunds/{id}", blob).unwrap());
-    }
-
-    #[test]
     fn content_guard_matrix_matches_js() {
         assert!(scan_text_forbidden("we use HEROKU for this").unwrap());
         assert!(!scan_text_forbidden("V e r c e l").unwrap());
@@ -721,31 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn samples_shape_checks_report_missing_pieces() {
-        let spec = SamplesContract {
-            shape_checks: vec![ShapeCheck {
-                dir: "sdk/samples/ios".into(),
-                required: vec!["project.yml".into()],
-            }],
-            web: WebSample {
-                package_json: "sdk/samples/web/package.json".into(),
-                entry: "sdk/samples/web/index.html".into(),
-            },
-        };
-        let exists = |p: &str| p == "sdk/samples/ios" || p == "sdk/samples/web/package.json";
-        let read = |_p: &str| Some("build".to_string());
-        let failures = samples_failures(&spec, &exists, &read);
-        assert!(failures
-            .iter()
-            .any(|f| f.contains("required path missing: project.yml")));
-        assert!(failures.iter().any(|f| f.contains("missing entry page")));
-        let exists_all = |_p: &str| true;
-        let no_build = |_p: &str| Some("   ".to_string());
-        let failures = samples_failures(&spec, &exists_all, &no_build);
-        assert!(failures.iter().any(|f| f.contains("no build script")));
-    }
-
-    #[test]
     fn docs_references_flag_unknown_scripts() {
         let scripts: BTreeSet<String> = ["build".to_string()].into_iter().collect();
         let md = vec![(
@@ -753,9 +606,37 @@ mod tests {
             "run `npm run build` then `npm run do:tls`".to_string(),
         )];
         let targets: BTreeSet<String> = ["test".to_string()].into_iter().collect();
-        let bad = docs_reference_violations(&md, &scripts, &targets).unwrap();
+        let bad = docs_reference_violations(&md, &scripts, &targets, true).unwrap();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].contains("do:tls"));
+    }
+
+    #[test]
+    fn github_metadata_refuses_broken_files() {
+        let good_checks = r#"{"required": ["coverage-gate", "dogfood-audit"]}"#;
+        let good_dependabot = "version: 2\nupdates:\n  - package-ecosystem: cargo\n    directory: \"/\"\n    schedule:\n      interval: weekly\n";
+        assert!(github_metadata_failures(good_checks, good_dependabot)
+            .unwrap()
+            .is_empty());
+        for (checks, dependabot) in [
+            (r#"{"required": []}"#, good_dependabot),
+            (r#"{"required": ["a", "a"]}"#, good_dependabot),
+            (r#"{"required": ["a", ""]}"#, good_dependabot),
+            (r#"{"required": "a"}"#, good_dependabot),
+            (good_checks, "version: 2\n"),
+            (good_checks, "version: 1\nupdates:\n"),
+            (
+                good_checks,
+                "version: 2\nupdates:\n  - package-ecosystem: cargo\n",
+            ),
+        ] {
+            assert!(
+                !github_metadata_failures(checks, dependabot)
+                    .unwrap()
+                    .is_empty(),
+                "must refuse: {checks} / {dependabot}"
+            );
+        }
     }
 
     #[test]
@@ -766,7 +647,7 @@ mod tests {
             "docs/y.md".to_string(),
             "run `make test` before `make deploy`".to_string(),
         )];
-        let bad = docs_reference_violations(&md, &scripts, &targets).unwrap();
+        let bad = docs_reference_violations(&md, &scripts, &targets, true).unwrap();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].contains("make target 'deploy'"), "{:?}", bad);
     }

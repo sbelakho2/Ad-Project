@@ -184,6 +184,8 @@ const SKIP_DIRS: &[&str] = &[
     "lhci-report",
     ".kilo",
     ".junie",
+    // The future tree is parked product work, not current documentation.
+    "future",
 ];
 
 /// Walk markdown documents under the repo root, slash-separated and sorted.

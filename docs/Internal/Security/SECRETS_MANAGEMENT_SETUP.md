@@ -123,8 +123,8 @@ Add Infisical token to GitHub Secrets and update workflows:
 - `ENABLE_SELF_EVOLVING_AI` - Toggle self-evolving AI (true/false)
 
 **Payment Providers (4)**
-- `STRIPE_SECRET_KEY` - Stripe secret key
-- `STRIPE_WEBHOOK_SECRET` - Stripe webhook signing secret
+- `STRIPE_SECRET_KEY` - Adyen secret key
+- `STRIPE_WEBHOOK_SECRET` - Adyen webhook signing secret
 - `PAYPAL_CLIENT_ID` - PayPal client ID
 - `PAYPAL_SECRET` - PayPal secret
 

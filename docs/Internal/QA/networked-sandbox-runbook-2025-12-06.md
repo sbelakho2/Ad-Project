@@ -4,7 +4,7 @@ This runbook executes checklist sections 0.0.7–0.0.12 on staging, captures evi
 
 Prerequisites
 - Staging console and API up; HSTS and `/ready` verified (see CHANGELOG 2025‑12‑06).
-- Test org in staging; test email inbox; Stripe test keys; Resend sandbox.
+- Test org in staging; test email inbox; Adyen test keys; Resend sandbox.
 - Sandbox apps built (iOS, tvOS, Android, Android TV, Unity, Web) pointing to staging.
 
 Evidence bundle structure
@@ -45,12 +45,12 @@ evidence-2025-12-06/
 3) SEO/canonical/404 + broken links
    - Record canonical, meta, and 404 page screenshots; run link checker and save logs
 
-0.0.9 Billing & Stripe
+0.0.9 Billing & Adyen
 1) Synthetic usage
    - Starter (<$10k), Growth (~$50k), Scale (~$150k) sample usage; run aggregation; capture tier assignments
 2) Cap transition
    - Exceed Starter cap → confirm `requires_payment_method` flips and console shows upgrade prompts
-3) Stripe test customer
+3) Adyen test customer
    - Create customer, add card via Customer Portal, send metered events, finalize invoice
    - Verify webhook transitions: open → paid; download PDF (shows Bel Consulting OÜ + Wise SEPA/ACH text)
 4) Emails

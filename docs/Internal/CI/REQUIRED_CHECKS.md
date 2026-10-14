@@ -14,15 +14,13 @@ as required status checks in branch protection, mirroring
 - `dogfood-audit`: the repository invariants (manifest, ratchet, bans, docs).
 - `contract-coverage`: the infrastructure, contract and content gates.
 
-Per-platform lanes (`apex-rs-coverage`, `sdk-node`, `sdk-android-coverage`,
-`sdk-apple-coverage`, `sdk-unity-coverage`, `sdk-flutter-coverage`,
-`site-perf`, `ui-ux`) feed `coverage-gate` and must pass for it to pass.
+Per-lane gates (`apex-rs-coverage`, `site-perf`, `ui-ux`) feed
+`coverage-gate` and must pass for it to pass.
 
 ## Artifacts
 
-- Rust crates and the mail-server: per-crate lcov files gated by
-  `apex-tools lcov-gate`.
-- SDK lanes: jest, kover, coverlet and flutter lcov or kover reports gated
-  against `tools/coverage/floors.txt`.
+- Rust crates: per-crate lcov files gated by `apex-tools lcov-gate` against
+  `tools/coverage/floors.txt`.
 - The site lane gates the built output; the console lane gates the rendered
-  fixture pages.
+  fixture pages; the contract lane gates the monitoring rules, the edge
+  config and the documentation contracts.

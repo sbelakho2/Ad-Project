@@ -21,13 +21,10 @@ pub const SUBCOMMANDS: &[&str] = &[
     "mutation-smoke",
     "mutation-floor",
     "yaml-policy",
-    "coverage-gate",
     "aggregate-verdict",
     "lcov-gate",
-    "go-func-gate",
     "contract",
     "docs-links",
-    "i18n-parity",
     "css-lint",
     "claims",
     "perf-budget",
@@ -46,7 +43,6 @@ pub mod docs_lint;
 pub mod docslinks;
 pub mod dogfood;
 pub mod glob;
-pub mod i18n;
 pub mod inventory;
 pub mod mutation;
 pub mod perfbudget;

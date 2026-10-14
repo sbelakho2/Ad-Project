@@ -1,10 +1,9 @@
 //! Shared integration-test helpers: temp dirs, fixtures, request plumbing and
-//! one pinned Stripe signature vector.
+//! one pinned Adyen webhook HMAC vector.
 //!
-//! The Stripe vector (`t=1700000000`, secret `whsec_api_test`, body
-//! `{"id":"evt_api","type":"invoice.paid"}`) was computed independently with
-//! `openssl dgst -sha256 -hmac`; tests use it as data so the webhook path is
-//! exercised without a signing dependency.
+//! The Adyen vector (key `hmac_api_test`, the AUTHORISATION body below) was
+//! computed independently with Python `hmac` + base64; tests use it as data
+//! so the webhook path is exercised without a signing dependency.
 
 #![allow(dead_code)]
 
@@ -25,19 +24,17 @@ use tower::ServiceExt;
 /// The publisher materialised by [`write_pub1_ledger`].
 pub const PUBLISHER: &str = "pub1";
 
-/// Signing secret of the pinned webhook vector.
-pub const WEBHOOK_SECRET: &[u8] = b"whsec_api_test";
+/// Webhook HMAC key of the pinned vector.
+pub const WEBHOOK_HMAC_KEY: &[u8] = b"hmac_api_test";
 /// Exact raw body of the pinned webhook vector.
-pub const WEBHOOK_BODY: &[u8] = br#"{"id":"evt_api","type":"invoice.paid"}"#;
-/// Signed timestamp of the pinned webhook vector.
-pub const WEBHOOK_TIMESTAMP: i64 = 1_700_000_000;
-/// HMAC-SHA256(secret = `whsec_api_test`, msg = `1700000000.{"id":"evt_api","type":"invoice.paid"}`).
-pub const WEBHOOK_SIGNATURE: &str =
-    "e6203106a9d7fdf414e82dd7467d2221a3f30ef1c25f8758ab68a16489eb8910";
+pub const WEBHOOK_BODY: &[u8] =
+    br#"{"eventCode":"AUTHORISATION","pspReference":"9916934567890123","success":"true"}"#;
+/// base64(HMAC-SHA256(key = `hmac_api_test`, body = WEBHOOK_BODY)).
+pub const WEBHOOK_SIGNATURE: &str = "Ty6Oev1JYY5G0ANzwIBCb0AIQyaDsUWletqzDv5aOK4=";
 
 /// The valid `Stripe-Signature` header for the pinned vector.
 pub fn webhook_header() -> String {
-    format!("t={WEBHOOK_TIMESTAMP},v1={WEBHOOK_SIGNATURE}")
+    WEBHOOK_SIGNATURE.to_string()
 }
 
 /// Unique temporary directory removed on drop.
@@ -224,6 +221,7 @@ pub fn change_record(index: u64) -> LedgerRecord {
             floor_ecpm: 2_500_000,
         },
         &format!("admob-floor:u{index}:EE"),
+        "0",
     )
 }
 

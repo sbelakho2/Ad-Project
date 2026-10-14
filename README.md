@@ -15,6 +15,7 @@ platform's built-in A/B testing.
 | `rust/crates/apex-autopilot` | Propose, apply, measure via platform-native A/B, keep or roll back |
 | `rust/crates/apex-proof` | Signed, hash-chained change log and billing proofs |
 | `rust/crates/apex-billing` | Lift-based billing: 15-20% of platform-proven lift, no lift no fee |
+| `rust/crates/apex-lift` | The Apex Lift Engine: revenue-per-user log-ratio measurement, guardrails, keep rule, 12-month lift billing |
 | `rust/crates/apex-api` | Axum server with the JSON API and the server-rendered console |
 | `rust/crates/apex-core` | Domain contracts shared by every crate |
 | `site/` | The Zola-built marketing site |

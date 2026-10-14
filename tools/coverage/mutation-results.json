@@ -1,16 +1,20 @@
 {
-  "__comment": "Sample-based mutation smoke for apex-core (money.rs + validation.rs). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.",
-  "generatedAt": "2026-10-14T16:48:18Z",
-  "target": "apex-core: money.rs, validation.rs",
+  "__comment": "Sample-based mutation smoke for the load-bearing logic: apex-core (money, validation) and apex-lift (decision, stats, billing, window). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.",
+  "generatedAt": "2026-10-14T23:53:18Z",
+  "target": "apex-core and apex-lift: money, validation, decision, stats, billing, window",
   "mutants": [
     { "description": "min lift rate 1500 -> 1400", "status": "killed" },
     { "description": "max lift rate 2000 -> 2100", "status": "killed" },
     { "description": "lift basis-points scale 10_000 -> 100", "status": "killed" },
     { "description": "zero-impressions guard == 0 -> == 1", "status": "killed" },
     { "description": "ecpm lower bound 1 -> 0", "status": "killed" },
-    { "description": "country shape check inverted", "status": "killed" }
+    { "description": "country shape check inverted", "status": "killed" },
+    { "description": "bill the upper bound instead of the lower bound", "status": "killed" },
+    { "description": "bootstrap 10th percentile -> median", "status": "killed" },
+    { "description": "pro-rate inclusive day count off by one", "status": "killed" },
+    { "description": "0.5 percent finality tolerance -> 50 percent", "status": "killed" }
   ],
-  "killed": 6,
-  "total": 6,
+  "killed": 10,
+  "total": 10,
   "killRatePercent": 100
 }

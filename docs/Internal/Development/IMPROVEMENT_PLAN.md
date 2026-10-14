@@ -17,7 +17,7 @@ Deliverables are grouped by area with prioritized tasks, acceptance criteria, an
 - Consolidated CI gate `ci-all.yml` covering backend (with Postgres/ClickHouse services), console, Android/iOS/CTV SDKs.
 - Android SDK build: modern toolchain, R8/proguard, size gate (`checkSdkSize`), config validation (`validateSdkConfig`), Dokka integration.
 - Monitoring stack: Prometheus, Grafana, Loki, Alertmanager; clear `monitoring/README.md`; initial alert rules present.
-- Backend stack: Express/TypeScript, Postgres, Redis/BullMQ, ClickHouse, prom-client, Stripe/email; migration verification in CI.
+- Backend stack: Express/TypeScript, Postgres, Redis/BullMQ, ClickHouse, prom-client, Adyen/email; migration verification in CI.
 - Console app: Next.js with type‑check and accessibility testing lane.
 - CTV CI lanes (Android TV, tvOS) present.
 
@@ -195,7 +195,7 @@ Priority C (Week 5+):
 
 #### 12) Risks and mitigations
 - macOS runners availability for iOS/tvOS lanes — Mitigation: queue friendly windows, use `runs-on: macos-13` with retry.
-- Flaky external dependencies in CI (Stripe/GCS/S3) — Mitigation: use mocks/stubs for unit/integration; reserve live tests for staging smoke.
+- Flaky external dependencies in CI (Adyen/GCS/S3) — Mitigation: use mocks/stubs for unit/integration; reserve live tests for staging smoke.
 - Alert noise after expansion — Mitigation: start with `warning` thresholds; iterate with silences; recording rules for stability.
 - Publishing credentials/config drift — Mitigation: environment secrets, double‑checked doc, dry‑run releases in staging.
 

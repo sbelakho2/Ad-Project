@@ -29,7 +29,7 @@
 - [x] Authentication required on all billing endpoints
 - [x] RBAC enforcement for admin operations
 - [x] CSRF protection enabled
-- [x] Stripe webhook signature verification implemented
+- [x] Adyen webhook signature verification implemented
 - [ ] Security audit completed by team
 - [ ] Penetration testing performed
 
@@ -54,12 +54,12 @@ psql $DATABASE_URL -c "\dt stripe_webhook_events"
 - [ ] Tables created with correct schema
 - [ ] Indexes created on all required columns
 
-### Step 2: Stripe Configuration
+### Step 2: Adyen Configuration
 ```bash
-# Go to Stripe Dashboard > Developers > Webhooks
+# Go to Adyen Dashboard > Developers > Webhooks
 # Click "Add endpoint"
 ```
-1. [ ] Set webhook URL: `https://yourdomain.com/api/v1/webhooks/stripe`
+1. [ ] Set webhook URL: `https://yourdomain.com/api/v1/webhooks/adyen`
 2. [ ] Select events:
    - [ ] `invoice.created`
    - [ ] `invoice.finalized`
@@ -125,7 +125,7 @@ curl -H "Cookie: auth_token=..." https://yourdomain.com/api/v1/billing/invoices
 
 #### 4. Webhook Handler
 ```bash
-# Send test webhook from Stripe Dashboard
+# Send test webhook from Adyen Dashboard
 ```
 - [ ] Webhook received successfully
 - [ ] Event logged to `stripe_webhook_events` table
@@ -150,7 +150,7 @@ curl -H "Cookie: auth_token=..." https://yourdomain.com/api/v1/billing/invoices
 5. [ ] Verify PostgreSQL `usage_records` table updated
 
 #### Invoice Generation Flow
-1. [ ] Trigger Stripe subscription billing (or wait for billing cycle)
+1. [ ] Trigger Adyen subscription billing (or wait for billing cycle)
 2. [ ] Verify `invoice.created` webhook received
 3. [ ] Check `invoices` table for new record
 4. [ ] Verify invoice appears in console UI
@@ -259,7 +259,7 @@ cd console && npm run build && pm2 restart apexmediation-console
 - [x] Users can view invoice details with line items
 - [x] Users can download invoice PDFs
 - [x] Admins can trigger reconciliation
-- [x] Stripe webhooks processed automatically
+- [x] Adyen webhooks processed automatically
 - [x] Feature flags control billing visibility
 
 ### Non-Functional Requirements
@@ -295,7 +295,7 @@ cd console && npm run build && pm2 restart apexmediation-console
 - [ ] Runbook documented: _______________
 
 ### Finance Team
-- [ ] Stripe integration verified: _______________
+- [ ] Adyen integration verified: _______________
 - [ ] Reconciliation process approved: _______________
 
 ---

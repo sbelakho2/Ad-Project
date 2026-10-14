@@ -136,6 +136,18 @@ fn site_origin(repo: &Repo) -> Option<String> {
     Some(caps[1].trim_end_matches('/').to_string())
 }
 
+/// The deploy-time domain check: a placeholder origin must never pass a
+/// production gate run. `APEX_PLACEHOLDER_DOMAIN_OK=1` allows local builds.
+pub fn placeholder_domain_violation(origin: &str, allow: bool) -> Option<String> {
+    if !allow && origin.contains(".example") {
+        Some(format!(
+            "site config base_url is still the placeholder '{origin}'; set the real domain or export APEX_PLACEHOLDER_DOMAIN_OK=1 for local builds"
+        ))
+    } else {
+        None
+    }
+}
+
 pub fn perf_budget(repo: &Repo, dist: &str, min_pages: usize) -> Result<(), String> {
     let dist_path = repo.path(dist);
     if !dist_path.is_dir() {
@@ -145,6 +157,14 @@ pub fn perf_budget(repo: &Repo, dist: &str, min_pages: usize) -> Result<(), Stri
         ));
     }
     let origin = site_origin(repo);
+    let allow_placeholder = std::env::var("APEX_PLACEHOLDER_DOMAIN_OK")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if let Some(origin_value) = &origin {
+        if let Some(violation) = placeholder_domain_violation(origin_value, allow_placeholder) {
+            return Err(violation);
+        }
+    }
     let mut pages: BTreeMap<String, String> = BTreeMap::new();
     let mut css_bytes = 0usize;
     for file in walk_files(&dist_path, &[]) {
@@ -324,5 +344,17 @@ mod tests {
             .collect();
         let v = check_dist(&one, 0, HTML_BUDGET_BYTES, CSS_BUDGET_BYTES, 6, None).unwrap();
         assert!(v.iter().any(|m| m.contains("pages")));
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::placeholder_domain_violation;
+
+    #[test]
+    fn placeholder_origins_fail_unless_explicitly_allowed() {
+        assert!(placeholder_domain_violation("https://apexmediation.example", false).is_some());
+        assert!(placeholder_domain_violation("https://apexmediation.example", true).is_none());
+        assert!(placeholder_domain_violation("https://apexmediation.ee", false).is_none());
     }
 }

@@ -264,7 +264,7 @@ Format: every row is given/when/then with an anchor. `A#` ids are stable and ref
 |---|---|---|---|---|
 | B1 | usage events for tenant | meter replay (same event id twice) | idempotent: charged once; duplicate dropped, metric `meter_duplicates_total` bumped | `backend/src/services/billing/UsageMetering*` AUDIT-REQUIRED |
 | B2 | negative/NaN/huge quantities (`1e308`, `-1`, `NaN`) | metering ingest | rejected by zod schema; no partial write; alert metric | `backend/src/config/env.ts` + billing schemas; AUDIT-REQUIRED (current accept/reject) |
-| B3 | Stripe webhook valid sig, `t` 10 min old | process | rejected (Stripe tolerance 5 min). **IMPLEMENTED in this change**: tolerance pinned explicitly to 300s in `constructEvent` | `backend/src/routes/webhooks.routes.ts:86` |
+| B3 | Adyen webhook valid sig, `t` 10 min old | process | rejected (Adyen tolerance 5 min). **IMPLEMENTED in this change**: tolerance pinned explicitly to 300s in `constructEvent` | `backend/src/routes/webhooks.routes.ts:86` |
 | B4 | invoice period boundary | usage at exact `periodEnd` timestamp | attributed to one period only; rounding = banker's rounding to cent, no float accumulation | `services/billing/platformFeeService` (top-level backend/services/billing/) AUDIT-REQUIRED |
 | B5 | payout already in `paid` state | duplicate payout request | 409 or no-op; ledger invariant `sum(entries)==0` holds | AUDIT-REQUIRED |
 
@@ -514,7 +514,7 @@ Three independent verifier waves found critical and major defects in the Rust pr
 | 2 | partial-charge reporting: a mixed sub-cent invoice was charged item by item before the error surfaced | `mixed_sub_cent_invoice_is_refused_before_any_request` | `1666051` |
 | 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `stripe_item_body_is_pinned_form_encoded` | `1666051` |
 | 3 | verify and re-read time of check: the ledger could be swapped between verification and the second read | `ledger_read_path_is_pinned_to_a_single_read` | `3def08a` |
-| 3 | ignored Stripe tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
+| 3 | ignored Adyen tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
 
 ### 9.5 Current green state
 
@@ -657,3 +657,47 @@ request envelope drift (`request_id`, `user_info` against the pinned tests),
 the missing OM SDK test stubs, the Kotlin `SSAIError` visibility clash, the
 react-native bob build configuration, the adapter dev kit package identity
 cycle, the sample app repository mode clash and the unescaped XML ampersand.
+
+### 9.11 Post-audit closure (2026-10-14)
+
+The full repository audit (audit.pdf) directed parking the legacy mediation
+SDK tree: it now lives under `future/sdk` with a marker README, classified as
+`FUTURE_SURFACE` so the gates prove the files exist without treating them as
+product code. The standalone mail-server workspace was removed, which
+contradicted nothing in the no-SDK product plan. The five SDK lanes and the
+mail-server matrix entry left with them; the lane set is now `apex-rs-coverage`,
+`dogfood-audit`, `contract-coverage`, `site-perf` and `ui-ux`, plus the
+aggregate verdict. Policy domains, suite claims and floors were pruned in the
+same change with a new ratchet history entry. The monitoring stack now watches
+`apex-api` only. The pipeline inventory check now fails in both directions, so
+a subcommand with no caller cannot survive.
+
+### 9.12 Apex Lift Engine (2026-10-14)
+
+The lift engine design spec (Oct 14, 2026) is implemented as the new
+`apex-lift` crate and wired through the gate stack.
+
+| area | implementation |
+|---|---|
+| Measurement | `stats.rs`: mean daily log ratio of revenue per user, one-sided t bounds (90% final, 99% interim, 90% upper for harm), block bootstrap cross-check, duration planner with the spec's table pinned |
+| Windows | `window.rs`: three-day burn-in, two-pull finality within 0.5%, whole-week windows, incident exclusion, per-arm values (active users on LevelPlay, allocated share on MAX) |
+| Guardrails | `guardrails.rs`: fast harm, confirmed harm, fill stops (2 points rewarded and interstitial, 5 points banner, two days running), publisher edit, split mismatch at p < 0.001, reporting gap, platform incident |
+| Decision | `decision.rs`: the six keep conditions, the single 99% interim keep, the one pre-registered extension, and lambda equal to the lower bound |
+| Billing | `billing.rs`: monthly fee over active changes with log-share splitting (the spec's worked example pinned to the micro), 12-month terms with leap-day clamping, override pro-rating, re-checks that can only lower the billed lift |
+| Fallback | `switchback.rs`: balanced two-day blocks, never three in a row, billing only with six blocks per arm and a positive bound |
+| Priors | `priors.rs`: skeptical normal prior, conjugate updates, Thompson-sampling score over the pre-registered scope revenue and contract rate |
+| Records | `records.rs`: the six signed record types in spec order, canonical JSON with pinned SHA-256 |
+
+Evidence: 98 crate tests green. Coverage measured 96.21 percent lines and
+96.73 percent functions. Stable llvm-cov emits no branch records, so
+branches stay ungated. Floors entry 96, suite claim, and a lane matrix
+entry with a crate-scope assertion on the lcov artifact. Four site claims
+anchor to the engine tests, and the pricing page now reads that monitoring
+is an optional plan, so "no required subscription" is literal.
+
+The engine itself now carries calibration, candidate generation with
+worst-case loss, the planning policy, the monthly billing run, re-check
+scheduling, the scoreboard, the record emission pipeline, the daily
+settings watcher with override detection, the weekday-balanced switchback
+planner, the impression-postback path with covariate variance reduction,
+and the re-run kit with its CSV template.

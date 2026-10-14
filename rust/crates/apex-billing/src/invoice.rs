@@ -95,7 +95,7 @@ pub struct InvoiceLine {
 /// total.
 ///
 /// Zero-fee lines are kept when a positive proof truncates to a zero fee, but
-/// [`crate::bill_invoice`] intentionally omits them from the Stripe receipt:
+/// [`crate::create_payment_links`] intentionally omits them from the receipt:
 /// `receipt.items` can be shorter than `line_items`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

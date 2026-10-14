@@ -1,168 +1,19 @@
-# Alertmanager configuration for ApexMediation
+# Render this file with the SMTP environment values before starting the stack:
+# envsubst < alertmanager.yml > alertmanager.generated.yml
 global:
-  resolve_timeout: 5m
-  smtp_from: 'security@apexmediation.ee'
-  smtp_smarthost: '${SMTP_HOST:-mail.apexmediation.ee}:${SMTP_PORT:-587}'
+  smtp_smarthost: '${SMTP_HOST}'
+  smtp_from: '${ALERT_FROM}'
   smtp_auth_username: '${SMTP_USER}'
-  smtp_auth_password: '${SMTP_PASS}'
+  smtp_auth_password: '${SMTP_PASSWORD}'
+  smtp_require_tls: true
 
-# Templates for alert messages
-templates:
-  - '/etc/alertmanager/templates/*.tmpl'
-
-# Route tree - determines how alerts are grouped and routed
 route:
-  receiver: 'security-email'
-  group_by: ['alertname', 'cluster', 'service']
-  group_wait: 10s
-  group_interval: 10s
-  repeat_interval: 12h
+  receiver: email
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
 
-  # Child routes
-  routes:
-    # Optional SMS channel for critical alerts
-    # OPTIONAL_TWILIO_ROUTE_START
-    - match:
-        severity: critical
-      receiver: 'founder-sms'
-      continue: true
-    # OPTIONAL_TWILIO_ROUTE_END
-    
-    - match:
-        severity: critical
-      receiver: 'security-email'
-      group_wait: 0s
-    
-    # Warning alerts - email only
-    - match:
-        severity: warning
-      receiver: 'security-email'
-      group_wait: 5m
-    
-    # Info alerts - email digest
-    - match:
-        severity: info
-      receiver: 'security-email'
-      group_wait: 1h
-      repeat_interval: 24h
-
-    # Business alerts - separate channel
-    - match:
-        service: business
-      receiver: 'business-metrics-email'
-      group_wait: 1h
-      repeat_interval: 24h
-
-# Inhibition rules - suppress certain alerts when others are firing
-inhibit_rules:
-  # Inhibit backend alerts if backend is down
-  - source_match:
-      alertname: 'BackendAPIDown'
-    target_match:
-      service: 'backend'
-    equal: ['instance']
-  
-  # Inhibit database connection alerts if database is down
-  - source_match:
-      alertname: 'PostgreSQLDown'
-    target_match:
-      service: 'database'
-    equal: ['instance']
-
-# Receiver configurations
 receivers:
-  # Security email (primary contact)
-  - name: 'security-email'
+  - name: email
     email_configs:
-      - to: 'security@apexmediation.ee'
-        headers:
-          Subject: '🚨 [{{ .Status | toUpper }}] {{ .GroupLabels.alertname }} - ApexMediation'
-        html: |
-          <h2>Alert: {{ .GroupLabels.alertname }}</h2>
-          <p><strong>Status:</strong> {{ .Status }}</p>
-          <p><strong>Severity:</strong> {{ .CommonLabels.severity }}</p>
-          <p><strong>Service:</strong> {{ .CommonLabels.service }}</p>
-          
-          <h3>Firing Alerts ({{ .Alerts.Firing | len }})</h3>
-          {{ range .Alerts.Firing }}
-          <div style="border: 1px solid #ff0000; padding: 10px; margin: 10px 0; background: #fff5f5;">
-            <p><strong>{{ .Labels.alertname }}</strong></p>
-            <p>{{ .Annotations.description }}</p>
-            <p><em>Started: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}</em></p>
-          </div>
-          {{ end }}
-          
-          {{ if gt (len .Alerts.Resolved) 0 }}
-          <h3>Resolved Alerts ({{ .Alerts.Resolved | len }})</h3>
-          {{ range .Alerts.Resolved }}
-          <div style="border: 1px solid #00ff00; padding: 10px; margin: 10px 0; background: #f5fff5;">
-            <p><strong>{{ .Labels.alertname }}</strong></p>
-            <p>{{ .Annotations.description }}</p>
-            <p><em>Resolved: {{ .EndsAt.Format "2006-01-02 15:04:05 MST" }}</em></p>
-          </div>
-          {{ end }}
-          {{ end }}
-          
-          <hr>
-          <p>
-            <a href="https://monitoring.apexmediation.ee">View Grafana Dashboard</a> |
-            <a href="https://console.apexmediation.ee">Console</a> |
-            <a href="https://status.apexmediation.ee">Status Page</a>
-          </p>
-
-  # Founder SMS (critical alerts only)
-  # Using Twilio webhook (configure via TWILIO_WEBHOOK_URL secret)
-  # OPTIONAL_TWILIO_RECEIVER_START
-  - name: 'founder-sms'
-    webhook_configs:
-      - url: '${TWILIO_WEBHOOK_URL}'
-        send_resolved: true
-        http_config:
-          basic_auth:
-            username: '${TWILIO_ACCOUNT_SID}'
-            password: '${TWILIO_AUTH_TOKEN}'
-  # OPTIONAL_TWILIO_RECEIVER_END
-
-  # Business metrics digest (daily summary)
-  - name: 'business-metrics-email'
-    email_configs:
-      - to: 'contact@apexmediation.ee'
-        headers:
-          Subject: '📊 Daily Business Metrics - ApexMediation'
-        html: |
-          <h2>Daily Business Metrics Summary</h2>
-          <p><em>{{ .CommonAnnotations.summary }}</em></p>
-          
-          {{ range .Alerts }}
-          <div style="padding: 10px; margin: 10px 0; background: #f5f5f5;">
-            <p><strong>{{ .Labels.alertname }}</strong></p>
-            <p>{{ .Annotations.description }}</p>
-          </div>
-          {{ end }}
-          
-          <p><a href="https://console.apexmediation.ee/analytics">View Full Analytics</a></p>
-
-  # Slack notifications (optional, requires Slack webhook)
-  # OPTIONAL_SLACK_RECEIVER_START
-  - name: 'slack-notifications'
-    slack_configs:
-      - api_url: '${SLACK_WEBHOOK_URL}'
-        channel: '#alerts'
-        title: '{{ .GroupLabels.alertname }}'
-        text: |
-          *Severity:* {{ .CommonLabels.severity }}
-          *Service:* {{ .CommonLabels.service }}
-          
-          {{ range .Alerts }}
-          • {{ .Annotations.description }}
-          {{ end }}
-        send_resolved: true
-  # OPTIONAL_SLACK_RECEIVER_END
-
-  # Discord notifications (optional, requires Discord webhook)
-  # OPTIONAL_DISCORD_RECEIVER_START
-  - name: 'discord-notifications'
-    webhook_configs:
-      - url: '${DISCORD_WEBHOOK_URL}'
-        send_resolved: true
-  # OPTIONAL_DISCORD_RECEIVER_END
+      - to: '${ALERT_EMAIL}'

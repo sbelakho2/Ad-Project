@@ -15,13 +15,15 @@
 //!   `POST /v1/audit/{platform}` requires `Authorization: Bearer <token>` and
 //!   runs on the publisher's own platform keys; without them that route
 //!   answers `503 live_audit_not_configured`;
-//! - `APEX_WEBHOOK_SECRET` — Stripe webhook signing secret; without it the
-//!   webhook endpoint answers `503 webhook_not_configured`;
+//! - `APEX_ADYEN_HMAC_KEY` (and optionally `APEX_ADYEN_API_KEY`,
+//!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
+//!   client) — without the HMAC key the webhook endpoint answers
+//!   `503 adyen_webhook_not_configured`;
 //! - `APEX_STRIPE_TOLERANCE_SECS` — accepted signature age, default 300.
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
-//! from the library and inject a write-capable `CycleRunner` and a Stripe
+//! from the library and inject a write-capable `CycleRunner` and an Adyen
 //! client.
 
 #![forbid(unsafe_code)]
@@ -61,14 +63,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(JsonFileAuditSource::new(snapshot_root)),
         Arc::new(FileLedgerSource::new(ledger_root, keys)),
     );
-    if let Some(secret) = env_value("APEX_WEBHOOK_SECRET") {
-        state = state.with_webhook_secret(secret.into_bytes());
+    match (
+        env_value("APEX_ADYEN_API_KEY"),
+        env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),
+        env_value("APEX_ADYEN_CHECKOUT_BASE"),
+    ) {
+        (Some(api_key), Some(merchant_account), Some(checkout_base)) => {
+            let adyen = apex_billing::AdyenClient::new(
+                api_key,
+                merchant_account,
+                env_value("APEX_ADYEN_HMAC_KEY")
+                    .unwrap_or_default()
+                    .into_bytes(),
+                checkout_base,
+            )
+            .map_err(|error| format!("adyen credentials are invalid: {error}"))?;
+            state = state.with_adyen(Arc::new(adyen));
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(
+                "APEX_ADYEN_API_KEY, APEX_ADYEN_MERCHANT_ACCOUNT and APEX_ADYEN_CHECKOUT_BASE must be set together"
+                    .into(),
+            );
+        }
     }
-    if let Some(raw) = env_value("APEX_STRIPE_TOLERANCE_SECS") {
-        let secs: u64 = raw
-            .parse()
-            .map_err(|error| format!("APEX_STRIPE_TOLERANCE_SECS is not a number: {error}"))?;
-        state = state.with_stripe_tolerance_secs(secs);
+    if let Some(hmac_key) = env_value("APEX_ADYEN_HMAC_KEY") {
+        state = state.with_adyen_hmac_key(hmac_key.into_bytes());
     }
 
     match (
@@ -104,8 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!(
-        "apex-api (read-only mode) listening on http://{bind} (webhook secret configured: {})",
-        state.webhook_secret.is_some()
+        "apex-api (read-only mode) listening on http://{bind} (adyen hmac configured: {})",
+        state.adyen_hmac_key.is_some() || state.adyen.is_some()
     );
     axum::serve(listener, router(state)).await?;
     Ok(())
@@ -171,8 +192,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use apex_api::DEFAULT_STRIPE_TOLERANCE_SECS;
-
     use super::*;
 
     #[test]
@@ -212,6 +231,9 @@ mod tests {
         assert_eq!(DEFAULT_BIND, "127.0.0.1:8787");
         assert_eq!(DEFAULT_SNAPSHOT_ROOT, ".apex/snapshots");
         assert_eq!(DEFAULT_LEDGER_ROOT, ".apex/ledgers");
-        assert_eq!(DEFAULT_STRIPE_TOLERANCE_SECS, 300);
+        assert!(
+            env_value("APEX_ADYEN_HMAC_KEY").is_none()
+                || !env_value("APEX_ADYEN_HMAC_KEY").unwrap().is_empty()
+        );
     }
 }

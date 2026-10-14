@@ -1,147 +1,21 @@
-version: '3.8'
-
+# Operator stack: prometheus and alertmanager only. Render the alertmanager
+# config with the SMTP environment values first (see README.md).
 services:
-  # Prometheus - Metrics collection and storage
   prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
+    image: prom/prometheus:v2.53.0
     restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./recording-rules.yml:/etc/prometheus/recording-rules.yml:ro
     ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.generated.yml:/etc/prometheus/prometheus.yml
-      - ./alerts.yml:/etc/prometheus/alerts.yml
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=30d'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-      - '--web.enable-lifecycle'
-    networks:
-      - monitoring
-
-  # Loki - Log aggregation
-  loki:
-    image: grafana/loki:latest
-    container_name: loki
-    restart: unless-stopped
-    ports:
-      - "3100:3100"
-    volumes:
-      - ./loki-config.yml:/etc/loki/local-config.yaml
-      - ./loki-tenant-limits.yaml:/etc/loki/tenant-limits.yaml
-      - loki-data:/loki
-    command: -config.file=/etc/loki/local-config.yaml
-    networks:
-      - monitoring
-
-  # Promtail - Log shipper
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    restart: unless-stopped
-    environment:
-      - BACKEND_LOG_PATH=${BACKEND_LOG_PATH:-/var/log/backend/*.log}
-      - CONSOLE_LOG_PATH=${CONSOLE_LOG_PATH:-/var/log/console/*.log}
-      - SYSTEM_LOG_PATH=${SYSTEM_LOG_PATH:-/var/log/syslog}
-      - PROMTAIL_POSITIONS_PATH=${PROMTAIL_POSITIONS_PATH:-/tmp/positions.yaml}
-      - LOKI_TENANT_ID=${LOKI_TENANT_ID:-apex}
-    volumes:
-      - ./promtail-config.yml:/etc/promtail/config.yml
-      - /var/log:/var/log:ro
-    command:
-      - '-config.file=/etc/promtail/config.yml'
-      - '-config.expand-env=true'
-    networks:
-      - monitoring
-    depends_on:
-      - loki
-
-  # Grafana - Visualization and dashboards
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
-      - GF_SERVER_ROOT_URL=${GF_SERVER_ROOT_URL:-http://localhost:3000}
-      - GF_SMTP_ENABLED=true
-      - GF_SMTP_HOST=${SMTP_HOST:-mail.apexmediation.ee}:${SMTP_PORT:-587}
-      - GF_SMTP_USER=${SMTP_USER}
-      - GF_SMTP_PASSWORD=${SMTP_PASS}
-      - GF_SMTP_FROM_ADDRESS=security@apexmediation.ee
-    volumes:
-      - ./grafana-datasources.generated.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      - ./grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
-      - ./dashboards:/var/lib/grafana/dashboards
-      - grafana-data:/var/lib/grafana
-    networks:
-      - monitoring
-    depends_on:
-      - prometheus
-      - loki
-
-  # Alertmanager - Alert routing and notifications
+      - '127.0.0.1:9090:9090'
   alertmanager:
-    image: prom/alertmanager:latest
-    container_name: alertmanager
+    image: prom/alertmanager:v0.27.0
     restart: unless-stopped
-    ports:
-      - "9093:9093"
     volumes:
-      - ./alertmanager.generated.yml:/etc/alertmanager/alertmanager.yml
-      - alertmanager-data:/alertmanager
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
-    networks:
-      - monitoring
-
-  # Node Exporter - System metrics
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: node-exporter
-    restart: unless-stopped
+      - ./alertmanager.generated.yml:/etc/alertmanager/alertmanager.yml:ro
     ports:
-      - "9100:9100"
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.sysfs=/host/sys'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    networks:
-      - monitoring
-
-  # cAdvisor - Container metrics
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/snap/docker/common/var-lib-docker/:/var/lib/docker:ro
-    networks:
-      - monitoring
-
-volumes:
-  prometheus-data:
-  loki-data:
-  grafana-data:
-  alertmanager-data:
-
-networks:
-  monitoring:
-    driver: bridge
+      - '127.0.0.1:9093:9093'

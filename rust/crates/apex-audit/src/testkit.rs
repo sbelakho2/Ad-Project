@@ -36,12 +36,15 @@ pub(crate) fn mediation_group(id: &str, networks: &[&str], ad_unit_id: &str) -> 
 pub(crate) fn floor(country: &str, floor_ecpm: Micros) -> CountryFloor {
     CountryFloor {
         country: country.into(),
+        group: None,
         floor_ecpm,
     }
 }
 
 pub(crate) fn unit(id: &str, enabled: bool, floors: Vec<CountryFloor>) -> AdUnit {
     AdUnit {
+        platform: None,
+        package_name: None,
         platform_unit_id: id.into(),
         name: format!("unit {id}"),
         format: AdFormat::Banner,

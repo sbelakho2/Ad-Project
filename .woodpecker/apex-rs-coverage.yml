@@ -1,8 +1,7 @@
-# apex-rs coverage: every Rust crate in the all-Rust repository, one matrix
-# entry per crate. Workspace crates run per package; the mail-server is its own
-# workspace under services/ and runs workspace-wide. Coverage comes from
-# cargo-llvm-cov and is consumed by apex-tools' lcov gate, which enforces the
-# ratchet floor from tools/coverage/floors.txt. Clippy and fmt run per entry.
+# apex-rs coverage: every Rust crate in the workspace, one matrix entry per
+# crate. Coverage comes from cargo-llvm-cov and is consumed by apex-tools'
+# lcov gate, which enforces the ratchet floor from tools/coverage/floors.txt.
+# Clippy and fmt run per entry.
 # Stable cargo-llvm-cov emits no branch records, so the gate holds lines and
 # functions; branch parity stays a nightly-toolchain upgrade.
 #
@@ -30,8 +29,8 @@ matrix:
       PKG: apex-api
     - CRATE: apex-tools
       PKG: apex-tools
-    - CRATE: mail-server
-      DIR: services/mail-server
+    - CRATE: apex-lift
+      PKG: apex-lift
 
 steps:
   apex-rs-crate:
@@ -39,10 +38,8 @@ steps:
     commands:
       - rustup component add llvm-tools-preview clippy rustfmt
       - cargo install cargo-llvm-cov --locked
-      - if [ -n "${DIR:-}" ]; then apt-get update && apt-get install -y protobuf-compiler; fi
-      - WORKDIR="${DIR:-rust}"
-      - cd "$CI_WORKSPACE/$WORKDIR"
-      - if [ -n "${PKG:-}" ]; then cargo llvm-cov -p "$PKG" --lcov --output-path "$CRATE.lcov" && cargo test -p "$PKG" && cargo clippy -p "$PKG" --all-targets -- -D warnings && cargo fmt -p "$PKG" --check; else cargo llvm-cov --workspace --lcov --output-path "$CRATE.lcov" && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check; fi
+      - cd "$CI_WORKSPACE"/rust
+      - cargo llvm-cov -p "$PKG" --lcov --output-path "$CRATE.lcov" && cargo test -p "$PKG" && cargo clippy -p "$PKG" --all-targets -- -D warnings && cargo fmt -p "$PKG" --check
       - cd "$CI_WORKSPACE" && cargo build --release --manifest-path rust/Cargo.toml -p apex-tools
       - FLOOR=$(grep -E "^${CRATE} " "$CI_WORKSPACE"/tools/coverage/floors.txt | awk '{print $2}')
-      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools lcov-gate "$WORKDIR/$CRATE.lcov" "$FLOOR"
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools lcov-gate "rust/$CRATE.lcov" "$FLOOR" --crate "$CRATE"
