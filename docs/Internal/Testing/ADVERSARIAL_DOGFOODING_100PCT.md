@@ -524,7 +524,7 @@ All checks below ran locally on 2026-10-13 from the repository root.
 |---|---|
 | Rust workspace (`cargo test --workspace`) | 347 tests, 0 failed |
 | Rust lints | `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean |
-| apex crate coverage lanes | 7 per-crate matrix entries in `apex-rs-coverage.yml` (floors 0, ratcheting) |
+| apex crate coverage lanes | 9 per-crate matrix entries in `apex-rs-coverage.yml` (measured floors, ratcheting; §9.10) |
 | tool suites (`npm test` under `tools/`) | 42/42 pass (coverage 22, site, ui-ux) |
 | docs-lint | total at or below the committed baseline of 8005; every scanned row at or below its row |
 | docs-lint one-shot adoption | self-test all pass (10 cases) |
@@ -535,7 +535,7 @@ All checks below ran locally on 2026-10-13 from the repository root.
 | site claims contract | 21/21 claims anchored and present on the site |
 | site perf budget (`tools/site/perf-budget.mjs`) | 7 pages, css 3213B (budget 12000B), zero JS, robots+sitemap present |
 | console a11y (`tools/ui-ux/console-a11y.mjs` over `render-fixtures` output) | axe-core WCAG 2.0/2.1 A+AA pass over 4 rendered pages; structure contract clean |
-| Woodpecker configs | 17/17 parse; 16 lanes wired into the aggregate |
+| Woodpecker configs | 11 configs parse; 10 lanes wired into the aggregate (§9.10) |
 
 ### 9.6 Blind-spot sweep results (all gates executed locally, in order)
 
@@ -627,3 +627,33 @@ An adversarial review of the sweep change found and fixed these defects before t
 | repo state | the dev compose published Redis without authentication and hardcoded the Postgres password; the monitoring runbook referenced a deleted script, the suites registry was orphaned, and the design doc inventories contradicted the six-config set | loopback binds and requirepass restored, env-overridable credentials, the runbook describes the render step, the orphaned registry is deleted, and the stale inventory lines point at §9.7 |
 
 Re-measured after hardening: apex-tools at 56.43 percent lines and 58.78 percent functions, mail-server at 25.50 and 16.88, both above their floors; the full audit family and the site gates run green.
+
+### 9.10 CI coverage sweep (2026-10-14)
+
+The lane set was rebuilt to cover 100% of the tree with correct expectations.
+
+| lane | surface | gate |
+|---|---|---|
+| `apex-rs-coverage` | every Rust crate plus the mail-server workspace | llvm-cov, tests, clippy, fmt, lcov floor |
+| `dogfood-audit` | whole tree | manifest, walker parity, orphan, ratchet, sync, assertion presence, stub ban, policy, mutation, docs links, prose |
+| `contract-coverage` | monitoring, terraform, proxies, compose, CI references, pipeline paths, content guard, docs references, samples contract, i18n, stylesheet | per tool gate |
+| `site-perf` | the built Zola site | claims, byte budgets, structural checks |
+| `ui-ux` | the rendered console pages | structural accessibility audit |
+| `sdk-node` | web and react-native SDKs | jest, lint, tsc, bob build, lcov floor |
+| `sdk-android-coverage` | Kotlin core and TV SDKs, both sample apps | kover line and branch floor, sample builds |
+| `sdk-apple-coverage` | iOS, adapter dev kit and tvOS packages | swift test, llvm-cov lcov floor |
+| `sdk-unity-coverage` | tier-1 Unity runtime | dotnet test, coverlet lcov floor, package size constraints |
+| `sdk-flutter-coverage` | flutter SDK | analyze, test, lcov floor |
+| `coverage-gate` | every lane | aggregate verdict replaying the invariants |
+
+Measured floors added to the ratchet: android-core 32, android-ctv 11,
+web-sdk 73, react-native-sdk 22. The unity, flutter and apple domains start
+at 0 because their coverage artifacts need the lane toolchains; the lanes
+still fail when tests fail.
+
+Defects the sweep fixed, each found by actually running the platform suites:
+assertion markers for `MAIL FROM: <addr>` style regressions, the auction
+request envelope drift (`request_id`, `user_info` against the pinned tests),
+the missing OM SDK test stubs, the Kotlin `SSAIError` visibility clash, the
+react-native bob build configuration, the adapter dev kit package identity
+cycle, the sample app repository mode clash and the unescaped XML ampersand.

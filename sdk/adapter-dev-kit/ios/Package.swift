@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -11,14 +11,16 @@ let package = Package(
         .executable(name: "apex-adapter-runner", targets: ["apex-adapter-runner"]),
     ],
     dependencies: [
-        // Local dependency on the core SDK to access the AdNetworkAdapter protocol and APIs
-        .package(path: "../../core/ios")
+        // Named local dependency: without the explicit name SwiftPM derives the
+        // identity from the directory ("ios") and collides with this package's
+        // own path component, producing a self-cycle.
+        .package(name: "RivalApexMediationSDK", path: "../../core/ios")
     ],
     targets: [
         .target(
             name: "ApexAdapterDevKit",
             dependencies: [
-                .product(name: "RivalApexMediationSDK", package: "ios")
+                .product(name: "RivalApexMediationSDK", package: "RivalApexMediationSDK")
             ],
             path: "Sources/ApexAdapterDevKit"
         ),
@@ -32,5 +34,6 @@ let package = Package(
             dependencies: ["ApexAdapterDevKit"],
             path: "Tests/ApexAdapterDevKitTests"
         ),
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

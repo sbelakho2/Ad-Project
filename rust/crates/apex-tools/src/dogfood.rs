@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::classify::Manifest;
 use crate::glob;
-use crate::policy::{read_floors_txt, Floors, PolicyBaseline};
+use crate::policy::{read_floors_txt, Floors, Policies, PolicyBaseline};
 use crate::repo::Repo;
 use crate::util::re;
 
@@ -116,6 +116,19 @@ pub fn floors_sync(repo: &Repo) -> Result<(), String> {
         if !floors.domains.contains_key(d) {
             problems.push(format!("floors.txt has unknown domain '{d}'"));
         }
+    }
+    // Every code domain the classifier knows must carry a floor entry, so a
+    // new domain cannot slip in unmeasured.
+    let policies = Policies::load(repo)?;
+    let missing: Vec<&str> = policies
+        .domains
+        .iter()
+        .filter(|domain| domain.kind == "code")
+        .map(|domain| domain.id.as_str())
+        .filter(|id| !floors.domains.contains_key(*id))
+        .collect();
+    for id in missing {
+        problems.push(format!("no floor entry for code domain '{id}'"));
     }
     if !problems.is_empty() {
         return Err(format!(

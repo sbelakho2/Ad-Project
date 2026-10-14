@@ -238,7 +238,10 @@
         "sdk/**/project.yml",
         "sdk/**/AndroidManifest.xml",
         "sdk/**/*.plist",
-        "sdk/**/link.xml"
+        "sdk/**/link.xml",
+        "sdk/**/Package.resolved",
+        "sdk/**/.eslintrc*",
+        ".github/required-checks.json"
       ]
     }
   ],
@@ -374,6 +377,30 @@
     {
       "code": "BUILD_ARTIFACT",
       "glob": "sdk/**/coverage/**"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "sdk/core/unity/**/bin/**"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "sdk/core/unity/**/obj/**"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "sdk/react-native/lib/**"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "**/*.hprof"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "sdk/**/.build/**"
+    },
+    {
+      "code": "BUILD_ARTIFACT",
+      "glob": "sdk/**/.swiftpm/**"
     }
   ],
   "exclusionCodes": [

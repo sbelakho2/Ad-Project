@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, StyleSheet, requireNativeComponent, Platform, ViewProps } from 'react-native';
-import { AdProject, AdSize, AdLoadResult, AdError, AdEventType } from './index';
+import { AdProject, AdSize, AdLoadResult, AdError } from '../index';
 
 // MARK: - Types
 
@@ -115,17 +115,18 @@ export const BannerAd: React.FC<BannerAdProps> = ({
 
   // Auto-refresh logic
   useEffect(() => {
-    if (autoRefresh && isLoaded) {
-      refreshTimerRef.current = setInterval(() => {
-        AdProject.loadBannerAd(adUnitId, size);
-      }, refreshInterval * 1000);
-
-      return () => {
-        if (refreshTimerRef.current) {
-          clearInterval(refreshTimerRef.current);
-        }
-      };
+    if (!autoRefresh || !isLoaded) {
+      return undefined;
     }
+    refreshTimerRef.current = setInterval(() => {
+      AdProject.loadBannerAd(adUnitId, size);
+    }, refreshInterval * 1000);
+
+    return () => {
+      if (refreshTimerRef.current) {
+        clearInterval(refreshTimerRef.current);
+      }
+    };
   }, [autoRefresh, isLoaded, refreshInterval, adUnitId, size]);
 
   return (

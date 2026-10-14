@@ -1,0 +1,29 @@
+# sdk-apple: Swift test lanes for the iOS package, the adapter dev kit and the
+# tvOS package. These steps run on the darwin local-backend agent (label
+# platform=darwin/arm64, see infrastructure/woodpecker/README.md); no docker
+# image is used there. Xcode is required for the device and simulator
+# frameworks. Coverage uses llvm-cov and the same lcov gate as the other lanes.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  build-apex-tools:
+    labels: {platform: darwin/arm64}
+    commands:
+      - cd "$CI_WORKSPACE"/rust && cargo build --release -p apex-tools
+
+  ios-swift:
+    labels: {platform: darwin/arm64}
+    depends_on: [build-apex-tools]
+    commands:
+      - cd "$CI_WORKSPACE"/sdk/core/ios && swift test --enable-code-coverage
+      - cd "$CI_WORKSPACE" && FLOOR=$(grep -E "^ios-swift " tools/coverage/floors.txt | awk '{print $2}') && PROFILE=$(find sdk/core/ios/.build -name default.profdata | head -1) && BIN=$(find sdk/core/ios/.build -type f -name "RivalApexMediationSDKPackageTests" | head -1) && xcrun llvm-cov export -format=lcov "$BIN" -instr-profile "$PROFILE" > ios-swift.lcov && rust/target/release/apex-tools lcov-gate ios-swift.lcov "$FLOOR"
+      - cd "$CI_WORKSPACE"/sdk/adapter-dev-kit/ios && swift test
+
+  tvos-swift:
+    labels: {platform: darwin/arm64}
+    depends_on: [build-apex-tools]
+    commands:
+      - cd "$CI_WORKSPACE"/sdk/ctv/tvos && swift test --enable-code-coverage
+      - cd "$CI_WORKSPACE" && FLOOR=$(grep -E "^tvos-swift " tools/coverage/floors.txt | awk '{print $2}') && PROFILE=$(find sdk/ctv/tvos/.build -name default.profdata | head -1) && BIN=$(find sdk/ctv/tvos/.build -type f -name "CTVSDKPackageTests" | head -1) && xcrun llvm-cov export -format=lcov "$BIN" -instr-profile "$PROFILE" > tvos-swift.lcov && rust/target/release/apex-tools lcov-gate tvos-swift.lcov "$FLOOR"

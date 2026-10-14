@@ -1,35 +1,31 @@
 # Woodpecker deployment design
 
-Self-hosted Woodpecker replaces/augments GitHub Actions as the 100%-coverage gate
-stack (design doc: `docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md` 7).
+Self-hosted Woodpecker runs the gate stack. Lane inventory and expectations:
+`.woodpecker/README.md`; design background:
+`docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md` section 9.10.
 
 ## Topology
 
-- **Server** (this compose file, app-server Hetzner host): Woodpecker v2 server + one
-  Linux docker-backend agent (`WOODPECKER_MAX_PROCS=4`).
-- **darwin/arm64 agent** (a macOS host, e.g. Mac mini): runs `sdk-apple-coverage` via the
-  **local backend** (`WOODPECKER_BACKEND=local`, agent registered with label
-  `platform=darwin/arm64`). swift/xcrun run natively; no docker images are used there
-  (`.woodpecker/sdk-apple-coverage.yml` documents this).
-- **Optional GPU/ML runner**: not needed for gates; ML pipeline runs on the Linux agent.
+- Server and one Linux docker-backend agent run from this directory
+  (`docker-compose.yml`, `WOODPECKER_MAX_PROCS=4`). All docker lanes run there.
+- A darwin/arm64 agent (a macOS host with Xcode) runs `sdk-apple-coverage.yml`
+  through the local backend: `WOODPECKER_BACKEND=local` and the agent label
+  `platform=darwin/arm64`. The lane's steps select that label and use no
+  docker image.
 
-## Required secrets (repo settings in Woodpecker UI)
+## Secrets
 
-| Secret | Used by | Notes |
-|---|---|---|
-| `codecov_token` (optional) | push-only upload steps | PR builds never receive secrets; gates do not depend on it |
-
-No other secrets are required for any coverage gate. Pipeline credentials for services
-are ephemeral test-only values hardcoded in the pipeline files (same pattern as
-`ci-all.yml`).
+No repository secret is required for any gate. Pipeline credentials for
+services are ephemeral test-only values in the pipeline files.
 
 ## Branch protection parity
 
-Configure required status checks (GitHub Settings, mirroring `.github/required-checks.json`):
+Configure these required status checks in GitHub, mirroring
+`.github/required-checks.json`:
 
-- `coverage-gate` (aggregate verdict; depends on all coverage pipelines)
-- `dogfood-audit` (manifest orphan gate, ratchet, pragma/skip ban, assertion presence)
-- `contract-coverage` (IaC/OpenAPI/CI-integrity/docs/content/samples)
+- `coverage-gate` (aggregate verdict; depends on every lane)
+- `dogfood-audit` (repository invariants)
+- `contract-coverage` (infrastructure and content contracts)
 
 ## Bring-up
 
@@ -39,6 +35,6 @@ cp /dev/null .env  # then set WOODPECKER_HOST, WOODPECKER_AGENT_SECRET, WOODPECK
 docker compose up -d
 ```
 
-Then in the Woodpecker UI: enable the GitHub repo, and mark
-`tools/coverage/coverage-floor.json` + `tools/coverage/suites.json` as protected files
-via CODEOWNERS-style review (single-maintainer repo: rely on branch protection).
+Then in the Woodpecker UI enable the GitHub repo, and keep
+`tools/coverage/coverage-floor.json` and `tools/coverage/suites.json` under
+CODEOWNERS review as `.github/CODEOWNERS` already does.

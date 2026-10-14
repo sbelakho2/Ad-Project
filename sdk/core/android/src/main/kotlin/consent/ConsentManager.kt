@@ -20,6 +20,7 @@ object ConsentManager {
         val coppa: Boolean? = null,        // child-directed treatment flag
         val limitAdTracking: Boolean? = null,
         val privacySandboxOptIn: Boolean? = null,
+        val gpp: String? = null,          // IAB GPP string
         val identifiers: IdentifierState = IdentifierState()
     ) {
         // Legacy accessor to ease transition from consentString -> tcfString.
@@ -35,6 +36,37 @@ object ConsentManager {
     )
 
     enum class IdentifierSource { NONE, GAID, APP_SET }
+
+    /** Read-only consent snapshot consumed by signal collection. */
+    data class ConsentSnapshot(
+        val gdprApplies: Boolean?,
+        val tcfConsentString: String?,
+        val uspString: String?,
+        val gppString: String?,
+        val coppa: Boolean?,
+        val limitAdTracking: Boolean?
+    )
+
+    @Volatile
+    private var current: State = State()
+
+    /** Mirror the facade's latest consent state for downstream readers. */
+    fun publish(state: State) {
+        current = state
+    }
+
+    /** The latest published consent snapshot. */
+    fun getConsentState(): ConsentSnapshot {
+        val state = current
+        return ConsentSnapshot(
+            gdprApplies = state.gdprApplies,
+            tcfConsentString = state.tcfString,
+            uspString = state.usPrivacy,
+            gppString = state.gpp,
+            coppa = state.coppa,
+            limitAdTracking = state.limitAdTracking
+        )
+    }
 
     /**
      * Normalize app-provided consent inputs to an internal State.

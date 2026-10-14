@@ -1,0 +1,17 @@
+# sdk-unity: tier-1 runtime tests for the Unity package on plain dotnet, no editor license.
+# Setting the runner variable inverts the test project's self-skip; coverlet writes the
+# lcov consumed by the floor gate, and the package constraint script keeps the
+# shipped runtime within its size budget.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  unity-tier1:
+    image: mcr.microsoft.com/dotnet/sdk:8.0
+    commands:
+      - cd "$CI_WORKSPACE" && FLOOR=$(grep -E "^unity-tier1 " tools/coverage/floors.txt | awk '{print $2}')
+      - cd "$CI_WORKSPACE"/sdk/core/unity && UNITY_RUNNER=true dotnet test Tests/ApexMediation.Tests.csproj /p:CollectCoverage=true /p:CoverletOutputFormat=lcov /p:CoverletOutput=coverage/lcov.info
+      - cd "$CI_WORKSPACE"/sdk/core/unity && bash scripts/check_package_constraints.sh
+      - cd "$CI_WORKSPACE" && cargo build --release --manifest-path rust/Cargo.toml -p apex-tools
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools lcov-gate sdk/core/unity/coverage/lcov.info "$FLOOR"

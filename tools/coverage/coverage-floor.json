@@ -1,5 +1,5 @@
 {
-  "comment": "Ratchet-only floors (apex-tools floor-ratchet). Domain floors are minimum percentages for the metrics the toolchain records; on stable cargo-llvm-cov, branch records are absent, so lines and functions carry the floor. The 2026-10-14 sweep measured every crate locally and pinned each domain at the floor of its measured minimum; values may only rise. orphanFloorPercent is pinned at 0 because the manifest measured zero orphans; mutationKillFloorPercent is pinned at 100 because the six-mutant sample kills six of six. Final phase: every domain floor = 100.",
+  "comment": "Ratchet-only floors (apex-tools floor-ratchet). Domain floors are minimum percentages for the metrics the toolchain records; on stable cargo-llvm-cov, branch records are absent, so lines and functions carry the floor. The 2026-10-14 sweep measured every crate locally and pinned each domain at the floor of its measured minimum; values may only rise. orphanFloorPercent is pinned at 0 because the manifest measured zero orphans; mutationKillFloorPercent is pinned at 100 because the six-mutant sample kills six of six. Final phase: every domain floor = 100. SDK domains joined the table in the CI 100% sweep; android uses the kover line+branch minimum, node and unity use the lcov minimum, and 0 marks a lane whose coverage is not yet measured locally.",
   "orphanFloorPercent": 0,
   "mutationKillFloorPercent": 100,
   "history": [
@@ -39,6 +39,31 @@
         "mail-server": 9
       },
       "__note": "adversarial sweep: orphan ceiling pinned at the measured zero, mutation floor pinned at the six-of-six sample, and every crate floor pinned to the integer floor of its measured minimum of lines/functions"
+    },
+    {
+      "at": "2026-10-14",
+      "orphanFloorPercent": 0,
+      "mutationKillFloorPercent": 100,
+      "domains": {
+        "apex-core": 95,
+        "apex-connectors": 80,
+        "apex-audit": 99,
+        "apex-autopilot": 84,
+        "apex-proof": 91,
+        "apex-billing": 90,
+        "apex-api": 83,
+        "apex-tools": 54,
+        "mail-server": 9,
+        "android-core": 32,
+        "android-ctv": 11,
+        "web-sdk": 73,
+        "react-native-sdk": 22,
+        "unity-tier1": 0,
+        "flutter": 0,
+        "ios-swift": 0,
+        "tvos-swift": 0
+      },
+      "__note": "CI 100% sweep: SDK domains added. android floors are the kover line+branch minimum measured on the debug unit-test run; web and react-native are measured lcov minimums; unity, flutter and the apple lanes start at 0 until their lanes produce artifacts (unity re-measure pending, apple and flutter blocked on Xcode and flutter toolchains locally)"
     }
   ],
   "domains": {
@@ -50,6 +75,14 @@
     "apex-billing": 90,
     "apex-api": 83,
     "apex-tools": 54,
-    "mail-server": 9
+    "mail-server": 9,
+    "android-core": 32,
+    "android-ctv": 11,
+    "web-sdk": 73,
+    "react-native-sdk": 22,
+    "unity-tier1": 0,
+    "flutter": 0,
+    "ios-swift": 0,
+    "tvos-swift": 0
   }
 }

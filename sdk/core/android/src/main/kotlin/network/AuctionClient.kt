@@ -399,11 +399,11 @@ class AuctionClient(
         val sdkVersion = try { com.rivalapexmediation.sdk.BuildConfig.SDK_VERSION } catch (_: Throwable) { "0.0.0" }
 
         return mapOf(
-            "requestId" to reqId,
+            "request_id" to reqId,
             "placementId" to opts.placementId,
             "adFormat" to "interstitial",
             "device" to deviceInfo,
-            "user" to userInfo,
+            "user_info" to userInfo,
             "app" to mapOf("id" to opts.publisherId),
             "floorCpm" to (opts.floorCpm ?: 0.0),
             "timeoutMs" to opts.timeoutMs,

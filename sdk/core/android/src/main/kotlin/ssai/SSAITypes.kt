@@ -280,7 +280,7 @@ data class SSAIError(
     /** Error code */
     val code: String,
     /** Human-readable error message */
-    val message: String,
+    override val message: String,
     /** Is this a fatal error */
     val fatal: Boolean = false
 ) : Exception("[$code] $message") {

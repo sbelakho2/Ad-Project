@@ -258,6 +258,7 @@ class MediationSDK private constructor(
         )
         val updated = ConsentManager.attachIdentifiers(normalized, previous.identifiers)
         this.consentState = updated
+        ConsentManager.publish(updated)
         applyPrivacySandboxSnapshot()
         if (ConsentManager.shouldRefetchIdentifiers(previous, limitAdTracking)) {
             refreshPrivacyIdentifiers(overrideLimitAdTracking = false)
@@ -300,6 +301,7 @@ class MediationSDK private constructor(
                 val ids = privacyIdentifierProvider.collect(optOut)
                 val identifierState = ConsentManager.fromPrivacyIdentifiers(ids)
                 consentState = ConsentManager.attachIdentifiers(consentState, identifierState)
+                ConsentManager.publish(consentState)
                 applyPrivacySandboxSnapshot()
                 callback?.let { postToMainThread { it(ids) } }
             } catch (t: Throwable) {
@@ -318,6 +320,7 @@ class MediationSDK private constructor(
         client.request(params, object : UmpConsentClient.Callback {
             override fun onConsentUpdated(state: ConsentManager.State) {
                 consentState = ConsentManager.attachIdentifiers(state, consentState.identifiers)
+                ConsentManager.publish(consentState)
                 callback.onConsentUpdated(consentState)
                 applyPrivacySandboxSnapshot()
                 refreshPrivacyIdentifiers(null)
@@ -347,6 +350,7 @@ class MediationSDK private constructor(
         }
         if (changed) {
             consentState = updated
+            ConsentManager.publish(updated)
         }
     }
 

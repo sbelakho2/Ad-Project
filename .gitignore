@@ -242,3 +242,10 @@ lhci-report/
 site/chrome/
 # Kilo agent state (sessions, local tooling)
 .kilo/
+sdk/core/unity/**/bin/
+sdk/core/unity/**/obj/
+sdk/react-native/lib/
+sdk/**/.build/
+sdk/**/.swiftpm/
+sdk/**/coverage/
+sdk/**/TestResults/

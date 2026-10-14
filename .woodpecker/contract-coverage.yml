@@ -51,5 +51,6 @@ steps:
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- contract content-guard-adversarial
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- contract pipeline-paths
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- contract docs-references
+      - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- contract samples
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- i18n-parity
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- css-lint

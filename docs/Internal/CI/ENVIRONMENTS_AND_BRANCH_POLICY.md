@@ -22,10 +22,11 @@ Require the following status checks to pass before merging:
   - CTV/OTT — Android TV unit/assemble/size
   - CTV tvOS — Swift build/test
 - security-trivy (Trivy FS scan) — required
-- security-scan (Snyk) — optional/non‑blocking unless policy changes
-- synthetic-probes — optional/non‑blocking
+- security-scan — optional and non-blocking unless the policy changes
+- synthetic-probes — optional and non-blocking
 
-See .github/required-checks.json for exact job names.
+See `.github/required-checks.json` for the exact lane names: `coverage-gate`,
+`dogfood-audit` and `contract-coverage`.
 
 ### How to configure branch protection
 1. Navigate to **GitHub → Settings → Branches**.

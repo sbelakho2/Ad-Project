@@ -1,0 +1,15 @@
+# sdk-flutter: Dart tests and analysis in the official flutter image. The lcov
+# gate accepts the missing branch records that flutter test emits.
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+
+steps:
+  flutter-sdk:
+    image: ghcr.io/cirruslabs/flutter:stable
+    commands:
+      - cd "$CI_WORKSPACE"/sdk/flutter && flutter pub get
+      - cd "$CI_WORKSPACE"/sdk/flutter && flutter analyze
+      - cd "$CI_WORKSPACE"/sdk/flutter && flutter test --coverage
+      - cd "$CI_WORKSPACE" && cargo build --release --manifest-path rust/Cargo.toml -p apex-tools
+      - cd "$CI_WORKSPACE" && FLOOR=$(grep -E "^flutter " tools/coverage/floors.txt | awk '{print $2}') && rust/target/release/apex-tools lcov-gate sdk/flutter/coverage/lcov.info "$FLOOR"

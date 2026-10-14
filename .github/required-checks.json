@@ -1,0 +1,3 @@
+{
+  "required": ["coverage-gate", "dogfood-audit", "contract-coverage"]
+}
