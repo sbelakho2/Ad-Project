@@ -23,7 +23,7 @@
 //! by the extractor inside the handler.
 
 use axum::body::Bytes;
-use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -53,7 +53,7 @@ pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/audit/{platform}", get(audit_report))
+        .route("/v1/audit/{platform}", get(audit_report).post(live_audit))
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
         .route("/v1/stripe/webhook", post(stripe_webhook))
@@ -129,6 +129,41 @@ async fn audit_report(
     let platform = parse_platform(&platform).ok_or(ApiError::BadRequest("unknown_platform"))?;
     let snapshot = state.audit_source.snapshot(platform).await?;
     Ok(Json(apex_audit::run(&snapshot)))
+}
+
+/// Request body of `POST /v1/audit/{platform}`.
+#[derive(Debug, Deserialize)]
+struct LiveAuditBody {
+    publisher: String,
+}
+
+/// Live read-only audit: build the snapshot from the publisher's own platform
+/// keys and run the revenue-leak rules. The platform is never written to.
+async fn live_audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    platform: Result<Path<String>, PathRejection>,
+    body: Result<Json<LiveAuditBody>, JsonRejection>,
+) -> Result<Json<apex_audit::AuditReport>, ApiError> {
+    let Some(auditor) = &state.live_auditor else {
+        return Err(ApiError::LiveAuditNotConfigured);
+    };
+    auditor.authorize(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )?;
+    let Ok(Path(platform)) = platform else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
+    let platform = parse_platform(&platform).ok_or(ApiError::BadRequest("unknown_platform"))?;
+    let Ok(Json(body)) = body else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
+    if !is_valid_publisher(&body.publisher) {
+        return Err(ApiError::BadRequest("invalid_publisher"));
+    }
+    Ok(Json(auditor.audit(&body.publisher, platform).await?))
 }
 
 async fn ledger(

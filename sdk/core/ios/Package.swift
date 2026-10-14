@@ -17,8 +17,6 @@ let package = Package(
     dependencies: [
         // Networking
         .package(url: "https://github.com/Alamofire/Alamofire.git", from: "5.8.0"),
-        // Protobuf
-        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.25.0"),
         // Crypto
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
     ],
@@ -27,7 +25,6 @@ let package = Package(
             name: "RivalApexMediationSDK",
             dependencies: [
                 "Alamofire",
-                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources",

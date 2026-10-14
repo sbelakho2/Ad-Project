@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.rivalapexmediation.ctv">
     <application>
-        <!-- Placeholder; SDK does not declare components by default -->
+        <!-- Intentionally declares no components; the SDK runs inside the host app. -->
     </application>
 </manifest>

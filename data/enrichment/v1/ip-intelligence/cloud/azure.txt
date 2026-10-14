@@ -1,2 +1,0 @@
-# Azure sample prefixes
-40.90.0.0/17

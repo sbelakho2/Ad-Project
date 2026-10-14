@@ -9,7 +9,6 @@ import {
   ExportDimension,
   ExportMetric,
   ExportConfigBuilder,
-  ExportConfig,
 } from '../src/publisherExporter';
 import { UsageMetrics, UsageBreakdown } from '../src/usageMeter';
 
@@ -251,7 +250,6 @@ describe('PublisherExporter', () => {
 
       expect(config.dateRange).toBeDefined();
 
-      const now = new Date();
       const daysDiff = Math.floor(
         (config.dateRange!.endDate.getTime() - config.dateRange!.startDate.getTime()) /
           (1000 * 60 * 60 * 24)

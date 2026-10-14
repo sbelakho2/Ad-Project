@@ -82,7 +82,7 @@ pub fn is_valid_publisher(publisher: &str) -> bool {
 /// path is a logged internal error, and a path that resolves outside the
 /// canonical root — e.g. through a symlink planted in the root — is reported
 /// as `NotFound` rather than served.
-fn contained_in(canonical_root: &Path, path: PathBuf) -> Result<PathBuf, ApiError> {
+pub(crate) fn contained_in(canonical_root: &Path, path: PathBuf) -> Result<PathBuf, ApiError> {
     let resolved = path.canonicalize().map_err(|error| match error.kind() {
         ErrorKind::NotFound => ApiError::NotFound,
         _ => ApiError::Internal(format!("resolve {}: {error}", path.display())),
@@ -95,7 +95,7 @@ fn contained_in(canonical_root: &Path, path: PathBuf) -> Result<PathBuf, ApiErro
 }
 
 /// Refuse a file whose on-disk size exceeds `cap` before it is read.
-fn ensure_within_cap(size: u64, cap: u64) -> Result<(), ApiError> {
+pub(crate) fn ensure_within_cap(size: u64, cap: u64) -> Result<(), ApiError> {
     if size > cap {
         return Err(ApiError::Internal(format!(
             "ledger is {size} bytes, above the {cap}-byte read cap"
@@ -107,7 +107,7 @@ fn ensure_within_cap(size: u64, cap: u64) -> Result<(), ApiError> {
 /// Canonicalize a configured root once, falling back to the configured path
 /// when it does not resolve yet (every later containment check then fails
 /// closed until the root exists).
-fn canonical_root(root: &Path) -> PathBuf {
+pub(crate) fn canonical_root(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 

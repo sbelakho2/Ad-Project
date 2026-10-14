@@ -152,7 +152,7 @@ class ConfigManager(
         // Require a configured public key in non-test builds.
         val pubKeyBytes = configPublicKey ?: return false
         return try {
-            val message = createSigningMessage(config)
+            val message = canonicalSigningMessage(config)
             val sigBytes = decodeBase64(config.signature)
             // Try JDK Ed25519 first (available on JVM 17); Android may fall back if provider missing.
             val kf = java.security.KeyFactory.getInstance("Ed25519")
@@ -169,7 +169,7 @@ class ConfigManager(
                 val ctor = clazz.getConstructor(ByteArray::class.java)
                 val verifier = ctor.newInstance(pubKeyBytes)
                 val method = clazz.getMethod("verify", ByteArray::class.java, ByteArray::class.java)
-                val message = createSigningMessage(config)
+                val message = canonicalSigningMessage(config)
                 val sigBytes = decodeBase64(config.signature)
                 method.invoke(verifier, sigBytes, message)
                 true
@@ -179,17 +179,7 @@ class ConfigManager(
         }
     }
     
-    /**
-     * Create message for signature verification
-     */
-    private fun createSigningMessage(config: SDKRemoteConfig): ByteArray {
-        val data = mapOf(
-            "config_id" to config.configId,
-            "version" to config.version,
-            "timestamp" to config.timestamp
-        )
-        return gson.toJson(data).toByteArray()
-    }
+
 
     /**
      * Lightweight schema validation for remote config payloads before trusting.
@@ -397,4 +387,20 @@ private fun decodeBase64(input: String): ByteArray {
             }
         }
     }
+}
+
+/**
+ * Canonical message for config signature verification.
+ *
+ * The bytes are pinned to the iOS `SignatureVerifier.createCanonicalMessage`
+ * output (lexicographic keys), so one signed envelope verifies on both
+ * platforms. The config service must sign exactly this message:
+ * {"config_id":"<id>","timestamp":<ts>,"version":<v>}
+ */
+internal fun canonicalSigningMessage(config: SDKRemoteConfig): ByteArray {
+    val escapedId = config.configId
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+    return ("{\"config_id\":\"$escapedId\",\"timestamp\":${config.timestamp}," +
+        "\"version\":${config.version}}").toByteArray(Charsets.UTF_8)
 }

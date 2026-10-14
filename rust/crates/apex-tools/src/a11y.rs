@@ -302,6 +302,18 @@ fn truncate(text: &str, max: usize) -> String {
     text.chars().take(max).collect::<String>() + "..."
 }
 
+/// Every rendered html page under `dir`, recursively. A built site keeps
+/// nested pages (`/pricing/index.html`); a flat top-level read silently
+/// undercounts them.
+pub fn collect_pages(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut pages: Vec<std::path::PathBuf> = crate::util::walk_files(dir, &[])
+        .into_iter()
+        .filter(|p| p.extension().map(|x| x == "html").unwrap_or(false))
+        .collect();
+    pages.sort();
+    Ok(pages)
+}
+
 pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>) -> Result<(), String> {
     let argument = dir_arg.unwrap_or("rust/target/ui-fixtures");
     let dir = if Path::new(argument).is_absolute() {
@@ -315,13 +327,7 @@ pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>) -> Result<(), String> {
             crate::util::slash(&dir)
         ));
     }
-    let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("{}: {e}", crate::util::slash(&dir)))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "html").unwrap_or(false))
-        .collect();
-    pages.sort();
+    let pages = collect_pages(&dir)?;
     if pages.len() < MIN_PAGES {
         return Err(format!(
             "console-a11y: expected at least {MIN_PAGES} rendered pages, found {}",
@@ -331,9 +337,9 @@ pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>) -> Result<(), String> {
     let mut findings = Vec::new();
     for page in &pages {
         let rel = page
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .strip_prefix(&dir)
+            .map(crate::util::slash)
+            .unwrap_or_else(|_| crate::util::slash(page));
         let html = std::fs::read_to_string(page).map_err(|e| format!("{rel}: {e}"))?;
         findings.extend(page_violations(&rel, &html)?);
     }
@@ -474,6 +480,22 @@ mod tests {
         );
         let v = page_violations("x.html", &html).unwrap();
         assert_eq!(v.iter().filter(|m| m.contains("low contrast")).count(), 1);
+    }
+
+    #[test]
+    fn collect_pages_walks_nested_directories() {
+        let dir = std::env::temp_dir().join(format!("apex-a11y-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("pricing")).unwrap();
+        std::fs::write(dir.join("index.html"), "x").unwrap();
+        std::fs::write(dir.join("pricing/index.html"), "x").unwrap();
+        std::fs::write(dir.join("style.css"), "x").unwrap();
+        let pages = collect_pages(&dir).unwrap();
+        let rels: Vec<String> = pages
+            .iter()
+            .map(|p| p.strip_prefix(&dir).map(crate::util::slash).unwrap())
+            .collect();
+        assert_eq!(rels, vec!["index.html", "pricing/index.html"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

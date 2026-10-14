@@ -15,7 +15,6 @@ import {
   isNetworkConnected,
   preflightNetworkCheck,
   getEffectiveTimeout,
-  getNetworkQualityHints,
   addNetworkListener,
   removeNetworkListener,
   NoNetworkError,

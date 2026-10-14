@@ -1,6 +1,0 @@
-[2025-12-07T23:59:11Z] NetworkEmulationBehaviour::Offline toggle ON
-[2025-12-07T23:59:11Z] NetworkingErrorSurfaceTests.OfflineRequestYieldsTimeout -> Timeout (retry=0)
-[2025-12-07T23:59:12Z] NetworkEmulationBehaviour::DnsOverride for host api-staging.apexmediation.ee
-[2025-12-07T23:59:12Z] NetworkingErrorSurfaceTests.DnsFailureMapsToNetworkError -> HostUnreachable
-[2025-12-07T23:59:13Z] NetworkEmulationBehaviour::CaptivePortal redirect -> HTTP 302
-[2025-12-07T23:59:13Z] NetworkingErrorSurfaceTests.CaptivePortalRedirectMapsToNavigationCancelled -> RateLimited(false) / retry in 0.25s

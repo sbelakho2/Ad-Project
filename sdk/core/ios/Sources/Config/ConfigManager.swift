@@ -160,7 +160,7 @@ public final class ConfigManager: @unchecked Sendable {
             throw ConfigError.missingSignature
         }
 
-        let payload = createSignaturePayload(config: config)
+        let payload = try createSignaturePayload(config: config)
 
         do {
             try verifier.verifySignature(message: payload, signatureBase64: signature)
@@ -171,18 +171,19 @@ public final class ConfigManager: @unchecked Sendable {
         }
     }
     
-    /// Create signature payload
-    private func createSignaturePayload(config: SDKRemoteConfig) -> String {
-        // Canonical representation for signature verification
-        var parts: [String] = []
-        
-        parts.append("version:\(config.version)")
-        parts.append("placements:\(config.placements.count)")
-        parts.append("adapters:\(config.adapters.count)")
-        parts.append("killswitches:\(config.killswitches.joined(separator: ","))")
-        parts.append("telemetry:\(config.telemetryEnabled)")
-        
-        return parts.joined(separator: "|")
+    /// Canonical message for signature verification, byte-pinned to the
+    /// Android `canonicalSigningMessage` output (lexicographic keys). The
+    /// signed envelope must carry config_id and timestamp; legacy envelopes
+    /// without them fail closed in production.
+    func createSignaturePayload(config: SDKRemoteConfig) throws -> String {
+        guard let configId = config.configId, let timestamp = config.timestamp else {
+            throw ConfigError.missingSignature
+        }
+        return SignatureVerifier.createCanonicalMessage(
+            configId: configId,
+            version: config.version,
+            timestamp: timestamp
+        )
     }
     
     // MARK: - Caching

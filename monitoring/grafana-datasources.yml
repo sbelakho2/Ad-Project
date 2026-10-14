@@ -1,7 +1,7 @@
 # Grafana datasource configuration
 #
 # This file contains only the always-on datasources (Prometheus, Loki).
-# `deploy-monitoring.sh` renders `grafana-datasources.generated.yml` from this
+# The deployment pipeline renders `grafana-datasources.generated.yml` from this
 # base file and conditionally appends the PostgreSQL analytics datasource when
 # valid credentials exist in `monitoring/.env`.
 apiVersion: 1

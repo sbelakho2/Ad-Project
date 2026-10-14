@@ -150,6 +150,30 @@ object ConsentManager {
         }
     }
 
+    /**
+     * Personalization gate matching the iOS ConsentManager rules: COPPA and CCPA
+     * opt-outs forbid personalization; when GDPR applies, a TCF v2 string must
+     * carry Purpose 1 consent; otherwise personalization is allowed.
+     */
+    fun canShowPersonalizedAds(state: State): Boolean {
+        if (state.coppa == true) return false
+        if (ccpaOptedOut(state)) return false
+        if (state.gdprApplies == true) {
+            val raw = state.tcfString
+            if (raw.isNullOrEmpty()) return false
+            return TCFParser.parse(raw, gdprApplies = true).purpose1Consent
+        }
+        return true
+    }
+
+    /** IAB US Privacy opt-out: position 1 of the string is the sale opt-out flag. */
+    private fun ccpaOptedOut(state: State): Boolean {
+        val raw = state.usPrivacy?.trim().orEmpty()
+        if (raw.length < 2) return false
+        val flag = raw[1]
+        return flag == 'Y' || flag == 'y'
+    }
+
     /** Lightweight debug summary with redacted strings for UI/debugger panels. */
     fun debugSummary(state: State): Map<String, Any?> = mapOf(
         "gdpr_applies" to state.gdprApplies,

@@ -1,7 +1,13 @@
-# apex-rs coverage: every Rust crate in the all-Rust repository, one job per
-# crate. Real per-crate floors from tools/coverage/floors.txt; coverage via
-# cargo-llvm-cov with a real lcov artifact consumed by apex-tools' lcov gate
-# (no --fail-under shortcuts). Clippy and fmt run per crate too.
+# apex-rs coverage: every Rust crate in the all-Rust repository, one matrix
+# entry per crate. Workspace crates run per package; the mail-server is its own
+# workspace under services/ and runs workspace-wide. Coverage comes from
+# cargo-llvm-cov and is consumed by apex-tools' lcov gate, which enforces the
+# ratchet floor from tools/coverage/floors.txt. Clippy and fmt run per entry.
+# Stable cargo-llvm-cov emits no branch records, so the gate holds lines and
+# functions; branch parity stays a nightly-toolchain upgrade.
+#
+# Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
+# script, so every `cd` below is absolute and idempotent.
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -9,13 +15,21 @@ when:
 matrix:
   include:
     - CRATE: apex-core
+      PKG: apex-core
     - CRATE: apex-connectors
+      PKG: apex-connectors
     - CRATE: apex-audit
+      PKG: apex-audit
     - CRATE: apex-proof
+      PKG: apex-proof
     - CRATE: apex-autopilot
+      PKG: apex-autopilot
     - CRATE: apex-billing
+      PKG: apex-billing
     - CRATE: apex-api
+      PKG: apex-api
     - CRATE: apex-tools
+      PKG: apex-tools
     - CRATE: mail-server
       DIR: services/mail-server
 
@@ -25,11 +39,10 @@ steps:
     commands:
       - rustup component add llvm-tools-preview clippy rustfmt
       - cargo install cargo-llvm-cov --locked
-      - if [ -z "${DIR:-}" ]; then cd rust/crates; else cd rust/${DIR}; fi
-      - cargo llvm-cov -p "$CRATE" --lcov --output-path "$CRATE.lcov"
-      - cargo test -p "$CRATE"
-      - cargo clippy -p "$CRATE" --all-targets -- -D warnings
-      - cargo fmt -p "$CRATE" --check
-      - FLOOR=$(grep -E "^${CRATE} " "$CI_WORKSPACE/tools/coverage/floors.txt" | awk '{print $2}')
-      - cd "$CI_WORKSPACE/rust/target/release"
-      - /w/rust/target/release/apex-tools lcov-gate "/w/rust/$CRATE.lcov" "$FLOOR"
+      - if [ -n "${DIR:-}" ]; then apt-get update && apt-get install -y protobuf-compiler; fi
+      - WORKDIR="${DIR:-rust}"
+      - cd "$CI_WORKSPACE/$WORKDIR"
+      - if [ -n "${PKG:-}" ]; then cargo llvm-cov -p "$PKG" --lcov --output-path "$CRATE.lcov" && cargo test -p "$PKG" && cargo clippy -p "$PKG" --all-targets -- -D warnings && cargo fmt -p "$PKG" --check; else cargo llvm-cov --workspace --lcov --output-path "$CRATE.lcov" && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check; fi
+      - cd "$CI_WORKSPACE" && cargo build --release --manifest-path rust/Cargo.toml -p apex-tools
+      - FLOOR=$(grep -E "^${CRATE} " "$CI_WORKSPACE"/tools/coverage/floors.txt | awk '{print $2}')
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools lcov-gate "$WORKDIR/$CRATE.lcov" "$FLOOR"

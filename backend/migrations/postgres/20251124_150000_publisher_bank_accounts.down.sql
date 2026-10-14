@@ -1,1 +1,0 @@
-DROP TABLE IF EXISTS publisher_bank_accounts;

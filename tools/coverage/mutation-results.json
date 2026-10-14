@@ -1,6 +1,6 @@
 {
   "__comment": "Sample-based mutation smoke for apex-core (money.rs + validation.rs). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.",
-  "generatedAt": "2026-10-13T23:10:57Z",
+  "generatedAt": "2026-10-14T11:31:35Z",
   "target": "apex-core: money.rs, validation.rs",
   "mutants": [
     { "description": "min lift rate 1500 -> 1400", "status": "killed" },

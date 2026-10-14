@@ -575,28 +575,9 @@ pub struct Baseline {
 }
 
 pub fn parse_baseline(text: &str) -> Baseline {
-    let mut baseline = Baseline::default();
-    let mut current_total: Option<usize> = None;
-    for line in text.lines() {
-        let trimmed = line.trim_end();
-        if let Some(rest) = trimmed.strip_prefix("TOTAL") {
-            if rest.starts_with(' ') || rest.starts_with('\t') {
-                current_total = rest.trim().parse::<usize>().ok();
-                continue;
-            }
-        }
-        let mut parts = trimmed.splitn(2, ' ');
-        if let (Some(count), Some(path)) = (parts.next(), parts.next()) {
-            if let Ok(n) = count.parse::<usize>() {
-                let path = path.trim_start_matches(' ').trim_end();
-                if !path.is_empty() {
-                    baseline.rows.insert(path.to_string(), n);
-                }
-            }
-        }
-    }
-    baseline.total = current_total.unwrap_or(0);
-    baseline
+    // One grammar for every ratchet baseline; see crate::baseline.
+    let (rows, total) = crate::baseline::parse_count_rows(text);
+    Baseline { rows, total }
 }
 
 /// Baseline ratchet failures: overages per row and total, stale rows noted.
@@ -658,20 +639,9 @@ pub fn parse_args(args: &[String]) -> Result<DocsLintArgs, String> {
     Ok(out)
 }
 
-fn product_root_readme(repo: &Repo) -> bool {
-    match repo.read("README.md") {
-        Ok(text) => text.lines().next() == Some("# ApexMediation Platform"),
-        Err(_) => false,
-    }
-}
-
 fn scan_files(repo: &Repo, extensions: &[&str]) -> Vec<PathBuf> {
     let mut out: BTreeSet<PathBuf> = BTreeSet::new();
-    let woodpecker_ok = product_root_readme(repo);
     for root in SCAN_ROOTS {
-        if *root == ".woodpecker" && !woodpecker_ok {
-            continue;
-        }
         let dir = repo.path(root);
         if !dir.is_dir() {
             continue;
@@ -696,17 +666,28 @@ fn scan_files(repo: &Repo, extensions: &[&str]) -> Vec<PathBuf> {
             out.insert(file);
         }
     }
-    if woodpecker_ok && extensions.contains(&"md") {
-        let readme = repo.path("README.md");
-        if readme.is_file() {
-            out.insert(readme);
-        }
-        let security = repo.path("SECURITY.md");
-        if security.is_file() {
-            out.insert(security);
+    if extensions.contains(&"md") {
+        for name in ["README.md", "SECURITY.md"] {
+            let path = repo.path(name);
+            if path.is_file() {
+                out.insert(path);
+            }
         }
     }
     out.into_iter().collect()
+}
+
+/// Baseline targets come from lanes that run with a different working
+/// directory (`cd rust && cargo run ... -- docs-lint --baseline tools/...`), so
+/// a relative target is resolved against the repository root, never the
+/// process cwd. Absolute targets pass through unchanged.
+fn resolve_target(repo: &Repo, target: &str) -> PathBuf {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo.path(target)
+    }
 }
 
 /// One shell word of the scanned file list. The retired shell iterates
@@ -884,14 +865,14 @@ pub fn docs_lint(repo: &Repo, args: &DocsLintArgs) -> Result<(), String> {
             content.push_str(&format!("{count} {path}\n"));
         }
         content.push_str(&format!("TOTAL {total_violations}\n"));
-        std::fs::write(target, content)
-            .map_err(|e| format!("docs-lint.sh: cannot write baseline: {target}: {e}"))?;
+        std::fs::write(resolve_target(repo, target), content)
+            .map_err(|e| format!("docs-lint: cannot write baseline: {target}: {e}"))?;
         println!("docs-lint: baseline written: {target} (TOTAL {total_violations})");
         return Ok(());
     }
 
     if let Some(target) = &args.baseline {
-        let text = std::fs::read_to_string(target).map_err(|_| {
+        let text = std::fs::read_to_string(resolve_target(repo, target)).map_err(|_| {
             format!(
                 "docs-lint: baseline file not found: {target} (generate with --update-baseline)"
             )

@@ -154,7 +154,7 @@ export class NetworkWarmer {
       timeoutId = setTimeout(() => controller.abort(), this.config.warmupTimeout);
 
       // Use HEAD request to minimize data transfer while still establishing connection
-      const response = await fetch(endpoint, {
+      await fetch(endpoint, {
         method: 'HEAD',
         mode: 'no-cors', // Allow cross-origin without CORS headers for warmup
         signal: controller.signal,

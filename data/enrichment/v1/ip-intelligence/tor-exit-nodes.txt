@@ -1,3 +1,0 @@
-# Sample Tor exit node list
-185.220.101.1
-185.220.101.2

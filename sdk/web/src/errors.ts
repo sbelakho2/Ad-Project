@@ -20,9 +20,8 @@ export class SdkError extends Error {
     if (cause && typeof (Error as any).captureStackTrace === 'function') {
       (Error as any).captureStackTrace(this, SdkError);
     }
-    // Non-standard, but helpful
-    // @ts-ignore
-    this.cause = cause;
+    // Non-standard on the ES2020 lib target, but helpful.
+    (this as { cause?: unknown }).cause = cause;
   }
 }
 

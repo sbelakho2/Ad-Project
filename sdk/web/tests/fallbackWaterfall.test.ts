@@ -10,7 +10,6 @@ import {
   error,
   timeout,
   DEFAULT_TIMEOUT_MS,
-  WaterfallResult,
   WaterfallSource
 } from '../src/fallbackWaterfall';
 

@@ -20,7 +20,7 @@ export { SSAIPlayerMonitor } from './SSAIPlayerMonitor';
 export type { SSAIPlayerMonitorConfig } from './SSAIPlayerMonitor';
 
 // Convenience function to create SSAI integration
-import { SSAIConfig, SSAISession, SSAIPlayerEvents } from './types';
+import { SSAIConfig, SSAIPlayerEvents } from './types';
 import { SSAISessionClient, SSAISessionClientConfig } from './SSAISessionClient';
 import { SSAIManifestParser } from './SSAIManifestParser';
 import { SSAIPlayerMonitor, SSAIPlayerMonitorConfig } from './SSAIPlayerMonitor';

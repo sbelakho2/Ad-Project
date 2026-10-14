@@ -15,8 +15,9 @@ use serde_json::json;
 pub enum ApiError {
     /// A request the server refuses to interpret: the payload names the
     /// machine-readable reason (`unknown_platform`, `invalid_publisher`,
-    /// `platform_required`, `invalid_cycle_request`, `invalid_policy`, and
-    /// `bad_request` for a malformed path/query or an oversized body).
+    /// `platform_required`, `invalid_cycle_request`, `invalid_policy`,
+    /// `invalid_credentials`, `platform_not_onboarded`, and `bad_request` for
+    /// a malformed path/query or an oversized body).
     #[error("bad request: {0}")]
     BadRequest(&'static str),
 
@@ -32,6 +33,19 @@ pub enum ApiError {
     /// No Stripe webhook secret is configured in this deployment.
     #[error("stripe webhook is not configured")]
     WebhookNotConfigured,
+
+    /// No live-audit account store is configured in this deployment.
+    #[error("live audit is not configured")]
+    LiveAuditNotConfigured,
+
+    /// The live-audit bearer token is missing or wrong.
+    #[error("unauthorized")]
+    Unauthorized,
+
+    /// An upstream platform refused or failed the call; the detail is logged
+    /// but not exposed.
+    #[error("platform unavailable: {0}")]
+    PlatformUnavailable(String),
 
     /// The Stripe signature did not pass verification. The response never says
     /// which check failed.
@@ -52,6 +66,9 @@ impl ApiError {
             ApiError::NotFound => "not_found",
             ApiError::LedgerUnverified { .. } => "ledger_unverified",
             ApiError::WebhookNotConfigured => "webhook_not_configured",
+            ApiError::LiveAuditNotConfigured => "live_audit_not_configured",
+            ApiError::Unauthorized => "unauthorized",
+            ApiError::PlatformUnavailable(_) => "platform_unavailable",
             ApiError::InvalidSignature => "invalid_signature",
             ApiError::Internal(_) => "internal",
         }
@@ -63,7 +80,11 @@ impl ApiError {
             ApiError::BadRequest(_) | ApiError::InvalidSignature => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::LedgerUnverified { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::WebhookNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::WebhookNotConfigured | ApiError::LiveAuditNotConfigured => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
+            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -82,7 +103,13 @@ impl IntoResponse for ApiError {
                 json!({ "error": "ledger_unverified", "line": line })
             }
             ApiError::WebhookNotConfigured => json!({ "error": "webhook_not_configured" }),
+            ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
+            ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
+            ApiError::PlatformUnavailable(detail) => {
+                tracing::error!(error = %detail, "platform call failed");
+                json!({ "error": "platform_unavailable" })
+            }
             ApiError::Internal(detail) => {
                 tracing::error!(error = %detail, "internal api error");
                 json!({ "error": "internal" })
@@ -127,6 +154,17 @@ mod tests {
                 503,
                 "webhook_not_configured",
             ),
+            (
+                ApiError::LiveAuditNotConfigured,
+                503,
+                "live_audit_not_configured",
+            ),
+            (
+                ApiError::PlatformUnavailable("AdMob listMediationGroups: HTTP 500".into()),
+                502,
+                "platform_unavailable",
+            ),
+            (ApiError::Unauthorized, 401, "unauthorized"),
             (ApiError::InvalidSignature, 400, "invalid_signature"),
             (ApiError::Internal("/etc/secret".into()), 500, "internal"),
         ];
@@ -141,6 +179,19 @@ mod tests {
     async fn unverified_ledger_body_names_the_line() {
         let (_, value) = render(ApiError::LedgerUnverified { line: 3 }).await;
         assert_eq!(value, json!({ "error": "ledger_unverified", "line": 3 }));
+    }
+
+    #[tokio::test]
+    async fn platform_unavailable_never_serializes_its_detail() {
+        let (status, value) = render(ApiError::PlatformUnavailable(
+            "AdMob listMediationGroups: HTTP 500 for key sk_live_abc".into(),
+        ))
+        .await;
+        assert_eq!(status.as_u16(), 502);
+        let rendered = value.to_string();
+        assert!(!rendered.contains("sk_live"), "{rendered}");
+        assert!(!rendered.contains("500"), "{rendered}");
+        assert_eq!(value, json!({ "error": "platform_unavailable" }));
     }
 
     #[tokio::test]

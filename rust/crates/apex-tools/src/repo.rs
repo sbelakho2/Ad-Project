@@ -31,8 +31,6 @@ pub const SKIP_DIRS: &[&str] = &[
     ".lighthouseci",
     "chrome",
     "chromium",
-    "obj",
-    "bin",
     "target",
     "vendor",
 ];

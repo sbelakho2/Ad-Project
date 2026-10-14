@@ -16,7 +16,7 @@ impl EmailAddress {
     /// Parse an email address string.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        
+
         // Handle "Name <email@domain>" format
         if let Some(start) = s.find('<') {
             if let Some(end) = s.find('>') {
@@ -28,7 +28,7 @@ impl EmailAddress {
                 });
             }
         }
-        
+
         // Simple email format
         if s.contains('@') && !s.contains(' ') {
             return Some(Self {
@@ -36,15 +36,15 @@ impl EmailAddress {
                 address: s.to_string(),
             });
         }
-        
+
         None
     }
-    
+
     /// Get the domain part.
     pub fn domain(&self) -> Option<&str> {
         self.address.split('@').nth(1)
     }
-    
+
     /// Get the local part.
     pub fn local_part(&self) -> Option<&str> {
         self.address.split('@').next()
@@ -100,7 +100,7 @@ impl BlobHash {
             hash,
         ))
     }
-    
+
     /// Get as string reference.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -122,7 +122,7 @@ impl AccountId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
-    
+
     /// Parse from string.
     pub fn parse(s: &str) -> Option<Self> {
         Uuid::parse_str(s).ok().map(Self)
@@ -158,16 +158,28 @@ impl MessageFlags {
     pub fn any_set(&self) -> bool {
         self.seen || self.answered || self.flagged || self.deleted || self.draft || self.recent
     }
-    
+
     /// Convert to IMAP flag string list.
     pub fn to_imap_strings(&self) -> Vec<&'static str> {
         let mut flags = Vec::new();
-        if self.seen { flags.push("\\Seen"); }
-        if self.answered { flags.push("\\Answered"); }
-        if self.flagged { flags.push("\\Flagged"); }
-        if self.deleted { flags.push("\\Deleted"); }
-        if self.draft { flags.push("\\Draft"); }
-        if self.recent { flags.push("\\Recent"); }
+        if self.seen {
+            flags.push("\\Seen");
+        }
+        if self.answered {
+            flags.push("\\Answered");
+        }
+        if self.flagged {
+            flags.push("\\Flagged");
+        }
+        if self.deleted {
+            flags.push("\\Deleted");
+        }
+        if self.draft {
+            flags.push("\\Draft");
+        }
+        if self.recent {
+            flags.push("\\Recent");
+        }
         flags
     }
 }
@@ -223,28 +235,28 @@ pub struct SpamSymbol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_email_address_parse() {
         let addr = EmailAddress::parse("test@example.com").unwrap();
         assert_eq!(addr.address, "test@example.com");
         assert!(addr.name.is_none());
-        
+
         let addr = EmailAddress::parse("John Doe <john@example.com>").unwrap();
         assert_eq!(addr.address, "john@example.com");
         assert_eq!(addr.name, Some("John Doe".to_string()));
-        
+
         let addr = EmailAddress::parse("\"Jane Doe\" <jane@example.com>").unwrap();
         assert_eq!(addr.address, "jane@example.com");
         assert_eq!(addr.name, Some("Jane Doe".to_string()));
     }
-    
+
     #[test]
     fn test_blob_hash() {
         let data = b"Hello, World!";
         let hash = BlobHash::compute(data);
         assert!(!hash.0.is_empty());
-        
+
         // Same data should produce same hash
         let hash2 = BlobHash::compute(data);
         assert_eq!(hash, hash2);

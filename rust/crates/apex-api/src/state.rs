@@ -12,6 +12,7 @@ use apex_billing::StripeClient;
 
 use crate::clock::{Clock, SystemClock};
 use crate::cycle::{CycleRunner, LedgerOnlyRunner};
+use crate::live::LiveAuditor;
 use crate::sources::{AuditSource, LedgerSource};
 
 /// The webhook freshness tolerance used when [`AppState::new`] builds the
@@ -42,6 +43,9 @@ pub struct AppState {
     pub clock: Arc<dyn Clock>,
     /// The cycle runner behind `POST /v1/cycle/{publisher}`.
     pub cycle_runner: Arc<dyn CycleRunner>,
+    /// The live read-only auditor behind `POST /v1/audit/{platform}`. `None`
+    /// makes the route answer `503 live_audit_not_configured`.
+    pub live_auditor: Option<Arc<LiveAuditor>>,
 }
 
 impl AppState {
@@ -61,7 +65,15 @@ impl AppState {
             stripe_tolerance_secs: DEFAULT_STRIPE_TOLERANCE_SECS,
             clock: Arc::new(SystemClock),
             cycle_runner,
+            live_auditor: None,
         }
+    }
+
+    /// Attach the live read-only auditor.
+    #[must_use]
+    pub fn with_live_auditor(mut self, auditor: Arc<LiveAuditor>) -> Self {
+        self.live_auditor = Some(auditor);
+        self
     }
 
     /// Attach a Stripe client.

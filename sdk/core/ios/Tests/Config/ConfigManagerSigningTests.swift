@@ -28,3 +28,47 @@ final class ConfigManagerSigningTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Canonical envelope pinning
+
+extension ConfigManagerSigningTests {
+    private func manager() -> ConfigManager {
+        let cfg = SDKConfig(
+            appId: "app",
+            configEndpoint: "https://example.invalid",
+            auctionEndpoint: "https://example.invalid",
+            telemetryEnabled: true,
+            logLevel: .info,
+            testMode: false,
+            configSignaturePublicKey: nil
+        )
+        return ConfigManager(config: cfg, signatureVerifier: nil)
+    }
+
+    func testSignaturePayloadPinsTheCrossPlatformByteOrder() throws {
+        let remote = SDKRemoteConfig(
+            version: 4,
+            placements: [],
+            adapters: [:],
+            killswitches: [],
+            telemetryEnabled: true,
+            configId: "config_1",
+            timestamp: 1234
+        )
+        XCTAssertEqual(
+            try manager().createSignaturePayload(config: remote),
+            "{\"config_id\":\"config_1\",\"timestamp\":1234,\"version\":4}"
+        )
+    }
+
+    func testSignaturePayloadFailsClosedWithoutEnvelopeFields() {
+        let legacy = SDKRemoteConfig(
+            version: 4,
+            placements: [],
+            adapters: [:],
+            killswitches: [],
+            telemetryEnabled: true
+        )
+        XCTAssertThrowsError(try manager().createSignaturePayload(config: legacy))
+    }
+}

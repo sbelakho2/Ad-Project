@@ -1,8 +1,16 @@
+0 .woodpecker/README.md
+0 .woodpecker/apex-rs-coverage.yml
+0 .woodpecker/contract-coverage.yml
+0 .woodpecker/coverage-gate.yml
+0 .woodpecker/dogfood-audit.yml
+0 .woodpecker/site-perf.yml
+0 .woodpecker/ui-ux.yml
 0 DEVELOPMENT_TODO_CHECKLIST.md
 0 Plane/sensei-modern-style-guide.md
 0 Plane/sensei-rams-accessibility.md
 0 Plane/sensei-rams-anti-patterns.md
 0 Plane/sensei-rams-implementation-guide.md
+0 README.md
 3 docs/Architecture/ADMIN_UI_DESIGN_SPEC.md
 8 docs/Architecture/CONTROL_PLANE.md
 9 docs/Architecture/DATABASE_OPTIMIZATION_PLAN.md

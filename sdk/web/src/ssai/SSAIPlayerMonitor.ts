@@ -453,8 +453,6 @@ export class SSAIPlayerMonitor {
    */
   private handleError(): void {
     if (this.adState.inAdBreak && this.adState.currentAd && this.adState.currentBreak) {
-      const state = this.getPlayerState();
-
       this.sessionClient.trackError(
         this.adState.currentBreak.podId,
         this.adState.currentAd.slotId,

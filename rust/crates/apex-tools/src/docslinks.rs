@@ -142,7 +142,21 @@ pub fn check_doc(
             }
             continue;
         }
-        let resolved = posix_normalize(&posix_join(&posix_dirname(rel), &clean_path));
+        // A leading slash is a site route (Zola renders `content/<route>.md` to
+        // `/route/`), not a document-relative path; resolve it from the repo
+        // root and let the existence callback map the route to its content
+        // file. Document-relative links keep the old resolution.
+        let resolved = if clean_path.starts_with('/') {
+            posix_normalize(&clean_path)
+        } else {
+            posix_normalize(&posix_join(&posix_dirname(rel), &clean_path))
+        };
+        if resolved == ".." || resolved.starts_with("../") || resolved.contains("/../") {
+            violations.push(format!(
+                "{rel}: link target escapes the repository: {clean_path}"
+            ));
+            continue;
+        }
         if !file_exists(&resolved) {
             violations.push(format!("{rel}: link target missing: {clean_path}"));
             continue;
@@ -204,6 +218,28 @@ pub fn parse_mode(args: &[String]) -> Result<Mode, String> {
     Err("usage: apex-tools docs-links --check --baseline <file> | --update-baseline <file>".into())
 }
 
+/// Content files a site-absolute route may resolve to: the page, the section
+/// index, or the static tree entry. Routes never leave those three roots.
+pub fn site_route_candidates(resolved: &str) -> Vec<String> {
+    let Some(route) = resolved.strip_prefix('/') else {
+        return Vec::new();
+    };
+    let route = route.trim_end_matches('/');
+    if route.split('/').any(|s| s == ".." || s == ".") {
+        return Vec::new();
+    }
+    if route.is_empty() {
+        // Zola serves content/_index.md at the site root.
+        return vec!["site/content/_index.md".to_string()];
+    }
+    vec![
+        format!("site/content/{route}.md"),
+        format!("site/content/{route}/_index.md"),
+        format!("site/content/{route}/index.md"),
+        format!("site/static/{route}"),
+    ]
+}
+
 pub fn docs_links(repo: &Repo, mode: &Mode) -> Result<(), String> {
     let docs = walk_markdown(&repo.root);
     let mut by_pos: BTreeMap<String, String> = BTreeMap::new();
@@ -212,7 +248,19 @@ pub fn docs_links(repo: &Repo, mode: &Mode) -> Result<(), String> {
             by_pos.insert(rel.clone(), text);
         }
     }
-    let exists = |resolved: &str| repo.path(resolved).exists() || by_pos.contains_key(resolved);
+    let exists = |resolved: &str| {
+        // Repo-relative paths are checked as-is; a leading slash marks a site
+        // route and must not be handed to PathBuf::join (an absolute path
+        // would replace the repository root).
+        if !resolved.starts_with('/')
+            && (repo.path(resolved).exists() || by_pos.contains_key(resolved))
+        {
+            return true;
+        }
+        site_route_candidates(resolved)
+            .iter()
+            .any(|c| repo.path(c).exists() || by_pos.contains_key(c))
+    };
     let read_doc = |resolved: &str| -> Option<String> { by_pos.get(resolved).cloned() };
     let mut per_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut total = 0usize;
@@ -251,43 +299,24 @@ pub fn docs_links(repo: &Repo, mode: &Mode) -> Result<(), String> {
                 return Err(format!("docs-links: baseline not found: {target}"));
             }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{target}: {e}"))?;
-            let mut allowed: BTreeMap<String, usize> = BTreeMap::new();
-            let mut allowed_total = 0usize;
-            let total_re = re(r"^TOTAL (\d+)$")?;
-            let row_re = re(r"^(\d+)\s+(.+)$")?;
-            for line in text.lines() {
-                if let Some(c) = total_re.captures(line) {
-                    allowed_total = c[1].parse().unwrap_or(0);
-                    continue;
-                }
-                if let Some(c) = row_re.captures(line) {
-                    allowed.insert(c[2].to_string(), c[1].parse().unwrap_or(0));
-                }
-            }
-            let mut failures = Vec::new();
+            let (allowed, allowed_total) = crate::baseline::parse_count_rows(&text);
+            let counts: BTreeMap<String, usize> =
+                per_file.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+            let (mut failures, _notes) = crate::baseline::ratchet(
+                &counts,
+                &allowed,
+                total,
+                allowed_total,
+                "broken links",
+                crate::baseline::Stale::Failure,
+            );
             for (rel, violations) in &per_file {
                 let allowed_count = allowed.get(rel).copied().unwrap_or(0);
                 if violations.len() > allowed_count {
-                    failures.push(format!(
-                        "{rel}: {} broken links (baseline {allowed_count})",
-                        violations.len()
-                    ));
                     for v in violations.iter().take(5) {
                         failures.push(format!("    {v}"));
                     }
                 }
-            }
-            for rel in allowed.keys() {
-                if !per_file.contains_key(rel) {
-                    failures.push(format!(
-                        "{rel}: baseline row no longer needed (stale) — remove it"
-                    ));
-                }
-            }
-            if total > allowed_total {
-                failures.push(format!(
-                    "total {total} exceeds baseline total {allowed_total}"
-                ));
             }
             if !failures.is_empty() {
                 return Err(format!(
@@ -343,6 +372,35 @@ mod tests {
             relative_links(md).unwrap(),
             vec!["./doc.md#h".to_string(), "#local".to_string()]
         );
+    }
+
+    #[test]
+    fn links_that_escape_the_repository_are_violations() {
+        static FILES: &[(&str, &str)] = &[];
+        let (exists, read) = ctx(FILES);
+        let md = "[x](../../../../etc/passwd)";
+        let v = check_doc("docs/a.md", md, &exists, &read).unwrap();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v.iter().any(|m| m.contains("escapes the repository")));
+    }
+
+    #[test]
+    fn site_route_candidates_map_pages_sections_bundles_and_static_files() {
+        assert_eq!(
+            site_route_candidates("/how-it-works/"),
+            vec![
+                "site/content/how-it-works.md".to_string(),
+                "site/content/how-it-works/_index.md".to_string(),
+                "site/content/how-it-works/index.md".to_string(),
+                "site/static/how-it-works".to_string()
+            ]
+        );
+        assert_eq!(
+            site_route_candidates("/"),
+            vec!["site/content/_index.md".to_string()]
+        );
+        assert!(site_route_candidates("docs/a.md").is_empty());
+        assert!(site_route_candidates("/../etc/passwd").is_empty());
     }
 
     #[test]

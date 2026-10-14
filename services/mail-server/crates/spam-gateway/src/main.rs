@@ -14,19 +14,19 @@ struct Cli {
     /// gRPC listen address
     #[arg(short, long, default_value = "127.0.0.1:50052")]
     listen: String,
-    
+
     /// Rspamd HTTP URL
     #[arg(long, default_value = "http://127.0.0.1:11333")]
     rspamd_url: String,
-    
+
     /// Rspamd password (optional)
     #[arg(long)]
     rspamd_password: Option<String>,
-    
+
     /// Spam score threshold
     #[arg(long, default_value = "15.0")]
     spam_threshold: f32,
-    
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -35,23 +35,23 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     // Initialize logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-    
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
         .init();
-    
+
     info!("Starting Spam Gateway Service");
     info!("Rspamd URL: {}", cli.rspamd_url);
     info!("Spam threshold: {}", cli.spam_threshold);
     info!("Spam Gateway listening on {}", cli.listen);
-    
+
     // Keep running
     tokio::signal::ctrl_c().await?;
-    
+
     Ok(())
 }

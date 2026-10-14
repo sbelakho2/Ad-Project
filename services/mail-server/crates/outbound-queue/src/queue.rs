@@ -1,8 +1,8 @@
 //! Queue management for outbound emails
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueItem {
@@ -47,12 +47,12 @@ impl QueueItem {
             updated_at: now,
         }
     }
-    
+
     pub fn with_text(mut self, text: &str) -> Self {
         self.body_text = Some(text.to_string());
         self
     }
-    
+
     pub fn with_html(mut self, html: &str) -> Self {
         self.body_html = Some(html.to_string());
         self

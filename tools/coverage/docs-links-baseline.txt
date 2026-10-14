@@ -43,6 +43,4 @@
 2 docs/SDK_API_REFERENCE.md
 6 docs/SSAI/SSAI_IMPROVEMENTS.md
 1 docs/runbooks/SALES_AUTOMATION_OPERATIONS.md
-3 monitoring/README.md
-4 site/content/_index.md
-TOTAL 161
+TOTAL 154

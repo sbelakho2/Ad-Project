@@ -36,7 +36,5 @@ bytes.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
 
-trust-dns-resolver.workspace = true
-
 clap.workspace = true
 dotenvy.workspace = true

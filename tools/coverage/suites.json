@@ -1,4 +1,112 @@
 {
-  "comment": "Suite registry: every code file in coverage-manifest.json must be claimed by exactly one suite (or carry an exclusion reason). 'covers' are glob patterns. Registered suites come online per rollout phase; orphan-gate fails while orphan percent exceeds tools/coverage/coverage-floor.json:orphanFloorPercent.",
-  "suites": []
+  "__comment": "Suite registry: every code file must be claimed by exactly one suite. 'covers' are glob patterns relative to the repo root. Rust crates are covered by cargo test in the apex-rs-coverage lane; the SDK domains are covered by their platform suites (jest for web and react-native, gradle unit tests for android, swift test for ios and tvos, flutter test, and the Unity edit-mode suite) in the SDK lanes.",
+  "suites": [
+    {
+      "id": "apex-core-unit",
+      "covers": [
+        "rust/crates/apex-core/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-connectors-unit",
+      "covers": [
+        "rust/crates/apex-connectors/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-audit-unit",
+      "covers": [
+        "rust/crates/apex-audit/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-autopilot-unit",
+      "covers": [
+        "rust/crates/apex-autopilot/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-proof-unit",
+      "covers": [
+        "rust/crates/apex-proof/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-billing-unit",
+      "covers": [
+        "rust/crates/apex-billing/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-api-tests",
+      "covers": [
+        "rust/crates/apex-api/**/*.rs"
+      ]
+    },
+    {
+      "id": "apex-tools-unit",
+      "covers": [
+        "rust/crates/apex-tools/**/*.rs"
+      ]
+    },
+    {
+      "id": "mail-server-tests",
+      "covers": [
+        "services/mail-server/**/*.rs"
+      ]
+    },
+    {
+      "id": "android-core-tests",
+      "covers": [
+        "sdk/core/android/src/main/**/*.kt",
+        "sdk/core/android/strictmode-sample/src/main/**/*.kt"
+      ]
+    },
+    {
+      "id": "android-ctv-tests",
+      "covers": [
+        "sdk/ctv/android-tv/src/main/**/*.kt"
+      ]
+    },
+    {
+      "id": "ios-swift-tests",
+      "covers": [
+        "sdk/core/ios/Sources/**/*.swift",
+        "sdk/adapter-dev-kit/ios/Sources/**/*.swift"
+      ]
+    },
+    {
+      "id": "tvos-swift-tests",
+      "covers": [
+        "sdk/ctv/tvos/Sources/**/*.swift"
+      ]
+    },
+    {
+      "id": "flutter-sdk-tests",
+      "covers": [
+        "sdk/flutter/lib/**/*.dart"
+      ]
+    },
+    {
+      "id": "web-sdk-tests",
+      "covers": [
+        "sdk/web/src/**/*.ts",
+        "sdk/web/src/**/*.tsx"
+      ]
+    },
+    {
+      "id": "react-native-sdk-tests",
+      "covers": [
+        "sdk/react-native/src/**/*.ts",
+        "sdk/react-native/src/**/*.tsx"
+      ]
+    },
+    {
+      "id": "unity-tier1-tests",
+      "covers": [
+        "sdk/core/unity/Runtime/**/*.cs",
+        "sdk/core/unity/Editor/**/*.cs"
+      ]
+    }
+  ]
 }

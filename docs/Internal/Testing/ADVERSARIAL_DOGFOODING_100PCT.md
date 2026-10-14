@@ -1,6 +1,6 @@
 # Adversarial Dogfooding & 100% Coverage — Master Design
 
-Status: design complete; the stack is implemented and verified. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3.
+Status: design complete; the stack is implemented and verified. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.
 Owner: @sbelakho2
 
 ---
@@ -52,7 +52,7 @@ Docs (`*.md`) are NOT excluded: they form the `docs` domain with a link/referenc
 
 3. **Skipped-but-never-run is a bug**: the backend's jest `testMatch` ran only 40 of 197 `*.test.ts` files. The additive `backend/jest.coverage.config.cjs` consolidates `testMatch` to pick up `src/**/__tests__`, `scripts/__tests__`, `routes/__tests__`, and `services/sales-automation/tests`. The Unity tier-1 suite had never compiled at all (see §5.11 U-1) and now runs 25/25 green.
 
-4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `sync-floors.mjs` + the dogfood audit).
+4. **Gates fail the build, not a report**: every percentage below is enforced via `--fail-under`-style mechanisms inside Woodpecker steps, never via "upload and look at it later". Machine-readable floors live in `tools/coverage/coverage-floor.json` and are mirrored to the grep-readable `tools/coverage/floors.txt` (kept in lockstep by `apex-tools sync-floors` plus the dogfood audit; see §9.7 for the all-Rust tooling).
 
 5. **Everything in this design is itself dogfooded**: the gate tooling runs under its own self-coverage gate (§6.1 M-8), and the prose lint plus the stub-ban check gate the files that implement them (§6.1 M-9/M-10).
 
@@ -85,7 +85,7 @@ Findings from the 2026-10-13 repo audit, refreshed to the current tree (anchors 
 | scripts/**.sh (64 sh) | 0 bats suites yet | kcov in `scripts-shell-coverage.yml` | shell floor (0, ratcheting) |
 | SQL migrations (109 files) | apply-verify only (`backend/scripts/verifyMigrations.js`) | n/a | `backend-coverage.yml` SQL contract step |
 | monitoring / infrastructure / helm / terraform | 0 | `promtool check rules` plus `monitoring/alerts.test.yml` | `contract-coverage.yml` S-IAC |
-| CI | GitHub Actions plus `.woodpecker/` (17 pipeline configs: 16 lanes + the aggregate verdict) | Woodpecker gates configured and locally verified (§9.5) | floors fail the build inside each pipeline; `coverage-gate` is the aggregate verdict |
+| CI | GitHub Actions plus `.woodpecker/` (all-Rust tree: 6 configs, 5 lanes + the aggregate verdict, §9.7) | Woodpecker gates configured and locally verified (§9.8) | floors fail the build inside each pipeline; `coverage-gate` is the aggregate verdict |
 
 Known broken references the meta-suite must catch and keep caught:
 
@@ -99,7 +99,7 @@ Known broken references the meta-suite must catch and keep caught:
 ## 2. Architecture of the gate stack
 
 ```
-                 .woodpecker/*.yml (16 lanes plus the aggregate verdict)
+                 .woodpecker/*.yml (all-Rust tree: 5 lanes plus the aggregate verdict, §9.7)
   backend ─ frontend ─ node-services ─ go ─ sdk-* ─ python ─ rust ─ apex-rs ─
   scripts-shell ─ contract ─ dogfood-audit ─ site-perf ─ ui-ux ───► coverage-gate
         │                │                │                │
@@ -393,7 +393,7 @@ The first execution of this stack (Unity tier-1, promtool, shell/bats, contract 
 
 ### 6.2 Why mutation testing is the "correct expectations" oracle
 
-A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants. An expectation that does not pin behavior lets mutants survive; the audit scores kills and fails below floor. That is the only mechanical proof that expectations are *correct and tight*; phase 3 therefore floors at a 60% kill rate with a ratchet to 80%. Phase 3 has started: `tools/coverage/rust-mutation-smoke.sh` applies six hand-picked mutants across money and validation in a throwaway copy of apex-core, demands the suite kill each one, and writes `tools/coverage/mutation-results.json`; the floor is live at 60% and the current sample kills six of six. The StrykerJS/mutmut rollout continues in later phases toward the 80% target.
+A passing suite only proves expectations hold for the written inputs. Mutation sampling (StrykerJS/mutmut) mutates production code and requires the suite to kill mutants. An expectation that does not pin behavior lets mutants survive; the audit scores kills and fails below floor. That is the only mechanical proof that expectations are *correct and tight*; phase 3 therefore started at a 60% kill rate with a ratchet toward 80%. Phase 3 has started: `apex-tools mutation-smoke` applies six hand-picked mutants across money and validation in a throwaway copy of apex-core, demands the suite kill each one, and writes `tools/coverage/mutation-results.json`. The floor was raised to 100% on 2026-10-14 (§9.7) because the sample kills six of six. The StrykerJS/mutmut rollout continues in later phases toward the 80% target.
 
 ---
 
@@ -404,6 +404,8 @@ A passing suite only proves expectations hold for the written inputs. Mutation s
 Self-hosted design in `infrastructure/woodpecker/`: docker-compose for server and agent on the existing Hetzner app-server pattern, plus a GitHub OAuth app integration. Commit-status reporting gives GitHub branch protection the same power as `required-checks.json`; the protected-branch contexts are `coverage-gate`, `dogfood-audit`, and `contract-coverage`.
 
 ### 7.2 Pipeline inventory (`.woodpecker/`, 17 configs: 16 lanes plus the aggregate verdict)
+
+Inventory note: the all-Rust tree runs six configs (five lanes plus the aggregate verdict); the multi-language inventory below is kept as design history and is superseded by §9.7.
 
 | pipeline | covers domains | key services |
 |---|---|---|
@@ -423,7 +425,7 @@ Self-hosted design in `infrastructure/woodpecker/`: docker-compose for server an
 | `dogfood-audit.yml` | manifest, meta M-1..M-10, stub-ban, docs-lint steps | none |
 | `site-perf.yml` | site build, claims contract, byte budgets, Lighthouse | zola image |
 | `ui-ux.yml` | rendered console pages: axe-core audit + structure contract | rust + node |
-| `coverage-gate.yml` | aggregate verdict; `depends_on` the 16 lanes above | none |
+| `coverage-gate.yml` | aggregate verdict; `depends_on` the lanes above (§9.7 for the current five) | none |
 
 All pipelines trigger on `push` and `pull_request` to `main`/`master` with **no path filters** in phase 0. Path-filtered parents that get skipped must not silently weaken the aggregate gate; filters are a phase-4 optimization behind verified `depends_on`-skip semantics. Secrets: none required for the gates. An optional `codecov_token` push-only upload step exists per pipeline; PR events never receive secrets, so uploads stay out of gate logic by design.
 
@@ -558,3 +560,70 @@ All checks below ran locally on 2026-10-13 from the repository root.
 | site | perf budget PASS, 21 claims PASS |
 | console a11y | WCAG 2.0 and 2.1 A plus AA clean |
 | aggregate verdict | PASS |
+
+### 9.7 All-Rust conversion sweep (2026-10-14)
+
+Second execution of the stack, run adversarially against the all-Rust tree. Every finding was
+patched in the same change; the table is the complete list.
+
+| area | defect | patch |
+|---|---|---|
+| gate stack | `walker-parity` skipped tracked files missing from disk as "pending deletions" (2,361 skipped on the live tree), so the purge was invisible to the manifest proof | index/tree divergence now fails with an actionable list; the purge deletions were staged, and parity verifies every tracked path |
+| gate stack | `assertion-presence` filtered by classifier kind, so every inline Rust test module was invisible (4 files checked, all JS-era) | content-based scan: any code file defining test cases must carry an assertion (51 files) |
+| gate stack | the assertion regex knew `assert.` and `\bassert\b` but not the Rust macros `assert_eq!`, `assert_ne!`, `matches!` | regex extended; a pinned unit test covers the macros |
+| gate stack | `mutation-floor` returned success when the results file was missing or empty | missing file and empty samples fail closed |
+| gate stack | `floor-ratchet` never compared the live domain table against the last history entry | a pinned domain can no longer disappear or drop below its recorded floor |
+| gate stack | `yaml-policy` excluded the whole apex-tools crate from the pragma scan and only knew JS skip markers | only the file defining the pattern is exempt; `#[ignore]` is scanned for Rust |
+| gate stack | `stub-ban` scanned neither `services/` nor `.woodpecker/`, hiding a real TODO in the outbound queue | both roots scanned; the gRPC `Status::unimplemented` message text stays allowed |
+| gate stack | `docs-lint` resolved baselines against the process cwd, so the lane (which runs from `rust/`) could never find one; the lane also named the links baseline | relative targets resolve against the repo root; the lane names `docs-lint-baseline.txt` |
+| gate stack | `docs-lint` silently dropped `.woodpecker/` and the root README from the scan when the README title changed | scan roots are unconditional; the baseline was regenerated with zero-count rows only |
+| gate stack | `docs-links` treated a leading-slash site route as a document path, and absolute paths could escape `PathBuf::join` | site routes map to content pages, section indexes and static files; escaping `..` links fail |
+| gate stack | the standalone `lcov-gate` passed a record set with zero executable lines; `go-func-gate` passed empty artifacts and never parsed integer rows | both fail closed; the Go gate parses rows through the shared parser |
+| gate stack | `docs-references` was vacuous without any package.json, and the content guard only tested its own memory | docs references ratchet through a committed baseline and cover make targets; the guard scans the site |
+| pipelines | the apex lane used `/w/...` paths, wrote the lcov where the gate did not read it, and `cd rust/services/mail-server` for the mail-server entry | lane rewritten: per-crate package runs, a workspace entry for mail-server, a built release gate binary, real paths |
+| pipelines | ui-ux handed `target/ui-fixtures` to the audit while the render step wrote `rust/target/ui-fixtures` | both steps use the rendered path |
+| pipelines | no lane ran `yaml-policy`, `docs-links`, `i18n-parity` or `css-lint` | wired into dogfood-audit and contract-coverage |
+| pipelines | the site lane ran `console-a11y` against a built site while the audit read only top-level html, so the 7-page build read as 2 pages and failed | page discovery now walks nested directories and reports repo-relative paths; a pinned unit test covers the nested case |
+| pipelines | the terraform step ran `validate` without `init`, and the production compose step had no `POSTGRES_PASSWORD` in the environment | the lane initialises providers first and passes a config-only password value |
+| mail-server | the workspace did not build: a nonexistent `trust-dns-resolver` version, a `[[bin]]` pointing at a missing file, missing sqlx/zstd/tokio-stream/rand dependencies, a build script writing generated code into the source tree, and 24 warnings under `-D warnings` | dependencies repaired, the build script delivers to OUT_DIR, CI installs protoc, crates gained library surfaces, the outbound queue gained a working `--send-to` path, tests and clippy and fmt are clean |
+| repo state | `Logo.jpg` and `logo.jpg` were both tracked with identical content; the sanitized log sample was gitignored; `services/mail-server/target` had no ignore rule | one index entry removed, ignore negation and target rule added |
+| ratchet | every floor sat at 0 and the orphan ceiling at 100, so the coverage gates could not fail | floors pinned to the integer floor of measured lines/functions per crate (9 to 99), orphan ceiling 0, mutation floor 100, floors.txt resynced |
+
+### 9.8 Sweep results (all gates run locally, in order)
+
+| gate | result |
+|---|---|
+| rust workspace | `cargo test --workspace` green; clippy `-D warnings` and `cargo fmt --check` clean |
+| mail-server workspace | tests green; clippy `-D warnings` clean; fmt clean |
+| manifest and walker parity | 566 paths classified, 0 unclassified, 0 invisible, 0 missing from disk |
+| orphan gate | 0 orphans against a ceiling of 0 |
+| floors | 9 domains in lockstep at measured floors; ratchet holds |
+| assertion presence | 51 files define test cases, all assert |
+| stub ban | clean over rust, services, coverage tooling and pipelines |
+| policy gates | shell and full pass with an empty baseline |
+| mutation smoke and floor | 6/6 killed, floor 100 |
+| contracts | CI references, pipeline paths, content guard (site scanned), docs references, docs links, i18n, css all pass |
+| docs-lint | 7,687 at the frozen baseline, every row in budget |
+| site | perf budget pass, 21 claims pass, promtool alert tests pass |
+| console a11y | the 4 fixture pages and the 7-page built site audited, structural WCAG checks clean |
+| coverage | per-crate lcov gates pass against the new floors |
+| aggregate verdict | pass, replaying manifest, orphan, ratchet, sync, walker and mutation invariants |
+
+### 9.9 Post-sweep review hardening (2026-10-14)
+
+An adversarial review of the sweep change found and fixed these defects before the change landed.
+
+| area | defect | patch |
+|---|---|---|
+| pipelines | Woodpecker runs a step's commands as one `set -e` script, so the repeated `cd rust && ...` lines in multi-command steps aborted on the second command, and the ui-ux audit used a binary path relative to the changed cwd | every lane command is now absolute and idempotent (`cd "$CI_WORKSPACE"/rust && ...`, `cd "$CI_WORKSPACE" && rust/target/...`) |
+| pipelines | with any step using `depends_on`, Woodpecker runs the rest in parallel, so walker parity and the orphan gate raced the manifest producer | both steps declare `depends_on: [manifest]` |
+| repo state | the render-fixtures helper binary was untracked and ignored by `**/bin/`, so a clean checkout had no render target; the walker also skipped `bin` directories, hiding the file from the manifest | `.gitignore` negates the source path, the file is tracked, and the walker no longer skips `bin` or `obj` |
+| mail server | routing the SMTP session through the parser narrowed `MAIL FROM:` to its first token, breaking the valid spaced address form | the session keeps the full remainder after the verb; two pinned session tests cover the spaced forms and the size or BINARYMIME rejections |
+| gates | the new Rust skip scan ignored the attributed `#[ignore = "reason"]` form and the `dogfood:skip:` marker self-exempted the gate file | the scan matches `#[ignore\b` and excludes the gate file explicitly |
+| gates | the content guard and the reference ratchet silently skipped unreadable files | both fail closed on unreadable input |
+| gates | site-route links to the site root or to a page bundle were reported missing | route candidates include `_index.md` and `index.md` bundles; a pinned test covers both |
+| gates | three copies of the `count path` / `TOTAL n` baseline grammar had drifted | one shared parser and comparator in `baseline.rs`, used by all three ratchets |
+| gates | the Makefile and lanes duplicated gate lists with nothing checking them | `apex-tools` exposes its subcommand inventory, and the aggregate verdict fails when a lane or Makefile references a subcommand that does not exist |
+| repo state | the dev compose published Redis without authentication and hardcoded the Postgres password; the monitoring runbook referenced a deleted script, the suites registry was orphaned, and the design doc inventories contradicted the six-config set | loopback binds and requirepass restored, env-overridable credentials, the runbook describes the render step, the orphaned registry is deleted, and the stale inventory lines point at §9.7 |
+
+Re-measured after hardening: apex-tools at 56.43 percent lines and 58.78 percent functions, mail-server at 25.50 and 16.88, both above their floors; the full audit family and the site gates run green.

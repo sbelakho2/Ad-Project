@@ -23,7 +23,7 @@ public final class AttributionManager {
         postbackHandler?(json)
     }
 
-    /// Placeholder bridge for AdAttributionKit tokens. When tvOS 18+ support lands, we surface the token through the same handler.
+    /// Forwards an AdAttributionKit token (tvOS 18+) to the registered postback handler over the same path as SKAdNetwork payloads.
     @available(tvOS 18.0, *)
     public func submitAdAttributionToken(_ token: Data) {
         if let tokenString = String(data: token, encoding: .utf8) {

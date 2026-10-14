@@ -16,8 +16,7 @@ steps:
     image: rust:1.87-bookworm
     depends_on: [site-build]
     commands:
-      - cd rust && cargo build --release -p apex-tools
-      - cd "$CI_WORKSPACE"
-      - rust/target/release/apex-tools claims
-      - rust/target/release/apex-tools perf-budget --dist site/public --min-pages 6
-      - rust/target/release/apex-tools console-a11y site/public
+      - cd "$CI_WORKSPACE"/rust && cargo build --release -p apex-tools
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools claims
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools perf-budget --dist site/public --min-pages 6
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools console-a11y site/public

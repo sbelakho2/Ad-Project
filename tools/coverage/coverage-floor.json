@@ -1,7 +1,7 @@
 {
-  "comment": "Ratchet-only floors. 'history' must be monotonically non-decreasing (enforced by dogfood-gates.mjs floor-ratchet). Domain floors are minimum percentages for ALL FOUR metrics (lines/branches/functions/statements where the tool supports them). Phase 0 seeds 0/100 so the first run is green; every later change may only raise values. Final phase: every domain floor = 100, orphanFloorPercent = 0.",
-  "orphanFloorPercent": 100,
-  "mutationKillFloorPercent": 60,
+  "comment": "Ratchet-only floors (apex-tools floor-ratchet). Domain floors are minimum percentages for the metrics the toolchain records; on stable cargo-llvm-cov, branch records are absent, so lines and functions carry the floor. The 2026-10-14 sweep measured every crate locally and pinned each domain at the floor of its measured minimum; values may only rise. orphanFloorPercent is pinned at 0 because the manifest measured zero orphans; mutationKillFloorPercent is pinned at 100 because the six-mutant sample kills six of six. Final phase: every domain floor = 100.",
+  "orphanFloorPercent": 0,
+  "mutationKillFloorPercent": 100,
   "history": [
     {
       "at": "2026-10-13",
@@ -22,17 +22,34 @@
       "mutationKillFloorPercent": 60,
       "domains": {},
       "__note": "all-Rust conversion: domains pruned to the surviving Rust universe; apex-tools added"
+    },
+    {
+      "at": "2026-10-14",
+      "orphanFloorPercent": 0,
+      "mutationKillFloorPercent": 100,
+      "domains": {
+        "apex-core": 95,
+        "apex-connectors": 80,
+        "apex-audit": 99,
+        "apex-autopilot": 84,
+        "apex-proof": 91,
+        "apex-billing": 90,
+        "apex-api": 83,
+        "apex-tools": 54,
+        "mail-server": 9
+      },
+      "__note": "adversarial sweep: orphan ceiling pinned at the measured zero, mutation floor pinned at the six-of-six sample, and every crate floor pinned to the integer floor of its measured minimum of lines/functions"
     }
   ],
   "domains": {
-    "apex-core": 0,
-    "apex-connectors": 0,
-    "apex-audit": 0,
-    "apex-autopilot": 0,
-    "apex-proof": 0,
-    "apex-billing": 0,
-    "apex-api": 0,
-    "apex-tools": 0,
-    "mail-server": 0
+    "apex-core": 95,
+    "apex-connectors": 80,
+    "apex-audit": 99,
+    "apex-autopilot": 84,
+    "apex-proof": 91,
+    "apex-billing": 90,
+    "apex-api": 83,
+    "apex-tools": 54,
+    "mail-server": 9
   }
 }

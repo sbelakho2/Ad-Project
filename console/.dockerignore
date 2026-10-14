@@ -1,8 +1,0 @@
-node_modules
-.next
-coverage
-storybook-static
-out
-build
-*.log
-.DS_Store

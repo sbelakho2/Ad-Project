@@ -3,7 +3,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use mail_common::config::DatabaseConfig;
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tracing::info;
 use uuid::Uuid;
 
@@ -17,17 +17,17 @@ impl Database {
     /// Connect to the database.
     pub async fn connect(config: &DatabaseConfig) -> Result<Self> {
         info!("Connecting to database...");
-        
+
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .acquire_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
             .connect(&config.url)
             .await?;
-        
+
         info!("Database connected");
         Ok(Self { pool })
     }
-    
+
     /// Run database migrations.
     pub async fn migrate(&self) -> Result<()> {
         info!("Running database migrations...");
@@ -35,11 +35,11 @@ impl Database {
         info!("Migrations complete");
         Ok(())
     }
-    
+
     // ========================================================================
     // Account Operations
     // ========================================================================
-    
+
     /// Create a new account.
     pub async fn create_account(
         &self,
@@ -49,7 +49,7 @@ impl Database {
         quota_bytes: i64,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        
+
         sqlx::query(
             r#"
             INSERT INTO mail_accounts (id, email, password_hash, display_name, quota_bytes, created_at)
@@ -63,10 +63,10 @@ impl Database {
         .bind(quota_bytes)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(id)
     }
-    
+
     /// Get account by email.
     pub async fn get_account_by_email(&self, email: &str) -> Result<Option<AccountRecord>> {
         let row = sqlx::query_as::<_, AccountRecord>(
@@ -79,10 +79,10 @@ impl Database {
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row)
     }
-    
+
     /// Get account by ID.
     pub async fn get_account(&self, id: Uuid) -> Result<Option<AccountRecord>> {
         let row = sqlx::query_as::<_, AccountRecord>(
@@ -95,14 +95,14 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row)
     }
-    
+
     // ========================================================================
     // Mailbox Operations
     // ========================================================================
-    
+
     /// Create a mailbox for an account.
     pub async fn create_mailbox(
         &self,
@@ -112,7 +112,7 @@ impl Database {
     ) -> Result<MailboxRecord> {
         let id = Uuid::new_v4();
         let uidvalidity = rand::random::<u32>() as i64;
-        
+
         let row = sqlx::query_as::<_, MailboxRecord>(
             r#"
             INSERT INTO mail_mailboxes (id, account_id, name, delimiter, special_use, uidvalidity, uidnext, created_at)
@@ -128,10 +128,10 @@ impl Database {
         .bind(uidvalidity)
         .fetch_one(&self.pool)
         .await?;
-        
+
         Ok(row)
     }
-    
+
     /// List mailboxes for an account.
     pub async fn list_mailboxes(&self, account_id: Uuid) -> Result<Vec<MailboxRecord>> {
         let rows = sqlx::query_as::<_, MailboxRecord>(
@@ -154,10 +154,10 @@ impl Database {
         .bind(account_id)
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(rows)
     }
-    
+
     /// Get mailbox by name.
     pub async fn get_mailbox(&self, account_id: Uuid, name: &str) -> Result<Option<MailboxRecord>> {
         let row = sqlx::query_as::<_, MailboxRecord>(
@@ -180,10 +180,10 @@ impl Database {
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row)
     }
-    
+
     /// Delete a mailbox.
     pub async fn delete_mailbox(&self, account_id: Uuid, name: &str) -> Result<bool> {
         let result = sqlx::query(
@@ -196,14 +196,14 @@ impl Database {
         .bind(name)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(result.rows_affected() > 0)
     }
-    
+
     // ========================================================================
     // Message Operations
     // ========================================================================
-    
+
     /// Store a new message.
     pub async fn store_message(
         &self,
@@ -215,7 +215,7 @@ impl Database {
         flags: &MessageFlagsRecord,
     ) -> Result<i64> {
         let mut tx = self.pool.begin().await?;
-        
+
         // Get and increment UID
         let uid: i64 = sqlx::query_scalar(
             r#"
@@ -228,7 +228,7 @@ impl Database {
         .bind(mailbox_id)
         .fetch_one(&mut *tx)
         .await?;
-        
+
         // Insert message
         sqlx::query(
             r#"
@@ -253,7 +253,7 @@ impl Database {
         .bind(flags.draft)
         .execute(&mut *tx)
         .await?;
-        
+
         // Update account used bytes
         sqlx::query(
             r#"
@@ -266,12 +266,12 @@ impl Database {
         .bind(account_id)
         .execute(&mut *tx)
         .await?;
-        
+
         tx.commit().await?;
-        
+
         Ok(uid)
     }
-    
+
     /// Get message metadata.
     pub async fn get_message(&self, mailbox_id: Uuid, uid: i64) -> Result<Option<MessageRecord>> {
         let row = sqlx::query_as::<_, MessageRecord>(
@@ -286,10 +286,10 @@ impl Database {
         .bind(uid)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row)
     }
-    
+
     /// List messages in a mailbox.
     pub async fn list_messages(
         &self,
@@ -314,10 +314,10 @@ impl Database {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(rows)
     }
-    
+
     /// Set message flags.
     pub async fn set_flags(
         &self,
@@ -341,10 +341,10 @@ impl Database {
         .bind(flags.draft)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(result.rows_affected())
     }
-    
+
     /// Expunge deleted messages.
     pub async fn expunge(&self, mailbox_id: Uuid) -> Result<Vec<i64>> {
         let rows: Vec<(i64,)> = sqlx::query_as(
@@ -357,7 +357,7 @@ impl Database {
         .bind(mailbox_id)
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(rows.into_iter().map(|(uid,)| uid).collect())
     }
 }

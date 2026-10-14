@@ -20,9 +20,11 @@
 )]
 
 pub mod admob;
+pub mod app_ads;
 pub mod decimal;
 pub mod levelplay;
 pub mod max;
+pub mod snapshot;
 pub mod transport;
 
 #[cfg(test)]

@@ -9,6 +9,12 @@
 //!   `<root>/<publisher>.jsonl`);
 //! - `APEX_LEDGER_KEYS` — comma-separated `publisher=<64-hex-ed25519-pubkey>`
 //!   allow-list of onboarded publishers;
+//! - `APEX_CREDENTIAL_ROOT`, `APEX_VAULT_KEY_HEX` and `APEX_LIVE_AUDIT_TOKEN`
+//!   — when all three are set, the live read-only audit is enabled over
+//!   vault-encrypted `<root>/<publisher>.blob` account files, and
+//!   `POST /v1/audit/{platform}` requires `Authorization: Bearer <token>` and
+//!   runs on the publisher's own platform keys; without them that route
+//!   answers `503 live_audit_not_configured`;
 //! - `APEX_WEBHOOK_SECRET` — Stripe webhook signing secret; without it the
 //!   webhook endpoint answers `503 webhook_not_configured`;
 //! - `APEX_STRIPE_TOLERANCE_SECS` — accepted signature age, default 300.
@@ -25,7 +31,11 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use apex_api::{is_valid_publisher, router, AppState, FileLedgerSource, JsonFileAuditSource};
+use apex_api::{
+    is_valid_publisher, router, AppState, FileLedgerSource, JsonFileAuditSource, LiveAuditor,
+    VaultedFileAccountStore,
+};
+use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper};
 use apex_proof::VerifyingKey;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
@@ -59,6 +69,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .parse()
             .map_err(|error| format!("APEX_STRIPE_TOLERANCE_SECS is not a number: {error}"))?;
         state = state.with_stripe_tolerance_secs(secs);
+    }
+
+    match (
+        env_value("APEX_CREDENTIAL_ROOT"),
+        env_value("APEX_VAULT_KEY_HEX"),
+        env_value("APEX_LIVE_AUDIT_TOKEN"),
+    ) {
+        (Some(root), Some(key_hex), Some(token)) => {
+            let store =
+                VaultedFileAccountStore::with_vault_key_hex(root, &key_hex).map_err(|error| {
+                    format!("APEX_VAULT_KEY_HEX is not a valid vault key: {error:?}")
+                })?;
+            let transport = ReqwestTransport::new()
+                .map_err(|error| format!("live transport could not be built: {error}"))?;
+            // The retry wrapper is also the status classifier the clients and
+            // the auditor expect; without it a 401 would be read as data.
+            let transport = Arc::new(RetryTransport::new(
+                Arc::new(transport),
+                2,
+                Arc::new(TokioSleeper),
+            ));
+            let auditor = LiveAuditor::new(Arc::new(store), transport, Arc::clone(&state.clock))
+                .with_token(token);
+            state = state.with_live_auditor(Arc::new(auditor));
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(
+                "APEX_CREDENTIAL_ROOT, APEX_VAULT_KEY_HEX and APEX_LIVE_AUDIT_TOKEN must be set together".into(),
+            );
+        }
     }
 
     let listener = tokio::net::TcpListener::bind(bind).await?;

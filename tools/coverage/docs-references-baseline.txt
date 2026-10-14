@@ -1,0 +1,11 @@
+# docs-references ratchet baseline: stale script/target references per file (rows may only shrink)
+23 CHANGELOG.md
+9 docs/Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md
+1 docs/Internal/Development/AD_PROJECT_FILE_ANALYSIS.md
+2 docs/Internal/Development/BACKEND_CONSOLE_IMPROVEMENTS.md
+10 docs/Internal/Development/OBSOLETE DEVELOPMENT_TODO_CHECKLIST.md
+1 docs/Internal/Infrastructure/POSTGRES_MIGRATION_PLAN.md
+1 docs/Internal/Security/AUDIT_REPORT.md
+3 docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md
+1 docs/Internal/VRA/IMPLEMENTATION_SUMMARY.md
+TOTAL 51

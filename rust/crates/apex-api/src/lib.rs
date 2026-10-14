@@ -45,9 +45,11 @@ pub mod clock;
 pub mod cycle;
 pub mod error;
 pub mod html;
+pub mod live;
 pub mod routes;
 pub mod sources;
 pub mod state;
+pub mod vault;
 
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use cycle::{
@@ -58,6 +60,9 @@ pub use error::ApiError;
 pub use html::{
     html_escape, render_audit_form, render_audit_page, render_error_page, render_ledger_form,
     render_ledger_records, render_overview,
+};
+pub use live::{
+    LiveAccount, LiveAccountStore, LiveAuditor, LiveCredentials, VaultedFileAccountStore,
 };
 pub use routes::{router, MAX_BODY_BYTES};
 pub use sources::{

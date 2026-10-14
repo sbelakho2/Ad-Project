@@ -7,9 +7,6 @@ import {
   MediationDebugger,
   MediationEvent,
   MediationEventType,
-  DebugSession,
-  DebugSnapshot,
-  DebuggerConfig,
 } from '../src/mediationDebugger';
 
 describe('MediationDebugger', () => {
@@ -376,7 +373,7 @@ describe('MediationDebugger', () => {
 
       // Record multiple adapter responses with varying latencies
       const latencies = [50, 100, 150, 200, 250, 300, 350];
-      latencies.forEach((latency, i) => {
+      latencies.forEach((latency) => {
         debugger_.recordEvent(session.id, {
           type: MediationEventType.ADAPTER_RESPONSE,
           adapterId: 'admob',

@@ -1,4 +1,4 @@
-import { init, setConsent, requestAd, Errors } from '../src';
+import { init, setConsent, requestAd } from '../src';
 import { state as mswState, timeoutHandler } from './msw/handlers';
 import { server } from './msw/server';
 import { http, HttpResponse } from 'msw';

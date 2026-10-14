@@ -362,7 +362,7 @@ export class PriorityWeightedMediation {
 
     // Timeout promise that rejects after the timeout period
     let timeoutId: ReturnType<typeof setTimeout>;
-    const timeoutPromise = new Promise<AdLoadResult>((_, reject) => {
+    const timeoutPromise = new Promise<AdLoadResult>((_resolve, reject) => {
       timeoutId = setTimeout(() => {
         controller.abort();
         reject(new Error('TIMEOUT'));
@@ -370,7 +370,7 @@ export class PriorityWeightedMediation {
     });
 
     // Abort promise that rejects when signal is aborted
-    const abortPromise = new Promise<AdLoadResult>((_, reject) => {
+    const abortPromise = new Promise<AdLoadResult>((_resolve, reject) => {
       signal.addEventListener('abort', () => {
         reject(new Error('ABORTED'));
       });

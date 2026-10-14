@@ -187,6 +187,10 @@ public struct SDKRemoteConfig: Codable, Sendable {
     public let enableOmSdk: Bool?
     public let ctvOmSdk: Bool?
     public let signature: String?
+    /// Envelope identifier; required for production signature verification.
+    public let configId: String?
+    /// Envelope timestamp; required for production signature verification.
+    public let timestamp: Int64?
     
     public init(
         version: Int,
@@ -196,7 +200,9 @@ public struct SDKRemoteConfig: Codable, Sendable {
         telemetryEnabled: Bool,
         enableOmSdk: Bool? = nil,
         ctvOmSdk: Bool? = nil,
-        signature: String? = nil
+        signature: String? = nil,
+        configId: String? = nil,
+        timestamp: Int64? = nil
     ) {
         self.version = version
         self.placements = placements
@@ -206,6 +212,8 @@ public struct SDKRemoteConfig: Codable, Sendable {
         self.enableOmSdk = enableOmSdk
         self.ctvOmSdk = ctvOmSdk
         self.signature = signature
+        self.configId = configId
+        self.timestamp = timestamp
     }
 }
 

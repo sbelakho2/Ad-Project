@@ -1,3 +1,0 @@
-ip,category,score,source
-203.0.113.1,ssh_brute_force,98,AbuseIPDB
-198.51.100.0/30,botnet,90,AbuseIPDB

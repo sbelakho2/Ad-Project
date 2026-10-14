@@ -1,6 +1,10 @@
-# ui-ux: structural WCAG audit of the rendered console pages, all-Rust.
-# apex-api renders its console pages from checked-in fixtures, then apex-tools
-# runs the structural WCAG checks on that output.
+# ui-ux: structural accessibility audit of the rendered console pages, all-Rust.
+# apex-api renders its console pages from checked-in fixtures, and apex-tools
+# runs the structural accessibility checks over that output.
+#
+# Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
+# script, so a bare `cd` persists across the step; each command below is
+# absolute and idempotent for that reason.
 when:
   - event: [push, pull_request]
     branch: [main, master]
@@ -9,11 +13,11 @@ steps:
   render-console-pages:
     image: rust:1.87-bookworm
     commands:
-      - cd rust && cargo run --release -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
+      - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
 
   console-a11y:
     image: rust:1.87-bookworm
     depends_on: [render-console-pages]
     commands:
-      - cd rust && cargo build --release -p apex-tools
-      - rust/target/release/apex-tools console-a11y target/ui-fixtures
+      - cd "$CI_WORKSPACE"/rust && cargo build --release -p apex-tools
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools console-a11y rust/target/ui-fixtures

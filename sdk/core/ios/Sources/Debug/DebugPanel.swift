@@ -111,11 +111,10 @@ public enum DebugPanel {
         }
         #endif
         
-        // TODO: Hook up actual GDPR/CCPA flags from consent management
-        // For now, return placeholder values
+        let consent = ConsentManager.shared.getConsent()
         return ConsentSnapshot(
-            gdprApplies: nil,
-            ccpaApplicable: nil,
+            gdprApplies: consent.gdprApplies,
+            ccpaApplicable: consent.usPrivacyString != nil || consent.ccpaOptOut,
             attStatus: attStatus
         )
     }

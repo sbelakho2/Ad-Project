@@ -39,13 +39,10 @@ class ConfigSignatureTest {
     private fun gson() = Gson()
 
     private fun signingMessage(configId: String, version: Long, timestamp: Long): ByteArray {
-        // Must mirror ConfigManager.createSigningMessage: LinkedHashMap order
-        val map = linkedMapOf(
-            "config_id" to configId,
-            "version" to version,
-            "timestamp" to timestamp,
-        )
-        return gson().toJson(map).toByteArray()
+        // Must mirror canonicalSigningMessage: lexicographic keys, matching the
+        // iOS SignatureVerifier.createCanonicalMessage bytes.
+        return ("{\"config_id\":\"$configId\",\"timestamp\":$timestamp,\"version\":$version}")
+            .toByteArray()
     }
 
     private fun baseConfigJson(configId: String, version: Long, timestamp: Long, signatureB64: String): String {

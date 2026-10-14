@@ -25,196 +25,10 @@ function createMockWindow(origin: string = 'https://example.com'): MockedWindow 
   return win;
 }
 
-// Inline the PostMessageBridge for testing
-interface PostMessageConfig {
-  allowedOrigins: string[];
-  targetWindow?: Window | null;
-  onMessage?: (message: PostMessagePayload) => void;
-  timeout?: number;
-  enableLogging?: boolean;
-}
-
-interface PostMessagePayload {
-  type: string;
-  id: string;
-  timestamp: number;
-  data: unknown;
-}
-
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
-class PostMessageBridge {
-  private config: Required<PostMessageConfig>;
-  private pendingRequests: Map<string, PendingRequest> = new Map();
-  private messageHandler: ((event: MessageEvent) => void) | null = null;
-  private readonly NAMESPACE = 'apex-mediation';
-
-  constructor(config: PostMessageConfig) {
-    this.config = {
-      allowedOrigins: config.allowedOrigins,
-      targetWindow: config.targetWindow ?? null,
-      onMessage: config.onMessage ?? (() => {}),
-      timeout: config.timeout ?? 5000,
-      enableLogging: config.enableLogging ?? false,
-    };
-  }
-
-  isOriginAllowed(origin: string): boolean {
-    return this.config.allowedOrigins.some((allowed) => {
-      if (allowed === '*') return true;
-      if (allowed.startsWith('*.')) {
-        const domain = allowed.slice(2);
-        return origin.endsWith(domain) || origin.endsWith('.' + domain);
-      }
-      return allowed === origin;
-    });
-  }
-
-  start(): void {
-    if (this.messageHandler) return;
-    
-    this.messageHandler = (event: MessageEvent) => {
-      this.handleMessage(event);
-    };
-    
-    if (typeof window !== 'undefined') {
-      window.addEventListener('message', this.messageHandler);
-    }
-  }
-
-  stop(): void {
-    if (this.messageHandler && typeof window !== 'undefined') {
-      window.removeEventListener('message', this.messageHandler);
-      this.messageHandler = null;
-    }
-    
-    this.pendingRequests.forEach((pending) => {
-      clearTimeout(pending.timeoutId);
-      pending.reject(new Error('Bridge stopped'));
-    });
-    this.pendingRequests.clear();
-  }
-
-  private handleMessage(event: MessageEvent): void {
-    if (!this.isOriginAllowed(event.origin)) {
-      if (this.config.enableLogging) {
-        console.warn(`[PostMessageBridge] Rejected message from untrusted origin: ${event.origin}`);
-      }
-      return;
-    }
-
-    const data = event.data;
-    if (!this.isValidPayload(data)) {
-      return;
-    }
-
-    if (data.type === 'response' || data.type === 'error') {
-      const pending = this.pendingRequests.get(data.id);
-      if (pending) {
-        clearTimeout(pending.timeoutId);
-        this.pendingRequests.delete(data.id);
-        
-        if (data.type === 'error') {
-          pending.reject(new Error(String(data.data)));
-        } else {
-          pending.resolve(data.data);
-        }
-      }
-    } else {
-      this.config.onMessage(data);
-    }
-  }
-
-  private isValidPayload(data: unknown): data is PostMessagePayload {
-    if (typeof data !== 'object' || data === null) return false;
-    const payload = data as Record<string, unknown>;
-    return (
-      typeof payload.type === 'string' &&
-      typeof payload.id === 'string' &&
-      typeof payload.timestamp === 'number' &&
-      payload.id.startsWith(this.NAMESPACE)
-    );
-  }
-
-  send(type: string, data: unknown): string {
-    const id = this.generateId();
-    const payload: PostMessagePayload = {
-      type,
-      id,
-      timestamp: Date.now(),
-      data,
-    };
-
-    const target = this.config.targetWindow;
-    if (target) {
-      const targetOrigin = this.config.allowedOrigins[0] === '*' 
-        ? '*' 
-        : this.config.allowedOrigins[0];
-      target.postMessage(payload, targetOrigin);
-    }
-
-    return id;
-  }
-
-  async request<T>(type: string, data: unknown): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const id = this.send(type, data);
-      
-      const timeoutId = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        reject(new Error('Request timed out'));
-      }, this.config.timeout);
-
-      this.pendingRequests.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timeoutId,
-      });
-    });
-  }
-
-  respond(requestId: string, data: unknown): void {
-    const payload: PostMessagePayload = {
-      type: 'response',
-      id: requestId,
-      timestamp: Date.now(),
-      data,
-    };
-
-    const target = this.config.targetWindow;
-    if (target) {
-      const targetOrigin = this.config.allowedOrigins[0] === '*' 
-        ? '*' 
-        : this.config.allowedOrigins[0];
-      target.postMessage(payload, targetOrigin);
-    }
-  }
-
-  respondError(requestId: string, error: string): void {
-    const payload: PostMessagePayload = {
-      type: 'error',
-      id: requestId,
-      timestamp: Date.now(),
-      data: error,
-    };
-
-    const target = this.config.targetWindow;
-    if (target) {
-      const targetOrigin = this.config.allowedOrigins[0] === '*' 
-        ? '*' 
-        : this.config.allowedOrigins[0];
-      target.postMessage(payload, targetOrigin);
-    }
-  }
-
-  private generateId(): string {
-    return `${this.NAMESPACE}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-  }
-}
+import {
+  PostMessageBridge,
+  type PostMessagePayload,
+} from '../src/postMessageBridge';
 
 describe('PostMessageBridge', () => {
   let bridge: PostMessageBridge;
@@ -401,33 +215,47 @@ describe('PostMessageBridge', () => {
   });
 
   describe('Security', () => {
-    it('should validate message namespace', () => {
+    it('should validate message namespace through real handling', () => {
       const receivedMessages: PostMessagePayload[] = [];
-      const secBridge = new PostMessageBridge({
-        allowedOrigins: ['https://example.com'],
-        onMessage: (msg) => receivedMessages.push(msg),
-      });
-
-      // Valid payload (has namespace)
-      const validPayload = {
-        type: 'test',
-        id: 'apex-mediation-123',
-        timestamp: Date.now(),
-        data: {},
+      const listeners: Array<(event: MessageEvent) => void> = [];
+      const fakeWindow = {
+        addEventListener: (_type: string, handler: (event: MessageEvent) => void) => {
+          listeners.push(handler);
+        },
+        removeEventListener: jest.fn(),
       };
+      (globalThis as { window?: unknown }).window = fakeWindow;
+      try {
+        const namespaceBridge = new PostMessageBridge({
+          allowedOrigins: ['https://example.com'],
+          onMessage: (msg) => receivedMessages.push(msg),
+        });
+        namespaceBridge.start();
 
-      // Invalid payload (wrong namespace)
-      const invalidPayload = {
-        type: 'test',
-        id: 'other-sdk-123',
-        timestamp: Date.now(),
-        data: {},
-      };
+        const validPayload = {
+          type: 'test',
+          id: 'apex-mediation-123',
+          timestamp: Date.now(),
+          data: {},
+        };
+        const invalidPayload = {
+          type: 'test',
+          id: 'other-sdk-123',
+          timestamp: Date.now(),
+          data: {},
+        };
 
-      // Test internal validation method via isValidPayload behavior
-      // The bridge should only accept apex-mediation namespaced messages
-      expect(validPayload.id.startsWith('apex-mediation')).toBe(true);
-      expect(invalidPayload.id.startsWith('apex-mediation')).toBe(false);
+        for (const handler of listeners) {
+          handler({ origin: 'https://example.com', data: validPayload } as MessageEvent);
+          handler({ origin: 'https://example.com', data: invalidPayload } as MessageEvent);
+        }
+
+        expect(receivedMessages).toHaveLength(1);
+        expect(receivedMessages[0].id).toBe('apex-mediation-123');
+        namespaceBridge.stop();
+      } finally {
+        delete (globalThis as { window?: unknown }).window;
+      }
     });
 
     it('should not leak pending request data on stop', () => {
@@ -440,36 +268,58 @@ describe('PostMessageBridge', () => {
 
       leakBridge.start();
 
-      // Create a pending request
       const requestPromise = leakBridge.request('test', {});
-
-      // Stop should clear all pending requests
       leakBridge.stop();
 
-      // The promise should be rejected
       return expect(requestPromise).rejects.toThrow('Bridge stopped');
     });
 
-    it('should enforce message structure validation', () => {
-      // Test various invalid payloads that should be rejected
-      const invalidPayloads = [
-        null,
-        undefined,
-        'string',
-        123,
-        [],
-        {},
-        { type: 'test' }, // missing id, timestamp, data
-        { type: 'test', id: 'apex-mediation-123' }, // missing timestamp, data
-        { type: 123, id: 'apex-mediation-123', timestamp: Date.now(), data: {} }, // wrong type for type field
-      ];
+    it('should reject payloads that fail structure validation', () => {
+      const receivedMessages: PostMessagePayload[] = [];
+      const listeners: Array<(event: MessageEvent) => void> = [];
+      const fakeWindow = {
+        addEventListener: (_type: string, handler: (event: MessageEvent) => void) => {
+          listeners.push(handler);
+        },
+        removeEventListener: jest.fn(),
+      };
+      (globalThis as { window?: unknown }).window = fakeWindow;
+      try {
+        const structureBridge = new PostMessageBridge({
+          allowedOrigins: ['https://example.com'],
+          onMessage: (msg) => receivedMessages.push(msg),
+        });
+        structureBridge.start();
 
-      // These should all fail validation (tested via the namespace check)
-      invalidPayloads.forEach((payload) => {
-        if (payload === null || payload === undefined) {
-          expect(typeof payload !== 'object' || payload === null).toBe(true);
+        const invalidPayloads: unknown[] = [
+          null,
+          undefined,
+          'string',
+          123,
+          [],
+          {},
+          { type: 'test' },
+          { type: 'test', id: 'apex-mediation-123' },
+          { type: 123, id: 'apex-mediation-123', timestamp: Date.now(), data: {} },
+        ];
+        for (const payload of invalidPayloads) {
+          for (const handler of listeners) {
+            handler({ origin: 'https://example.com', data: payload } as MessageEvent);
+          }
         }
-      });
+        expect(receivedMessages).toHaveLength(0);
+
+        for (const handler of listeners) {
+          handler({
+            origin: 'https://example.com',
+            data: { type: 'test', id: 'apex-mediation-1', timestamp: Date.now(), data: {} },
+          } as MessageEvent);
+        }
+        expect(receivedMessages).toHaveLength(1);
+        structureBridge.stop();
+      } finally {
+        delete (globalThis as { window?: unknown }).window;
+      }
     });
   });
 
@@ -479,7 +329,7 @@ describe('PostMessageBridge', () => {
       const timeoutBridge = new PostMessageBridge({
         allowedOrigins: ['https://example.com'],
         targetWindow: mockWindow as unknown as Window,
-        timeout: 50, // Very short timeout for test
+        timeout: 50,
       });
 
       timeoutBridge.start();
@@ -501,42 +351,54 @@ describe('PostMessageBridge', () => {
       try {
         await shortTimeoutBridge.request('test', {});
       } catch {
-        // Expected to fail
+        // Expected to time out.
       }
-      const elapsed = Date.now() - start;
-
-      expect(elapsed).toBeLessThan(500); // Should timeout quickly
+      expect(Date.now() - start).toBeLessThan(500);
     });
   });
 
   describe('Bridge Lifecycle', () => {
-    it('should be idempotent on multiple start calls', () => {
-      // Multiple starts should not cause issues
-      bridge.start();
-      bridge.start();
-      bridge.start();
-      
-      // Should not throw
-      expect(true).toBe(true);
+    it('should register exactly one message listener across repeated starts', () => {
+      const listeners: Array<(event: MessageEvent) => void> = [];
+      const fakeWindow = {
+        addEventListener: (_type: string, handler: (event: MessageEvent) => void) => {
+          listeners.push(handler);
+        },
+        removeEventListener: jest.fn(),
+      };
+      (globalThis as { window?: unknown }).window = fakeWindow;
+      try {
+        bridge.start();
+        bridge.start();
+        bridge.start();
+        expect(listeners).toHaveLength(1);
+      } finally {
+        bridge.stop();
+        delete (globalThis as { window?: unknown }).window;
+      }
     });
 
     it('should be safe to stop without starting', () => {
       const freshBridge = new PostMessageBridge({
         allowedOrigins: ['https://example.com'],
       });
-
-      // Should not throw
-      freshBridge.stop();
-      expect(true).toBe(true);
+      expect(() => freshBridge.stop()).not.toThrow();
     });
 
-    it('should clean up on stop', () => {
-      bridge.start();
-      bridge.stop();
-      
-      // Bridge should be in clean state
-      // Further operations should not cause errors
-      expect(true).toBe(true);
+    it('should remove its listener on stop', () => {
+      const fakeWindow = {
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+      };
+      (globalThis as { window?: unknown }).window = fakeWindow;
+      try {
+        bridge.start();
+        const handler = fakeWindow.addEventListener.mock.calls[0][1];
+        bridge.stop();
+        expect(fakeWindow.removeEventListener).toHaveBeenCalledWith('message', handler);
+      } finally {
+        delete (globalThis as { window?: unknown }).window;
+      }
     });
   });
 });
@@ -552,7 +414,6 @@ describe('PostMessageBridge Integration', () => {
 
     reqBridge.start();
 
-    // The request should timeout since there's no actual response
     await expect(reqBridge.request('getConfig', {})).rejects.toThrow('Request timed out');
   });
 
@@ -566,7 +427,6 @@ describe('PostMessageBridge Integration', () => {
 
     concBridge.start();
 
-    // Multiple concurrent requests
     const promises = [
       concBridge.request('req1', {}).catch(() => 'timeout1'),
       concBridge.request('req2', {}).catch(() => 'timeout2'),
@@ -574,7 +434,6 @@ describe('PostMessageBridge Integration', () => {
     ];
 
     const results = await Promise.all(promises);
-    
     expect(results).toEqual(['timeout1', 'timeout2', 'timeout3']);
     expect(mockWindow.postMessage).toHaveBeenCalledTimes(3);
   });

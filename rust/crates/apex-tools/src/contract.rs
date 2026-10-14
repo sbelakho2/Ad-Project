@@ -23,13 +23,13 @@ pub const CI_GENERATED_PATH_PATTERNS: &[&str] = &[
     r"website/analyze",
 ];
 
-pub fn contract(repo: &Repo, check: &str) -> Result<(), String> {
+pub fn contract(repo: &Repo, check: &str, update_baseline: bool) -> Result<(), String> {
     match check {
         "ci-reference-integrity" => ci_reference_integrity(repo),
         "openapi-parity" => openapi_parity(repo),
-        "content-guard-adversarial" => content_guard_adversarial(),
+        "content-guard-adversarial" => content_guard_adversarial(repo),
         "samples" => samples(repo),
-        "docs-references" => docs_references(repo),
+        "docs-references" => docs_references(repo, update_baseline),
         "pipeline-paths" => pipeline_paths(repo),
         other => Err(format!(
             "unknown contract check '{other}' (use ci-reference-integrity|openapi-parity|content-guard-adversarial|samples|docs-references|pipeline-paths)"
@@ -269,7 +269,7 @@ pub fn scan_text_forbidden(text: &str) -> Result<bool, String> {
     Ok(false)
 }
 
-pub fn content_guard_adversarial() -> Result<(), String> {
+pub fn content_guard_adversarial(repo: &Repo) -> Result<(), String> {
     let mut failures = Vec::new();
     for (text, expected) in CONTENT_GUARD_CASES {
         let got = scan_text_forbidden(text)?;
@@ -280,14 +280,31 @@ pub fn content_guard_adversarial() -> Result<(), String> {
             ));
         }
     }
+    // The matrix alone would pass no matter what the site says; scan the
+    // published site sources so the guard has a subject.
+    let scannable = re(r"\.(md|html|toml|yml|yaml|txt)$")?;
+    let mut scanned = 0usize;
+    for rel in repo.walk() {
+        if !rel.starts_with("site/") || !scannable.is_match(&rel) {
+            continue;
+        }
+        // Fail closed: an unreadable file cannot be declared clean.
+        let text = repo.read(&rel)?;
+        scanned += 1;
+        if scan_text_forbidden(&text)? {
+            failures.push(format!(
+                "{rel}: forbidden hosting-provider reference on the site"
+            ));
+        }
+    }
     if !failures.is_empty() {
         return Err(format!(
-            "contract gate failed [content-guard-adversarial] content guard adversarial matrix failed:\n  - {}",
+            "contract gate failed [content-guard-adversarial]:\n  - {}",
             failures.join("\n  - ")
         ));
     }
     println!(
-        "content-guard-adversarial PASS ({} payload cases)",
+        "content-guard-adversarial PASS ({} payload cases, {scanned} site files scanned)",
         CONTENT_GUARD_CASES.len()
     );
     Ok(())
@@ -379,18 +396,29 @@ pub fn samples(repo: &Repo) -> Result<(), String> {
     Ok(())
 }
 
-/// Pure: npm-run references in markdown that resolve to no known script.
+/// Pure: npm-run and make references in markdown that resolve to nothing that
+/// exists. Returns one message per violation.
 pub fn docs_reference_violations(
     md_texts: &[(String, String)],
     scripts: &BTreeSet<String>,
+    make_targets: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
     let npm_re = re(r"`npm run ([a-z0-9:_-]+)`")?;
+    let make_re = re(r"`make ([a-z0-9][a-z0-9_.-]*)`")?;
     let mut bad = Vec::new();
     for (rel, text) in md_texts {
         for c in npm_re.captures_iter(text) {
             if !scripts.contains(&c[1]) {
                 bad.push(format!(
                     "{rel}: references npm script '{}' which exists nowhere",
+                    &c[1]
+                ));
+            }
+        }
+        for c in make_re.captures_iter(text) {
+            if !make_targets.contains(&c[1]) {
+                bad.push(format!(
+                    "{rel}: references make target '{}' which exists nowhere",
                     &c[1]
                 ));
             }
@@ -406,17 +434,21 @@ pub const PKG_JSON_LIST: &[&str] = &[
     "website/package.json",
     "control-plane/package.json",
     "sdk/web/package.json",
+    "sdk/react-native/package.json",
+    "sdk/samples/web/apex-sandbox-web/package.json",
+    "sdk/core/unity/package.json",
     "tools/package.json",
 ];
 
-pub fn docs_references(repo: &Repo) -> Result<(), String> {
+pub const DOCS_REFERENCES_BASELINE: &str = "tools/coverage/docs-references-baseline.txt";
+
+/// Names every doc may reference: package.json scripts plus Makefile targets.
+pub fn known_scripts(repo: &Repo) -> Result<BTreeSet<String>, String> {
     let mut scripts: BTreeSet<String> = BTreeSet::new();
-    let mut pkg_count = 0usize;
     for p in PKG_JSON_LIST {
         if !repo.exists(p) {
             continue;
         }
-        pkg_count += 1;
         let text = repo.read(p)?;
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{p}: {e}"))?;
         if let Some(objs) = v.get("scripts").and_then(|s| s.as_object()) {
@@ -425,26 +457,88 @@ pub fn docs_references(repo: &Repo) -> Result<(), String> {
             }
         }
     }
-    if pkg_count == 0 {
-        println!(
-            "docs-references: no package.json files exist in this checkout; npm-run references are unverifiable (PASS)"
+    Ok(scripts)
+}
+
+/// Makefile target names (lines `name:` that are not variable assignments).
+pub fn make_targets(repo: &Repo) -> Result<BTreeSet<String>, String> {
+    let mut targets = BTreeSet::new();
+    let Ok(text) = repo.read("Makefile") else {
+        return Ok(targets);
+    };
+    let target = re(r"^([A-Za-z0-9][A-Za-z0-9_.-]*):")?;
+    for line in text.lines() {
+        if let Some(c) = target.captures(line) {
+            targets.insert(c[1].to_string());
+        }
+    }
+    Ok(targets)
+}
+
+pub fn docs_references(repo: &Repo, update_baseline: bool) -> Result<(), String> {
+    let scripts = known_scripts(repo)?;
+    let targets = make_targets(repo)?;
+    // Fail closed: an unreadable document might hide a stale reference.
+    let mut md_texts: Vec<(String, String)> = Vec::new();
+    for p in repo.walk().into_iter().filter(|p| p.ends_with(".md")) {
+        let text = repo.read(&p)?;
+        md_texts.push((p, text));
+    }
+    let bad = docs_reference_violations(&md_texts, &scripts, &targets)?;
+    let mut per_file: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for message in &bad {
+        let file = message
+            .split_once(':')
+            .map(|(f, _)| f.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        *per_file.entry(file).or_insert(0) += 1;
+    }
+    let total = bad.len();
+
+    if update_baseline {
+        let mut content = String::from(
+            "# docs-references ratchet baseline: stale script/target references per file (rows may only shrink)\n",
         );
+        for (file, count) in &per_file {
+            content.push_str(&format!("{count} {file}\n"));
+        }
+        content.push_str(&format!("TOTAL {total}\n"));
+        std::fs::write(repo.path(DOCS_REFERENCES_BASELINE), content)
+            .map_err(|e| format!("{DOCS_REFERENCES_BASELINE}: {e}"))?;
+        println!("docs-references baseline written: {DOCS_REFERENCES_BASELINE} (TOTAL {total})");
         return Ok(());
     }
-    let md_texts: Vec<(String, String)> = repo
-        .walk()
-        .into_iter()
-        .filter(|p| p.ends_with(".md"))
-        .filter_map(|p| repo.read(&p).ok().map(|t| (p, t)))
-        .collect();
-    let bad = docs_reference_violations(&md_texts, &scripts)?;
-    if !bad.is_empty() {
+
+    let path = repo.path(DOCS_REFERENCES_BASELINE);
+    if !path.exists() {
         return Err(format!(
-            "contract gate failed [docs-references] docs reference nonexistent scripts:\n  - {}",
-            bad.join("\n  - ")
+            "docs-references: baseline not found: {DOCS_REFERENCES_BASELINE} (generate with --update-baseline)"
         ));
     }
-    println!("docs-reference-contract PASS");
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let (allowed, allowed_total) = crate::baseline::parse_count_rows(&text);
+    let (failures, _notes) = crate::baseline::ratchet(
+        &per_file,
+        &allowed,
+        total,
+        allowed_total,
+        "stale references",
+        crate::baseline::Stale::Failure,
+    );
+    if !failures.is_empty() {
+        let mut detail: Vec<String> = failures.clone();
+        for message in bad.iter().take(40) {
+            detail.push(format!("    {message}"));
+        }
+        return Err(format!(
+            "contract gate failed [docs-references]:\n  - {}",
+            detail.join("\n  - ")
+        ));
+    }
+    println!(
+        "docs-reference-contract PASS: {total} stale references at or below baseline ({allowed_total}) across {} files",
+        md_texts.len()
+    );
     Ok(())
 }
 
@@ -622,7 +716,8 @@ mod tests {
         assert!(!scan_text_forbidden("nothing to see here").unwrap());
         assert!(scan_text_forbidden("upstash-redis://xyz").unwrap());
         assert!(scan_text_forbidden("backblaze b2 bucket").unwrap());
-        assert!(content_guard_adversarial().is_ok());
+        let repo = Repo::discover().expect("repo");
+        assert!(content_guard_adversarial(&repo).is_ok());
     }
 
     #[test]
@@ -657,9 +752,23 @@ mod tests {
             "docs/x.md".to_string(),
             "run `npm run build` then `npm run do:tls`".to_string(),
         )];
-        let bad = docs_reference_violations(&md, &scripts).unwrap();
+        let targets: BTreeSet<String> = ["test".to_string()].into_iter().collect();
+        let bad = docs_reference_violations(&md, &scripts, &targets).unwrap();
         assert_eq!(bad.len(), 1);
         assert!(bad[0].contains("do:tls"));
+    }
+
+    #[test]
+    fn docs_references_flag_stale_make_targets() {
+        let scripts: BTreeSet<String> = BTreeSet::new();
+        let targets: BTreeSet<String> = ["test".to_string()].into_iter().collect();
+        let md = vec![(
+            "docs/y.md".to_string(),
+            "run `make test` before `make deploy`".to_string(),
+        )];
+        let bad = docs_reference_violations(&md, &scripts, &targets).unwrap();
+        assert_eq!(bad.len(), 1);
+        assert!(bad[0].contains("make target 'deploy'"), "{:?}", bad);
     }
 
     #[test]

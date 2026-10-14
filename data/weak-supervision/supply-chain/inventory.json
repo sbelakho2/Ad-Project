@@ -1,7 +1,0 @@
-[
-  { "domain": "trustedpublisher.com", "appStoreId": "com.trusted.app" },
-  { "domain": "casualgaming.example", "appStoreId": "com.casual.game" },
-  { "domain": "hypercasualhub.test", "appStoreId": "com.hypercasualhub.runner" },
-  { "domain": "premiumnews.example", "siteId": "premiumnews_web" },
-  { "domain": "globalvideostream.media", "appStoreId": "tv.global.vod" }
-]

@@ -1,31 +1,26 @@
-# Woodpecker CI: the coverage gate stack
+# Woodpecker CI: the gate stack
 
-Each `*.yml` file in this directory is one Woodpecker pipeline (name = filename without
-extension): 16 lanes plus the aggregate verdict in `coverage-gate.yml`, 17 configs in total.
-Trigger: `push` + `pull_request` on `main`/`master`, no path filters (deliberate: see
-`docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md` §7.2).
+Each `*.yml` file in this directory is one Woodpecker pipeline (five lanes plus the aggregate verdict
+in `coverage-gate.yml`; six configs in total). Trigger: `push` and `pull_request` on `main` and
+`master`, with no path filters (deliberate: see `docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md`
+section 7.2).
 
 Lanes:
 
-- `apex-rs-coverage.yml`: the seven Rust product crates, one matrix entry per crate.
-- `backend-coverage.yml`, `frontend-coverage.yml`, `node-services-coverage.yml`: TypeScript domains.
-- `go-coverage.yml`, `python-coverage.yml`, `rust-coverage.yml`: Go, Python, and the mail-server Rust workspace.
-- `sdk-android-coverage.yml`, `sdk-apple-coverage.yml`, `sdk-flutter-coverage.yml`, `sdk-unity-coverage.yml`: the SDK languages.
-- `scripts-shell-coverage.yml`, `contract-coverage.yml`: shell code and the non-line contracts.
-- `dogfood-audit.yml`: manifest, floors, policy bans, stub-ban, docs-lint, self-coverage.
-- `site-perf.yml`, `ui-ux.yml`: the Zola site budgets and the rendered-console accessibility audit.
-- `coverage-gate.yml`: the aggregate verdict; it depends on the 16 lanes and fails the build when any domain sits below its floor in `tools/coverage/coverage-floor.json` (ratchet-only file).
+- `apex-rs-coverage.yml`: one matrix entry per Rust crate, plus the mail-server workspace. Each entry
+  runs `cargo llvm-cov`, the crate tests, clippy and fmt, then the `lcov-gate` floor check.
+- `dogfood-audit.yml`: manifest, walker parity, orphan ceiling, floor ratchet and sync, assertion
+  presence, stub ban, policy bans, mutation smoke and floor, docs links, prose ratchet.
+- `contract-coverage.yml`: monitoring rules and their tests, terraform, proxies and compose, CI
+  reference integrity, pipeline paths, content guard, docs references, i18n parity, stylesheet lint.
+- `site-perf.yml`: Zola build, claims contract, byte budgets, structural checks on the built output.
+- `ui-ux.yml`: the rendered console pages checked by the structural accessibility audit.
+- `coverage-gate.yml`: the aggregate verdict. It depends on the five lanes and replays the manifest,
+  orphan, ratchet, sync, walker and mutation invariants before reporting.
 
-Floors start at observed baselines (green day one) and may only rise; the final phase requires
-every floor = 100. Server/agent deployment design: `infrastructure/woodpecker/README.md`.
+Floors are single-sourced from `tools/coverage/coverage-floor.json` (ratchet-only) and mirrored to
+`tools/coverage/floors.txt` by `apex-tools sync-floors`; the dogfood audit fails if they drift or if
+history regresses. Server and agent deployment design: `infrastructure/woodpecker/README.md`.
 
-Pipelines intentionally contain **no secrets in gate logic**: gates run identically on PRs
-(Woodpecker does not expose secrets to PR events; nothing here needs them). Floors are
-single-sourced from `tools/coverage/coverage-floor.json` and mirrored to `tools/coverage/floors.txt`
-(grep-readable inside any container image) by `tools/coverage/sync-floors.mjs`; the dogfood audit
-fails if they drift or if history regresses.
-
-Locally verified before commit (see design doc §9.5): 347 Rust workspace tests with clippy `-D
-warnings` and `cargo fmt --check` clean; 42 tool tests; the docs-lint gate OK against the 8005
-baseline. The manifest holds 2904 files with 0 unclassified; the stub-ban gate passes; the
-aggregate verdict passes locally.
+The local equivalent of the audit family is `make dogfood`. Every gate is a subcommand of the
+`apex-tools` binary; the retired JavaScript tooling has no counterpart left in this tree.

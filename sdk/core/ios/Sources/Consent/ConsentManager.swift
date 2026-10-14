@@ -92,15 +92,13 @@ public final class ConsentManager {
             return false
         }
         
-        // GDPR: check if consent string indicates consent
+        // GDPR: a TCF v2 string must carry Purpose 1 consent; a missing,
+        // malformed, or truncated string refuses personalization.
         if let gdprApplies = consent.gdprApplies, gdprApplies {
-            // If GDPR applies but no consent string, assume no consent
-            if consent.gdprConsentString == nil || consent.gdprConsentString?.isEmpty == true {
+            guard let raw = consent.gdprConsentString, !raw.isEmpty else {
                 return false
             }
-            // TODO: Parse IAB TCF string for specific purposes when needed
-            // For now, presence of consent string implies consent
-            return true
+            return TCFParser.parse(tcfV2: raw, gdprApplies: true).purpose1Consent
         }
         
         // Default: allow personalized ads

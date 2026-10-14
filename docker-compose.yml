@@ -1,134 +1,39 @@
+# Dev/test service stack for the all-Rust repository.
+# Woodpecker (CI) runs from infrastructure/woodpecker/docker-compose.yml.
 services:
-  backend:
-    build:
-      context: ./backend
-    ports:
-      - "8080:8080" # Aligned with production backend port
-    environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - TRUST_PROXY=${TRUST_PROXY:-true}
-      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/apexmediation}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - JWT_SECRET=${JWT_SECRET:-dev-stack-secret-token-1234567890abcdef}
-      - COOKIE_SECRET=${COOKIE_SECRET:-dev-cookie-secret-1234567890abcdef}
-      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
-      - PORT=${PORT:-8080}
-      - CORS_ALLOWLIST=${CORS_ALLOWLIST:-http://localhost:3000,http://localhost:3001}
-      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-900000}
-      - RATE_LIMIT_MAX_REQUESTS=${RATE_LIMIT_MAX_REQUESTS:-10000}
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - ad-stack
-    profiles:
-      - dev
-      - full
-
-  console:
-    build:
-      context: ./console
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8080/api/v1}
-    depends_on:
-      - backend
-    networks:
-      - ad-stack
-    profiles:
-      - dev
-      - full
-
-  website:
-    build:
-      context: ./website
-    ports:
-      - "3001:3001"
-    environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8080/api/v1}
-    depends_on:
-      - backend
-    networks:
-      - ad-stack
-    profiles:
-      - dev
-      - full
-
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-apexmediation}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-apexmediation_test}
     ports:
-      - "5432:5432"
+      # Dev only: loopback so the database is not exposed to the network.
+      - '127.0.0.1:5432:5432'
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./backend/migrations:/docker-entrypoint-initdb.d
-    networks:
-      - ad-stack
-    profiles:
-      - dev
-      - full
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
-    command: [
-      "redis-server",
-      "--requirepass", "${REDIS_PASSWORD:-changeme}",
-      "--maxmemory", "512mb",
-      "--maxmemory-policy", "allkeys-lru",
-      "--appendonly", "yes"
-    ]
-    # Do not expose Redis publicly in production; port mapping is only for local dev.
+    restart: unless-stopped
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:-changeme}', '--appendonly', 'yes']
     ports:
-      - "6379:6379"
-    networks:
-      - ad-stack
-    profiles:
-      - dev
-      - full
-
-
-  ml-train:
-    build:
-      context: .
-      dockerfile: Dockerfile.ml
-    working_dir: /workspace
+      # Dev only: loopback so the cache is not exposed unauthenticated.
+      - '127.0.0.1:6379:6379'
     volumes:
-      - .:/workspace
-    command: ["--help"]
-    profiles:
-      - ml
-    networks:
-      - ad-stack
-
-  ml-train-gpu:
-    build:
-      context: .
-      dockerfile: Dockerfile.ml-gpu
-    working_dir: /workspace
-    volumes:
-      - .:/workspace
-    command: ["--help"]
-    profiles:
-      - ml-gpu
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-    networks:
-      - ad-stack
-
-networks:
-  ad-stack:
-    driver: bridge
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:
+  redis-data:

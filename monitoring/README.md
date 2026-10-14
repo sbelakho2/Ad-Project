@@ -14,7 +14,7 @@ This directory contains the complete monitoring stack for Rival Ad Platform, inc
 
 ### Local Development
 
-> ⚠️ Before running any containers, create a `.env` file in this directory (or run `./deploy-monitoring.sh start` once to scaffold it) and replace every placeholder secret. Docker Compose automatically reads `.env`, so values such as `GRAFANA_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` must be present before the stack boots.
+> ⚠️ Before running any containers, create a `.env` file in this directory (or scaffold it manually) and replace every placeholder secret. Docker Compose automatically reads `.env`, so values such as `GRAFANA_PASSWORD`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` must be present before the stack boots.
 
 ```bash
 # Start the monitoring stack
@@ -32,30 +32,40 @@ Services will be available at:
 - Prometheus: http://localhost:9090
 - Alertmanager: http://localhost:9093
 
-> 💡 `alertmanager.yml` and `prometheus.yml` are templates. Run `./deploy-monitoring.sh start` (or `./deploy-monitoring.sh restart`) to render them to `alertmanager.generated.yml` / `prometheus.generated.yml` via `envsubst` before bringing the stack up. Launching `docker-compose up` without rendering leaves `${VAR}` placeholders in Alertmanager or Prometheus targets and SMTP/metrics auth will fail.
+> 💡 `alertmanager.yml` and `prometheus.yml` are templates. Render them to `alertmanager.generated.yml` / `prometheus.generated.yml` via `envsubst` before bringing the stack up. Launching `docker-compose up` without rendering leaves `${VAR}` placeholders in Alertmanager or Prometheus targets and SMTP/metrics auth will fail.
 
 > 🔐 Loki enforces multi-tenant auth now. Promtail sends logs with `LOKI_TENANT_ID` (default `apex`), and `loki-tenant-limits.yaml` defines per-tenant ingestion/retention caps. Update that file (and the env var in `.env`) if you add more tenants.
 
-> 📝 When the deploy script creates `monitoring/.env` for you, it exits immediately—fill in every placeholder, then rerun `./deploy-monitoring.sh start` so the stack can boot. Use `./deploy-monitoring.sh backup` for validated Prometheus/Loki/Grafana archives (each gzip is checked after creation).
+> 📝 Fill in every placeholder in `monitoring/.env` before the stack boots. Backups are made with your preferred archive tooling; verify each archive after creation.
 
-> 🗂 Grafana now reads datasources from `grafana-datasources.generated.yml`, which `./deploy-monitoring.sh` renders each time you run `start`/`restart`. The Postgres datasource (pointing at the analytics replicas) is added only when `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` exist in `.env`; otherwise Grafana still boots with Prometheus + Loki and prints a warning.
+> 🗂 Grafana now reads datasources from `grafana-datasources.generated.yml`, which is rendered before each stack start from the template. The Postgres datasource (pointing at the analytics replicas) is added only when `DATABASE_URL`, `DB_USER`, and `DB_PASSWORD` exist in `.env`; otherwise Grafana still boots with Prometheus + Loki and prints a warning.
 
-> 🧾 The `logs/` directory stays `.gitignore`d so raw JSONL files never leave your workstation. A sanitized schema sample lives in `docs/log-samples/error.sample.log` with usage notes in `docs/log-samples/README.md`. Update that sample (not the real logs) whenever the log format changes.
+> 🧾 The `logs/` directory stays `.gitignore`d so raw JSONL files never leave your workstation. A sanitized schema sample lives in `docs/Internal/log-samples/error.sample.log` with usage notes in `docs/Internal/log-samples/README.md`. Update that sample (not the real logs) whenever the log format changes.
 
-> 🗃 Grafana dashboards are provisioned read-only (`allowUiUpdates=false`). To apply tweaks: edit the JSON under `monitoring/grafana/`, copy it into `monitoring/dashboards/` (or `kubectl create configmap ... --from-file` in clusters), then restart the stack so Grafana reloads the exported files. Avoid editing dashboards in the UI or changes will be discarded on the next deploy. When you *do* prototype in the UI, capture the results with `./deploy-monitoring.sh export-dashboards` (requires `GRAFANA_API_KEY` + optional `GRAFANA_URL`) so the JSON in source control stays authoritative.
+> 🗃 Grafana dashboards are provisioned read-only (`allowUiUpdates=false`). To apply tweaks: edit the JSON under `monitoring/grafana/`, copy it into `monitoring/dashboards/` (or `kubectl create configmap ... --from-file` in clusters), then restart the stack so Grafana reloads the exported files. Avoid editing dashboards in the UI or changes will be discarded on the next deploy. When you prototype in the UI, capture the results with the Grafana API (requires `GRAFANA_API_KEY` and `GRAFANA_URL`) so the JSON in source control stays authoritative.
 
 > 🌐 Set `GF_SERVER_ROOT_URL` in `.env` when you want Grafana to advertise a non-localhost URL. The compose file now defaults this to `http://localhost:3000`, which keeps login redirects working during local development.
 
 > 📡 Prometheus scrape targets live in `.env` (`BACKEND_METRICS_TARGET`, `CONSOLE_METRICS_TARGET`, etc.).
 > - Local development: use `host.docker.internal:<port>`.
 > - Hetzner (Docker scraping host services): use `172.17.0.1:<port>` (e.g. `172.17.0.1:8080`).
-> The deploy script rewrites `prometheus.generated.yml` with whatever hosts you configure.
+> Rendering substitutes those values into `prometheus.generated.yml` before the stack starts.
 
 ### Production Deployment
 
+The compose stack consumes the rendered variants of three configs
+(`prometheus.generated.yml`, `alertmanager.generated.yml`,
+`grafana-datasources.generated.yml`). They are rendered from the checked-in
+base files by substituting the `${...}` references with the values from `.env`;
+`${1}` inside `prometheus.yml` is a Prometheus relabeling capture group and
+must stay literal. There is no separate deploy script in this tree, so on the
+production host render the three files next to their base configs and then run:
+
 ```bash
-# Deploy to production
-./deploy-monitoring.sh production
+cd monitoring
+# Render the three generated configs from their base files and .env values,
+# then:
+docker compose up -d
 ```
 
 ## Dashboard Import
@@ -151,7 +161,7 @@ The dashboards will be automatically loaded by Grafana's provisioning system.
 
 ### Alertmanager Configuration
 
-Alerts are defined in `alerts.yml` and loaded by Prometheus. See the [Alerts Documentation](../docs/Monitoring/ALERTS.md) for details.
+Alerts are defined in `alerts.yml` and loaded by Prometheus. See the [Alerts Documentation](../docs/Internal/Monitoring/ALERTS.md) for details.
 
 ### Wiring Alertmanager
 
@@ -371,7 +381,7 @@ command:
 
 ## Additional Resources
 
-- [Grafana Dashboards Documentation](../docs/Monitoring/GRAFANA_DASHBOARDS.md)
-- [Alerts Documentation](../docs/Monitoring/ALERTS.md)
+- [Grafana Dashboards Documentation](../docs/Internal/Monitoring/GRAFANA_DASHBOARDS.md)
+- [Alerts Documentation](../docs/Internal/Monitoring/ALERTS.md)
 - [Prometheus Query Guide](https://prometheus.io/docs/prometheus/latest/querying/basics/)
 - [Grafana Provisioning Docs](https://grafana.com/docs/grafana/latest/administration/provisioning/)

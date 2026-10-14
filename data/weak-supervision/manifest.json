@@ -1,7 +1,0 @@
-{
-  "supplyChain": {
-    "appAds": "supply-chain/app-ads.json",
-    "sellers": "supply-chain/sellers.json"
-  },
-  "syntheticScenarios": "synthetic-scenarios.json"
-}

@@ -7,58 +7,58 @@ use thiserror::Error;
 pub enum MailError {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
-    
+
     #[error("Account not found: {0}")]
     AccountNotFound(String),
-    
+
     #[error("Mailbox not found: {0}")]
     MailboxNotFound(String),
-    
+
     #[error("Message not found: UID {0}")]
     MessageNotFound(u64),
-    
+
     #[error("Mailbox already exists: {0}")]
     MailboxExists(String),
-    
+
     #[error("Quota exceeded: {used} / {max} bytes")]
     QuotaExceeded { used: u64, max: u64 },
-    
+
     #[error("Message too large: {size} bytes (max: {max})")]
     MessageTooLarge { size: usize, max: usize },
-    
+
     #[error("Too many recipients: {count} (max: {max})")]
     TooManyRecipients { count: usize, max: usize },
-    
+
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
-    
+
     #[error("Invalid address: {0}")]
     InvalidAddress(String),
-    
+
     #[error("Invalid mailbox name: {0}")]
     InvalidMailboxName(String),
-    
+
     #[error("Protocol error: {0}")]
     ProtocolError(String),
-    
+
     #[error("TLS required")]
     TlsRequired,
-    
+
     #[error("Spam rejected: score {score}")]
     SpamRejected { score: f32 },
-    
+
     #[error("Delivery failed: {0}")]
     DeliveryFailed(String),
-    
+
     #[error("Temporary failure: {0}")]
     TemporaryFailure(String),
-    
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -88,7 +88,7 @@ impl MailError {
             Self::Internal(_) => 451,
         }
     }
-    
+
     /// Check if this is a temporary failure (should retry).
     pub fn is_temporary(&self) -> bool {
         matches!(

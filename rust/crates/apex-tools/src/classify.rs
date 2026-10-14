@@ -152,47 +152,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifier_matches_js_expectations() {
+    fn classifier_matches_policy_expectations() {
         let repo = Repo::discover().expect("repo");
         let policies = Policies::load(&repo).expect("policies");
         let c = Classifier::new(policies);
+        // Product crates and the mail-server workspace are code domains.
         assert_eq!(
-            c.classify("backend/src/services/billing/x.ts")
+            c.classify("rust/crates/apex-core/src/money.rs")
                 .unwrap()
                 .domain
                 .as_deref(),
-            Some("backend")
+            Some("apex-core")
         );
-        let helper = c.classify("backend/tests/helpers/testApp.ts").unwrap();
+        assert_eq!(
+            c.classify("services/mail-server/crates/smtp-edge/src/parser.rs")
+                .unwrap()
+                .domain
+                .as_deref(),
+            Some("mail-server")
+        );
+        // Fixtures and test paths land in the meta-test domain.
+        let helper = c
+            .classify("rust/crates/apex-api/fixtures/admob.json")
+            .unwrap();
         assert_eq!(helper.domain.as_deref(), Some("meta-test"));
         assert_eq!(helper.status, "test");
-        // root files
+        // Docs and root markdown.
         assert_eq!(
-            c.classify("package.json").unwrap().domain.as_deref(),
-            Some("contract-build")
+            c.classify("docs/INDEX.md").unwrap().domain.as_deref(),
+            Some("docs")
         );
         assert_eq!(
             c.classify("README.md").unwrap().domain.as_deref(),
             Some("docs")
         );
-        // reason codes
+        // Contract domains: pipelines, monitoring rules, build files.
         assert_eq!(
-            c.classify("backend/src/types/foo.d.ts")
+            c.classify(".woodpecker/dogfood-audit.yml")
                 .unwrap()
-                .reason
+                .domain
                 .as_deref(),
-            Some("GENERATED")
+            Some("contract-iac")
         );
         assert_eq!(
-            c.classify("website/public/logo.png")
+            c.classify("monitoring/alerts.yml")
+                .unwrap()
+                .domain
+                .as_deref(),
+            Some("contract-iac")
+        );
+        assert_eq!(
+            c.classify("tools/coverage/policies.json")
+                .unwrap()
+                .domain
+                .as_deref(),
+            Some("contract-build")
+        );
+        // Reason codes: a built page and an image are excluded, never owned.
+        assert_eq!(
+            c.classify("site/public/404.html")
                 .unwrap()
                 .reason
                 .as_deref(),
+            Some("BUILD_ARTIFACT")
+        );
+        assert_eq!(
+            c.classify("logo.jpg").unwrap().reason.as_deref(),
             Some("NON_EXECUTABLE")
-        );
-        assert_eq!(
-            c.classify("models/fraud/latest").unwrap().reason.as_deref(),
-            Some("DATA_ARTIFACT")
         );
     }
 }

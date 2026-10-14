@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::classify::Manifest;
 use crate::glob;
-use crate::policy::{read_floors_txt, Floors, Policies, PolicyBaseline};
+use crate::policy::{read_floors_txt, Floors, PolicyBaseline};
 use crate::repo::Repo;
 use crate::util::re;
 
@@ -78,6 +78,24 @@ pub fn floor_ratchet(floors: &Floors) -> Result<(), String> {
         if floors.mutation_kill_floor_percent < last.mutation_kill_floor_percent {
             return Err("floor-ratchet FAILED: current mutation floor below last recorded".into());
         }
+        // A domain recorded in history may never disappear or drop below its
+        // recorded floor in the live table; otherwise a domain gate can be
+        // removed or weakened after being pinned.
+        for (d, v) in &last.domains {
+            match floors.domains.get(d) {
+                None => {
+                    return Err(format!(
+                        "floor-ratchet FAILED: domain {d} (floor {v}) disappeared from the live domain table"
+                    ));
+                }
+                Some(current) if *current < *v => {
+                    return Err(format!(
+                        "floor-ratchet FAILED: domain {d} floor {current} below last recorded {v}"
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
     println!("floor-ratchet PASS: orphan ceiling non-increasing, domain and mutation floors non-decreasing");
     Ok(())
@@ -135,39 +153,106 @@ pub fn sync_floors_write(repo: &Repo) -> Result<(), String> {
     Ok(())
 }
 
-fn test_case_re() -> Result<Regex, String> {
-    // No lookbehind in the regex crate: an explicit preceding-char class
-    // alternation carries the JS negative-lookbehind semantics for tests.
-    re(
-        r"(?m)(\bdef test_|(^|[^.\w])it\(|(^|[^.\w])test\(|@Test\b|#\[test\]|#\[tokio::test\]|XCTestCase|\[Fact\]|\[Theory\]|class\s+\w*Test\w*\s*:|fun\s+\w*[Tt]est\w*\s*\()",
-    )
+/// Scaffolding markers and their allowlist. `placeholder` only counts when it
+/// labels deferred work (`placeholder implementation`, `placeholder values`):
+/// the SDKs legitimately render test-mode placeholder creatives, and blanket
+/// matching would ban real product behavior.
+/// One scaffolding marker and its human label.
+pub type StubPattern = (Regex, &'static str);
+
+pub fn stub_patterns() -> Result<(Vec<StubPattern>, Regex), String> {
+    let patterns: Vec<StubPattern> = vec![
+        (re(r"todo!\(")?, "rust todo!()"),
+        (re(r"unimplemented!\(")?, "rust unimplemented!()"),
+        (re(r"\bTODO\b")?, "TODO marker"),
+        (re(r"\bFIXME\b")?, "FIXME marker"),
+        (re(r"\bTBD\b")?, "TBD marker"),
+        (re(r"(?i)lorem ipsum")?, "lorem ipsum"),
+        (re(r"(?i)coming soon")?, "coming soon"),
+        (re(r"(?i)not implemented")?, "not-implemented prose"),
+        (
+            re(
+                r"(?i)placeholder[-\s](implementation|impl|value|values|configuration|config|data)\b",
+            )?,
+            "placeholder marker",
+        ),
+        (re(r"\bWIP\b")?, "work-in-progress marker"),
+    ];
+    // `Status::unimplemented` is a gRPC status for an unimplemented RPC. The
+    // UIKit `init(coder:)` idiom uses `fatalError` with the same words, which
+    // is also not scaffolding; both are allowed.
+    let allow = re(
+        r"placeholder\s*=|::placeholder|placeholder-shown|Status::unimplemented|init\(coder:\)",
+    )?;
+    Ok((patterns, allow))
+}
+
+/// 1-based line numbers carrying a Rust `#[ignore]` marker.
+pub fn maybe_ignore_marker(text: &str, marker: &Regex) -> Result<Vec<usize>, String> {
+    Ok(text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| marker.is_match(line))
+        .map(|(i, _)| i + 1)
+        .collect())
+}
+
+/// Does this file define test cases? Markers are language-aware: the JS `it`
+/// and test forms, the Kotlin test-function prefix, and the C# `[Test]`
+/// attribute would otherwise fire on production names like `setTestMode` or
+/// `TestModeAdLoader` in other languages.
+pub fn defines_test_cases(rel: &str, text: &str) -> Result<bool, String> {
+    let ext = rel.rsplit('.').next().unwrap_or("");
+    let hit = |pat: &str| re(pat).map(|r| r.is_match(text));
+    match ext {
+        "rs" => hit(r"#\[(tokio::)?test\]"),
+        "kt" | "java" => Ok(hit(r"@Test\b")?
+            || hit(r"fun\s+test[A-Z0-9_]\w*\s*\(")?
+            || hit(r"class\s+\w+Tests?\s*[:{]")?),
+        // XCTest files subclass XCTestCase. A plain `func testX()` can also be
+        // a production harness (the adapter dev kit ships one), so the function
+        // name alone is not a marker for Swift.
+        "swift" => hit(r"XCTestCase"),
+        "cs" => Ok(
+            hit(r"\[(Test|TestCase|Fact|Theory|UnityTest)(\([^]]*\))?\]")?
+                || hit(r"class\s+\w+Tests?\s*[:{]")?,
+        ),
+        "dart" => hit(r"(^|[^.\w])(test|testWidgets|group)\("),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
+            // No lookbehind in the regex crate: an explicit preceding-char
+            // class carries the JS negative-lookbehind semantics.
+            hit(r"(^|[^.\w])(it|test)\(")
+        }
+        "py" => hit(r"def test_"),
+        _ => Ok(false),
+    }
 }
 
 fn assert_re() -> Result<Regex, String> {
-    re("(#expect|XCTAssert|XCTFail|expect\\(|assert\\.|\\bassert\\b|Assert\\.|require\\.Equal|t\\.Error|t\\.Fatal|\\[Fact\\]|\\[ \"\\$|assertTrue|assertFalse|assertEquals|assertNotNull|assertNull|assertThrows|assertFailsWith|@Test\\(expected|ViewAssertions|\\bmatches\\()")
+    // `\bassert\b` alone misses the Rust macros (`assert_eq!`, `assert_ne!`,
+    // `matches!`) because `_` and `!` are not word boundaries.
+    re("(#expect|XCTAssert|XCTFail|expect\\(|assert\\.|\\bassert(_eq|_ne)?!|\\bdebug_assert!|\\bassert\\b|Assert\\.|require\\.Equal|t\\.Error|t\\.Fatal|\\[Fact\\]|\\[ \"\\$|assertTrue|assertFalse|assertEquals|assertNotNull|assertNull|assertThrows|assertFailsWith|@Test\\(expected|ViewAssertions|\\bmatches!?\\()")
 }
 
 pub fn assertion_presence(repo: &Repo) -> Result<(), String> {
-    let policies = Policies::load(repo)?;
-    let classifier = crate::classify::Classifier::new(policies);
-    let ext_re = re(r"\.(py|ts|tsx|js|jsx|mjs|go|rs|kt|java|swift|cs|bats)$")?;
-    let case = test_case_re()?;
+    let ext_re = re(r"\.(py|ts|tsx|js|jsx|mjs|cjs|dart|go|rs|kt|java|swift|cs|bats)$")?;
     let assertion = assert_re()?;
     let mut bad = Vec::new();
+    let mut checked = 0usize;
+    // Content-based: any code file that defines test cases must carry at least
+    // one assertion, independent of how the classifier labels the path. Inline
+    // Rust `#[cfg(test)]` modules live inside `src/` files, so a
+    // classification-gated scan would silently skip the entire all-Rust test
+    // surface.
     for rel in repo.walk() {
         if !ext_re.is_match(&rel) {
             continue;
         }
-        let Ok(c) = classifier.classify(&rel) else {
-            continue;
-        };
-        if c.kind.as_deref() != Some("test") {
-            continue;
-        }
         let Ok(text) = repo.read(&rel) else { continue };
-        if !case.is_match(&text) {
+        if !defines_test_cases(&rel, &text)? {
             continue;
         }
+        checked += 1;
         if !assertion.is_match(&text) {
             bad.push(format!(
                 "{rel} (defines test cases but contains no assertion)"
@@ -180,25 +265,20 @@ pub fn assertion_presence(repo: &Repo) -> Result<(), String> {
             bad.join("\n  - ")
         ));
     }
-    println!("assertion-presence PASS");
+    println!("assertion-presence PASS ({checked} files define test cases)");
     Ok(())
 }
 
 pub fn stub_ban(repo: &Repo) -> Result<(), String> {
-    let roots = ["rust/", "tools/coverage/", "tools/docs-lint/", "site/"];
-    let patterns: Vec<(Regex, &str)> = vec![
-        (re(r"todo!\(")?, "rust todo!()"),
-        (re(r"unimplemented!\(")?, "rust unimplemented!()"),
-        (re(r"\bTODO\b")?, "TODO marker"),
-        (re(r"\bFIXME\b")?, "FIXME marker"),
-        (re(r"\bTBD\b")?, "TBD marker"),
-        (re(r"(?i)lorem ipsum")?, "lorem ipsum"),
-        (re(r"(?i)coming soon")?, "coming soon"),
-        (re(r"(?i)not implemented")?, "not-implemented prose"),
-        (re(r"(?i)\bplaceholder\b")?, "placeholder marker"),
-        (re(r"\bWIP\b")?, "work-in-progress marker"),
+    let roots = [
+        "rust/",
+        "services/",
+        "sdk/",
+        "tools/coverage/",
+        "site/",
+        ".woodpecker/",
     ];
-    let allow = re(r"placeholder\s*=|::placeholder|placeholder-shown")?;
+    let (patterns, allow) = stub_patterns()?;
     let mut bad = Vec::new();
     for rel in repo.walk() {
         if !roots.iter().any(|r| rel.starts_with(r)) {
@@ -244,6 +324,7 @@ pub fn walker_parity(repo: &Repo, manifest_path: &str) -> Result<(), String> {
     }
     let tracked = repo.tracked_files_with_modes()?;
     let mut invisible = Vec::new();
+    let mut missing_on_disk = Vec::new();
     let mut case_folded = Vec::new();
     let mut gitlinks = 0usize;
     for (mode, path) in tracked {
@@ -254,11 +335,30 @@ pub fn walker_parity(repo: &Repo, manifest_path: &str) -> Result<(), String> {
         if in_manifest.contains(&path) {
             continue;
         }
+        // A tracked file that is absent from disk cannot be classified: the
+        // index and the tree disagree, and a fresh CI checkout would resurrect
+        // the file. Fail and force either `git add -A` or a restore.
+        if !repo.path(&path).exists() {
+            missing_on_disk.push(path);
+            continue;
+        }
         if let Some(found) = folded.get(&path.to_lowercase()) {
             case_folded.push(format!("{path} ~ {found}"));
             continue;
         }
         invisible.push(format!("{path} (mode {mode})"));
+    }
+    if !missing_on_disk.is_empty() {
+        let first: Vec<&str> = missing_on_disk
+            .iter()
+            .take(10)
+            .map(String::as_str)
+            .collect();
+        return Err(format!(
+            "WALKER-PARITY FAILED: {} tracked paths are missing from disk (index/tree divergence). Stage the deletions (git add -A) or restore them. First: {}",
+            missing_on_disk.len(),
+            first.join(", ")
+        ));
     }
     if !invisible.is_empty() {
         return Err(format!(
@@ -271,7 +371,7 @@ pub fn walker_parity(repo: &Repo, manifest_path: &str) -> Result<(), String> {
         println!("walker-parity note: case-only name difference on this filesystem: {note}");
     }
     println!(
-        "walker-parity PASS: all tracked regular files and symlinks classified ({} manifest paths, {gitlinks} gitlinks accounted, {} case-folded)",
+        "walker-parity PASS: all tracked regular files and symlinks classified ({} manifest paths, {gitlinks} gitlinks accounted, {} case-folded, 0 missing from disk)",
         in_manifest.len(),
         case_folded.len()
     );
@@ -283,29 +383,42 @@ pub fn mutation_floor(repo: &Repo, floor_override: f64) -> Result<(), String> {
     let required = floor_override.max(floors.mutation_kill_floor_percent);
     let path = "tools/coverage/mutation-results.json";
     if !repo.exists(path) {
-        println!("mutation-floor SKIP: no {path} yet (floor={required}%)");
-        return Ok(());
+        // Fail closed: a deleted results file must not read as a pass.
+        return Err(format!(
+            "MUTATION FLOOR FAILED: {path} is missing; run mutation-smoke first (floor={required}%)"
+        ));
     }
     let v: serde_json::Value =
         serde_json::from_str(&repo.read(path)?).map_err(|e| e.to_string())?;
+    let total = v
+        .get("total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if total == 0 {
+        return Err(format!(
+            "MUTATION FLOOR FAILED: {path} records zero mutants; the sample must not be empty"
+        ));
+    }
     let score = v
         .get("killRatePercent")
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0);
     if score < required {
         return Err(format!(
-            "MUTATION FLOOR FAILED: kill rate {score}% < {required}%"
+            "MUTATION FLOOR FAILED: kill rate {score}% < {required}% ({total} mutants sampled)"
         ));
     }
-    println!("mutation-floor PASS: kill rate {score}% >= {required}%");
+    println!("mutation-floor PASS: kill rate {score}% >= {required}% ({total} mutants sampled)");
     Ok(())
 }
 
 pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
     let baseline = PolicyBaseline::load(repo)?;
-    let shell_allow: Vec<&str> = vec!["infrastructure/hetzner/", "tools/docs-lint/"];
+    let shell_allow: Vec<&str> = Vec::new();
     let pragma = re(r"(pragma:\s*no cover|istanbul ignore|c8 ignore-next|coverage-ignore)")?;
     let skip = re(r"(describe|it|test)\.(skip|todo)\(")?;
+    // Matches both `#[ignore]` and the attributed `#[ignore = "reason"]` form.
+    let ignore_re = re(r"#\[ignore\b")?;
     let destructive = re(
         r"(?i)\b(deploy|ssh|kubectl|docker|pm2|systemctl|helm|terraform|migrate|drop|truncate)\b",
     )?;
@@ -348,11 +461,10 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
         if full {
             if code_ext.is_match(&rel)
                 && pragma.is_match(&text)
-                && rel != "tools/coverage/yaml-policy-gate.mjs"
-                && !rel.starts_with("tools/coverage/")
-                // The Rust gate tooling's own regex definitions contain the
-                // pragma pattern text; exclude the entire apex-tools crate.
-                && !rel.starts_with("rust/crates/apex-tools/")
+                // Only the gate file that defines the pragma regex may contain
+                // the pattern text; every other file (including the rest of
+                // apex-tools) is scanned. A whole-crate exclusion hid markers.
+                && rel != "rust/crates/apex-tools/src/dogfood.rs"
             {
                 actual
                     .get_mut("pragma")
@@ -368,6 +480,23 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
                     .get_mut("skip")
                     .ok_or("skip bucket missing")?
                     .push(rel.clone());
+            }
+            // Rust's skip marker is #[ignore]; the JS describe/it form does
+            // not exist in this tree, and src/tests.rs style modules are not
+            // under a /tests/ path. The gate's own source contains the
+            // `dogfood:skip:` literal, so it is excluded explicitly rather
+            // than through the marker check, which would exempt it always.
+            if rel.ends_with(".rs")
+                && rel != "rust/crates/apex-tools/src/dogfood.rs"
+                && !text.contains("dogfood:skip:")
+            {
+                maybe_ignore_marker(&text, &ignore_re)?
+                    .into_iter()
+                    .for_each(|line| {
+                        if let Some(bucket) = actual.get_mut("skip") {
+                            bucket.push(format!("{rel}:{line}"));
+                        }
+                    });
             }
             if (rel.ends_with(".yml") || rel.ends_with(".yaml"))
                 && (rel.starts_with(".github/workflows/") || rel.starts_with(".woodpecker/"))
@@ -459,4 +588,104 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
         counts.join(" ")
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assertion_regex_matches_rust_macros() {
+        let assertion = assert_re().unwrap();
+        for text in [
+            "assert_eq!(a, b);",
+            "assert_ne!(a, b);",
+            "assert!(x.is_ok());",
+            "debug_assert!(x);",
+            "matches!(x, Some(_));",
+        ] {
+            assert!(assertion.is_match(text), "missing assertion match: {text}");
+        }
+    }
+
+    #[test]
+    fn ignore_markers_are_line_numbered_in_both_forms() {
+        let marker = re(r"#\[ignore\b").unwrap();
+        let text = "#[test]\n#[ignore]\nfn slow() {}\n#[ignore = \"slow\"]\nfn slower() {}\n";
+        assert_eq!(maybe_ignore_marker(text, &marker).unwrap(), vec![2, 4]);
+        assert_eq!(
+            maybe_ignore_marker("#[test]\n", &marker).unwrap(),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn floor_ratchet_rejects_a_domain_removed_after_being_pinned() {
+        let floors = Floors {
+            orphan_floor_percent: 0.0,
+            mutation_kill_floor_percent: 60.0,
+            domains: std::collections::BTreeMap::new(),
+            history: vec![crate::policy::HistoryEntry {
+                orphan_floor_percent: 0.0,
+                mutation_kill_floor_percent: 60.0,
+                domains: [("apex-core".to_string(), 40.0)].into_iter().collect(),
+                at: "test".into(),
+            }],
+        };
+        let err = floor_ratchet(&floors).unwrap_err();
+        assert!(err.contains("apex-core"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn test_case_markers_are_language_aware() {
+        assert!(!defines_test_cases("a/BelAds.kt", "fun setTestMode(enabled: Boolean)").unwrap());
+        assert!(!defines_test_cases("a/AuctionClient.kt", "fun isTestRuntime()").unwrap());
+        assert!(!defines_test_cases(
+            "a/TestModeAdLoader.swift",
+            "class TestModeAdLoader: Sendable"
+        )
+        .unwrap());
+        assert!(defines_test_cases("a/BelAdsTest.kt", "fun testFoo() {}").unwrap());
+        assert!(defines_test_cases("a/BelAdsTest.kt", "class BelAdsTest {").unwrap());
+        assert!(defines_test_cases("a/BelAdsTest.kt", "@Test fun x() {}").unwrap());
+        assert!(defines_test_cases("a/XTests.swift", "class XTests: XCTestCase {}").unwrap());
+        assert!(!defines_test_cases("a/Harness.swift", "func testInterstitial() {}").unwrap());
+        assert!(defines_test_cases("a/XTests.cs", "[Test] public void x() {}").unwrap());
+        assert!(defines_test_cases("a/x.test.ts", "it('works', () => {});").unwrap());
+        assert!(defines_test_cases("a/x.test.ts", "test('works', () => {});").unwrap());
+        assert!(!defines_test_cases("a/legit.ts", "await commit('works');").unwrap());
+        assert!(defines_test_cases("a/x_test.dart", "test('works', () {});").unwrap());
+        assert!(defines_test_cases("a/x_test.py", "def test_works():").unwrap());
+        assert!(defines_test_cases("a/x.rs", "#[tokio::test] async fn x() {}").unwrap());
+        assert!(!defines_test_cases("a/readme.md", "def test_works()").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod stub_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_only_flags_deferred_work() {
+        let (patterns, allow) = stub_patterns().unwrap();
+        let flagged = |line: &str| {
+            patterns
+                .iter()
+                .any(|(p, _)| p.is_match(line) && !allow.is_match(line))
+        };
+        assert!(flagged("// Placeholder implementation - adjust"));
+        assert!(flagged("// For now, return placeholder values"));
+        assert!(flagged("# Placeholder ProGuard configuration"));
+        assert!(!flagged("renders a safe placeholder in test mode"));
+        assert!(!flagged("placeholder.dismiss(animated: true)"));
+        assert!(!flagged("/// Provides a placeholder tint"));
+        assert!(!flagged("android:text=\"Ad placeholder\""));
+        assert!(!flagged("fatalError(\"init(coder:) not implemented\")"));
+        assert!(flagged(concat!("// TO", "DO: wire this")));
+    }
 }

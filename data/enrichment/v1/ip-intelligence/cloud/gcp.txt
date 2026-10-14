@@ -1,2 +1,0 @@
-# GCP sample prefixes
-34.80.0.0/16

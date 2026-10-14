@@ -14,10 +14,13 @@ mail-common = { path = "../mail-common" }
 mail-proto = { path = "../mail-proto" }
 
 tokio.workspace = true
+tokio-stream.workspace = true
 async-trait.workspace = true
 tonic.workspace = true
 prost.workspace = true
 sqlx.workspace = true
+zstd.workspace = true
+rand.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
@@ -40,3 +43,6 @@ dashmap.workspace = true
 clap.workspace = true
 config.workspace = true
 dotenvy.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

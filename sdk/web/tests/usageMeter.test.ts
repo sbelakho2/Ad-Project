@@ -7,9 +7,7 @@ import {
   UsageMeter,
   UsageMeterBuilder,
   UsageEventType,
-  UsageEvent,
   UsageMetrics,
-  UsageBreakdown,
   MeteringReporter,
 } from '../src/usageMeter';
 
@@ -366,7 +364,7 @@ describe('UsageMeter', () => {
     it('should call reporter on flush', async () => {
       const reportedMetrics: UsageMetrics[] = [];
       const reporter: MeteringReporter = {
-        report: async (metrics, breakdown) => {
+        report: async (metrics) => {
           reportedMetrics.push(metrics);
           return true;
         },

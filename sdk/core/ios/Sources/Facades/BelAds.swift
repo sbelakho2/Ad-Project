@@ -98,7 +98,7 @@ public enum BelAds {
     /// Enable or disable debug logging
     /// - Parameter enabled: Whether debug logging should be enabled
     public static func setDebugLogging(_ enabled: Bool) {
-        // TODO: Wire to actual logging system when implemented
+        Logger.setLevel(enabled ? .debug : .info)
         UserDefaults.standard.set(enabled, forKey: "apex_debug_logging")
     }
     

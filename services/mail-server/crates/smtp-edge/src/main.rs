@@ -2,14 +2,12 @@
 //!
 //! Inbound SMTP server handling mail from the internet (port 25).
 
-mod session;
-mod parser;
-
 use anyhow::Result;
 use clap::Parser;
+use smtp_edge::session;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -19,27 +17,27 @@ struct Cli {
     /// Listen address
     #[arg(short, long, default_value = "0.0.0.0:25")]
     listen: String,
-    
+
     /// Hostname to announce
     #[arg(long, default_value = "mail.apexmediation.ee")]
     hostname: String,
-    
+
     /// Mailstore gRPC address
     #[arg(long, default_value = "127.0.0.1:50051")]
     mailstore_addr: String,
-    
+
     /// Spam gateway gRPC address
     #[arg(long, default_value = "127.0.0.1:50052")]
     spam_addr: String,
-    
+
     /// TLS certificate path
     #[arg(long)]
     cert: Option<String>,
-    
+
     /// TLS key path
     #[arg(long)]
     key: Option<String>,
-    
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -48,18 +46,18 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     // Initialize logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
-    
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
         .init();
-    
+
     info!("Starting SMTP Edge on {}", cli.listen);
-    
+
     let config = Arc::new(session::SmtpConfig {
         hostname: cli.hostname,
         mailstore_addr: cli.mailstore_addr,
@@ -67,10 +65,10 @@ async fn main() -> Result<()> {
         max_message_size: 25 * 1024 * 1024, // 25MB
         max_recipients: 100,
     });
-    
+
     let listener = TcpListener::bind(&cli.listen).await?;
     info!("SMTP listening on {}", cli.listen);
-    
+
     loop {
         match listener.accept().await {
             Ok((socket, addr)) => {
@@ -78,7 +76,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     let peer = addr.to_string();
                     info!(peer = %peer, "New SMTP connection");
-                    
+
                     if let Err(e) = session::handle_connection(socket, config, peer.clone()).await {
                         warn!(peer = %peer, error = %e, "SMTP session error");
                     }

@@ -47,12 +47,20 @@ fn positionals(args: &[String]) -> Vec<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first().map(String::as_str) else {
+    let usage = || {
         eprintln!(
-            "usage: apex-tools <manifest|walker-parity|orphan-gate|floor-ratchet|floors-sync|sync-floors|assertion-presence|stub-ban|mutation-floor|yaml-policy|coverage-gate|aggregate-verdict|lcov-gate|go-func-gate|contract|docs-links|i18n-parity|css-lint|claims|perf-budget|console-a11y|docs-lint|mutation-smoke> [flags]"
+            "usage: apex-tools <{}> [flags]",
+            apex_tools::SUBCOMMANDS.join("|")
         );
+    };
+    let Some(cmd) = args.first().map(String::as_str) else {
+        usage();
         std::process::exit(2);
     };
+    if !apex_tools::SUBCOMMANDS.contains(&cmd) {
+        usage();
+        std::process::exit(2);
+    }
     let rest = &args[1..];
     let repo = match Repo::discover() {
         Ok(r) => r,
@@ -144,9 +152,10 @@ fn main() {
         })(),
         "contract" => (|| {
             let check = positionals(rest).into_iter().next().ok_or(
-                "usage: apex-tools contract <ci-reference-integrity|openapi-parity|content-guard-adversarial|samples|docs-references|pipeline-paths>",
+                "usage: apex-tools contract <ci-reference-integrity|openapi-parity|content-guard-adversarial|samples|docs-references|pipeline-paths> [--update-baseline]",
             )?;
-            contract::contract(&repo, &check)
+            let update_baseline = rest.iter().any(|a| a == "--update-baseline");
+            contract::contract(&repo, &check, update_baseline)
         })(),
         "docs-links" => match docslinks::parse_mode(rest) {
             Ok(mode) => docslinks::docs_links(&repo, &mode),

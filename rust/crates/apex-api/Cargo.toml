@@ -9,8 +9,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+aes-gcm = { version = "0.10", features = ["std"] }
+hex = "0.4"
+rand = "0.8"
 apex-audit = { path = "../apex-audit" }
 apex-billing = { path = "../apex-billing" }
+apex-connectors = { path = "../apex-connectors" }
 apex-core.workspace = true
 apex-proof = { path = "../apex-proof" }
 async-trait = "0.1"
