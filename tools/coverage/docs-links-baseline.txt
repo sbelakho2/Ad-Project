@@ -43,11 +43,6 @@
 2 docs/SDK_API_REFERENCE.md
 6 docs/SSAI/SSAI_IMPROVEMENTS.md
 1 docs/runbooks/SALES_AUTOMATION_OPERATIONS.md
-3 models/README.md
 3 monitoring/README.md
-1 scripts/README.md
-4 services/inference-ml/README.md
 4 site/content/_index.md
-1 website/README.md
-1 website/WEBSITE_DESIGN.md
-TOTAL 171
+TOTAL 161

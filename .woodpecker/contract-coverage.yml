@@ -1,32 +1,22 @@
-# Contract coverage: everything that is not line-covered is adversarially contracted here.
-# S-IAC (promtool/helm/terraform/gixy/caddy/compose), S-OPENAPI, S-CI, S-SAMPLE, S-CONTENT, S-DOCS.
+# Contract coverage: everything that is not line-covered is adversarially
+# contracted here, all through the apex-tools binary.
+# S-IAC (promtool/helm/terraform/gixy/compose), S-OPENAPI, S-CI, S-SAMPLE, S-DOCS.
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
 steps:
+  build-apex-tools:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo build --release -p apex-tools
+
   promtool-rules-with-tests:
     image: alpine:3.20
     commands:
       - wget -qO- https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar -C /tmp -xz
       - /tmp/prometheus-2.53.0.linux-amd64/promtool check rules monitoring/alerts.yml monitoring/recording-rules.yml
       - /tmp/prometheus-2.53.0.linux-amd64/promtool test rules monitoring/alerts.test.yml
-
-  openapi-contract:
-    image: node:20-bookworm
-    commands:
-      - npx -y @redocly/cli@1.34.2 lint backend/src/openapi/billing.yaml
-      - node tools/coverage/contract-checks.mjs openapi-parity
-
-  helm-kubeconform:
-    image: alpine:3.20
-    commands:
-      - apk add --no-cache helm
-      - wget -qO- https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
-      - helm lint infrastructure/helm/backend infrastructure/helm/console infrastructure/helm/fraud-inference
-      - helm template infrastructure/helm/backend | ./kubeconform -strict -summary
-      - helm template infrastructure/helm/console | ./kubeconform -strict -summary
-      - helm template infrastructure/helm/fraud-inference | ./kubeconform -strict -summary
 
   terraform-validate:
     image: hashicorp/terraform:1.9
@@ -46,43 +36,11 @@ steps:
       - docker-compose -f docker-compose.yml config -q
       - docker-compose -f infrastructure/docker-compose.prod.yml config -q
 
-  ci-reference-integrity:
-    image: node:20-bookworm
+  contract-checks:
+    image: rust:1.87-bookworm
+    depends_on: [build-apex-tools]
     commands:
-      - node tools/coverage/contract-checks.mjs ci-reference-integrity
-
-  content-guard-self-test:
-    image: node:20-bookworm
-    commands:
-      - node tools/content-guard.js
-      - node tools/coverage/contract-checks.mjs content-guard-adversarial
-
-  samples-build-contract:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/contract-checks.mjs samples
-
-  docs-reference-contract:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/contract-checks.mjs docs-references
-
-  docs-links-check:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/docs-links.mjs --check --baseline tools/coverage/docs-links-baseline.txt
-
-  i18n-parity:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/i18n-parity.mjs
-
-  css-contract:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/css-lint.mjs
-
-  shell-policy:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/yaml-policy-gate.mjs --shell
+      - cd rust && cargo run --release -q -p apex-tools -- contract ci-reference-integrity
+      - cd rust && cargo run --release -q -p apex-tools -- contract content-guard-adversarial
+      - cd rust && cargo run --release -q -p apex-tools -- contract pipeline-paths
+      - cd rust && cargo run --release -q -p apex-tools -- docs-references

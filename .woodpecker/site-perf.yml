@@ -1,49 +1,23 @@
-# site-perf: the marketing site's hard performance budgets.
-# Zola builds the static site; the built DIST is then measured, never the intent:
-# zero JavaScript, per-page byte budgets, self-hosted resources only, and the
-# two-way claims contract (every claim anchored to a pinned test AND present on
-# a page). Lighthouse asserts the user-facing budgets on the same dist.
+# site-perf: the marketing site's hard performance budgets, all-Rust.
+# Zola builds the dist; apex-tools then runs the claims contract, the byte
+# budgets, and the structural WCAG checks on the built output.
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
-matrix:
-  PAGE:
-    - index.html
-    - 404.html
-    - for-publishers/index.html
-    - how-it-works/index.html
-    - pricing/index.html
-    - proof/index.html
-    - security/index.html
-
 steps:
-  site-build-and-budget:
+  site-build:
     image: ghcr.io/getzola/zola:v0.19.2
     commands:
       - cd site
       - zola build
-  site-claims-contract:
-    image: node:20-bookworm
+
+  site-gates:
+    image: rust:1.87-bookworm
+    depends_on: [site-build]
     commands:
-      - node tools/site/claims-contract.mjs
-  site-perf-budget:
-    image: node:20-bookworm
-    depends_on: [site-build-and-budget]
-    commands:
-      - node tools/site/perf-budget.mjs --dist site/public --min-pages 6
-  site-lighthouse:
-    image: node:20-bookworm
-    depends_on: [site-build-and-budget]
-    commands:
-      # One job per page (matrix): each page is audited on a freshly started
-      # Chrome and server, so no page's measurements can be degraded by another
-      # page's run. lhci 0.14 does not bundle Chrome: install Chrome for
-      # Testing plus the shared libs it needs, then point the browser-binary env var at the installed Chrome.
-      - apt-get update && apt-get install -y --no-install-recommends libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 fonts-liberation libatspi2.0-0 libxcursor1 libxss1 libdbus-1-3 libnspr4 ca-certificates
-      - export CHROME_PATH="$(npx -y @puppeteer/browsers@2 install chrome@stable --path /root/chrome --format '{{path}}' | tail -1)"
-      # First-party dist server: deterministic gzip plus documented cache
-      # policy, so performance audits judge the page, not the server.
-      - node tools/site/serve-dist.mjs site/public 8080 >/dev/null 2>&1 &
-      - sleep 1
-      - npx -y @lhci/cli@0.14.0 autorun --config=lighthouserc.json --collect.url=http://127.0.0.1:8080/$PAGE
+      - cd rust && cargo build --release -p apex-tools
+      - cd "$CI_WORKSPACE"
+      - rust/target/release/apex-tools claims
+      - rust/target/release/apex-tools perf-budget --dist site/public --min-pages 6
+      - rust/target/release/apex-tools console-a11y site/public

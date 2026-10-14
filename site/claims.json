@@ -68,7 +68,7 @@
     },
     {
       "id": "audit-stale-floors",
-      "claim": "The audit flags stale floors — a country floor set above that country's recent eCPM is throttling demand.",
+      "claim": "The audit flags stale floors \u2014 a country floor set above that country's recent eCPM is throttling demand.",
       "anchor": "rust/crates/apex-audit/src/rules/stale_floor.rs",
       "test": "critical_at_exact_100k_boundary"
     },
@@ -117,8 +117,8 @@
     {
       "id": "encrypted-credentials",
       "claim": "Publisher network credentials are stored encrypted with AES-256-GCM.",
-      "anchor": "backend/src/services/networkCredentialVault.ts",
-      "test": "should store new credentials successfully (backend/src/services/__tests__/networkCredentialVault.test.ts)"
+      "anchor": "rust/crates/apex-api/src/vault.rs",
+      "test": "vault_roundtrip_and_tamper_detection"
     },
     {
       "id": "invoice-reverified-from-ledger",

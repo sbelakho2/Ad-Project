@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+# Node/JS/TS reintroduction guard (all-Rust repo)
+node_modules/
+/package.json
+/package-lock.json
 vendor/
 *.egg-info/
 __pycache__/

@@ -1,30 +1,25 @@
-# Aggregate verdict. Runs only when every coverage pipeline above has finished;
-# fails the build unless all domain floors (tools/coverage/coverage-floor.json) are met
-# and the manifest is complete. This is the protected-branch status context.
+# Aggregate verdict. Runs when every lane above has finished; fails the build
+# unless all domain floors are met, the manifest is complete, and the ratchet
+# holds. This is the protected-branch status context.
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
 depends_on:
-  - backend-coverage
-  - frontend-coverage
-  - node-services-coverage
-  - go-coverage
-  - sdk-android-coverage
-  - sdk-apple-coverage
-  - sdk-unity-coverage
-  - sdk-flutter-coverage
-  - python-coverage
-  - rust-coverage
   - apex-rs-coverage
-  - scripts-shell-coverage
-  - contract-coverage
   - dogfood-audit
+  - contract-coverage
   - site-perf
   - ui-ux
 
 steps:
-  aggregate-coverage-verdict:
-    image: node:20-bookworm
+  build-apex-tools:
+    image: rust:1.87-bookworm
     commands:
-      - node tools/coverage/aggregate-coverage-verdict.mjs --report coverage-report.md
+      - cd rust && cargo build --release -p apex-tools
+
+  aggregate-verdict:
+    image: rust:1.87-bookworm
+    depends_on: [build-apex-tools]
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- aggregate-verdict --report coverage-report.md

@@ -1,101 +1,56 @@
-# Dogfood audit: the repo's own quality machinery, adversarially audited.
-# M-1 manifest orphans; M-2 floor ratchet (+ shell-readable floors.txt sync); M-3/M-4 policy
-# bans with ratchet baseline; M-7 assertion presence; M-8 self-coverage of tools/coverage;
-# mutation floor (phase 3).
+# dogfood audit: the repository's own quality machinery, all-Rust.
+# Every gate is a subcommand of the apex-tools binary.
 when:
   - event: [push, pull_request]
     branch: [main, master]
 
 steps:
-  manifest-build-and-orphan-gate:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/build-coverage-manifest.mjs --out coverage-manifest.json
-      - node tools/coverage/dogfood-gates.mjs orphan-gate --manifest coverage-manifest.json --suites tools/coverage/suites.json
-
-  floor-ratchet-and-sync:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/dogfood-gates.mjs floor-ratchet
-      - node tools/coverage/dogfood-gates.mjs floors-sync
-
-  walker-parity:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/build-coverage-manifest.mjs --out coverage-manifest.json
-      - node tools/coverage/dogfood-gates.mjs walker-parity --manifest coverage-manifest.json
-
-  pragma-and-skip-ban:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/yaml-policy-gate.mjs --full
-
-  stub-ban:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/dogfood-gates.mjs stub-ban
-
-  docs-lint:
-    image: alpine:3.20
-    commands:
-      - apk add --no-cache bash gawk ripgrep
-      - sh tools/docs-lint/docs-lint-one-shot-test.sh
-      - sh tools/docs-lint/docs-lint.sh --source --baseline tools/docs-lint/docs-lint-baseline.txt
-
-  docs-lint-integrity:
-    image: alpine:3.20
-    commands:
-      - apk add --no-cache bash gawk ripgrep git
-      - |
-        set -eu
-        base="${CI_COMMIT_BEFORE_SHA:-}"
-        if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-          if [ "${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "${CI_COMMIT_TARGET_SHA:-}" ]; then
-            base="$CI_COMMIT_TARGET_SHA"
-          else
-            if ! git fetch --depth=2 --no-filter origin "$CI_COMMIT_SHA" >/dev/null 2>&1; then
-              echo "warning: could not deepen the shallow clone to find the integrity base" >&2
-            fi
-            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-              base="$(git rev-parse --verify HEAD^)"
-            fi
-          fi
-        fi
-        [ -n "$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }
-        git cat-file -e "$base:tools/docs-lint/docs-lint-baseline.txt" 2>/dev/null \
-          || { echo "no baseline file at $base" >&2; exit 1; }
-        git show "$base:tools/docs-lint/docs-lint-baseline.txt" > /tmp/base-baseline.txt
-        while IFS= read -r entry; do
-          entry="${entry#"${entry%%[![:space:]]*}"}"
-          entry="${entry%%#*}"
-          entry="${entry%"${entry##*[![:space:]]}"}"
-          [ -n "$entry" ] || continue
-          if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
-            echo "stale adoption manifest entry: $entry already has a baseline row" >&2
-            exit 1
-          fi
-        done < tools/docs-lint/docs-lint-adopted.txt
-        sh tools/docs-lint/docs-lint.sh --source --integrity /tmp/base-baseline.txt
-
-  meta-assertion-presence:
-    image: node:20-bookworm
-    commands:
-      - node tools/coverage/dogfood-gates.mjs assertion-presence
-
-  self-coverage:
-    image: node:20-bookworm
-    commands:
-      - cd "$CI_WORKSPACE/tools" && npm install --no-audit --no-fund
-      - cd "$CI_WORKSPACE/tools" && npm run test:cov
-      - cd "$CI_WORKSPACE" && node tools/coverage/coverage-gate.mjs --domain js-tools --artifact tools/coverage/coverage/coverage-summary.json --tool c8
-
-  apex-core-mutation-smoke:
+  build-apex-tools:
     image: rust:1.87-bookworm
     commands:
-      - sh tools/coverage/rust-mutation-smoke.sh
+      - rustup component add clippy rustfmt
+      - cd rust && cargo build --release -p apex-tools
 
-  mutation-floor:
-    image: node:20-bookworm
-    depends_on: [apex-core-mutation-smoke]
+  manifest:
+    image: rust:1.87-bookworm
     commands:
-      - node tools/coverage/dogfood-gates.mjs mutation-floor
+      - cd rust && cargo run --release -q -p apex-tools -- manifest --out coverage-manifest.json
+
+  walker-parity:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- walker-parity --manifest coverage-manifest.json
+
+  orphan-gate:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- orphan-gate --manifest coverage-manifest.json
+
+  floor-ratchet-and-sync:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- floor-ratchet
+      - cd rust && cargo run --release -q -p apex-tools -- floors-sync
+
+  assertion-presence:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- assertion-presence
+
+  stub-ban:
+    image: rust:1.87-bookworm
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- stub-ban
+
+  mutation-smoke-and-floor:
+    image: rust:1.87-bookworm
+    depends_on: [build-apex-tools]
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- mutation-smoke
+      - cd rust && cargo run --release -q -p apex-tools -- mutation-floor
+
+  docs-lint:
+    image: rust:1.87-bookworm
+    depends_on: [build-apex-tools]
+    commands:
+      - cd rust && cargo run --release -q -p apex-tools -- docs-lint --source --baseline tools/coverage/docs-links-baseline.txt

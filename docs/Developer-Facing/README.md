@@ -13,7 +13,7 @@ This section contains API references and integration guides for developers build
 | API | Description | Documentation |
 |-----|-------------|---------------|
 | **SSAI API** | Server-Side Ad Insertion endpoints | [SSAI API Reference](#ssai-api) |
-| **RTB API** | Real-time bidding endpoints | [OpenAPI Spec](../../backend/openapi.yaml) |
+| **RTB API** | Real-time bidding endpoints | the billing API reference (archived with the mediation platform) |
 | **Billing API** | Billing and subscription management | [Backend Billing](../Internal/Backend/BILLING_API.md) |
 | **Sales Automation API** | Outbound sales automation | [Autonomous Sales API](./AUTONOMOUS_SALES_API.md) |
 
@@ -179,5 +179,5 @@ See [Autonomous Sales API](./AUTONOMOUS_SALES_API.md) for:
 
 - [SSAI Improvements](../SSAI/SSAI_IMPROVEMENTS.md) - Full SSAI specification
 - [VAST/VMAP Parser](../SSAI/VAST_VMAP_PARSER.md) - Parser documentation
-- [Backend README](../../backend/README.md) - Backend setup guide
-- [OpenAPI Spec](../../backend/openapi.yaml) - Full API specification
+- the platform README (archived) - Backend setup guide
+- the billing API reference (archived with the mediation platform) - Full API specification
