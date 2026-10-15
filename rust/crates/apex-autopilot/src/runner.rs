@@ -182,12 +182,69 @@ impl Runner {
     }
 }
 
+/// A kept change whose month-6 (or 30%-eCPM-move) re-check is due.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecheckDue {
+    pub change_id: String,
+    pub scope: String,
+    pub months_since_keep: u32,
+    pub plan: apex_lift::recheck::ReversalPlan,
+}
+
+impl Runner {
+    /// The kept changes whose re-check is due at `now_unix_ms` by the scheduled
+    /// month-6 trigger. The reversal test itself is a normal cycle; this
+    /// planner tells the operator which one to start.
+    pub fn due_rechecks(&self, ledger: &dyn LedgerLog, now_unix_ms: i64) -> Vec<RecheckDue> {
+        let today = now_unix_ms.div_euclid(86_400_000);
+        kept_changes(ledger)
+            .into_iter()
+            .filter_map(|(scope, change)| {
+                let months = months_between(&change.kept_day, today)?;
+                apex_lift::recheck::recheck_due(months, 0.0).then_some(RecheckDue {
+                    change_id: change.change_id.clone(),
+                    scope,
+                    months_since_keep: months,
+                    plan: apex_lift::recheck::reversal_plan(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whole months from a `YYYY-MM-DD` day to a day number since the epoch.
+fn months_between(kept_day: &str, today_day: i64) -> Option<u32> {
+    let kept = crate::calendar::day_number(kept_day)?;
+    let today = crate::calendar::format_day(today_day);
+    let (ky, km, kd) = parse_ymd(kept_day)?;
+    let (ty, tm, td) = parse_ymd(&today)?;
+    if today_day < kept {
+        return Some(0);
+    }
+    let mut months = (ty - ky) * 12 + (tm - km);
+    if td < kd {
+        months -= 1;
+    }
+    u32::try_from(months.max(0)).ok()
+}
+
+fn parse_ymd(day: &str) -> Option<(i64, i64, i64)> {
+    let mut parts = day.split('-');
+    let y = parts.next()?.parse().ok()?;
+    let m = parts.next()?.parse().ok()?;
+    let d = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((y, m, d))
+}
+
 /// The last calendar day of a month, `YYYY-MM-DD`.
 fn month_end(month_start: &str, month_days: u32) -> Result<String, PlanError> {
-    let start = crate::live_max::day_number(month_start).ok_or_else(|| {
+    let start = crate::calendar::day_number(month_start).ok_or_else(|| {
         PlanError::Validation(format!("month start '{month_start}' is not a valid day"))
     })?;
-    Ok(crate::live_max::format_day(
+    Ok(crate::calendar::format_day(
         start + i64::from(month_days.max(1)) - 1,
     ))
 }
@@ -243,7 +300,7 @@ fn kept_changes(ledger: &dyn LedgerLog) -> Vec<(String, apex_lift::billing::Kept
                     change_id: name.clone(),
                     lambda,
                     rate_bp,
-                    kept_day: crate::live_max::format_day(at_unix_ms.div_euclid(86_400_000)),
+                    kept_day: crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000)),
                     overridden_day: None,
                     pre_registration_hash: pre_hash,
                     result_hash,
@@ -675,6 +732,16 @@ mod tests {
         fn call_log(&self) -> Vec<String> {
             Vec::new()
         }
+    }
+
+    #[test]
+    fn months_between_counts_whole_months() {
+        let day = |text: &str| crate::calendar::day_number(text).expect("valid day");
+        assert_eq!(months_between("2023-11-14", day("2023-11-20")), Some(0));
+        assert_eq!(months_between("2023-11-01", day("2023-12-01")), Some(1));
+        assert_eq!(months_between("2023-05-01", day("2023-11-01")), Some(6));
+        assert_eq!(months_between("2023-05-20", day("2023-11-01")), Some(5));
+        assert_eq!(months_between("bad", day("2023-11-01")), None);
     }
 
     #[tokio::test]

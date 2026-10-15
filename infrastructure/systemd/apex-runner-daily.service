@@ -1,0 +1,13 @@
+[Unit]
+Description=Apex runner — daily measurement pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+EnvironmentFile=/etc/apex/runner.env
+ExecStart=/usr/local/bin/apex-runner daily
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex

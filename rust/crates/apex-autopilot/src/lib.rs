@@ -19,6 +19,7 @@
     )
 )]
 
+pub mod calendar;
 pub mod keys;
 pub mod live_max;
 pub mod model;

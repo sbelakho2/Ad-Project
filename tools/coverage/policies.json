@@ -1,284 +1,284 @@
 {
-  "__comment": "Policy tables for the coverage classifier of the Rust product. DOMAINS: first-match-wins include/exclude patterns per domain. EXCLUSIONS: reason-coded file patterns checked before domains. Validated against the live tree by apex-tools manifest.",
-  "domains": [
-    {
-      "id": "meta-test",
-      "kind": "test",
-      "include": [
-        "**/*.test.ts",
-        "**/*_test.go",
-        "**/__tests__/**",
-        "**/tests/**",
-        "**/Tests/**",
-        "**/src/test/**",
-        "**/*.bats",
-        "**/__mocks__/**",
-        "**/docs/**/*.tsx",
-        "**/fixtures/**",
-        "**/*.test.tsx",
-        "**/*.spec.ts",
-        "**/src/androidTest/**",
-        "**/setupTests.ts"
-      ]
-    },
-    {
-      "id": "apex-core",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-core/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-connectors",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-connectors/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-audit",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-audit/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-autopilot",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-autopilot/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-proof",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-proof/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-billing",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-billing/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-api",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-api/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-tools",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-tools/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-lift",
-      "kind": "code",
-      "include": [
-        "rust/crates/apex-lift/**/*.rs"
-      ]
-    },
-    {
-      "id": "docs",
-      "kind": "docs",
-      "include": [
-        "**/*.md"
-      ]
-    },
-    {
-      "id": "contract-sql",
-      "kind": "contract",
-      "include": [
-        "tools/sql/**/*.sql"
-      ]
-    },
-    {
-      "id": "contract-iac",
-      "kind": "contract",
-      "include": [
-        "monitoring/**/*.{yml,yaml,json}",
-        "infrastructure/**/*.{yml,yaml,toml,conf,service,tf,tpl}",
-        "**/Dockerfile*",
-        "**/docker-compose*.yml",
-        ".woodpecker/*.yml",
-        ".github/**/*.{yml,yaml}",
-        "**/Caddyfile",
-        "**/*.proto",
-        "**/cron/*",
-        "infrastructure/hetzner/*.service",
-        "docs/**/evidence/**/*.{yml,yaml}",
-        "infrastructure/**/grafana/**/*.json",
-        "**/*.service"
-      ]
-    },
-    {
-      "id": "contract-site",
-      "kind": "contract",
-      "include": [
-        "site/**"
-      ]
-    },
-    {
-      "id": "contract-build",
-      "kind": "contract",
-      "include": [
-        "Makefile",
-        "**/Cargo.toml",
-        "Cargo.lock",
-        "rust/Cargo.lock",
-        "tools/coverage/*",
-        "**/*.toml",
-        ".github/required-checks.json"
-      ]
-    }
-  ],
-  "exclusions": [
-    {
-      "glob": "**/*.d.ts",
-      "code": "GENERATED"
-    },
-    {
-      "glob": "LICENSE",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "**/package-lock.json"
-    },
-    {
-      "glob": "**/CODEOWNERS",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.png",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.jpg",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.jpeg",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.svg",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.ico",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.gif",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.webp",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.woff2",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.pdf",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.txt",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/.gitignore",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/.dockerignore",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/.gitkeep",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "**/*.sln",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "site/public/**",
-      "code": "BUILD_ARTIFACT"
-    },
-    {
-      "glob": "**/*.lock",
-      "code": "BUILD_ARTIFACT"
-    },
-    {
-      "glob": "**/*.parquet",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "**/*.onnx",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "**/*.pkl",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "**/*.csv",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "**/*.jsonl",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "coverage-manifest.json",
-      "code": "BUILD_ARTIFACT"
-    },
-    {
-      "glob": "coverage-report.md",
-      "code": "BUILD_ARTIFACT"
-    },
-    {
-      "glob": "**/*.docx",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "docs/**/*.json",
-      "code": "DATA_ARTIFACT"
-    },
-    {
-      "glob": "docs/**/*.log",
-      "code": "NON_EXECUTABLE"
-    },
-    {
-      "glob": "docs/**/*.html",
-      "code": "SAMPLE_APP"
-    },
-    {
-      "code": "BUILD_ARTIFACT",
-      "glob": "**/*.hprof"
-    },
-    {
-      "code": "FUTURE_SURFACE",
-      "glob": "future/**"
-    }
-  ],
-  "exclusionCodes": [
-    "VENDOR",
-    "GENERATED",
-    "BUILD_ARTIFACT",
-    "SAMPLE_APP",
-    "DATA_ARTIFACT",
-    "NON_EXECUTABLE",
-    "FUTURE_SURFACE"
-  ]
+ "__comment": "Policy tables for the coverage classifier of the Rust product. DOMAINS: first-match-wins include/exclude patterns per domain. EXCLUSIONS: reason-coded file patterns checked before domains. Validated against the live tree by apex-tools manifest.",
+ "domains": [
+  {
+   "id": "meta-test",
+   "kind": "test",
+   "include": [
+    "**/*.test.ts",
+    "**/*_test.go",
+    "**/__tests__/**",
+    "**/tests/**",
+    "**/Tests/**",
+    "**/src/test/**",
+    "**/*.bats",
+    "**/__mocks__/**",
+    "**/docs/**/*.tsx",
+    "**/fixtures/**",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/src/androidTest/**",
+    "**/setupTests.ts"
+   ]
+  },
+  {
+   "id": "apex-core",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-core/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-connectors",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-connectors/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-audit",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-audit/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-autopilot",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-autopilot/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-proof",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-proof/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-billing",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-billing/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-api",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-api/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-tools",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-tools/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-lift",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-lift/**/*.rs"
+   ]
+  },
+  {
+   "id": "docs",
+   "kind": "docs",
+   "include": [
+    "**/*.md"
+   ]
+  },
+  {
+   "id": "contract-sql",
+   "kind": "contract",
+   "include": [
+    "tools/sql/**/*.sql"
+   ]
+  },
+  {
+   "id": "contract-iac",
+   "kind": "contract",
+   "include": [
+    "monitoring/**/*.{yml,yaml,json}",
+    "infrastructure/**/*.{yml,yaml,toml,conf,service,tf,tpl,timer}",
+    "**/Dockerfile*",
+    "**/docker-compose*.yml",
+    ".woodpecker/*.yml",
+    ".github/**/*.{yml,yaml}",
+    "**/Caddyfile",
+    "**/*.proto",
+    "**/cron/*",
+    "infrastructure/hetzner/*.service",
+    "docs/**/evidence/**/*.{yml,yaml}",
+    "infrastructure/**/grafana/**/*.json",
+    "**/*.{service,timer}"
+   ]
+  },
+  {
+   "id": "contract-site",
+   "kind": "contract",
+   "include": [
+    "site/**"
+   ]
+  },
+  {
+   "id": "contract-build",
+   "kind": "contract",
+   "include": [
+    "Makefile",
+    "**/Cargo.toml",
+    "Cargo.lock",
+    "rust/Cargo.lock",
+    "tools/coverage/*",
+    "**/*.toml",
+    ".github/required-checks.json"
+   ]
+  }
+ ],
+ "exclusions": [
+  {
+   "glob": "**/*.d.ts",
+   "code": "GENERATED"
+  },
+  {
+   "glob": "LICENSE",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "code": "BUILD_ARTIFACT",
+   "glob": "**/package-lock.json"
+  },
+  {
+   "glob": "**/CODEOWNERS",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.png",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.jpg",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.jpeg",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.svg",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.ico",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.gif",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.webp",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.woff2",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.pdf",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.txt",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/.gitignore",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/.dockerignore",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/.gitkeep",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "**/*.sln",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "site/public/**",
+   "code": "BUILD_ARTIFACT"
+  },
+  {
+   "glob": "**/*.lock",
+   "code": "BUILD_ARTIFACT"
+  },
+  {
+   "glob": "**/*.parquet",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "**/*.onnx",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "**/*.pkl",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "**/*.csv",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "**/*.jsonl",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "coverage-manifest.json",
+   "code": "BUILD_ARTIFACT"
+  },
+  {
+   "glob": "coverage-report.md",
+   "code": "BUILD_ARTIFACT"
+  },
+  {
+   "glob": "**/*.docx",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "docs/**/*.json",
+   "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "docs/**/*.log",
+   "code": "NON_EXECUTABLE"
+  },
+  {
+   "glob": "docs/**/*.html",
+   "code": "SAMPLE_APP"
+  },
+  {
+   "code": "BUILD_ARTIFACT",
+   "glob": "**/*.hprof"
+  },
+  {
+   "code": "FUTURE_SURFACE",
+   "glob": "future/**"
+  }
+ ],
+ "exclusionCodes": [
+  "VENDOR",
+  "GENERATED",
+  "BUILD_ARTIFACT",
+  "SAMPLE_APP",
+  "DATA_ARTIFACT",
+  "NON_EXECUTABLE",
+  "FUTURE_SURFACE"
+ ]
 }

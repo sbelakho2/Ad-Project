@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Apex monthly billing pass on the first of the month
+
+[Timer]
+OnCalendar=*-*-01 04:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
