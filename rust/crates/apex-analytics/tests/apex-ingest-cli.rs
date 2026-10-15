@@ -1,9 +1,9 @@
 //! End-to-end checks of the `apex-ingest` binary in `--check` mode: stdin
 //! and file inputs, the JSON summary, exit codes, and the guarantee that
-//! nothing needs a store (no network) when checking. The rows the binary
-//! writes, the spool and the replay are covered by the binary's own tests
-//! over a `MemoryStore` and by the real-server integration in
-//! `tests/clickhouse.rs`.
+//! nothing needs a store (no network) when checking. The rows and events the
+//! binary writes, the cursor, the spool and the replay are covered by the
+//! binary's own tests over a `MemoryStore` and by the real-server
+//! integration in `tests/clickhouse.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -60,9 +60,14 @@ fn check_mode_reports_a_clean_log() {
     assert_eq!(summary["check_only"], true);
     assert_eq!(summary["lines"], 3);
     assert_eq!(summary["request_logs"], 2);
+    assert_eq!(summary["events"], 2, "one public_page_requested per row");
     assert_eq!(summary["skipped_non_request"], 1);
     assert_eq!(summary["rejected"], 0);
     assert_eq!(summary["input"], "stdin");
+    assert!(
+        summary.get("cursor_path").is_none(),
+        "--check and stdin runs carry no cursor"
+    );
     // The redaction guarantees hold end to end.
     assert!(!stdout.contains("203.0.113.9"));
 }

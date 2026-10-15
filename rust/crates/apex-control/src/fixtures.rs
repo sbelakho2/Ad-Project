@@ -617,6 +617,12 @@ impl DemoData {
         })
     }
 
+    /// Site requests over the last 30 days from the edge access log; the
+    /// illustrative dataset answers so the growth page shows the line.
+    pub fn site_requests_last_30_days(&self) -> u64 {
+        18_240
+    }
+
     /// The experiment fleet landscape.
     pub fn experiment_landscape(&self) -> Vec<ExperimentLandscapeRow> {
         vec![

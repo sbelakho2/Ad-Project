@@ -5,14 +5,16 @@
 //! the chart and a row in the table, never a zero. When the store is not
 //! configured or did not answer, the route renders the honest not-available
 //! panel with the reason instead of numbers. CSV exports are generated from
-//! the same rows the page shows and keep UTC days verbatim.
+//! the same rows the page shows, keep UTC days verbatim, end every line with
+//! CRLF, and neutralise spreadsheet formula triggers in text cells (numbers
+//! keep their plain form).
 
 use apex_analytics::queries::{
     DataQuality, FeeDetail, FeeRow, LiftRow, QueryScope, RevenueBreakdownRow, RevenueDailyRow,
 };
 use apex_ui::charts::{line_chart, ChartColor, ChartSeries, ChartSpec};
 use apex_ui::components::{action, data_table, notice, panel, tabs, Cell, EmptyState};
-use apex_ui::format::{csv_field, money_fixed, or_not_available, percent};
+use apex_ui::format::{csv_field, csv_text_field, money_fixed, or_not_available, percent};
 use apex_ui::status::StatusKind;
 
 use super::{console_document, html_escape, ConsoleCtx};
@@ -744,119 +746,150 @@ fn export_row(_data: &AnalyticsPageData, view: &str) -> String {
 }
 
 /// The lift CSV: the same rows the lift table shows, UTC dates verbatim.
+/// Text cells are neutralised against spreadsheet formula triggers; numeric
+/// columns keep their plain form and every line ends CRLF.
 pub fn lift_csv(rows: &[LiftRow]) -> String {
     let mut out = String::from(
-        "experiment_id,change_ref,observed_lift_bp,billable_bound_bp,outcome,measurement_source,measurement_version,decided_at_utc\n",
+        "experiment_id,change_ref,observed_lift_bp,billable_bound_bp,outcome,measurement_source,measurement_version,decided_at_utc\r\n",
     );
     for row in rows {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
-            csv_field(&row.experiment_id),
-            csv_field(row.change_ref.as_deref().unwrap_or("")),
-            row.observed_lift_bp
-                .map(|bp| bp.to_string())
-                .unwrap_or_default(),
-            row.billable_bound_bp
-                .map(|bp| bp.to_string())
-                .unwrap_or_default(),
-            csv_field(&row.outcome),
-            csv_field(row.measurement_source.as_deref().unwrap_or("")),
-            csv_field(row.measurement_version.as_deref().unwrap_or("")),
-            csv_field(row.decided_at.as_deref().unwrap_or("")),
+            "{},{},{},{},{},{},{},{}\r\n",
+            csv_text_field(&row.experiment_id),
+            csv_text_field(row.change_ref.as_deref().unwrap_or("")),
+            csv_field(
+                &row.observed_lift_bp
+                    .map(|bp| bp.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(
+                &row.billable_bound_bp
+                    .map(|bp| bp.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_text_field(&row.outcome),
+            csv_text_field(row.measurement_source.as_deref().unwrap_or("")),
+            csv_text_field(row.measurement_version.as_deref().unwrap_or("")),
+            csv_text_field(row.decided_at.as_deref().unwrap_or("")),
         ));
     }
     out
 }
 
-/// The fee CSV: lifecycle rows with proof references.
+/// The fee CSV: lifecycle rows with proof references. Text cells are
+/// neutralised against spreadsheet formula triggers; numeric columns keep
+/// their plain form and every line ends CRLF.
 pub fn fees_csv(rows: &[FeeRow]) -> String {
     let mut out = String::from(
-        "change_id,period,state,amount_micros,currency,source_amount_micros,bound_bp,rate_bp,active_days,invoice_ref,proof_refs\n",
+        "change_id,period,state,amount_micros,currency,source_amount_micros,bound_bp,rate_bp,active_days,invoice_ref,proof_refs\r\n",
     );
     for row in rows {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\n",
-            csv_field(&row.change_id),
-            csv_field(&row.period),
-            row.state.as_str(),
-            row.amount
-                .as_ref()
-                .map(|amount| amount.micros)
-                .unwrap_or_default(),
+            "{},{},{},{},{},{},{},{},{},{},{}\r\n",
+            csv_text_field(&row.change_id),
+            csv_text_field(&row.period),
+            csv_text_field(row.state.as_str()),
             csv_field(
+                &row.amount
+                    .as_ref()
+                    .map(|amount| amount.micros)
+                    .unwrap_or_default()
+                    .to_string()
+            ),
+            csv_text_field(
                 row.amount
                     .as_ref()
                     .map(|amount| amount.currency.as_str())
                     .unwrap_or("")
             ),
-            row.source_amount
-                .as_ref()
-                .map(|amount| amount.micros)
-                .unwrap_or_default(),
-            row.bound_bp.map(|bp| bp.to_string()).unwrap_or_default(),
-            row.rate_bp.map(|bp| bp.to_string()).unwrap_or_default(),
-            row.active_days
-                .map(|days| days.to_string())
-                .unwrap_or_default(),
-            csv_field(row.invoice_ref.as_deref().unwrap_or("")),
-            csv_field(&row.proof_refs.join(" ")),
+            csv_field(
+                &row.source_amount
+                    .as_ref()
+                    .map(|amount| amount.micros)
+                    .unwrap_or_default()
+                    .to_string()
+            ),
+            csv_field(&row.bound_bp.map(|bp| bp.to_string()).unwrap_or_default()),
+            csv_field(&row.rate_bp.map(|bp| bp.to_string()).unwrap_or_default()),
+            csv_field(
+                &row.active_days
+                    .map(|days| days.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_text_field(row.invoice_ref.as_deref().unwrap_or("")),
+            csv_text_field(&row.proof_refs.join(" ")),
         ));
     }
     out
 }
 
-/// The revenue CSV: the same daily rows as the table.
+/// The revenue CSV: the same daily rows as the table. Text cells are
+/// neutralised against spreadsheet formula triggers; numeric columns keep
+/// their plain form and every line ends CRLF.
 pub fn revenue_csv(rows: &[RevenueDailyRow]) -> String {
-    let mut out =
-        String::from("day,platform,revenue_micros,currency,impressions,source_days,final_days,provisional_days\n");
+    let mut out = String::from(
+        "day,platform,revenue_micros,currency,impressions,source_days,final_days,provisional_days\r\n",
+    );
     for row in rows {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
-            csv_field(&row.day),
-            csv_field(&row.platform),
-            row.revenue.micros,
-            csv_field(&row.revenue.currency),
-            row.impressions.map(|v| v.to_string()).unwrap_or_default(),
-            row.source_days,
-            row.final_days,
-            row.provisional_days,
+            "{},{},{},{},{},{},{},{}\r\n",
+            csv_text_field(&row.day),
+            csv_text_field(&row.platform),
+            csv_field(&row.revenue.micros.to_string()),
+            csv_text_field(&row.revenue.currency),
+            csv_field(
+                &row.impressions
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
+            csv_field(&row.source_days.to_string()),
+            csv_field(&row.final_days.to_string()),
+            csv_field(&row.provisional_days.to_string()),
         ));
     }
     out
 }
 
-/// The data-quality CSV: the badge plus the stale sources.
+/// The data-quality CSV: the badge plus the stale sources. Text cells are
+/// neutralised against spreadsheet formula triggers; numeric columns keep
+/// their plain form and every line ends CRLF.
 pub fn quality_csv(quality: &DataQuality) -> String {
     let mut out = String::from(
-        "publisher_id,as_of_utc,matched_source_days,missing_days,provisional_days,dedup_rejects,unmapped_rows\n",
+        "publisher_id,as_of_utc,matched_source_days,missing_days,provisional_days,dedup_rejects,unmapped_rows\r\n",
     );
     out.push_str(&format!(
-        "{},{},{},{},{},{},{}\n",
-        csv_field(&quality.publisher_id),
-        csv_field(&quality.as_of),
-        quality.matched_source_days,
-        quality
-            .missing_days
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        quality.provisional_days,
-        quality
-            .dedup_rejects
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
-        quality.unmapped_rows,
+        "{},{},{},{},{},{},{}\r\n",
+        csv_text_field(&quality.publisher_id),
+        csv_text_field(&quality.as_of),
+        csv_field(&quality.matched_source_days.to_string()),
+        csv_field(
+            &quality
+                .missing_days
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
+        csv_field(&quality.provisional_days.to_string()),
+        csv_field(
+            &quality
+                .dedup_rejects
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        ),
+        csv_field(&quality.unmapped_rows.to_string()),
     ));
-    out.push_str("\nplatform,platform_account_id,last_final_day,freshness_days\n");
+    out.push_str("platform,platform_account_id,last_final_day,freshness_days\r\n");
     for source in &quality.stale_sources {
         out.push_str(&format!(
-            "{},{},{},{}\n",
-            csv_field(&source.platform),
-            csv_field(&source.platform_account_id),
-            csv_field(source.last_final_day.as_deref().unwrap_or("")),
-            source
-                .freshness_days
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
+            "{},{},{},{}\r\n",
+            csv_text_field(&source.platform),
+            csv_text_field(&source.platform_account_id),
+            csv_text_field(source.last_final_day.as_deref().unwrap_or("")),
+            csv_field(
+                &source
+                    .freshness_days
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ),
         ));
     }
     out
@@ -1113,6 +1146,85 @@ mod tests {
         let quality = quality_csv(&quality());
         assert!(quality.contains("2026-10-15T09:30:00.000Z"));
         assert!(quality.contains("levelplay,app-1,2026-10-05,10"));
+    }
+
+    #[test]
+    fn csv_exports_neutralize_formula_text_cells_and_end_every_line_with_crlf() {
+        use apex_analytics::queries::{FeeState, Money};
+
+        fn assert_crlf_only(csv: &str) {
+            assert!(csv.ends_with("\r\n"), "the last line ends CRLF: {csv}");
+            for (index, byte) in csv.bytes().enumerate() {
+                if byte == b'\n' {
+                    assert!(
+                        index > 0 && csv.as_bytes()[index - 1] == b'\r',
+                        "lone LF at byte {index}: {csv}"
+                    );
+                }
+            }
+        }
+
+        let lift = lift_csv(&[LiftRow {
+            experiment_id: "=cmd|' /C calc'!A0".to_string(),
+            change_ref: Some("@user".to_string()),
+            observed_lift_bp: Some(-120),
+            billable_bound_bp: Some(30),
+            outcome: "+SUM(1,1)".to_string(),
+            measurement_source: Some("-abc".to_string()),
+            measurement_version: Some("v1".to_string()),
+            decided_at: Some("2026-10-10T09:30:00.000Z".to_string()),
+        }]);
+        assert_eq!(
+            lift,
+            "experiment_id,change_ref,observed_lift_bp,billable_bound_bp,outcome,measurement_source,measurement_version,decided_at_utc\r\n\
+             '=cmd|' /C calc'!A0,'@user,-120,30,\"'+SUM(1,1)\",'-abc,v1,2026-10-10T09:30:00.000Z\r\n"
+        );
+        assert_crlf_only(&lift);
+
+        let fees = fees_csv(&[FeeRow {
+            change_id: "=cmd|' /C calc'!A0".to_string(),
+            period: "@user".to_string(),
+            state: FeeState::Estimated,
+            amount: Some(Money::new(-120, "USD")),
+            source_amount: Some(Money::new(51_500_000_000, "USD")),
+            bound_bp: Some(-120),
+            rate_bp: Some(2_000),
+            active_days: Some(31),
+            invoice_ref: Some("+SUM(1,1)".to_string()),
+            proof_refs: vec!["-abc".to_string()],
+        }]);
+        assert_eq!(
+            fees,
+            "change_id,period,state,amount_micros,currency,source_amount_micros,bound_bp,rate_bp,active_days,invoice_ref,proof_refs\r\n\
+             '=cmd|' /C calc'!A0,'@user,estimated,-120,USD,51500000000,-120,2000,31,\"'+SUM(1,1)\",'-abc\r\n"
+        );
+        assert_crlf_only(&fees);
+
+        let revenue = revenue_csv(&[RevenueDailyRow {
+            day: "=cmd|' /C calc'!A0".to_string(),
+            platform: "@user".to_string(),
+            revenue: Money::new(-120, "+SUM(1,1)"),
+            impressions: Some(5),
+            source_days: 1,
+            final_days: 0,
+            provisional_days: 0,
+        }]);
+        assert_eq!(
+            revenue,
+            "day,platform,revenue_micros,currency,impressions,source_days,final_days,provisional_days\r\n\
+             '=cmd|' /C calc'!A0,'@user,-120,\"'+SUM(1,1)\",5,1,0,0\r\n"
+        );
+        assert_crlf_only(&revenue);
+
+        let mut quality = quality();
+        quality.publisher_id = "=cmd|' /C calc'!A0".to_string();
+        quality.as_of = "@user".to_string();
+        quality.stale_sources[0].platform = "+SUM(1,1)".to_string();
+        quality.stale_sources[0].platform_account_id = "-abc".to_string();
+        let csv = quality_csv(&quality);
+        assert!(csv.contains("'=cmd|' /C calc'!A0,'@user,"));
+        assert!(csv.contains("\"'+SUM(1,1)\",'-abc,"));
+        assert_crlf_only(&csv);
     }
 
     #[test]

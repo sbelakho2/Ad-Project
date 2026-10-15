@@ -174,7 +174,7 @@ impl PlatformOps for MaxPlatformOps {
             .reporting
             .experiment_rows(experiment_id, &start, &end)
             .await?;
-        Ok(arms_from_rows(&rows, today))
+        arms_from_rows(&rows, today)
     }
 
     async fn scope_revenue(
@@ -223,8 +223,10 @@ impl PlatformOps for MaxPlatformOps {
 }
 
 /// Split reporting rows into the control and test arms by their
-/// `max_ad_unit_test` label (empty means control).
-fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> ExperimentDays {
+/// `max_ad_unit_test` label (empty means control). A day's revenue is the
+/// sum of its rows; a provider row that pushes the sum past i64 micros
+/// fails the pull with a typed error instead of wrapping or panicking.
+fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> Result<ExperimentDays, PlatformError> {
     let mut control: BTreeMap<String, i64> = BTreeMap::new();
     let mut test: BTreeMap<String, i64> = BTreeMap::new();
     for row in rows {
@@ -234,7 +236,14 @@ fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> ExperimentDays {
             .map(|label| !label.trim().is_empty())
             .unwrap_or(false);
         let map = if is_test { &mut test } else { &mut control };
-        *map.entry(row.day.clone()).or_default() += row.revenue;
+        let total = map.entry(row.day.clone()).or_default();
+        *total = total
+            .checked_add(row.revenue)
+            .ok_or_else(|| PlatformError::Schema {
+                platform: PlatformId::AppLovinMax,
+                operation: "experiment_days".into(),
+                detail: format!("revenue rows for {} overflow i64 micros", row.day),
+            })?;
     }
     let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
     let arm = |map: &BTreeMap<String, i64>, day: &str| -> apex_lift::window::ArmDay {
@@ -249,10 +258,10 @@ fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> ExperimentDays {
             fill: None,
         }
     };
-    ExperimentDays {
+    Ok(ExperimentDays {
         control: days.iter().map(|day| arm(&control, day)).collect(),
         test: days.iter().map(|day| arm(&test, day)).collect(),
-    }
+    })
 }
 
 use crate::calendar::{day_number, format_day};
@@ -379,7 +388,7 @@ mod tests {
                 impressions: 1,
             },
         ];
-        let arms = arms_from_rows(&rows, today);
+        let arms = arms_from_rows(&rows, today).expect("arms");
         let older = format_day(today - 2);
         assert_eq!(arms.control[0].day, older);
         assert_eq!(arms.control[0].revenue, 900);
@@ -389,6 +398,34 @@ mod tests {
         // A day strictly before the pull day is final; the pull day is not.
         assert_eq!(arms.test[1].second_pull_revenue, Some(100));
         assert_eq!(arms.test[2].second_pull_revenue, None);
+    }
+
+    #[test]
+    fn an_overflowing_day_revenue_fails_the_pull_typed() {
+        // Two provider rows for one arm-day whose micros sum past i64::MAX:
+        // the pull fails with a typed error naming the day, never a wrapped
+        // revenue.
+        let rows = vec![
+            ReportRow {
+                day: "2026-10-01".into(),
+                country: None,
+                ad_unit_id: Some("u1".into()),
+                test_group: Some(String::new()),
+                revenue: i64::MAX,
+                impressions: 1,
+            },
+            ReportRow {
+                day: "2026-10-01".into(),
+                country: None,
+                ad_unit_id: Some("u1".into()),
+                test_group: Some(String::new()),
+                revenue: 1,
+                impressions: 1,
+            },
+        ];
+        let error = arms_from_rows(&rows, 20_000).expect_err("overflow");
+        assert!(error.to_string().contains("2026-10-01"), "{error}");
+        assert!(!error.is_retryable(), "a wrapped total is not retryable");
     }
 
     #[tokio::test]

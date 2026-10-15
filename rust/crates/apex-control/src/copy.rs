@@ -85,9 +85,11 @@ pub const LOGIN_CODE_LEAD: &str = "Enter the current six-digit code from your au
 /// Rate-limit headline (no document copy exists for this state; short and
 /// factual in the same voice).
 pub const LOGIN_RATE_LIMITED_HEADLINE: &str = "Too many attempts.";
-/// Rate-limit body, with `{until}` the UTC moment the lockout ends.
+/// Rate-limit body, with `{until}` the moment the lockout ends rendered in
+/// the console's UTC format (`14 Oct 2026, 20:05 UTC`); the placeholder
+/// already carries the `UTC` suffix.
 pub const LOGIN_RATE_LIMITED_BODY: &str =
-    "Sign-in is locked for this operator and client until {until} UTC. Wait for the lockout to end.";
+    "Sign-in is locked for this operator and client until {until}. Wait for the lockout to end.";
 
 /// The unconfigured-deployment notices (no document copy exists; the
 /// deployment must be self-describing).
@@ -127,6 +129,9 @@ pub const CONFLICT_HEADLINE: &str = "This object changed while the form was open
 /// Body of the conflict page.
 pub const CONFLICT_BODY: &str =
     "The object no longer matches the view this form was prepared from, so no operation was requested. Reload the object and review the current state before acting.";
+/// The conflict detail when one idempotency key is replayed for a different
+/// target or payload (no document copy exists; short and factual).
+pub const CONFLICT_KEY_REUSED: &str = "This request key was already used for a different action.";
 
 /// The action result states (page 64).
 pub const RESULT_REQUESTED: &str = "Requested";
@@ -218,6 +223,17 @@ mod tests {
     }
 
     #[test]
+    fn the_rate_limit_body_names_utc_exactly_once() {
+        let rendered = LOGIN_RATE_LIMITED_BODY
+            .replace("{until}", &apex_ui::format::utc_datetime(1_791_965_400_000));
+        assert_eq!(
+            rendered,
+            "Sign-in is locked for this operator and client until 14 Oct 2026, 08:10 UTC. Wait for the lockout to end."
+        );
+        assert_eq!(rendered.matches("UTC").count(), 1, "{rendered}");
+    }
+
+    #[test]
     fn no_copy_contains_an_em_dash() {
         let all = [
             EMPTY_OPERATIONS_HEADLINE,
@@ -260,6 +276,7 @@ mod tests {
             STEP_UP_BODY,
             CONFLICT_HEADLINE,
             CONFLICT_BODY,
+            CONFLICT_KEY_REUSED,
             RESULT_STATE_UNKNOWN,
             RESULT_RECONCILE_NOTE,
             NO_MANUAL_KEEP,

@@ -67,6 +67,11 @@ pub fn format_usd(micros: i64) -> Result<String, FormatError> {
 /// currency code, two decimals, thousands grouped. The code must be three
 /// ASCII uppercase letters (the ISO-4217 shape the provider events use); an
 /// absent or malformed code is a typed refusal, never a guessed USD.
+///
+/// The rounding mirrors `apex-ui::format::money` exactly (i128 math, round
+/// half away from zero, the cents carry folded into the integer part), so a
+/// non-negative amount in a known currency renders identically on every
+/// surface, up to `i64::MAX` micros without overflowing.
 pub fn format_money(currency: &str, micros: i64) -> Result<String, FormatError> {
     if micros < 0 {
         return Err(FormatError::NegativeAmount { micros });
@@ -76,15 +81,7 @@ pub fn format_money(currency: &str, micros: i64) -> Result<String, FormatError> 
             currency: currency.to_string(),
         });
     }
-    // Round half up to whole cents, then split.
-    let cents = (micros + 5_000) / 10_000;
-    let whole = cents / 100;
-    let fraction = cents % 100;
-    Ok(format!(
-        "{currency} {}.{:02}",
-        group_digits(whole),
-        fraction
-    ))
+    Ok(format!("{currency} {}", amount_2dp(micros)))
 }
 
 /// Format an amount whose currency may be absent: a missing or malformed
@@ -110,8 +107,27 @@ pub fn is_currency_code(code: &str) -> bool {
     code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 
-/// `1250` becomes `1,250`; `300` stays `300`.
-fn group_digits(value: i64) -> String {
+/// Cents-precision rendering of non-negative micros, the same algorithm as
+/// `apex-ui::format::money`: grouped whole units and exactly two decimals,
+/// rounded half away from zero. The arithmetic is i128, so the full i64
+/// range (up to `i64::MAX` micros) rounds and renders without overflowing;
+/// the caller has already refused the negative case.
+fn amount_2dp(micros: i64) -> String {
+    let value = i128::from(micros);
+    let mut units = value / 1_000_000;
+    let remainder = value % 1_000_000;
+    let mut cents = (remainder + 5_000) / 10_000;
+    if cents == 100 {
+        // A remainder that rounds up to a whole cent carries into the units.
+        cents = 0;
+        units += 1;
+    }
+    format!("{}.{:02}", group_digits(units), cents)
+}
+
+/// `1250` becomes `1,250`; `300` stays `300`. The value is non-negative by
+/// construction (`amount_2dp` runs after the negative refusal).
+fn group_digits(value: i128) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
@@ -193,6 +209,53 @@ mod tests {
         assert_eq!(format_usd(5_000).unwrap(), "USD 0.01");
         assert_eq!(format_usd(4_999).unwrap(), "USD 0.00");
         assert_eq!(format_usd(999_999_999).unwrap(), "USD 1,000.00");
+    }
+
+    #[test]
+    fn extreme_amounts_render_without_overflow_or_panic() {
+        // The review's parity set: exact strings, in debug too (the release
+        // wrap used to render "USD -9,223,372,036,854.-77").
+        assert_eq!(format_usd(0).unwrap(), "USD 0.00");
+        assert_eq!(format_usd(4_999).unwrap(), "USD 0.00");
+        assert_eq!(format_usd(5_000).unwrap(), "USD 0.01");
+        assert_eq!(format_usd(999_999).unwrap(), "USD 1.00");
+        assert_eq!(
+            format_usd(999_999_999_999_999).unwrap(),
+            "USD 1,000,000,000.00"
+        );
+        assert_eq!(format_usd(i64::MAX).unwrap(), "USD 9,223,372,036,854.78");
+        assert_eq!(
+            format_usd(i64::MAX - 4_999).unwrap(),
+            "USD 9,223,372,036,854.77"
+        );
+    }
+
+    #[test]
+    fn money_renders_identically_to_apex_ui_for_the_shared_range() {
+        // Same input, same output as the shared renderer for every
+        // non-negative amount in a known currency.
+        for micros in [
+            0i64,
+            1,
+            4_999,
+            5_000,
+            9_999,
+            10_000,
+            999_999,
+            300_000_000,
+            1_250_000_000,
+            999_999_999_999_999,
+            i64::MAX - 4_999,
+            i64::MAX,
+        ] {
+            for currency in ["USD", "EUR", "GBP", "SEK"] {
+                assert_eq!(
+                    format_money(currency, micros).unwrap(),
+                    apex_ui::format::money(micros, currency),
+                    "{currency} {micros}"
+                );
+            }
+        }
     }
 
     #[test]

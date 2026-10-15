@@ -83,12 +83,30 @@ fn truncate_body(text: &str) -> String {
 
 /// Read an unsigned integer JSON field, tolerating plain numbers and quoted
 /// strings (ClickHouse quotes 64-bit integers in JSON under some settings).
-fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+pub(crate) fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
     value.and_then(|value| {
         value
             .as_u64()
             .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
     })
+}
+
+/// The `(name, sorting_key)` pairs of a `system.tables` answer, skipping rows
+/// without a name and defaulting a missing or non-string key to the empty
+/// string, which never matches a staged key (the planner leaves that table
+/// alone and the next boot re-reads it).
+fn observed_sorting_keys(rows: &[serde_json::Value]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter_map(|row| {
+            let name = row.get("name")?.as_str()?.to_string();
+            let key = row
+                .get("sorting_key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Some((name, key))
+        })
+        .collect()
 }
 
 /// How many events a store accepted and how many duplicates it observed.
@@ -550,6 +568,32 @@ impl ClickHouseStore {
         );
         self.execute_statement(&statement).await.map(|_| ())
     }
+
+    /// Migrate legacy staged-table shapes in place.
+    ///
+    /// Databases created before the staging change have `projection_versions`
+    /// ordered by `projection_name` and projection tables ordered by their
+    /// business keys only, so a staged rebuild collapses the published rows
+    /// away at merge time and readers resolve no version at all. The live
+    /// sorting keys are read from `system.tables` and the plan from
+    /// [`crate::schema::staged_migration_plan`] is executed statement by
+    /// statement; the plan first drops any `<table>__migration` leftover from
+    /// an interrupted boot and only rebuilds tables whose key is not the
+    /// staged one, so every boot is idempotent and a crash anywhere in the
+    /// sequence is repaired by the next boot.
+    async fn migrate_legacy_staged_tables(&self) -> Result<(), StoreError> {
+        let rows = self
+            .fetch_rows(
+                "SELECT name, sorting_key FROM system.tables WHERE database = {db:String}",
+                &[("db", self.config.database.as_str())],
+            )
+            .await?;
+        let observed = observed_sorting_keys(&rows);
+        for statement in crate::schema::staged_migration_plan(&self.config.database, &observed)? {
+            self.execute_statement(&statement).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -558,7 +602,10 @@ impl EventStore for ClickHouseStore {
         for statement in all_ddl(&self.config.database)? {
             self.execute(&statement).await?;
         }
-        Ok(())
+        // A database created before staged projections existed keeps its
+        // legacy sorting keys: migrate every legacy shape before any rebuild
+        // can collapse a published version away.
+        self.migrate_legacy_staged_tables().await
     }
 
     async fn insert(&self, events: &[DomainEvent]) -> Result<InsertOutcome, StoreError> {
@@ -1424,6 +1471,42 @@ mod tests {
     use crate::test_support::{valid_event, valid_event_builder};
 
     #[test]
+    fn observed_sorting_keys_reads_system_tables_rows() {
+        let rows = vec![
+            serde_json::json!({"name": "customer_daily", "sorting_key": "publisher_id, day, platform, currency, as_of_version"}),
+            serde_json::json!({"name": "request_logs", "sorting_key": ""}),
+            serde_json::json!({"sorting_key": "x"}),
+            serde_json::json!({"name": "no_key"}),
+            serde_json::json!({"name": "projection_versions", "sorting_key": "projection_name"}),
+        ];
+        let observed = observed_sorting_keys(&rows);
+        assert_eq!(
+            observed,
+            vec![
+                (
+                    "customer_daily".to_string(),
+                    "publisher_id, day, platform, currency, as_of_version".to_string()
+                ),
+                ("request_logs".to_string(), String::new()),
+                ("no_key".to_string(), String::new()),
+                (
+                    "projection_versions".to_string(),
+                    "projection_name".to_string()
+                ),
+            ]
+        );
+        // The staged planner sees the legacy projection_versions shape and
+        // plans its migration.
+        let plan = crate::schema::staged_migration_plan("db", &observed).expect("plan");
+        assert!(plan
+            .iter()
+            .any(|sql| sql.contains("EXCHANGE TABLES db.projection_versions")));
+        assert!(!plan
+            .iter()
+            .any(|sql| sql.contains("EXCHANGE TABLES db.customer_daily")));
+    }
+
+    #[test]
     fn error_bodies_truncate_on_character_boundaries() {
         // A multibyte character spans byte 512: a byte-index truncate would
         // panic here (and `panic = abort` in release).
@@ -1486,6 +1569,12 @@ mod tests {
         assert_eq!(store.http_url(), "http://127.0.0.1:1");
         assert!(matches!(store.health().await, Err(StoreError::Http(_))));
         assert!(store.ensure_schema().await.is_err());
+        // The staged-shape migration runs after the DDL: on an unreachable
+        // server it surfaces its own read failure instead of panicking.
+        assert!(matches!(
+            store.migrate_legacy_staged_tables().await,
+            Err(StoreError::Http(_))
+        ));
         assert!(store
             .insert(&[valid_event(EventType::JobRun)])
             .await

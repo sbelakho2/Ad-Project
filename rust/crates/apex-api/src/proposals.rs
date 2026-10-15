@@ -19,13 +19,24 @@
 //!   until the runner wires such a consumer, approving records the decision
 //!   and nothing else: an approval never bypasses the policy gates, and a
 //!   retry with the same decision returns the original operation status.
+//!
+//! Publishing is exclusive: the candidate record is written to a per-call
+//! unique temp file (`create_new`), then linked into place with `hard_link`,
+//! which fails when the decision file already exists. Exactly one concurrent
+//! writer wins; every loser reads the winner's record back and reports the
+//! existing-decision outcome (the same key replays as the original status, a
+//! different decision is a typed conflict). The decision file therefore
+//! always matches the operation status and the emitted event.
 
 use apex_autopilot::model::Proposal;
 use apex_lift::decision::GuardrailThresholds;
 use async_trait::async_trait;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use crate::error::ApiError;
 use crate::sources::{contained_in, is_valid_publisher};
@@ -38,6 +49,13 @@ pub const APPROVAL_SUFFIX: &str = ".approval.json";
 pub const MAX_PROPOSAL_BYTES: u64 = 256 * 1024;
 /// The bounded size of the proposal index page.
 const MAX_LIST_ENTRIES: usize = 200;
+/// How many unique temp names one decision write may try before giving up.
+/// A collision needs two writers to draw the same 64 random bits.
+const MAX_TEMP_ATTEMPTS: usize = 16;
+/// Temp files older than this are removed while recording a decision: a live
+/// writer's temp file is milliseconds old, so this only reaps files left
+/// behind by a crashed writer.
+const STALE_TEMP_AGE_MS: u64 = 60 * 60 * 1000;
 /// The actor an approval is recorded for: this console has no user accounts,
 /// so the workspace itself is the recorded actor.
 pub const APPROVAL_ACTOR: &str = "console-workspace";
@@ -198,6 +216,65 @@ pub fn idempotency_key(proposal_id: &str, decision: ApprovalDecision, change_has
 /// A valid proposal id: the same charset as publisher names.
 pub fn is_proposal_id(id: &str) -> bool {
     is_valid_publisher(id)
+}
+
+/// The outcome a candidate decision has against the record already on disk:
+/// the same idempotency key is the original operation, anything else is a
+/// conflict the candidate must not overwrite.
+fn outcome_against(existing: &ApprovalRecord, key: &str) -> DecisionOutcome {
+    if existing.idempotency_key == key {
+        DecisionOutcome::AlreadyDecidedSameKey
+    } else {
+        DecisionOutcome::AlreadyDecided
+    }
+}
+
+/// A random 8-byte suffix, hex-encoded, for a per-call temp file name.
+fn temp_suffix() -> String {
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Read one approval file that must sit inside `canonical_root`; `Ok(None)`
+/// when nothing exists at the path yet.
+fn read_approval(canonical_root: &Path, path: PathBuf) -> Result<Option<ApprovalRecord>, ApiError> {
+    let resolved = match contained_in(canonical_root, path) {
+        Ok(resolved) => resolved,
+        Err(ApiError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let raw = std::fs::read_to_string(&resolved)
+        .map_err(|error| ApiError::Internal(format!("approval read: {error}")))?;
+    let record: ApprovalRecord = serde_json::from_str(&raw)
+        .map_err(|error| ApiError::Internal(format!("approval parse: {error}")))?;
+    Ok(Some(record))
+}
+
+/// Best-effort removal of temp files abandoned by a crashed writer. A live
+/// writer's temp file is younger than [`STALE_TEMP_AGE_MS`], so the sweep
+/// never races a publish in progress.
+fn sweep_stale_temps(root: &Path, id: &str, now: SystemTime) {
+    let prefix = format!("{id}{APPROVAL_SUFFIX}.tmp-");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age >= Duration::from_millis(STALE_TEMP_AGE_MS) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Proposal and approval files under one canonicalized root.
@@ -373,31 +450,81 @@ impl ProposalStore for FileProposalStore {
         let raw = serde_json::to_vec_pretty(record)
             .map_err(|error| ApiError::Internal(format!("approval serialization: {error}")))?;
         tokio::task::spawn_blocking(move || {
-            let existing_path = store.approval_path(&id);
-            if let Ok(resolved) = contained_in(&store.canonical_root, existing_path) {
-                let existing_raw = std::fs::read_to_string(&resolved)
-                    .map_err(|error| ApiError::Internal(format!("approval read: {error}")))?;
-                let existing: ApprovalRecord = serde_json::from_str(&existing_raw)
-                    .map_err(|error| ApiError::Internal(format!("approval parse: {error}")))?;
-                return Ok(if existing.idempotency_key == key {
-                    DecisionOutcome::AlreadyDecidedSameKey
-                } else {
-                    DecisionOutcome::AlreadyDecided
-                });
-            }
             std::fs::create_dir_all(&store.root)
                 .map_err(|error| ApiError::Internal(format!("proposal root: {error}")))?;
             let root = store
                 .root
                 .canonicalize()
                 .map_err(|error| ApiError::Internal(format!("proposal root: {error}")))?;
+            sweep_stale_temps(&root, &id, SystemTime::now());
             let target = root.join(format!("{id}{APPROVAL_SUFFIX}"));
-            let tmp = root.join(format!("{id}{APPROVAL_SUFFIX}.tmp"));
-            std::fs::write(&tmp, &raw)
-                .map_err(|error| ApiError::Internal(format!("approval write: {error}")))?;
-            std::fs::rename(&tmp, &target)
-                .map_err(|error| ApiError::Internal(format!("approval rename: {error}")))?;
-            Ok(DecisionOutcome::Recorded)
+            if let Some(existing) = read_approval(&store.canonical_root, target.clone())? {
+                return Ok(outcome_against(&existing, &key));
+            }
+            // The candidate record goes to a per-call unique temp file
+            // first; `create_new` refuses a name that already exists, so the
+            // retry loop can only ever create empty names of its own.
+            let mut temp: Option<PathBuf> = None;
+            for _ in 0..MAX_TEMP_ATTEMPTS {
+                let candidate = root.join(format!("{id}{APPROVAL_SUFFIX}.tmp-{}", temp_suffix()));
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(mut file) => {
+                        let written = file.write_all(&raw).and_then(|()| file.sync_all());
+                        drop(file);
+                        match written {
+                            Ok(()) => {
+                                temp = Some(candidate);
+                                break;
+                            }
+                            Err(error) => {
+                                let _ = std::fs::remove_file(&candidate);
+                                return Err(ApiError::Internal(format!("approval write: {error}")));
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(ApiError::Internal(format!("approval write: {error}")));
+                    }
+                }
+            }
+            let Some(temp) = temp else {
+                return Err(ApiError::Internal(
+                    "approval write: no unique temp name could be created".to_string(),
+                ));
+            };
+            // Publish exclusively: `hard_link` fails when the target exists,
+            // so exactly one writer wins, and the target appears complete
+            // (the temp file's bytes) the moment it does. Readers never see
+            // a partial record.
+            let published = std::fs::hard_link(&temp, &target);
+            let _ = std::fs::remove_file(&temp);
+            match published {
+                Ok(()) => {
+                    // Best-effort directory sync so the published name
+                    // survives a crash; a failure here does not undo the
+                    // record, which is already complete on disk.
+                    if let Ok(dir) = std::fs::File::open(&root) {
+                        let _ = dir.sync_all();
+                    }
+                    Ok(DecisionOutcome::Recorded)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Lost the race: the winner's published record decides
+                    // what the candidate reports.
+                    let Some(existing) = read_approval(&store.canonical_root, target)? else {
+                        return Err(ApiError::Internal(
+                            "approval publish race left no record".to_string(),
+                        ));
+                    };
+                    Ok(outcome_against(&existing, &key))
+                }
+                Err(error) => Err(ApiError::Internal(format!("approval publish: {error}"))),
+            }
         })
         .await
         .map_err(|join| ApiError::Internal(format!("approval task failed: {join}")))?
@@ -457,6 +584,24 @@ mod tests {
             serde_json::to_vec_pretty(&proposal).expect("json"),
         )
         .expect("write");
+    }
+
+    fn approval_record(
+        proposal: &ConsoleProposal,
+        id: &str,
+        decision: ApprovalDecision,
+        at_unix_ms: i64,
+    ) -> ApprovalRecord {
+        ApprovalRecord {
+            proposal_id: id.to_string(),
+            decision,
+            decided_at_unix_ms: at_unix_ms,
+            idempotency_key: idempotency_key(id, decision, &proposal.change_hash()),
+            change_hash: proposal.change_hash(),
+            snapshot: proposal.snapshot.clone(),
+            policy_version: proposal.policy_version.clone(),
+            approval_actor: APPROVAL_ACTOR.to_string(),
+        }
     }
 
     #[tokio::test]
@@ -589,6 +734,85 @@ mod tests {
             .await
             .expect("no approval")
             .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_key_decisions_publish_exactly_one_record() {
+        let (store, dir) = temp_store("storm");
+        write_proposal(&dir, "p_0247");
+        let proposal = store.get("p_0247").await.expect("get").expect("some");
+        let record = approval_record(
+            &proposal,
+            "p_0247",
+            ApprovalDecision::Approved,
+            1_792_055_400_000,
+        );
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let store = store.clone();
+            let record = record.clone();
+            tasks.push(tokio::spawn(async move {
+                store.record_decision("p_0247", &record).await
+            }));
+        }
+        let mut recorded = 0usize;
+        let mut replayed = 0usize;
+        for task in tasks {
+            match task.await.expect("join").expect("no call may fail") {
+                DecisionOutcome::Recorded => recorded += 1,
+                DecisionOutcome::AlreadyDecidedSameKey => replayed += 1,
+                DecisionOutcome::AlreadyDecided => panic!("the same key cannot conflict"),
+            }
+        }
+        assert_eq!(recorded, 1, "exactly one writer publishes the record");
+        assert_eq!(replayed, 15, "every loser replays the original status");
+        let stored = store.approval("p_0247").await.expect("read").expect("some");
+        assert_eq!(stored.idempotency_key, record.idempotency_key);
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file survives a decision: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stale_temp_files_are_swept_and_fresh_ones_survive() {
+        let (store, dir) = temp_store("sweep");
+        write_proposal(&dir, "p_0247");
+        let stale = dir.join("p_0247.approval.json.tmp-deadbeefdeadbeef");
+        std::fs::write(&stale, b"{}").expect("stale write");
+        let old = SystemTime::now() - Duration::from_millis(2 * STALE_TEMP_AGE_MS);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .expect("open stale")
+            .set_modified(old)
+            .expect("age the stale temp file");
+        let fresh = dir.join("p_0247.approval.json.tmp-0123456789abcdef");
+        std::fs::write(&fresh, b"{}").expect("fresh write");
+        let proposal = store.get("p_0247").await.expect("get").expect("some");
+        let record = approval_record(
+            &proposal,
+            "p_0247",
+            ApprovalDecision::Approved,
+            1_792_055_400_000,
+        );
+        assert_eq!(
+            store
+                .record_decision("p_0247", &record)
+                .await
+                .expect("record"),
+            DecisionOutcome::Recorded
+        );
+        assert!(!stale.exists(), "an abandoned temp file is swept");
+        assert!(fresh.exists(), "a live writer's temp file is untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

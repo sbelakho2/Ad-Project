@@ -21,8 +21,8 @@ use crate::timestamp::{UtcMillis, MILLIS_PER_DAY};
 use super::dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
     ExperimentLandscapeRow, FeeDetail, FeeRow, FeeState, FreshnessStatus, FunnelStageRow,
-    GrowthCohortRow, IngestionHealthRow, LiftRow, Money, ObjectTimelineEntry, QueryScope,
-    RevenueBreakdownRow, RevenueDailyRow, StaleSource,
+    GrowthCohortRow, IngestionHealthRow, LiftRow, Money, ObjectTimelineEntry, PageRequestsDay,
+    QueryScope, RevenueBreakdownRow, RevenueDailyRow, StaleSource,
 };
 
 /// A source is stale when its latest finalized day is more than this many
@@ -1068,5 +1068,67 @@ pub fn experiment_effectiveness(
             "unknown".to_string(),
             "in_flight".to_string(),
         ],
+    }
+}
+
+/// Site-wide public page requests per UTC day, inside the inclusive day
+/// bounds (`""` means unbounded on that side).
+///
+/// The `public_page_requested` family describes the public site and carries
+/// no tenant identity: this read deliberately ignores `publisher_id`,
+/// `platform` and `currency` from the scope, because applying them would
+/// silently hide requests (no event could ever match). Only aggregate counts
+/// leave the store: one row per day, `not_found` for exactly HTTP 404, and
+/// the bounded bot-class mix; never a request row, a query value or a
+/// visitor identity.
+pub fn page_requests_daily(
+    events: &[DomainEvent],
+    from_day: &str,
+    to_day: &str,
+) -> Vec<PageRequestsDay> {
+    let mut days: BTreeMap<String, (u64, u64, BTreeMap<String, u64>)> = BTreeMap::new();
+    for event in events {
+        if event.event_type != EventType::PublicPageRequested {
+            continue;
+        }
+        let day = event.occurred_at_utc.to_day_string();
+        if !from_day.is_empty() && day.as_str() < from_day {
+            continue;
+        }
+        if !to_day.is_empty() && day.as_str() > to_day {
+            continue;
+        }
+        let entry = days.entry(day).or_default();
+        entry.0 += 1;
+        if event.payload.status == Some(404) {
+            entry.1 += 1;
+        }
+        // A stored event always carries the bounded class; a row without one
+        // is reported as `unknown` rather than being guessed at.
+        let bot_class = event
+            .payload
+            .bot_class
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        *entry.2.entry(bot_class).or_insert(0) += 1;
+    }
+    days.into_iter()
+        .map(|(day, (requests, not_found, mix))| PageRequestsDay {
+            day,
+            requests,
+            not_found,
+            bot_class_mix: mix.into_iter().collect(),
+        })
+        .collect()
+}
+
+/// The effective day bound of a page-request read: the explicit argument
+/// when one is given, otherwise the scope's day range (empty means
+/// unbounded on that side).
+pub(crate) fn effective_day_bound(argument: &str, scope_bound: Option<&str>) -> String {
+    if argument.is_empty() {
+        scope_bound.unwrap_or_default().to_string()
+    } else {
+        argument.to_string()
     }
 }

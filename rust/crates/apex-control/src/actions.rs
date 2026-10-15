@@ -17,12 +17,15 @@ use serde_json::json;
 
 use crate::capabilities::{Capability, CapabilityCheck};
 use crate::copy::{
-    RESULT_CONFIRMED, RESULT_FAILED, RESULT_REQUESTED, RESULT_RUNNING, RESULT_STATE_UNKNOWN,
+    CONFLICT_KEY_REUSED, RESULT_CONFIRMED, RESULT_FAILED, RESULT_REQUESTED, RESULT_RUNNING,
+    RESULT_STATE_UNKNOWN,
 };
 use crate::governance::{InterventionRecord, PolicyRecord};
-use crate::jobs::{JobKind, OperatorJob};
+use crate::jobs::{JobKind, JobWrite, OperatorJob};
 use crate::journal::ActionJournalEntry;
-use crate::signing::{constant_time_eq, idempotency_fingerprint, is_random_hex_32, random_hex_32};
+use crate::signing::{
+    constant_time_eq, idempotency_fingerprint, is_random_hex_32, payload_fingerprint, random_hex_32,
+};
 use crate::state::ControlState;
 
 /// The form fields every action POST carries.
@@ -200,11 +203,23 @@ pub async fn submit(
     // 2. The idempotency key is claimed before anything else runs: the
     // duplicate check, the durable job write and the journal append are one
     // critical section per key, so two concurrent submissions of the same
-    // form cannot both execute. A duplicate waits here for the original and
-    // then returns its result page with no new journal entry.
+    // form cannot both execute. A duplicate (same key, same payload
+    // fingerprint) waits here for the original and then returns its result
+    // page with no new journal entry; the same key for a *different* action
+    // is a conflict and changes nothing.
+    let fingerprint =
+        payload_fingerprint(capability.as_str(), request.target.trim(), &request.payload);
     let _submission_claim = state.claim_submission(&request.idempotency_key).await;
-    if let Some(result_id) = state.remembered_result(&request.idempotency_key) {
-        return SubmitOutcome::Duplicate { result_id };
+    if let Some(remembered) = state.remembered_result(&request.idempotency_key) {
+        if remembered.matches(&fingerprint) {
+            return SubmitOutcome::Duplicate {
+                result_id: remembered.result_id,
+            };
+        }
+        return SubmitOutcome::Conflict {
+            reason: CONFLICT_KEY_REUSED.to_string(),
+            return_path: safe_return(&request.return_path),
+        };
     }
     // 3. Capability check, deny by default.
     if crate::capabilities::check(role, capability) == CapabilityCheck::Denied {
@@ -215,6 +230,7 @@ pub async fn submit(
             role,
             capability,
             request,
+            &fingerprint,
             "denied",
             None,
             None,
@@ -248,6 +264,7 @@ pub async fn submit(
             role,
             capability,
             request,
+            &fingerprint,
             "step_up_required",
             None,
             None,
@@ -318,6 +335,7 @@ pub async fn submit(
             role,
             capability,
             request,
+            &fingerprint,
             "rejected",
             None,
             None,
@@ -348,16 +366,25 @@ pub async fn submit(
             &correlation,
         );
         match state.jobs.write(&job) {
-            Ok(written) => {
+            Ok(JobWrite::Created(existing) | JobWrite::Duplicate(existing)) => {
                 // An idempotent write returns the existing job when the key
-                // already claimed one (for example after a restart between
-                // the job write and the journal append).
-                job_id = Some(written.job.job_id.clone());
+                // already claimed an identical action (for example after a
+                // restart between the job write and the journal append).
+                job_id = Some(existing.job_id.clone());
                 state_outcome = ActionState::Requested;
                 note = format!(
                     "One operator request created one job ({}); duplicate submits reuse it.",
-                    written.job.job_id
+                    existing.job_id
                 );
+            }
+            Ok(JobWrite::KeyConflict(_)) => {
+                // The key is already bound to a different durable job (a
+                // crash between the job write and the journal append): the
+                // documented conflict page, with nothing changed.
+                return SubmitOutcome::Conflict {
+                    reason: CONFLICT_KEY_REUSED.to_string(),
+                    return_path: safe_return(&request.return_path),
+                };
             }
             Err(error) => {
                 let entry = journal_entry(
@@ -366,6 +393,7 @@ pub async fn submit(
                     role,
                     capability,
                     request,
+                    &fingerprint,
                     "failed",
                     Some(&result_id),
                     None,
@@ -373,7 +401,7 @@ pub async fn submit(
                 );
                 let _ = state.journal.append(&entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
-                state.remember_result(&request.idempotency_key, &result_id);
+                state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
                     result_id,
                     state: ActionState::Failed,
@@ -395,6 +423,7 @@ pub async fn submit(
                     role,
                     capability,
                     request,
+                    &fingerprint,
                     "failed",
                     Some(&result_id),
                     None,
@@ -402,7 +431,7 @@ pub async fn submit(
                 );
                 let _ = state.journal.append(&entry);
                 crate::telemetry::record_action(&state.metrics, capability, "failed");
-                state.remember_result(&request.idempotency_key, &result_id);
+                state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
                 return SubmitOutcome::Result {
                     result_id,
                     state: ActionState::Failed,
@@ -419,6 +448,7 @@ pub async fn submit(
         role,
         capability,
         request,
+        &fingerprint,
         state_outcome.outcome(),
         Some(&result_id),
         job_id.as_deref(),
@@ -441,7 +471,7 @@ pub async fn submit(
             .await;
     }
     state.versions.bump(&object_key);
-    state.remember_result(&request.idempotency_key, &result_id);
+    state.remember_result(&request.idempotency_key, &fingerprint, &result_id);
     SubmitOutcome::Result {
         result_id,
         state: state_outcome,
@@ -774,6 +804,7 @@ fn journal_entry(
     role: crate::capabilities::Role,
     capability: Capability,
     request: &ActionRequest,
+    payload_fingerprint: &str,
     outcome: &str,
     result_id: Option<&str>,
     job_id: Option<&str>,
@@ -807,6 +838,7 @@ fn journal_entry(
             format!("{outcome}:{}", request.target.trim()).as_bytes(),
         ),
         idempotency_key: idempotency_fingerprint(&request.idempotency_key),
+        payload_fingerprint: Some(payload_fingerprint.to_string()),
         result_id: result_id.map(str::to_string),
         job_id: job_id.map(str::to_string),
         correlation_id: correlation.to_string(),

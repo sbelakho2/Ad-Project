@@ -27,7 +27,7 @@ pub use dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
     ExperimentLandscapeRow, FeeDetail, FeeRow, FeeState, FreshnessStatus, FunnelStageRow,
     GrowthCohortRow, IngestionHealthRow, LiftRow, Money, ObjectTimelineEntry, OperatorQueues,
-    QueryScope, RevenueBreakdownRow, RevenueDailyRow, StaleSource,
+    PageRequestsDay, QueryScope, RevenueBreakdownRow, RevenueDailyRow, StaleSource,
 };
 pub use memory::MemoryReader;
 pub use model::{
@@ -95,6 +95,22 @@ pub trait AnalyticsReader: Send + Sync + std::fmt::Debug {
         scope: &QueryScope,
         cohort_month: &str,
     ) -> Result<ExperimentEffectiveness, StoreError>;
+    /// Site-wide public page requests per day from the
+    /// `public_page_requested` family, inside the inclusive `YYYY-MM-DD`
+    /// bounds (`""` means unbounded on that side).
+    ///
+    /// Tenant privacy note: this family describes visits to the public site,
+    /// which carries no publisher identity, so the read deliberately applies
+    /// NO publisher, platform or currency filter ([`QueryScope`] only
+    /// supplies its day range when a bound argument is empty). It is bounded
+    /// by the day range alone and returns aggregate counts only: never a
+    /// request row, a query value or a visitor identity.
+    async fn page_requests_daily(
+        &self,
+        scope: &QueryScope,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<Vec<PageRequestsDay>, StoreError>;
 }
 
 #[cfg(test)]

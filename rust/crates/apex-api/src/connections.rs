@@ -299,6 +299,12 @@ impl VaultedConnectionStore {
                 Err(ApiError::NotFound) => return Ok(None),
                 Err(error) => return Err(error),
             };
+            // The metadata read never loads an oversized blob into memory:
+            // the same stat-and-cap check as `load_account`, so an
+            // over-cap file is the same typed error class on both paths.
+            let metadata = std::fs::metadata(&resolved)
+                .map_err(|error| ApiError::Internal(format!("credential stat: {error}")))?;
+            crate::sources::ensure_within_cap(metadata.len(), crate::live::MAX_CREDENTIAL_BYTES)?;
             let blob = std::fs::read_to_string(&resolved)
                 .map_err(|error| ApiError::Internal(format!("credential read: {error}")))?;
             Ok(Some(entry_meta(&blob)))
@@ -474,6 +480,26 @@ mod tests {
             other.load_account("pub1").await,
             Err(ApiError::Internal(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn blob_meta_refuses_an_oversized_blob_before_reading() {
+        let (store, dir) = temp_store("blob-cap");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let oversized =
+            vec![b'a'; usize::try_from(crate::live::MAX_CREDENTIAL_BYTES).expect("fits") + 1];
+        std::fs::write(dir.join("pub1.blob"), oversized).expect("write oversized blob");
+        let error = store
+            .blob_meta("pub1")
+            .await
+            .expect_err("an over-cap blob is refused");
+        assert!(matches!(error, ApiError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("read cap"), "{error}");
+        assert!(
+            matches!(store.load_account("pub1").await, Err(ApiError::Internal(_))),
+            "both reads refuse the same over-cap file the same way"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

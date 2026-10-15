@@ -176,6 +176,25 @@ impl AnalyticsSource {
             .await
             .map_err(|error| Unavailable::new(format!("the analytics store read failed: {error}")))
     }
+
+    /// The site-request total over the last 30 calendar days (including the
+    /// as-of day), summed from the per-day edge access-log counts.
+    async fn site_requests_last_30_days(&self, as_of: UtcMillis) -> Result<u64, Unavailable> {
+        let to_day = as_of.to_day_string();
+        let from = UtcMillis::from_unix_millis(
+            as_of
+                .unix_millis()
+                .saturating_sub(29 * apex_analytics::timestamp::MILLIS_PER_DAY),
+        );
+        let days = self
+            .reader
+            .page_requests_daily(&Self::scope(as_of), &from.to_day_string(), &to_day)
+            .await
+            .map_err(|error| {
+                Unavailable::new(format!("the analytics store read failed: {error}"))
+            })?;
+        Ok(days.iter().map(|day| day.requests).sum())
+    }
 }
 
 /// One experiment read from a durable runner ledger line.
@@ -387,7 +406,9 @@ impl DurableReader {
     pub fn experiments(&self) -> Result<Vec<DurableExperiment>, Unavailable> {
         let files = self.ledger_files()?;
         let mut experiments: Vec<DurableExperiment> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
+        // Experiment ids are only unique per publisher: two publishers may
+        // reuse one id, so the merge index is keyed by (publisher, id).
+        let mut index: HashMap<(String, String), usize> = HashMap::new();
         for (publisher, lines) in &files {
             for line in lines.iter() {
                 let kind = line.get("type").and_then(|value| value.as_str());
@@ -401,7 +422,9 @@ impl DurableReader {
                         };
                         let spec = line.get("spec");
                         let position = experiments.len();
-                        index.entry(experiment_id.to_string()).or_insert(position);
+                        index
+                            .entry((publisher.clone(), experiment_id.to_string()))
+                            .or_insert(position);
                         experiments.push(DurableExperiment {
                             publisher: publisher.clone(),
                             experiment_id: experiment_id.to_string(),
@@ -441,7 +464,8 @@ impl DurableReader {
                         let confidence = result
                             .and_then(|result| result.get("confidence"))
                             .and_then(|value| value.as_i64());
-                        if let Some(&position) = index.get(experiment_id) {
+                        let key = (publisher.clone(), experiment_id.to_string());
+                        if let Some(&position) = index.get(&key) {
                             let existing = &mut experiments[position];
                             existing.state = state;
                             existing.lift_bp = lift_bp;
@@ -449,7 +473,7 @@ impl DurableReader {
                             existing.observed_at_ms = at;
                         } else {
                             let position = experiments.len();
-                            index.entry(experiment_id.to_string()).or_insert(position);
+                            index.entry(key).or_insert(position);
                             experiments.push(DurableExperiment {
                                 publisher: publisher.clone(),
                                 experiment_id: experiment_id.to_string(),
@@ -944,6 +968,20 @@ impl ControlData {
         }
     }
 
+    /// Site requests over the last 30 days from the edge access log. `None`
+    /// when the read is unavailable (no analytics store configured or the
+    /// store did not answer), so the growth page renders nothing rather
+    /// than a fabricated zero.
+    pub async fn site_requests_last_30_days(&self, as_of: UtcMillis) -> Option<u64> {
+        match self {
+            ControlData::Fixtures(demo) => Some(demo.site_requests_last_30_days()),
+            ControlData::Live(live) => match &live.analytics {
+                Some(analytics) => analytics.site_requests_last_30_days(as_of).await.ok(),
+                None => None,
+            },
+        }
+    }
+
     /// Durable experiment records.
     pub fn durable_experiments(&self) -> Result<Vec<DurableExperiment>, Unavailable> {
         match self {
@@ -1070,6 +1108,94 @@ mod tests {
     }
 
     #[test]
+    fn durable_experiments_keep_the_same_id_separate_across_publishers() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-ledger-shared-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let alice = [
+            r#"{"type":"experimentStarted","atUnixMs":1000,"experimentId":"u1","spec":{"name":"alice-started"}}"#,
+            r#"{"type":"experimentObserved","atUnixMs":2000,"experimentId":"u1","result":{"state":"running","liftPercentBp":50,"confidence":7000}}"#,
+        ];
+        let bob = [
+            r#"{"type":"experimentStarted","atUnixMs":1500,"experimentId":"u1","spec":{"name":"bob-started"}}"#,
+            r#"{"type":"experimentObserved","atUnixMs":2500,"experimentId":"u1","result":{"state":"stopped","liftPercentBp":200,"confidence":9000}}"#,
+        ];
+        std::fs::write(dir.join("alice.jsonl"), alice.join("\n")).expect("write alice");
+        std::fs::write(dir.join("bob.jsonl"), bob.join("\n")).expect("write bob");
+        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let experiments = reader.experiments().expect("experiments");
+        assert_eq!(experiments.len(), 2, "one row per publisher, not a merge");
+        let alice_row = experiments
+            .iter()
+            .find(|experiment| experiment.publisher == "alice")
+            .expect("alice row");
+        let bob_row = experiments
+            .iter()
+            .find(|experiment| experiment.publisher == "bob")
+            .expect("bob row");
+        assert_eq!(alice_row.experiment_id, "u1");
+        assert_eq!(bob_row.experiment_id, "u1");
+        assert_eq!(alice_row.name.as_deref(), Some("alice-started"));
+        assert_eq!(alice_row.state.as_deref(), Some("running"));
+        assert_eq!(alice_row.lift_bp, Some(50));
+        assert_eq!(alice_row.confidence, Some(7000));
+        assert_eq!(alice_row.observed_at_ms, Some(2000));
+        assert_eq!(bob_row.name.as_deref(), Some("bob-started"));
+        assert_eq!(bob_row.state.as_deref(), Some("stopped"));
+        assert_eq!(bob_row.lift_bp, Some(200));
+        assert_eq!(bob_row.confidence, Some(9000));
+        assert_eq!(bob_row.observed_at_ms, Some(2500));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn durable_experiments_do_not_cross_update_a_shared_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-ledger-shared-id-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        // Alice only starts; bob starts and is observed. Alice's row must
+        // stay untouched (state None) while bob's row carries the result.
+        std::fs::write(
+            dir.join("alice.jsonl"),
+            r#"{"type":"experimentStarted","atUnixMs":1000,"experimentId":"u1","spec":{"name":"alice-started"}}"#,
+        )
+        .expect("write alice");
+        std::fs::write(
+            dir.join("bob.jsonl"),
+            [
+                r#"{"type":"experimentStarted","atUnixMs":1500,"experimentId":"u1","spec":{"name":"bob-started"}}"#,
+                r#"{"type":"experimentObserved","atUnixMs":2500,"experimentId":"u1","result":{"state":"stopped","liftPercentBp":200,"confidence":9000}}"#,
+            ]
+            .join("\n"),
+        )
+        .expect("write bob");
+        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+        let experiments = reader.experiments().expect("experiments");
+        assert_eq!(experiments.len(), 2);
+        let alice_row = experiments
+            .iter()
+            .find(|experiment| experiment.publisher == "alice")
+            .expect("alice row");
+        let bob_row = experiments
+            .iter()
+            .find(|experiment| experiment.publisher == "bob")
+            .expect("bob row");
+        assert_eq!(alice_row.state, None);
+        assert_eq!(alice_row.lift_bp, None);
+        assert_eq!(alice_row.observed_at_ms, None);
+        assert_eq!(bob_row.state.as_deref(), Some("stopped"));
+        assert_eq!(bob_row.lift_bp, Some(200));
+        assert_eq!(bob_row.observed_at_ms, Some(2500));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn readiness_marks_everything_unavailable_without_evidence() {
         let rows = readiness_rows(&OperationsEvidence::default());
         assert_eq!(
@@ -1145,5 +1271,22 @@ mod tests {
         );
         let error = live.durable_experiments().expect_err("no ledgers");
         assert!(error.reason.contains("no ledger root"));
+    }
+
+    #[tokio::test]
+    async fn site_requests_are_a_fixture_value_and_absent_without_analytics() {
+        let as_of = UtcMillis::from_unix_millis(0);
+        let fixtures = ControlData::fixtures();
+        assert_eq!(
+            fixtures.site_requests_last_30_days(as_of).await,
+            Some(18_240)
+        );
+        // No analytics store configured: the read is absent, never zero.
+        let live = ControlData::Live(Box::new(LiveData {
+            analytics: None,
+            durable: DurableReader::new("/nonexistent-ledgers", "/nonexistent-invoices.jsonl"),
+            operations: Ok(OperationsEvidence::default()),
+        }));
+        assert_eq!(live.site_requests_last_30_days(as_of).await, None);
     }
 }

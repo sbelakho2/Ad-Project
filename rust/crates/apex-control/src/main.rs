@@ -36,6 +36,14 @@ use apex_control::state::ControlState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Operational log lines (tracing warn/error) must be visible in
+    // production: initialize the stderr subscriber once, tolerating an
+    // already-installed global subscriber.
+    let _ = tracing_subscriber::fmt()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let config = ControlConfig::from_env()?;
     let analytics =
         AnalyticsSource::build(config.clickhouse.as_ref()).map_err(|error| error.reason)?;

@@ -1338,6 +1338,17 @@ fn billing_fixture() -> Result<BillingView, Box<dyn std::error::Error>> {
             amount_value: 4_000,
             amount_currency: "USD".to_string(),
         },
+        // A receipt in another currency: excluded from the USD balance and
+        // rendered as the explicit exclusion note, never summed in.
+        apex_billing::CollectionEvent {
+            at_unix_ms: NOW_MS - 9 * 86_400_000,
+            event_code: "AUTHORISATION".to_string(),
+            psp_reference: "8815397128890003".to_string(),
+            merchant_reference: "apex-fee:northstar:exp_0242:2026-08".to_string(),
+            success: "true".to_string(),
+            amount_value: 300,
+            amount_currency: "EUR".to_string(),
+        },
     ];
     Ok(apex_api::billing_view::build(
         &records,

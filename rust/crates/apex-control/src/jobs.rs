@@ -9,7 +9,8 @@
 //! ```json
 //! {"job_id": "opj_<12hex>", "kind": "...", "requested_by": "...",
 //!  "requested_at_ms": 0, "target": "...", "payload": {},
-//!  "idempotency_key": "...", "state": "queued",
+//!  "idempotency_key": "...", "payload_fingerprint": "sha256:<hex>",
+//!  "state": "queued",
 //!  "state_history": [{"state": "queued", "at_ms": 0, "note": "..."}],
 //!  "outcome": null, "correlation_id": "..."}
 //! ```
@@ -18,10 +19,12 @@
 //! half-written job. A job file that cannot be parsed, or whose state is not
 //! one of the known values, is displayed as `State unknown`, never guessed.
 //!
-//! A write is also idempotent by `idempotency_key`: the key claim (scan) and
-//! the file write happen under one process-wide lock, so a submission that
-//! already produced a durable job reuses that job instead of writing a
-//! second file.
+//! A write is also idempotent by `idempotency_key` *and* payload fingerprint:
+//! the key claim (scan) and the file write happen under one process-wide
+//! lock, so a submission that already produced a durable job for the same
+//! action reuses that job instead of writing a second file, while the same
+//! key reused for a different target or payload reports a conflict and
+//! changes nothing.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -83,6 +86,11 @@ pub struct OperatorJob {
     /// The originating idempotency key (raw; this file is a restricted
     /// durable record consumed by the runner, not an analytics event).
     pub idempotency_key: String,
+    /// The fingerprint of the submitted action (kind, target and payload);
+    /// a reused key with a different fingerprint is a conflict. Absent on
+    /// job files written before fingerprints existed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub payload_fingerprint: String,
     /// Current state: `queued`, `running`, `completed` or `failed`.
     pub state: String,
     /// The full state history.
@@ -105,6 +113,8 @@ impl OperatorJob {
         correlation_id: &str,
     ) -> Self {
         let note = format!("requested by {requested_by} from the operator control plane");
+        let payload_fingerprint =
+            crate::signing::payload_fingerprint(kind.as_str(), target, &payload);
         Self {
             job_id: format!("opj_{}", &random_hex_32()[..12]),
             kind,
@@ -113,6 +123,7 @@ impl OperatorJob {
             target: target.to_string(),
             payload,
             idempotency_key: idempotency_key.to_string(),
+            payload_fingerprint,
             state: "queued".to_string(),
             state_history: vec![JobStateEntry {
                 state: "queued".to_string(),
@@ -158,11 +169,12 @@ pub enum JobError {
     },
 }
 
-/// One row of the job listing: a parsed job or an unreadable file.
+/// One row of the job listing: a parsed job or an unreadable file. The job
+/// is boxed so a listing row stays small next to the unreadable-file variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobRead {
     /// A parsed job.
-    Parsed(OperatorJob),
+    Parsed(Box<OperatorJob>),
     /// A file that exists but cannot be trusted.
     StateUnknown {
         /// File name.
@@ -208,12 +220,29 @@ impl JobRead {
 
 /// The outcome of an idempotent job write.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobWrite {
-    /// The durable job: the existing one when the idempotency key was
-    /// already claimed, else the job that was just written.
-    pub job: OperatorJob,
-    /// Whether this call created the file (`false` for a duplicate claim).
-    pub created: bool,
+pub enum JobWrite {
+    /// The job file was written.
+    Created(OperatorJob),
+    /// The idempotency key already claimed an identical action (same payload
+    /// fingerprint): the existing job is returned, nothing new is written.
+    Duplicate(OperatorJob),
+    /// The idempotency key already claimed a different action: the caller
+    /// must answer with the conflict page and change nothing.
+    KeyConflict(OperatorJob),
+}
+
+impl JobWrite {
+    /// The durable job involved: the created or existing one.
+    pub fn job(&self) -> &OperatorJob {
+        match self {
+            JobWrite::Created(job) | JobWrite::Duplicate(job) | JobWrite::KeyConflict(job) => job,
+        }
+    }
+
+    /// Whether this call created the file.
+    pub fn created(&self) -> bool {
+        matches!(self, JobWrite::Created(_))
+    }
 }
 
 /// The durable job directory.
@@ -238,8 +267,10 @@ impl JobStore {
     }
 
     /// Write one job atomically (temp file plus rename), idempotent by
-    /// `idempotency_key`: the key claim and the write share one process-wide
-    /// lock, and a job whose key is already durable is returned unchanged.
+    /// `idempotency_key` and payload fingerprint: the key claim and the
+    /// write share one process-wide lock; a job whose key is already durable
+    /// is returned unchanged when the fingerprint matches, and reported as a
+    /// conflict when it does not.
     pub fn write(&self, job: &OperatorJob) -> Result<JobWrite, JobError> {
         // The claim and the write are one step: two concurrent submissions
         // of the same form can never produce two durable jobs.
@@ -248,9 +279,14 @@ impl JobStore {
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(existing) = self.existing_for_key(&job.idempotency_key)? {
-            return Ok(JobWrite {
-                job: existing,
-                created: false,
+            // A legacy job without a recorded fingerprint cannot establish a
+            // difference and keeps the duplicate behavior.
+            let same_action = existing.payload_fingerprint.is_empty()
+                || existing.payload_fingerprint == job.payload_fingerprint;
+            return Ok(if same_action {
+                JobWrite::Duplicate(existing)
+            } else {
+                JobWrite::KeyConflict(existing)
             });
         }
         std::fs::create_dir_all(&self.dir).map_err(|error| JobError::Write {
@@ -271,10 +307,7 @@ impl JobStore {
             path: final_path.display().to_string(),
             reason: format!("atomic rename failed: {error}"),
         })?;
-        Ok(JobWrite {
-            job: job.clone(),
-            created: true,
-        })
+        Ok(JobWrite::Created(job.clone()))
     }
 
     /// The first durable job written under `idempotency_key`, when any.
@@ -282,7 +315,7 @@ impl JobStore {
         for row in self.list()? {
             if let JobRead::Parsed(job) = row {
                 if job.idempotency_key == idempotency_key {
-                    return Ok(Some(job));
+                    return Ok(Some(*job));
                 }
             }
         }
@@ -349,7 +382,7 @@ fn parse_job(file: &str, raw: &str) -> JobRead {
                     reason: "the job carries no state history".to_string(),
                 };
             }
-            JobRead::Parsed(job)
+            JobRead::Parsed(Box::new(job))
         }
         Err(error) => JobRead::StateUnknown {
             file: file.to_string(),
@@ -389,8 +422,8 @@ mod tests {
         assert_eq!(job.state_history.len(), 1);
         assert_eq!(job.state_history[0].state, "queued");
         let written = store.write(&job).expect("write");
-        assert!(written.created);
-        assert_eq!(written.job, job);
+        assert!(written.created());
+        assert_eq!(written.job(), &job);
         let path = store.dir().join(format!("{}.json", job.job_id));
         assert!(path.exists());
         assert_eq!(
@@ -399,7 +432,7 @@ mod tests {
         );
         let read = store.read(&job.job_id).expect("read");
         match read {
-            JobRead::Parsed(back) => assert_eq!(back, job),
+            JobRead::Parsed(back) => assert_eq!(*back, job),
             other => panic!("expected a parsed job, got {other:?}"),
         }
         // The frozen field names are exactly these.
@@ -412,6 +445,7 @@ mod tests {
             "\"target\"",
             "\"payload\"",
             "\"idempotency_key\"",
+            "\"payload_fingerprint\"",
             "\"state\"",
             "\"state_history\"",
             "\"outcome\"",
@@ -489,11 +523,10 @@ mod tests {
         );
         assert_ne!(first.job_id, second.job_id);
         let written = store.write(&first).expect("first write");
-        assert!(written.created);
-        assert_eq!(written.job.job_id, first.job_id);
+        assert!(written.created());
+        assert_eq!(written.job().job_id, first.job_id);
         let again = store.write(&second).expect("second write");
-        assert!(!again.created);
-        assert_eq!(again.job, first);
+        assert_eq!(again, JobWrite::Duplicate(first.clone()));
         // Exactly one durable file exists, under the first job id; the
         // second submission's id was never written.
         assert!(dir.join(format!("{}.json", first.job_id)).exists());
@@ -537,14 +570,55 @@ mod tests {
             .into_iter()
             .map(|writer| writer.join().expect("join"))
             .collect();
-        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.created()).count(),
+            1
+        );
         let winner = outcomes
             .iter()
-            .find(|outcome| outcome.created)
+            .find(|outcome| outcome.created())
             .expect("one creator");
         for outcome in &outcomes {
-            assert_eq!(outcome.job.job_id, winner.job.job_id);
+            assert_eq!(outcome.job().job_id, winner.job().job_id);
+            assert!(!matches!(outcome, JobWrite::KeyConflict(_)));
         }
+        assert_eq!(store.list().expect("list").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_same_key_with_a_different_action_is_a_conflict() {
+        let (store, dir) = store();
+        let first = OperatorJob::queued(
+            JobKind::RetryRead,
+            "maya",
+            1,
+            "acct_northstar_max_01",
+            serde_json::json!({"platform": "applovin_max"}),
+            "one-key",
+            "corr-1",
+        );
+        // Same key and kind but a different target and payload.
+        let other = OperatorJob::queued(
+            JobKind::RetryRead,
+            "maya",
+            2,
+            "acct_northstar_max_02",
+            serde_json::json!({"platform": "applovin_max"}),
+            "one-key",
+            "corr-2",
+        );
+        let written = store.write(&first).expect("first write");
+        assert!(written.created());
+        let conflict = store.write(&other).expect("conflicting write");
+        match &conflict {
+            JobWrite::KeyConflict(existing) => assert_eq!(existing.job_id, first.job_id),
+            other => panic!("expected a key conflict, got {other:?}"),
+        }
+        assert!(!conflict.created());
+        // Nothing changed: one file, under the first job id.
+        assert!(dir.join(format!("{}.json", first.job_id)).exists());
+        assert!(!dir.join(format!("{}.json", other.job_id)).exists());
         assert_eq!(store.list().expect("list").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

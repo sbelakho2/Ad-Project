@@ -172,6 +172,11 @@ fn fixture_journal_entries() -> Vec<ActionJournalEntry> {
         before_digest: sha256_hex(b"before"),
         after_digest: sha256_hex(b"after"),
         idempotency_key: idempotency_fingerprint(key),
+        payload_fingerprint: Some(crate::signing::payload_fingerprint(
+            capability,
+            target,
+            &serde_json::json!({}),
+        )),
         result_id: Some(format!("res_{}", &random_hex_32()[..12])),
         job_id: None,
         correlation_id: format!("corr-{}", &random_hex_32()[..8]),
@@ -785,6 +790,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 funnel: demo
                     .activation_funnel("2026-08")
                     .map_err(|error| error.reason),
+                site_requests: Some(demo.site_requests_last_30_days()),
             },
         ),
     );
@@ -798,6 +804,23 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
                 funnel: demo
                     .activation_funnel("2026-09")
                     .map_err(|error| error.reason),
+                site_requests: Some(demo.site_requests_last_30_days()),
+            },
+        ),
+    );
+    // The unavailable site-request read renders no line at all: an absent
+    // number is not a zero.
+    push(
+        "growth-no-site-requests",
+        pages::growth::render(
+            &m,
+            &pages::growth::GrowthData {
+                cohorts: Ok(demo.growth_cohorts()),
+                selected_cohort: Some("2026-08".to_string()),
+                funnel: demo
+                    .activation_funnel("2026-08")
+                    .map_err(|error| error.reason),
+                site_requests: None,
             },
         ),
     );

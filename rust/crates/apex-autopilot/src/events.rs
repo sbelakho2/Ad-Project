@@ -44,8 +44,13 @@ pub const SPOOL_ENV: &str = "APEX_ANALYTICS_SPOOL";
 /// The environment variable naming the runner's data directory, under which
 /// the default spool path lives.
 pub const DATA_DIR_ENV: &str = "APEX_RUNNER_DATA_DIR";
-/// The environment variable naming the deployment environment label.
-pub const ENVIRONMENT_ENV: &str = "APEX_ANALYTICS_ENVIRONMENT";
+/// The environment variable naming the deployment environment label. This is
+/// the name `apex-api` reads (`APEX_ANALYTICS_ENV`); the historical
+/// runner-only spelling is a deprecated fallback announced once.
+pub const ENVIRONMENT_ENV: &str = "APEX_ANALYTICS_ENV";
+/// The historical runner-only environment variable name; still read as the
+/// deprecated fallback for [`ENVIRONMENT_ENV`].
+pub const DEPRECATED_ENVIRONMENT_ENV: &str = "APEX_ANALYTICS_ENVIRONMENT";
 /// The default data directory (matching the runner's other state defaults).
 pub const DEFAULT_DATA_DIR: &str = ".apex";
 /// The spool path under the data directory.
@@ -114,9 +119,20 @@ impl RunnerEvents {
         let Some(http) = lookup(CLICKHOUSE_ENV).filter(|value| !value.trim().is_empty()) else {
             return Ok(None);
         };
-        let environment = lookup(ENVIRONMENT_ENV)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "production".to_string());
+        let environment = match lookup(ENVIRONMENT_ENV).filter(|value| !value.trim().is_empty()) {
+            Some(value) => value,
+            None => {
+                match lookup(DEPRECATED_ENVIRONMENT_ENV).filter(|value| !value.trim().is_empty()) {
+                    Some(value) => {
+                        eprintln!(
+                        "apex-runner: {DEPRECATED_ENVIRONMENT_ENV} is deprecated; use {ENVIRONMENT_ENV} (the apex-api name)"
+                    );
+                        value
+                    }
+                    None => "production".to_string(),
+                }
+            }
+        };
         let spool = lookup(SPOOL_ENV)
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
@@ -218,13 +234,27 @@ impl RunnerEvents {
             .with_platform(self.platform.clone())
     }
 
-    /// `job_run` (page 75): schedule and outcome.
-    pub async fn job_run(&self, job_id: &str, occurred_ms: i64, outcome: &str, duration_ms: u64) {
+    /// `job_run` (page 75): schedule and outcome. The event id carries the
+    /// job type, so a failed daily and a same-minute monthly are two
+    /// distinct events with distinct merge keys (the run reference alone is
+    /// minute-granular and would collapse them in the store).
+    pub async fn job_run(
+        &self,
+        job_type: &str,
+        job_id: &str,
+        occurred_ms: i64,
+        outcome: &str,
+        duration_ms: u64,
+    ) {
         let mut payload = EventPayload::new();
         payload.job_id = Some(job_id.to_string());
         payload.duration_ms = Some(duration_ms);
         let builder = self
-            .base(EventType::JobRun, format!("job_run:{job_id}"), occurred_ms)
+            .base(
+                EventType::JobRun,
+                format!("job_run:{job_type}:{job_id}"),
+                occurred_ms,
+            )
             .with_object("job", job_id)
             .with_outcome(outcome)
             .with_payload(payload);
@@ -824,7 +854,7 @@ mod tests {
         let (events, store) = runner_events().await;
         let now = 1_700_000_000_000;
         events
-            .job_run("job_20261015_0810", now, "completed", 4200)
+            .job_run("daily", "job_20261015_0810", now, "completed", 4200)
             .await;
         events
             .report_pull_started(
@@ -1040,9 +1070,41 @@ mod tests {
                     now,
                 )
                 .await;
-            events.job_run("job_x", now, "completed", 1).await;
+            events.job_run("daily", "job_x", now, "completed", 1).await;
         }
         // The store's (source, event_id) dedup absorbs the replay.
+        assert_eq!(emitted(&store).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_daily_and_a_monthly_run_in_the_same_minute_keep_distinct_ids() {
+        let (events, store) = runner_events().await;
+        let now = 1_700_000_000_000;
+        // The run reference is minute-granular; without the job type a
+        // failed daily and a same-minute monthly would collapse into one
+        // merge key and hide the failure.
+        let same_minute = "job_20261015_0810";
+        events.job_run("daily", same_minute, now, "failed", 1).await;
+        events
+            .job_run("monthly", same_minute, now, "completed", 1)
+            .await;
+        let stored = emitted(&store).await;
+        assert_eq!(
+            stored.len(),
+            2,
+            "both runs are visible after the store's exact dedup (FINAL)"
+        );
+        let ids: std::collections::BTreeSet<&str> =
+            stored.iter().map(|event| event.event_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from([
+                "job_run:daily:job_20261015_0810",
+                "job_run:monthly:job_20261015_0810",
+            ])
+        );
+        // A replay of the identical type+minute still deduplicates.
+        events.job_run("daily", same_minute, now, "failed", 1).await;
         assert_eq!(emitted(&store).await.len(), 2);
     }
 
@@ -1077,6 +1139,48 @@ mod tests {
         .expect("configured");
         assert!(configured.is_some());
         assert_eq!(RunnerEvents::at_millis(7), 7);
+    }
+
+    #[test]
+    fn the_environment_reads_the_apex_api_name_first() {
+        // The apex-api name is primary.
+        let configured = RunnerEvents::from_lookup(|name| match name {
+            CLICKHOUSE_ENV => Some("http://127.0.0.1:8123".into()),
+            ENVIRONMENT_ENV => Some("staging".into()),
+            _ => None,
+        })
+        .expect("configured")
+        .expect("some");
+        assert_eq!(configured.environment, "staging");
+
+        // The historical name is the deprecated fallback.
+        let configured = RunnerEvents::from_lookup(|name| match name {
+            CLICKHOUSE_ENV => Some("http://127.0.0.1:8123".into()),
+            DEPRECATED_ENVIRONMENT_ENV => Some("dev".into()),
+            _ => None,
+        })
+        .expect("configured")
+        .expect("some");
+        assert_eq!(configured.environment, "dev");
+
+        // The primary name wins when both are set; neither means
+        // production.
+        let configured = RunnerEvents::from_lookup(|name| match name {
+            CLICKHOUSE_ENV => Some("http://127.0.0.1:8123".into()),
+            ENVIRONMENT_ENV => Some("staging".into()),
+            DEPRECATED_ENVIRONMENT_ENV => Some("dev".into()),
+            _ => None,
+        })
+        .expect("configured")
+        .expect("some");
+        assert_eq!(configured.environment, "staging");
+        let configured = RunnerEvents::from_lookup(|name| match name {
+            CLICKHOUSE_ENV => Some("http://127.0.0.1:8123".into()),
+            _ => None,
+        })
+        .expect("configured")
+        .expect("some");
+        assert_eq!(configured.environment, "production");
     }
 
     #[test]
@@ -1153,7 +1257,7 @@ mod tests {
             .with_publisher("northstar");
         assert_eq!(events.spool_path(), Some(spool.as_path()));
         events
-            .job_run("job_1", 1_700_000_000_000, "completed", 5)
+            .job_run("daily", "job_1", 1_700_000_000_000, "completed", 5)
             .await;
         let spooled = tokio::fs::read_to_string(&spool).await.expect("spool");
         assert_eq!(spooled.lines().count(), 1, "the failed batch spooled");

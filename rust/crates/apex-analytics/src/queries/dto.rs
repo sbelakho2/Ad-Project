@@ -157,6 +157,25 @@ pub struct RevenueBreakdownRow {
     pub share_bp: Option<u32>,
 }
 
+/// One day of site-wide public page requests.
+///
+/// The `public_page_requested` family describes visits to the public site,
+/// not a tenant's account: the event carries no publisher identity, so these
+/// counts are deliberately NOT tenant-scoped. Only aggregate counts leave
+/// the store: never rows, never query values, never a visitor identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PageRequestsDay {
+    /// UTC day `YYYY-MM-DD`.
+    pub day: String,
+    /// Page requests that day (deduplicated by the stable source/event key).
+    pub requests: u64,
+    /// Requests answered with exactly HTTP 404 (`/unmatched` routes).
+    pub not_found: u64,
+    /// Requests per bounded bot classification, sorted by class name; never
+    /// a claim about humans.
+    pub bot_class_mix: Vec<(String, u64)>,
+}
+
 /// One experiment decision as a lift row.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiftRow {

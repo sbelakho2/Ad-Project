@@ -454,9 +454,14 @@ pub fn incidents(database: &str) -> Result<String, SchemaError> {
 /// one version (the publish marker). See
 /// [`projection_versions_add_published`] for the column migration.
 pub fn projection_versions(database: &str) -> Result<String, SchemaError> {
+    projection_versions_ddl(database, "projection_versions")
+}
+
+fn projection_versions_ddl(database: &str, table: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
+    let table = validate_identifier(table)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.projection_versions (\n\
+        "CREATE TABLE IF NOT EXISTS {db}.{table} (\n\
          \x20   projection_name LowCardinality(String),\n\
          \x20   as_of_version UInt64,\n\
          \x20   batch_id String,\n\
@@ -493,9 +498,14 @@ pub fn projection_versions_add_published(database: &str) -> Result<String, Schem
 /// with (and never hides) the published version across merges; `publish`
 /// prunes superseded versions.
 pub fn customer_daily(database: &str) -> Result<String, SchemaError> {
+    customer_daily_ddl(database, "customer_daily")
+}
+
+fn customer_daily_ddl(database: &str, table: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
+    let table = validate_identifier(table)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.customer_daily (\n\
+        "CREATE TABLE IF NOT EXISTS {db}.{table} (\n\
          \x20   publisher_id LowCardinality(String),\n\
          \x20   day Date,\n\
          \x20   platform LowCardinality(String),\n\
@@ -516,9 +526,14 @@ pub fn customer_daily(database: &str) -> Result<String, SchemaError> {
 /// part of the sorting key (staged and published versions coexist);
 /// `publish` prunes superseded versions.
 pub fn platform_daily(database: &str) -> Result<String, SchemaError> {
+    platform_daily_ddl(database, "platform_daily")
+}
+
+fn platform_daily_ddl(database: &str, table: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
+    let table = validate_identifier(table)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.platform_daily (\n\
+        "CREATE TABLE IF NOT EXISTS {db}.{table} (\n\
          \x20   platform LowCardinality(String),\n\
          \x20   day Date,\n\
          \x20   currency LowCardinality(String),\n\
@@ -538,9 +553,14 @@ pub fn platform_daily(database: &str) -> Result<String, SchemaError> {
 /// ever needed again). The as-of version is part of the sorting key (staged
 /// and published versions coexist); `publish` prunes superseded versions.
 pub fn lifecycle_cohorts(database: &str) -> Result<String, SchemaError> {
+    lifecycle_cohorts_ddl(database, "lifecycle_cohorts")
+}
+
+fn lifecycle_cohorts_ddl(database: &str, table: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
+    let table = validate_identifier(table)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.lifecycle_cohorts (\n\
+        "CREATE TABLE IF NOT EXISTS {db}.{table} (\n\
          \x20   cohort_month Date,\n\
          \x20   publisher_id LowCardinality(String),\n\
          \x20   stage LowCardinality(String),\n\
@@ -557,9 +577,14 @@ pub fn lifecycle_cohorts(database: &str) -> Result<String, SchemaError> {
 /// The as-of version is part of the sorting key (staged and published
 /// versions coexist); `publish` prunes superseded versions.
 pub fn operator_queues(database: &str) -> Result<String, SchemaError> {
+    operator_queues_ddl(database, "operator_queues")
+}
+
+fn operator_queues_ddl(database: &str, table: &str) -> Result<String, SchemaError> {
     let db = db(database)?;
+    let table = validate_identifier(table)?;
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {db}.operator_queues (\n\
+        "CREATE TABLE IF NOT EXISTS {db}.{table} (\n\
          \x20   queue LowCardinality(String),\n\
          \x20   object_id String,\n\
          \x20   publisher_id LowCardinality(String),\n\
@@ -600,6 +625,164 @@ pub fn all_ddl(database: &str) -> Result<Vec<String>, SchemaError> {
     statements.push(lifecycle_cohorts(database)?);
     statements.push(operator_queues(database)?);
     Ok(statements)
+}
+
+/// One staged-shape table `ensure_schema` verifies at boot: its name and the
+/// `system.tables.sorting_key` the staged shape must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagedTable {
+    /// Table name.
+    pub name: &'static str,
+    /// Expected `system.tables.sorting_key`, normalized (comma separated
+    /// column names, no spaces) so it compares regardless of formatting.
+    pub sorting_key: &'static str,
+}
+
+/// The tables whose staged-publish change also changed the sorting key.
+///
+/// A database created before staging has these tables ordered by their
+/// business keys only (`projection_versions` by `projection_name`), so a
+/// staged rebuild and the published version collapse into one row at merge
+/// time and readers can lose the published version entirely. A boot on such
+/// a database migrates every legacy shape to the staged shape; see
+/// [`staged_migration_plan`].
+pub const STAGED_TABLES: [StagedTable; 5] = [
+    StagedTable {
+        name: "projection_versions",
+        sorting_key: "projection_name,as_of_version",
+    },
+    StagedTable {
+        name: "customer_daily",
+        sorting_key: "publisher_id,day,platform,currency,as_of_version",
+    },
+    StagedTable {
+        name: "platform_daily",
+        sorting_key: "platform,day,currency,as_of_version",
+    },
+    StagedTable {
+        name: "lifecycle_cohorts",
+        sorting_key: "cohort_month,publisher_id,stage,as_of_version",
+    },
+    StagedTable {
+        name: "operator_queues",
+        sorting_key: "queue,object_id,as_of_version",
+    },
+];
+
+/// Normalize a `system.tables.sorting_key` for comparison: drop whitespace,
+/// backticks and parentheses so `(a, b)` and `a,b` compare equal.
+fn normalize_sorting_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| !c.is_whitespace() && *c != '`' && *c != '(' && *c != ')')
+        .collect()
+}
+
+/// The name a staged table is rebuilt under while migrating a legacy shape.
+fn migration_table_name(table: &str) -> String {
+    format!("{table}__migration")
+}
+
+fn staged_table_ddl(database: &str, base: &str, table: &str) -> Result<String, SchemaError> {
+    match base {
+        "projection_versions" => projection_versions_ddl(database, table),
+        "customer_daily" => customer_daily_ddl(database, table),
+        "platform_daily" => platform_daily_ddl(database, table),
+        "lifecycle_cohorts" => lifecycle_cohorts_ddl(database, table),
+        "operator_queues" => operator_queues_ddl(database, table),
+        _ => Err(SchemaError::InvalidIdentifier(base.to_string())),
+    }
+}
+
+fn drop_table_sql(database: &str, table: &str) -> Result<String, SchemaError> {
+    let db = db(database)?;
+    let table = validate_identifier(table)?;
+    Ok(format!("DROP TABLE IF EXISTS {db}.{table}"))
+}
+
+/// Copy the legacy rows, with merge-time duplicates collapsed, into the
+/// migration table. Version rows were reader-visible before staging existed
+/// (and a legacy table cannot tell a staged row apart from a published one),
+/// so they are marked published.
+fn migrate_legacy_rows_sql(database: &str, table: &str) -> Result<String, SchemaError> {
+    let db = db(database)?;
+    let table = validate_identifier(table)?;
+    let migration_name = migration_table_name(table);
+    let migration = validate_identifier(&migration_name)?;
+    let body = match table {
+        "projection_versions" => {
+            "projection_name, as_of_version, batch_id, source_event_max, rebuilt_at, published) \
+             SELECT projection_name, as_of_version, batch_id, source_event_max, rebuilt_at, 1"
+                .to_string()
+        }
+        "customer_daily" => "publisher_id, day, platform, currency, revenue_micros, impressions, \
+             source_days, final_days, provisional_days, as_of_version) \
+             SELECT publisher_id, day, platform, currency, revenue_micros, impressions, \
+             source_days, final_days, provisional_days, as_of_version"
+            .to_string(),
+        "platform_daily" => "platform, day, currency, revenue_micros, impressions, \
+             final_accounts, provisional_accounts, as_of_version) \
+             SELECT platform, day, currency, revenue_micros, impressions, final_accounts, \
+             provisional_accounts, as_of_version"
+            .to_string(),
+        "lifecycle_cohorts" => "cohort_month, publisher_id, stage, accounts, as_of_version) \
+             SELECT cohort_month, publisher_id, stage, accounts, as_of_version"
+            .to_string(),
+        "operator_queues" => "queue, object_id, publisher_id, severity, age_seconds, owner, \
+             next_action, as_of_version) \
+             SELECT queue, object_id, publisher_id, severity, age_seconds, owner, next_action, \
+             as_of_version"
+            .to_string(),
+        _ => return Err(SchemaError::InvalidIdentifier(table.to_string())),
+    };
+    Ok(format!(
+        "INSERT INTO {db}.{migration} ({body} FROM {db}.{table} FINAL"
+    ))
+}
+
+fn exchange_tables_sql(database: &str, a: &str, b: &str) -> Result<String, SchemaError> {
+    let db = db(database)?;
+    let a = validate_identifier(a)?;
+    let b = validate_identifier(b)?;
+    Ok(format!("EXCHANGE TABLES {db}.{a} AND {db}.{b}"))
+}
+
+/// The boot plan that migrates legacy staged tables.
+///
+/// `observed` is the live `(name, sorting_key)` pairs from `system.tables`.
+/// For every [`STAGED_TABLES`] entry the plan first drops a leftover
+/// `<table>__migration` sibling (an interrupted earlier boot never has a
+/// complete answer and is redone), and when the live sorting key is not the
+/// staged key it rebuilds the table crash-safely: create the staged shape
+/// under the migration name, copy the legacy rows into it, swap the two
+/// atomically with `EXCHANGE TABLES`, and drop the legacy table. A table
+/// that already has the staged key contributes only the leftover drop, so
+/// the plan is a no-op on every healthy boot.
+pub fn staged_migration_plan(
+    database: &str,
+    observed: &[(String, String)],
+) -> Result<Vec<String>, SchemaError> {
+    let mut plan = Vec::new();
+    for table in STAGED_TABLES {
+        let migration = migration_table_name(table.name);
+        plan.push(drop_table_sql(database, &migration)?);
+        let live_key = observed
+            .iter()
+            .find(|(name, _)| name == table.name)
+            .map(|(_, key)| key.as_str());
+        let Some(live_key) = live_key else {
+            // all_ddl created every staged table before this plan runs, so a
+            // missing entry means the server is mid-flight; leave it alone.
+            continue;
+        };
+        if normalize_sorting_key(live_key) == table.sorting_key {
+            continue;
+        }
+        plan.push(staged_table_ddl(database, table.name, &migration)?);
+        plan.push(migrate_legacy_rows_sql(database, table.name)?);
+        plan.push(exchange_tables_sql(database, table.name, &migration)?);
+        plan.push(drop_table_sql(database, &migration)?);
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -815,5 +998,185 @@ mod tests {
             .position(|sql| sql.contains("ADD COLUMN IF NOT EXISTS published"))
             .expect("migration");
         assert!(create_index < migrate_index);
+    }
+
+    #[test]
+    fn staged_tables_name_the_staged_sorting_key() {
+        for table in STAGED_TABLES {
+            let ddl = staged_table_ddl("db", table.name, table.name).expect("ddl");
+            let order = ddl
+                .split("ORDER BY")
+                .nth(1)
+                .expect("staged tables order by their keys")
+                .lines()
+                .next()
+                .expect("order line");
+            assert_eq!(normalize_sorting_key(order), table.sorting_key, "{ddl}");
+            // The public builder and the migration dispatcher agree byte for
+            // byte, so a fresh boot and a migrated boot produce one shape.
+            let public = match table.name {
+                "projection_versions" => projection_versions("db").expect("vs"),
+                "customer_daily" => customer_daily("db").expect("cd"),
+                "platform_daily" => platform_daily("db").expect("pd"),
+                "lifecycle_cohorts" => lifecycle_cohorts("db").expect("lc"),
+                "operator_queues" => operator_queues("db").expect("oq"),
+                other => panic!("unknown staged table {other}"),
+            };
+            assert_eq!(public, ddl, "{}", table.name);
+        }
+        assert!(staged_table_ddl("db", "nope", "nope").is_err());
+        assert!(staged_table_ddl("bad name", "customer_daily", "customer_daily").is_err());
+    }
+
+    #[test]
+    fn the_boot_plan_migrates_every_legacy_shape() {
+        // The pre-staging sorting keys: business keys only, so a staged
+        // version collapses the published one away at merge time.
+        let legacy = vec![
+            (
+                "projection_versions".to_string(),
+                "projection_name".to_string(),
+            ),
+            (
+                "customer_daily".to_string(),
+                "(publisher_id, day, platform, currency)".to_string(),
+            ),
+            (
+                "platform_daily".to_string(),
+                "(platform, day, currency)".to_string(),
+            ),
+            (
+                "lifecycle_cohorts".to_string(),
+                "(cohort_month, publisher_id, stage)".to_string(),
+            ),
+            (
+                "operator_queues".to_string(),
+                "(queue, object_id)".to_string(),
+            ),
+        ];
+        let plan = staged_migration_plan("db", &legacy).expect("plan");
+        for table in STAGED_TABLES {
+            let migration = migration_table_name(table.name);
+            let statements: Vec<&String> =
+                plan.iter().filter(|sql| sql.contains(&migration)).collect();
+            assert!(
+                statements
+                    .iter()
+                    .any(|sql| sql.starts_with("DROP TABLE IF EXISTS")),
+                "drop leftover for {}: {plan:?}",
+                table.name
+            );
+            assert!(
+                statements
+                    .iter()
+                    .any(|sql| sql.starts_with("CREATE TABLE IF NOT EXISTS")),
+                "create the staged shape for {}: {plan:?}",
+                table.name
+            );
+            assert!(
+                statements
+                    .iter()
+                    .any(|sql| sql.starts_with("INSERT INTO") && sql.contains("FINAL")),
+                "copy the legacy rows for {}: {plan:?}",
+                table.name
+            );
+            assert!(
+                statements
+                    .iter()
+                    .any(|sql| sql.starts_with("EXCHANGE TABLES")),
+                "swap atomically for {}: {plan:?}",
+                table.name
+            );
+        }
+        // Legacy rows were reader-visible: version rows become published.
+        let version_insert = plan
+            .iter()
+            .find(|sql| sql.starts_with("INSERT INTO db.projection_versions__migration"))
+            .expect("version row insert");
+        assert!(
+            version_insert.contains("published) SELECT projection_name"),
+            "{version_insert}"
+        );
+        assert!(
+            version_insert.contains("rebuilt_at, 1 FROM db.projection_versions FINAL"),
+            "{version_insert}"
+        );
+        // Projection rows keep every column, including the as-of version.
+        let customer_insert = plan
+            .iter()
+            .find(|sql| sql.starts_with("INSERT INTO db.customer_daily__migration"))
+            .expect("row insert");
+        assert!(
+            customer_insert
+                .contains("SELECT publisher_id, day, platform, currency, revenue_micros")
+                && customer_insert.contains("as_of_version FROM db.customer_daily FINAL"),
+            "{customer_insert}"
+        );
+        // The swap is same-database and leaves the legacy table under the
+        // migration name to be dropped.
+        let exchange = plan
+            .iter()
+            .find(|sql| sql.contains("db.customer_daily AND db.customer_daily__migration"))
+            .expect("exchange");
+        assert!(exchange.starts_with("EXCHANGE TABLES"), "{exchange}");
+        // Leftovers are dropped before anything could swap them in.
+        assert_eq!(
+            plan.first().map(String::as_str),
+            Some("DROP TABLE IF EXISTS db.projection_versions__migration")
+        );
+
+        // A healthy boot (already staged) only drops leftover siblings:
+        // idempotent on every boot.
+        let healthy: Vec<(String, String)> = STAGED_TABLES
+            .iter()
+            .map(|table| (table.name.to_string(), table.sorting_key.to_string()))
+            .collect();
+        let plan = staged_migration_plan("db", &healthy).expect("plan");
+        assert_eq!(plan.len(), STAGED_TABLES.len(), "{plan:?}");
+        assert!(plan
+            .iter()
+            .all(|sql| sql.starts_with("DROP TABLE IF EXISTS")));
+
+        // Formatting variants of the staged key are still staged (a padded,
+        // parenthesized oracle answer must not trigger a rebuild).
+        let padded = vec![(
+            "projection_versions".to_string(),
+            "`(projection_name, as_of_version)`".to_string(),
+        )];
+        let plan = staged_migration_plan("db", &padded).expect("plan");
+        assert!(plan
+            .iter()
+            .all(|sql| sql.starts_with("DROP TABLE IF EXISTS")));
+
+        // A hostile database name is refused before any statement is built.
+        assert!(staged_migration_plan("db; DROP TABLE x", &legacy).is_err());
+    }
+
+    #[test]
+    fn a_legacy_plan_covers_every_staged_table_step_by_step() {
+        let legacy: Vec<(String, String)> = STAGED_TABLES
+            .iter()
+            .map(|table| (table.name.to_string(), "legacy_key".to_string()))
+            .collect();
+        let plan = staged_migration_plan("apex", &legacy).expect("plan");
+        // Per table: one leftover drop plus create, insert, exchange, drop.
+        assert_eq!(plan.len(), STAGED_TABLES.len() * 5, "{plan:?}");
+        for (index, table) in STAGED_TABLES.iter().enumerate() {
+            let slice = &plan[index * 5..(index + 1) * 5];
+            assert!(slice[0].contains("DROP TABLE IF EXISTS apex."));
+            assert!(slice[1].contains(&format!(
+                "CREATE TABLE IF NOT EXISTS apex.{}__migration",
+                table.name
+            )));
+            assert!(slice[2].contains(&format!("FROM apex.{} FINAL", table.name)));
+            assert!(slice[3].contains(&format!(
+                "EXCHANGE TABLES apex.{} AND apex.{}__migration",
+                table.name, table.name
+            )));
+            assert!(slice[4].contains(&format!(
+                "DROP TABLE IF EXISTS apex.{}__migration",
+                table.name
+            )));
+        }
     }
 }

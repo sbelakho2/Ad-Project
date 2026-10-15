@@ -3,7 +3,7 @@
 //! One experiment is assembled from the verified ledger (its
 //! `experimentStarted` record, the signed `LiftRecord` payloads:
 //! pre-registration, data pulls, guardrails and the result) plus, when one
-//! exists, the runner's alert log (`APEX_ALERTS_FILE`, the `FileAlertSink`
+//! exists, the runner's alert log (`APEX_ALERT_FILE`, the `FileAlertSink`
 //! output): a `failedRollback` alert is the restore-failed incident, shown
 //! with the frozen customer-facing message and a stable incident reference.
 //!
@@ -33,11 +33,29 @@ use apex_proof::LedgerRecord;
 
 use crate::error::ApiError;
 
-/// The runner's alert log path (the `FileAlertSink` output), read-only.
+/// The runner's alert log path (the `FileAlertSink` output), read-only. This
+/// is the documented name the runner and the deployment units use.
+pub const ALERT_FILE_ENV: &str = "APEX_ALERT_FILE";
+/// The historical name of the same setting, read only as a fallback.
 pub const ALERTS_FILE_ENV: &str = "APEX_ALERTS_FILE";
 /// Read cap for the alert log.
 pub const MAX_ALERTS_BYTES: u64 = 4 * 1024 * 1024;
 const DAY_MS: i64 = 86_400_000;
+
+/// Resolve the alert log path from the environment: `APEX_ALERT_FILE` (the
+/// documented name, the one the runner writes) first, the historical
+/// `APEX_ALERTS_FILE` as a fallback with one logged line when it is the only
+/// name set.
+pub fn alerts_file_from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    if let Some(path) = lookup(ALERT_FILE_ENV).filter(|value| !value.trim().is_empty()) {
+        return Some(path);
+    }
+    let fallback = lookup(ALERTS_FILE_ENV).filter(|value| !value.trim().is_empty())?;
+    tracing::warn!(
+        "alert log configured through {ALERTS_FILE_ENV}; the documented name is {ALERT_FILE_ENV}"
+    );
+    Some(fallback)
+}
 
 /// The lifecycle state of one experiment, exactly as the console renders it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -976,6 +994,39 @@ mod tests {
         std::fs::write(&path, "not json\n").expect("write");
         assert!(matches!(read_alerts(&path), Err(ApiError::Internal(_))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn alert_file_env_prefers_the_documented_name_with_a_fallback() {
+        let both = |key: &str| match key {
+            ALERT_FILE_ENV => Some("/documented.jsonl".to_string()),
+            ALERTS_FILE_ENV => Some("/fallback.jsonl".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            alerts_file_from_env(&both).as_deref(),
+            Some("/documented.jsonl")
+        );
+        let fallback_only = |key: &str| match key {
+            ALERTS_FILE_ENV => Some("/fallback.jsonl".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            alerts_file_from_env(&fallback_only).as_deref(),
+            Some("/fallback.jsonl"),
+            "the runner's documented name is primary; the old name still resolves"
+        );
+        assert_eq!(alerts_file_from_env(&|_| None), None);
+        let blank = |key: &str| match key {
+            ALERT_FILE_ENV => Some("  ".to_string()),
+            ALERTS_FILE_ENV => Some("/fallback.jsonl".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            alerts_file_from_env(&blank).as_deref(),
+            Some("/fallback.jsonl"),
+            "a blank primary falls through to the fallback"
+        );
     }
 
     #[test]

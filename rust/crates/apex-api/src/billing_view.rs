@@ -118,8 +118,12 @@ pub struct InvoiceRegisterRow {
     pub state: InvoiceStateView,
     /// The signed total before tax.
     pub total_micros: i64,
-    /// Verified collected amount for the period.
+    /// Verified collected amount for the period, same currency only.
     pub collected_micros: i64,
+    /// Successful receipts in another currency for this period. Their
+    /// amounts are never summed with the balance currency; the page renders
+    /// them as an explicit exclusion note.
+    pub excluded_foreign_receipts: usize,
     /// Whether this is the newest (current) period.
     pub is_current: bool,
 }
@@ -209,13 +213,27 @@ impl BillingView {
             .collect()
     }
 
-    /// The successfully collected amount for a period.
+    /// The successfully collected amount for a period. Only receipts in the
+    /// invoice currency count (case-insensitive code compare): a foreign
+    /// currency amount is never summed into this balance.
     pub fn collected_for(&self, period: &str) -> i64 {
         self.payments_for(period)
             .iter()
             .filter(|event| event.success.eq_ignore_ascii_case("true"))
+            .filter(|event| event.amount_currency.eq_ignore_ascii_case(&self.currency))
             .map(|event| event.amount_value.saturating_mul(10_000))
             .sum()
+    }
+
+    /// How many successful receipts for a period are in another currency
+    /// than the invoice. They are excluded from [`Self::collected_for`] and
+    /// shown as the explicit exclusion note.
+    pub fn excluded_foreign_for(&self, period: &str) -> usize {
+        self.payments_for(period)
+            .iter()
+            .filter(|event| event.success.eq_ignore_ascii_case("true"))
+            .filter(|event| !event.amount_currency.eq_ignore_ascii_case(&self.currency))
+            .count()
     }
 
     /// The balance due for a period: signed total minus verified collections.
@@ -238,6 +256,19 @@ pub fn merchant_reference_period(reference: &str) -> Option<String> {
         Some(candidate.to_string())
     } else {
         None
+    }
+}
+
+/// The honest note for successful receipts in another currency that were
+/// excluded from a balance, when any exist. The count is stated; the amounts
+/// are never summed across currencies.
+pub fn excluded_foreign_note(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 receipt in another currency is excluded from this balance.".to_string()),
+        count => Some(format!(
+            "{count} receipts in another currency are excluded from this balance."
+        )),
     }
 }
 
@@ -348,8 +379,18 @@ pub fn build(
                         == Some(period.as_str())
                 })
                 .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                .filter(|event| event.amount_currency.eq_ignore_ascii_case(currency))
                 .map(|event| event.amount_value.saturating_mul(10_000))
                 .sum();
+            let excluded_foreign_receipts = payments
+                .iter()
+                .filter(|event| {
+                    merchant_reference_period(&event.merchant_reference).as_deref()
+                        == Some(period.as_str())
+                })
+                .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                .filter(|event| !event.amount_currency.eq_ignore_ascii_case(currency))
+                .count();
             let state = if period == &current_month {
                 InvoiceStateView::Draft
             } else if collected >= total && total > 0 {
@@ -364,6 +405,7 @@ pub fn build(
                 state,
                 total_micros: total,
                 collected_micros: collected,
+                excluded_foreign_receipts,
                 is_current: period == &current_month,
             }
         })
@@ -443,6 +485,16 @@ mod tests {
     }
 
     fn payment(period: &str, amount_minor: i64, success: &str, psp: &str) -> CollectionEvent {
+        payment_in(period, amount_minor, success, psp, "USD")
+    }
+
+    fn payment_in(
+        period: &str,
+        amount_minor: i64,
+        success: &str,
+        psp: &str,
+        currency: &str,
+    ) -> CollectionEvent {
         CollectionEvent {
             at_unix_ms: 1_792_055_400_000,
             event_code: "AUTHORISATION".to_string(),
@@ -450,7 +502,7 @@ mod tests {
             merchant_reference: format!("apex-fee:northstar:{period}"),
             success: success.to_string(),
             amount_value: amount_minor,
-            amount_currency: "USD".to_string(),
+            amount_currency: currency.to_string(),
         }
     }
 
@@ -530,6 +582,69 @@ mod tests {
             InvoiceStateView::NotCollected
         );
         assert_eq!(view.payments_for("2026-09").len(), 1, "the event is shown");
+    }
+
+    #[test]
+    fn a_foreign_currency_receipt_never_pays_a_usd_invoice() {
+        let records = sealed(vec![billing_record("ch_0246", "2026-09", 100_000_000)]);
+        let view = build(
+            &records,
+            vec![payment_in("2026-09", 300, "true", "psp-eur", "EUR")],
+            1_792_055_400_000,
+            MonitoringView {
+                fee_micros: None,
+                since: None,
+            },
+            "USD",
+        );
+        assert_eq!(view.collected_for("2026-09"), 0);
+        assert_eq!(view.balance_due_for("2026-09"), 100_000_000);
+        let row = view.register_row("2026-09").expect("row");
+        assert_eq!(row.state, InvoiceStateView::NotCollected);
+        assert_eq!(row.collected_micros, 0);
+        assert_eq!(row.excluded_foreign_receipts, 1);
+        assert_eq!(view.excluded_foreign_for("2026-09"), 1);
+        assert_eq!(
+            excluded_foreign_note(row.excluded_foreign_receipts).as_deref(),
+            Some("1 receipt in another currency is excluded from this balance.")
+        );
+        assert_eq!(
+            view.payments_for("2026-09").len(),
+            1,
+            "the excluded receipt is still shown"
+        );
+    }
+
+    #[test]
+    fn same_currency_receipts_count_case_insensitively_and_alone() {
+        let records = sealed(vec![billing_record("ch_1", "2026-09", 100_000_000)]);
+        let view = build(
+            &records,
+            vec![
+                payment_in("2026-09", 300, "true", "psp-eur", "EUR"),
+                payment_in("2026-09", 10_000, "true", "psp-usd", "usd"),
+            ],
+            1_792_055_400_000,
+            MonitoringView {
+                fee_micros: None,
+                since: None,
+            },
+            "USD",
+        );
+        assert_eq!(
+            view.collected_for("2026-09"),
+            100_000_000,
+            "the lowercase usd receipt counts; the EUR amount is never summed in"
+        );
+        assert_eq!(view.balance_due_for("2026-09"), 0);
+        let row = view.register_row("2026-09").expect("row");
+        assert_eq!(row.state, InvoiceStateView::Paid);
+        assert_eq!(row.excluded_foreign_receipts, 1);
+        assert_eq!(excluded_foreign_note(0), None);
+        assert_eq!(
+            excluded_foreign_note(2).as_deref(),
+            Some("2 receipts in another currency are excluded from this balance.")
+        );
     }
 
     #[test]

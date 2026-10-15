@@ -9,7 +9,8 @@ use crate::store::{MemoryStore, ProjectionStore, StoreError};
 use super::dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
     ExperimentLandscapeRow, FeeDetail, FeeRow, GrowthCohortRow, IngestionHealthRow, LiftRow,
-    ObjectTimelineEntry, OperatorQueues, QueryScope, RevenueBreakdownRow, RevenueDailyRow,
+    ObjectTimelineEntry, OperatorQueues, PageRequestsDay, QueryScope, RevenueBreakdownRow,
+    RevenueDailyRow,
 };
 use super::model;
 use super::AnalyticsReader;
@@ -174,6 +175,19 @@ impl AnalyticsReader for MemoryReader {
             &events,
             cohort_month,
         ))
+    }
+
+    async fn page_requests_daily(
+        &self,
+        scope: &QueryScope,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<Vec<PageRequestsDay>, StoreError> {
+        // The page-request family is site-wide: no tenant filter applies.
+        let events = self.store.load_events().await?;
+        let from = model::effective_day_bound(from_day, scope.from_day.as_deref());
+        let to = model::effective_day_bound(to_day, scope.to_day.as_deref());
+        Ok(model::page_requests_daily(&events, &from, &to))
     }
 }
 
@@ -850,6 +864,100 @@ mod tests {
             reader.fee_rows(&scope()).await,
             Err(StoreError::SchemaNotReady)
         ));
+        assert!(matches!(
+            reader.page_requests_daily(&scope(), "", "").await,
+            Err(StoreError::SchemaNotReady)
+        ));
+    }
+
+    fn page_event(id: &str, occurred_at: &str, status: u16, bot_class: &str) -> DomainEvent {
+        let at = UtcMillis::parse_rfc3339(occurred_at).expect("time");
+        DomainEvent::builder(EventType::PublicPageRequested, EventSource::AccessLog)
+            .with_event_id(id)
+            .with_occurred_at(at)
+            .with_received_at(at)
+            .with_environment("production")
+            .with_service_version("apex-0.1.0")
+            .with_object("document", "/pricing")
+            .with_outcome(if status == 404 { "4xx" } else { "2xx" })
+            .with_payload(EventPayload {
+                route_template: Some("/pricing".into()),
+                status: Some(status),
+                bot_class: Some(bot_class.into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("page event")
+    }
+
+    #[tokio::test]
+    async fn page_requests_are_site_wide_daily_counts() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        store
+            .insert(&[
+                page_event("pr_1", "2026-10-14T08:00:00.000Z", 200, "unclassified"),
+                page_event("pr_2", "2026-10-14T09:30:00.000Z", 200, "search_engine_bot"),
+                page_event("pr_3", "2026-10-14T23:59:59.999Z", 404, "unclassified"),
+                page_event("pr_4", "2026-10-15T00:00:00.000Z", 404, "automation_client"),
+            ])
+            .await
+            .expect("events");
+        let reader = MemoryReader::new(store);
+        let wide = QueryScope::operator_wide(occurred());
+        let days = reader
+            .page_requests_daily(&wide, "2026-10-14", "2026-10-15")
+            .await
+            .expect("days");
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].day, "2026-10-14");
+        assert_eq!(days[0].requests, 3);
+        assert_eq!(days[0].not_found, 1);
+        assert_eq!(
+            days[0].bot_class_mix,
+            vec![
+                ("search_engine_bot".to_string(), 1),
+                ("unclassified".to_string(), 2),
+            ]
+        );
+        assert_eq!(days[1].day, "2026-10-15");
+        assert_eq!(days[1].requests, 1);
+        assert_eq!(days[1].not_found, 1);
+        assert_eq!(
+            days[1].bot_class_mix,
+            vec![("automation_client".to_string(), 1)]
+        );
+
+        // Inclusive bounds; an empty bound is unbounded on that side.
+        let single = reader
+            .page_requests_daily(&wide, "2026-10-14", "2026-10-14")
+            .await
+            .expect("single day");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].day, "2026-10-14");
+        let all = reader
+            .page_requests_daily(&wide, "", "")
+            .await
+            .expect("unbounded");
+        assert_eq!(all, days);
+
+        // The family is site-wide: tenant, platform, currency and a scope
+        // day range are NOT filters, so a tampered scope changes nothing.
+        let tampered = QueryScope::new("northstar", occurred())
+            .with_platform("applovin_max")
+            .with_currency("EUR")
+            .with_day_range("2020-01-01", "2020-01-02");
+        let same = reader
+            .page_requests_daily(&tampered, "2026-10-14", "2026-10-15")
+            .await
+            .expect("wide");
+        assert_eq!(same, days, "a tampered scope changes nothing");
+        // The scope range is only a fallback for an empty argument.
+        let fallback = reader
+            .page_requests_daily(&tampered, "", "")
+            .await
+            .expect("fallback");
+        assert!(fallback.is_empty(), "{fallback:?}");
     }
 
     #[tokio::test]

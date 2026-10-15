@@ -861,6 +861,7 @@ async fn growth(
             .map_err(|error| error.reason),
         None => Err("no cohort is selected yet".to_string()),
     };
+    let site_requests = state.data.site_requests_last_30_days(state.as_of()).await;
     html_response(
         StatusCode::OK,
         pages::growth::render(
@@ -869,6 +870,7 @@ async fn growth(
                 cohorts,
                 selected_cohort: selected,
                 funnel,
+                site_requests,
             },
         ),
     )

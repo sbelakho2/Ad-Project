@@ -381,7 +381,8 @@ impl Runner {
                     &self.publisher_id,
                     now_unix_ms,
                 )
-                .await,
+                .await
+                .map_err(|error| PlanError::Validation(error.to_string()))?,
             );
             // Only a pass that read new lines advances the cursor; a read
             // failure above left it untouched so the batch is retried.

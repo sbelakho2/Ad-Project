@@ -19,6 +19,10 @@ pub struct GrowthData {
     pub selected_cohort: Option<String>,
     /// The funnel of the selected cohort.
     pub funnel: Result<ActivationFunnel, String>,
+    /// Site requests over the last 30 days from the edge access log, when the
+    /// analytics reader answered. `None` renders nothing: an unavailable read
+    /// is not a zero.
+    pub site_requests: Option<u64>,
 }
 
 /// Render the growth page.
@@ -66,6 +70,11 @@ pub fn render(meta: &PageMeta, data: &GrowthData) -> String {
                 Ok(funnel) => {
                     body.push_str(&render_funnel(funnel));
                 }
+            }
+            if let Some(count) = data.site_requests {
+                body.push_str(&format!(
+                    "<p class=\"table-note\">Site requests, last 30 days: {count} (edge access log)</p>"
+                ));
             }
             body.push_str(&render_cohort_table(cohorts, &selected));
         }
@@ -247,8 +256,38 @@ mod tests {
                 cohorts: Ok(demo.growth_cohorts()),
                 selected_cohort: Some(cohort_month.to_string()),
                 funnel: demo.activation_funnel(cohort_month).map_err(|e| e.reason),
+                site_requests: Some(demo.site_requests_last_30_days()),
             },
         )
+    }
+
+    #[test]
+    fn site_requests_render_as_one_factual_context_line() {
+        let demo = DemoData::new();
+        let base = GrowthData {
+            cohorts: Ok(demo.growth_cohorts()),
+            selected_cohort: Some("2026-08".to_string()),
+            funnel: demo.activation_funnel("2026-08").map_err(|e| e.reason),
+            site_requests: Some(18_240),
+        };
+        let html = render(&meta(), &base);
+        assert!(
+            html.contains("Site requests, last 30 days: 18240 (edge access log)"),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("Site requests, last 30 days:").count(),
+            1,
+            "exactly one context line"
+        );
+        // An unavailable read renders nothing, never a fabricated zero.
+        let unavailable = GrowthData {
+            site_requests: None,
+            ..base
+        };
+        let html = render(&meta(), &unavailable);
+        assert!(!html.contains("Site requests, last 30 days:"), "{html}");
+        assert!(!html.contains(": 0 ("), "{html}");
     }
 
     #[test]

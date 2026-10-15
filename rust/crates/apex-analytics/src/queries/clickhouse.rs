@@ -19,14 +19,15 @@
 
 use async_trait::async_trait;
 
-use crate::envelope::DomainEvent;
+use crate::envelope::{DomainEvent, EventType};
 use crate::projections::OperatorQueueRow;
 use crate::store::{domain_event_from_row, ClickHouseStore, ReportDayRow, StoreError};
 
 use super::dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
     ExperimentLandscapeRow, FeeDetail, FeeRow, GrowthCohortRow, IngestionHealthRow, LiftRow, Money,
-    ObjectTimelineEntry, OperatorQueues, QueryScope, RevenueBreakdownRow, RevenueDailyRow,
+    ObjectTimelineEntry, OperatorQueues, PageRequestsDay, QueryScope, RevenueBreakdownRow,
+    RevenueDailyRow,
 };
 use super::model;
 use super::AnalyticsReader;
@@ -148,6 +149,29 @@ fn duplicate_scan_select(database: &str) -> String {
          WHERE ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
          \x20 AND ({{from:String}} = '' OR toDate(occurred_at_utc) >= toDateOrZero({{from:String}}))\n\
          \x20 AND ({{to:String}} = '' OR toDate(occurred_at_utc) <= toDateOrZero({{to:String}}))"
+    )
+}
+
+/// The site-wide daily page-request aggregation.
+///
+/// The `public_page_requested` family carries no tenant identity, so the
+/// statement binds only the event type and the day bounds: no publisher,
+/// platform or currency filter may appear, or every request would silently
+/// disappear. It groups into (day, bot class) counts server-side and never
+/// returns a request row.
+fn page_requests_select(database: &str) -> String {
+    format!(
+        "SELECT toString(toDate(occurred_at_utc)) AS day, \
+         toString(count()) AS requests, \
+         toString(countIf(JSONExtractUInt(payload_json, 'status') = 404)) AS not_found, \
+         JSONExtractString(payload_json, 'bot_class') AS bot_class, \
+         toString(count()) AS bot_requests \
+         FROM {database}.domain_events FINAL\n\
+         WHERE event_type = {{event_type:String}}\n\
+         \x20 AND ({{from:String}} = '' OR toDate(occurred_at_utc) >= toDateOrZero({{from:String}}))\n\
+         \x20 AND ({{to:String}} = '' OR toDate(occurred_at_utc) <= toDateOrZero({{to:String}}))\n\
+         GROUP BY day, bot_class\n\
+         ORDER BY day, bot_class"
     )
 }
 
@@ -461,6 +485,65 @@ impl AnalyticsReader for ClickHouseReader {
             cohort_month,
         ))
     }
+
+    async fn page_requests_daily(
+        &self,
+        scope: &QueryScope,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<Vec<PageRequestsDay>, StoreError> {
+        // Site-wide by design: the statement binds only the day bounds,
+        // never publisher/platform/currency, and aggregates server-side.
+        let from = model::effective_day_bound(from_day, scope.from_day.as_deref());
+        let to = model::effective_day_bound(to_day, scope.to_day.as_deref());
+        let select = page_requests_select(self.store.database());
+        let rows = self
+            .store
+            .fetch_rows(
+                &select,
+                &[
+                    ("event_type", EventType::PublicPageRequested.as_str()),
+                    ("from", from.as_str()),
+                    ("to", to.as_str()),
+                ],
+            )
+            .await?;
+        let mut days: Vec<PageRequestsDay> = Vec::new();
+        for row in &rows {
+            let text = |key: &str| {
+                row.get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| StoreError::Json(format!("missing column '{key}'")))
+            };
+            let day = text("day")?.to_string();
+            let requests = crate::store::json_u64(row.get("requests"))
+                .ok_or_else(|| StoreError::Json("missing column 'requests'".to_string()))?;
+            let not_found = crate::store::json_u64(row.get("not_found"))
+                .ok_or_else(|| StoreError::Json("missing column 'not_found'".to_string()))?;
+            let bot_requests = crate::store::json_u64(row.get("bot_requests"))
+                .ok_or_else(|| StoreError::Json("missing column 'bot_requests'".to_string()))?;
+            // A row without a stored class is reported as `unknown`, exactly
+            // like the portable aggregation, never guessed at.
+            let bot_class = match text("bot_class")? {
+                "" => "unknown".to_string(),
+                class => class.to_string(),
+            };
+            match days.last_mut() {
+                Some(entry) if entry.day == day => {
+                    entry.requests += requests;
+                    entry.not_found += not_found;
+                    entry.bot_class_mix.push((bot_class, bot_requests));
+                }
+                _ => days.push(PageRequestsDay {
+                    day,
+                    requests,
+                    not_found,
+                    bot_class_mix: vec![(bot_class, bot_requests)],
+                }),
+            }
+        }
+        Ok(days)
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +603,41 @@ mod tests {
             .experiment_effectiveness(&scope, "2026-10")
             .await
             .is_err());
+        assert!(reader
+            .page_requests_daily(&scope, "2026-10-01", "2026-10-14")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn the_page_request_aggregation_is_site_wide_and_count_only() {
+        let sql = page_requests_select("apex");
+        assert!(sql.contains("FROM apex.domain_events FINAL"), "{sql}");
+        assert!(sql.contains("event_type = {event_type:String}"), "{sql}");
+        assert!(
+            sql.contains(
+                "toString(countIf(JSONExtractUInt(payload_json, 'status') = 404)) AS not_found"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUP BY day, bot_class"), "{sql}");
+        assert!(sql.contains("ORDER BY day, bot_class"), "{sql}");
+        // No tenant filter may appear: the family is site-wide, and a
+        // publisher/platform/currency predicate would silently hide every
+        // request (no event carries those fields).
+        for bound in [
+            "{publisher:String}",
+            "{platform:String}",
+            "{currency:String}",
+            "publisher_id",
+            "platform =",
+        ] {
+            assert!(!sql.contains(bound), "{bound} must not be bound: {sql}");
+        }
+        assert!(
+            !sql.contains("SELECT *") && !sql.contains("payload_json FROM"),
+            "counts only, never rows: {sql}"
+        );
     }
 
     #[test]

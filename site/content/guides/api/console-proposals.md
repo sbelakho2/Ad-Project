@@ -2,7 +2,7 @@
 title = "Console proposals | Apex API reference"
 description = "Review a proposed change and record an approve or decline decision."
 template = "api.html"
-weight = 13
+weight = 14
 
 [extra]
 h1 = "Console proposals"

@@ -2,7 +2,7 @@
 title = "Console experiments | Apex API reference"
 description = "List and inspect tests with GET-link filters and tabs; incident recovery state."
 template = "api.html"
-weight = 14
+weight = 15
 
 [extra]
 h1 = "Console experiments"

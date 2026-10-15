@@ -7,7 +7,10 @@
 //!   appended to the spool instead of being lost; [`SpoolSink::replay_spool`]
 //!   re-emits spooled batches and truncates only after they are delivered.
 //!   Corrupt spool lines are preserved to a `.dead` sibling file, never
-//!   dropped silently.
+//!   dropped silently. Rewrites (truncation and keeping undelivered lines)
+//!   go through a `<spool>.tmp` sibling and a rename, so a crash mid-rewrite
+//!   leaves the old complete file or the new complete file, never a
+//!   truncated one.
 //!
 //! Delivery is at-least-once by construction: a crash between a successful
 //! insert and the spool truncation replays the batch, and the store's
@@ -295,27 +298,45 @@ impl<S: EventSink> SpoolSink<S> {
                 if !remaining_text.is_empty() {
                     remaining_text.push('\n');
                 }
-                tokio::fs::write(&self.spool_path, remaining_text)
-                    .await
-                    .map_err(|write_error| SinkError::Spool {
-                        path: self.spool_path.display().to_string(),
-                        reason: write_error.to_string(),
-                    })?;
+                replace_file(&self.spool_path, &remaining_text).await?;
                 return Err(error);
             }
         };
-        tokio::fs::write(&self.spool_path, "")
-            .await
-            .map_err(|error| SinkError::Spool {
-                path: self.spool_path.display().to_string(),
-                reason: error.to_string(),
-            })?;
+        replace_file(&self.spool_path, "").await?;
         Ok(ReplayOutcome {
             replayed,
             corrupt,
             remaining: 0,
         })
     }
+}
+
+/// Replace `path` with `contents` through a `<path>.tmp` sibling and a
+/// rename (write, flush, rename): a crash mid-rewrite leaves either the old
+/// complete file or the new complete file, never a truncated spool.
+async fn replace_file(path: &Path, contents: &str) -> Result<(), SinkError> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    let tmp_path = PathBuf::from(name);
+    use tokio::io::AsyncWriteExt;
+    let write_error = |error: std::io::Error| SinkError::Spool {
+        path: tmp_path.display().to_string(),
+        reason: error.to_string(),
+    };
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(write_error)?;
+    file.write_all(contents.as_bytes())
+        .await
+        .map_err(write_error)?;
+    file.flush().await.map_err(write_error)?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|error| SinkError::Spool {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })
 }
 
 #[async_trait]
@@ -579,5 +600,55 @@ mod tests {
         let error: SinkError = StoreError::SchemaNotReady.into();
         assert!(matches!(error, SinkError::Store(_)));
         assert!(error.to_string().contains("schema is not ready"));
+    }
+
+    #[tokio::test]
+    async fn spool_rewrites_are_atomic_replacements() {
+        let directory =
+            std::env::temp_dir().join(format!("apex-analytics-atomic-{}", std::process::id()));
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let spool = directory.join("ingest.jsonl");
+        let mut tmp_name = spool.as_os_str().to_os_string();
+        tmp_name.push(".tmp");
+        let tmp = PathBuf::from(tmp_name);
+
+        // A pre-existing spool with one deliverable line and one dead line:
+        // after the rewrite the file holds exactly the intended content and
+        // no temp sibling remains, so the rewrite was a replacement rather
+        // than a truncate-and-write.
+        let good = serde_json::to_string(&valid_event(EventType::JobRun).to_row()).expect("row");
+        tokio::fs::write(&spool, format!("{good}\nnot json at all\n"))
+            .await
+            .expect("write spool");
+        let store = Arc::new(MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let client = AnalyticsClient::new(store.clone(), "production", "apex-0.1.0");
+        let sink = SpoolSink::new(client, spool.clone());
+        let replay = sink.replay_spool().await.expect("replay");
+        assert_eq!(replay.replayed, 1);
+        assert_eq!(replay.corrupt, 1);
+        let after = tokio::fs::read_to_string(&spool)
+            .await
+            .expect("empty spool");
+        assert_eq!(after, "", "the truncation is the intended complete content");
+        assert!(!tmp.exists(), "no temp file remains");
+
+        // A failed delivery keeps the undelivered lines: the kept file is
+        // exactly the intended content, again with no temp sibling.
+        let cold = Arc::new(MemoryStore::new());
+        let client = AnalyticsClient::new(cold, "production", "apex-0.1.0");
+        let sink = SpoolSink::new(client, spool.clone());
+        tokio::fs::write(&spool, format!("{good}\n"))
+            .await
+            .expect("write spool");
+        assert!(sink.replay_spool().await.is_err());
+        let kept = tokio::fs::read_to_string(&spool).await.expect("kept spool");
+        assert_eq!(
+            kept,
+            format!("{good}\n"),
+            "the undelivered line stays complete"
+        );
+        assert!(!tmp.exists(), "no temp file remains");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

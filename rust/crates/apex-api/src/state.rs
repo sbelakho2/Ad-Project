@@ -68,7 +68,8 @@ pub struct AppState {
     pub connection_validator: Option<Arc<LiveAuditor>>,
     /// The proposal files the runner writes (`APEX_PROPOSALS_ROOT`).
     pub proposal_store: Option<Arc<dyn crate::proposals::ProposalStore>>,
-    /// The runner's alert log for incident states (`APEX_ALERTS_FILE`).
+    /// The runner's alert log for incident states (`APEX_ALERT_FILE`, with
+    /// `APEX_ALERTS_FILE` as a fallback).
     pub alerts_path: Option<std::path::PathBuf>,
     /// The Adyen collection log for payment reads (`APEX_COLLECTION_FILE`).
     pub collection_log_path: Option<std::path::PathBuf>,

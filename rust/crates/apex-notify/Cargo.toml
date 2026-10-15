@@ -18,4 +18,5 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
+apex-ui = { path = "../apex-ui" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

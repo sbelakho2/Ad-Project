@@ -13,6 +13,13 @@
 //! their values), and a bounded bot classification. It never copies the
 //! client address, the raw user agent, the raw path or any query value.
 //!
+//! Each parsed line stands for a `public_page_requested` domain event
+//! ([`event_for_row`]): the bounded route template, status, bot class and the
+//! KEYS of campaign parameters that appeared, and nothing else. The event
+//! payload carries no values and no referrer host, so the 90-day raw event
+//! store holds only classification facts while the 30-day `request_logs`
+//! row keeps the fuller sanitized set; both are written by `apex-ingest`.
+//!
 //! The deployment Caddyfile needs a JSON access log on the site block:
 //!
 //! ```text
@@ -25,7 +32,8 @@
 //! ```
 //!
 //! `apex-ingest /var/log/caddy/apex-access.json` then writes one sanitized
-//! `request_logs` row per request line (30-day retention).
+//! `request_logs` row and one `public_page_requested` event per request line
+//! (30-day and 90-day retention respectively).
 
 use serde::Deserialize;
 
@@ -248,10 +256,10 @@ struct CaddyHeaders {
 /// and never counted as pages.
 ///
 /// The row is assembled only after the equivalent `public_page_requested`
-/// envelope validates, so the envelope's value checks (credentials, raw
-/// query strings and token-looking blobs are refused) still guard every
-/// field, and the derived event identity becomes the row identity so a
-/// replay of one line stays recognizable.
+/// envelope ([`event_for_row`]) validates, so the envelope's value checks
+/// (credentials, raw query strings and token-looking blobs are refused) still
+/// guard every field, and the derived event identity becomes the row identity
+/// so a replay of one line stays recognizable.
 pub fn parse_line(
     line: &str,
     defaults: &AccessLogDefaults,
@@ -290,33 +298,10 @@ pub fn parse_line(
         None => (Vec::new(), None),
     };
 
-    let payload = crate::envelope::EventPayload {
-        route_template: Some(route_template.clone()),
-        status: Some(status),
-        referrer_host: referrer_host.clone(),
-        campaign_code: campaign_code.clone(),
-        bot_class: Some(bot_class.as_str().to_string()),
-        query_keys: if query_keys.is_empty() {
-            None
-        } else {
-            Some(query_keys.clone())
-        },
-        ..crate::envelope::EventPayload::default()
-    };
-    let event = DomainEvent::builder(EventType::PublicPageRequested, EventSource::AccessLog)
-        .with_occurred_at(occurred)
-        .with_received_at(defaults.received_at)
-        .with_environment(defaults.environment.clone())
-        .with_service_version(defaults.service_version.clone())
-        .with_object("document", route_template.clone())
-        .with_outcome(status_class(status))
-        .with_payload(payload)
-        .build()
-        .map_err(|error| AccessLogError::Validation(error.to_string()))?;
-    Ok(Some(RequestLogRow {
-        event_id: event.event_id,
-        occurred_at_utc: event.occurred_at_utc,
-        received_at_utc: event.received_at_utc,
+    let mut row = RequestLogRow {
+        event_id: String::new(),
+        occurred_at_utc: occurred,
+        received_at_utc: defaults.received_at,
         route_template,
         status,
         status_class: status_class(status),
@@ -324,8 +309,54 @@ pub fn parse_line(
         referrer_host,
         campaign_code,
         query_keys,
-        environment: event.environment,
-    }))
+        environment: defaults.environment.clone(),
+    };
+    let event = event_for_row(&row, defaults)?;
+    row.event_id = event.event_id;
+    Ok(Some(row))
+}
+
+/// The `public_page_requested` event a sanitized row stands for.
+///
+/// The payload carries only the bounded catalog minimum: the route template,
+/// the status, the bot classification and the KEYS of the campaign
+/// parameters that appeared. It never carries campaign values, the referrer
+/// host or the other query keys; those live only in the 30-day
+/// `request_logs` row. The event id is derived from exactly these bounded
+/// fields, so the parse path (which derives the row identity from this
+/// event) and a spool replay (which rebuilds the event from the row) agree
+/// on one stable id for one request line.
+pub fn event_for_row(
+    row: &RequestLogRow,
+    defaults: &AccessLogDefaults,
+) -> Result<DomainEvent, AccessLogError> {
+    let campaign_keys: Vec<String> = row
+        .query_keys
+        .iter()
+        .filter(|key| CAMPAIGN_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    let payload = crate::envelope::EventPayload {
+        route_template: Some(row.route_template.clone()),
+        status: Some(row.status),
+        bot_class: Some(row.bot_class.clone()),
+        query_keys: if campaign_keys.is_empty() {
+            None
+        } else {
+            Some(campaign_keys)
+        },
+        ..crate::envelope::EventPayload::default()
+    };
+    DomainEvent::builder(EventType::PublicPageRequested, EventSource::AccessLog)
+        .with_occurred_at(row.occurred_at_utc)
+        .with_received_at(row.received_at_utc)
+        .with_environment(row.environment.clone())
+        .with_service_version(defaults.service_version.clone())
+        .with_object("document", row.route_template.clone())
+        .with_outcome(row.status_class.clone())
+        .with_payload(payload)
+        .build()
+        .map_err(|error| AccessLogError::Validation(error.to_string()))
 }
 
 fn parse_timestamp(ts: Option<&serde_json::Value>) -> Result<UtcMillis, AccessLogError> {
@@ -679,6 +710,84 @@ mod tests {
             .expect("row");
         assert_eq!(first.event_id, second.event_id);
         assert_eq!(first.event_id.len(), 32);
+    }
+
+    #[test]
+    fn the_event_carries_only_bounded_classification_facts() {
+        let record = line(
+            "/pricing?utm_campaign=fall%20launch&utm_source=newsletter&token=SECRET&campaign=spring",
+            404,
+            "Googlebot/2.1",
+            "https://news.example.com/article?ref=1",
+        );
+        let row = parse_line(&record, &defaults())
+            .expect("parse")
+            .expect("row");
+        let event = event_for_row(&row, &defaults()).expect("event");
+        assert_eq!(event.event_type, EventType::PublicPageRequested);
+        assert_eq!(event.source, EventSource::AccessLog);
+        assert_eq!(event.event_id, row.event_id, "one identity for one line");
+        assert_eq!(event.payload.route_template.as_deref(), Some("/pricing"));
+        assert_eq!(event.payload.status, Some(404));
+        assert_eq!(
+            event.payload.bot_class.as_deref(),
+            Some("search_engine_bot")
+        );
+        assert_eq!(
+            event.payload.query_keys,
+            Some(vec!["campaign".to_string(), "utm_campaign".to_string()]),
+            "the campaign KEYS only"
+        );
+        assert_eq!(event.payload.campaign_code, None, "no campaign values");
+        assert_eq!(event.payload.referrer_host, None, "no referrer host");
+        assert_eq!(event.outcome.as_deref(), Some("4xx"));
+        assert_eq!(event.object_type.as_deref(), Some("document"));
+        assert_eq!(event.object_id.as_deref(), Some("/pricing"));
+        // Neither a query value, a campaign code, a referrer host nor the
+        // raw user agent reaches the event; the row keeps its sanitized set.
+        let json = serde_json::to_string(&event.to_row()).expect("event json");
+        for forbidden in [
+            "SECRET",
+            "falllaunch",
+            "spring",
+            "news.example.com",
+            "Googlebot",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden} leaked: {json}");
+        }
+        assert_eq!(row.campaign_code.as_deref(), Some("spring"));
+        assert_eq!(row.referrer_host.as_deref(), Some("news.example.com"));
+        assert_eq!(row.bot_class, "search_engine_bot");
+    }
+
+    #[test]
+    fn replay_rebuilds_the_identical_event_from_a_spooled_row() {
+        let record = line("/for-publishers?utm_campaign=launch", 200, "curl/8.4.0", "");
+        let row = parse_line(&record, &defaults())
+            .expect("parse")
+            .expect("row");
+        let rebuilt = event_for_row(&row, &defaults()).expect("rebuilt");
+        assert_eq!(rebuilt.event_id, row.event_id);
+        assert_eq!(
+            rebuilt.payload.query_keys,
+            Some(vec!["utm_campaign".into()])
+        );
+        // The row carries its own environment, so a spooled row replays with
+        // the labels it was parsed under, and the identity excludes them.
+        let mut moved = row.clone();
+        moved.environment = "staging".into();
+        let rebuilt = event_for_row(&moved, &defaults()).expect("rebuilt staging");
+        assert_eq!(rebuilt.environment, "staging");
+        assert_eq!(rebuilt.event_id, moved.event_id);
+
+        // No campaign parameter means no campaign keys on the event.
+        let plain = line("/pricing?utm_source=news", 200, "Mozilla/5.0", "");
+        let row = parse_line(&plain, &defaults())
+            .expect("parse")
+            .expect("row");
+        assert_eq!(row.query_keys, vec!["utm_source"]);
+        let event = event_for_row(&row, &defaults()).expect("event");
+        assert_eq!(event.payload.query_keys, None);
     }
 
     #[test]

@@ -495,8 +495,10 @@ fn evidence_value(key: &str, value: &serde_json::Value, currency: &str) -> Strin
     }
 }
 
-/// Render the RFC 4180 CSV of one filtered report. Every field is quoted
-/// through [`apex_ui::format::csv_field`]; dates stay UTC.
+/// Render the RFC 4180 CSV of one filtered report. Text columns go through
+/// [`apex_ui::format::csv_text_field`] (spreadsheet formula triggers are
+/// neutralised), the numeric micros column keeps its plain form, and every
+/// line ends CRLF; dates stay UTC.
 pub fn render_audit_csv(view: &AuditReportView<'_>, currency: &str) -> String {
     let headers = [
         "severity",
@@ -521,28 +523,25 @@ pub fn render_audit_csv(view: &AuditReportView<'_>, currency: &str) -> String {
     out.push_str("\r\n");
     let captured = utc_datetime(view.snapshot.fetched_at_unix_ms);
     for finding in &view.report.findings {
-        let fields = [
-            severity_label(finding.severity).to_lowercase(),
-            finding.rule.as_str().to_string(),
-            finding.platform.as_str().to_string(),
-            finding.subject.clone(),
-            finding_id(
+        let line = vec![
+            format::csv_text_field(&severity_label(finding.severity).to_lowercase()),
+            format::csv_text_field(finding.rule.as_str()),
+            format::csv_text_field(finding.platform.as_str()),
+            format::csv_text_field(&finding.subject),
+            format::csv_text_field(&finding_id(
                 finding.rule.as_str(),
                 finding.platform.as_str(),
                 &finding.subject,
-            ),
-            finding.message.clone(),
-            recovery_model(finding).unwrap_or("missing").to_string(),
-            finding.estimated_monthly_recovery.to_string(),
-            currency.to_string(),
-            captured.clone(),
-            view.report.snapshot_digest.clone(),
-            view.report.generated_by.to_string(),
+            )),
+            format::csv_text_field(&finding.message),
+            format::csv_text_field(recovery_model(finding).unwrap_or("missing")),
+            // Numeric: never prefixed, so the number stays machine-readable.
+            format::csv_field(&finding.estimated_monthly_recovery.to_string()),
+            format::csv_text_field(currency),
+            format::csv_text_field(&captured),
+            format::csv_text_field(&view.report.snapshot_digest),
+            format::csv_text_field(view.report.generated_by),
         ];
-        let line: Vec<String> = fields
-            .iter()
-            .map(|value| format::csv_field(value))
-            .collect();
         out.push_str(&line.join(","));
         out.push_str("\r\n");
     }
@@ -912,6 +911,63 @@ mod tests {
         assert!(csv.contains("420000000"));
         assert!(csv.ends_with("\r\n"));
         assert_eq!(csv.lines().count(), 2);
+    }
+
+    #[test]
+    fn csv_neutralizes_formula_text_cells_and_keeps_numbers() {
+        let ctx = ConsoleCtx::default();
+        let snapshot = snapshot();
+        let mut hostile = finding(
+            RuleId::StaleFloor,
+            Severity::Critical,
+            "=cmd|' /C calc'!A0",
+            "not_applicable",
+            -120,
+        );
+        hostile.message = "@user".to_string();
+        hostile.evidence = serde_json::json!({
+            "recovery_model": "+SUM(1,1)",
+            "estimated_monthly_recovery_micros": -120,
+        });
+        let mut report = report(vec![hostile]);
+        report.snapshot_digest = "-abc".to_string();
+        let csv = render_audit_csv(
+            &AuditReportView {
+                platform: PlatformId::Admob,
+                snapshot: &snapshot,
+                report: &report,
+            },
+            &ctx.currency,
+        );
+        // The formula triggers are prefixed with an apostrophe; the +SUM
+        // value is quoted because it contains a comma.
+        assert!(
+            csv.contains("'=cmd|' /C calc'!A0"),
+            "subject is neutralised: {csv}"
+        );
+        assert!(csv.contains(",'@user,"), "message is neutralised: {csv}");
+        assert!(
+            csv.contains("\"'+SUM(1,1)\""),
+            "recovery model is neutralised and quoted: {csv}"
+        );
+        assert!(csv.contains(",'-abc,"), "digest is neutralised: {csv}");
+        // The numeric micros column is untouched.
+        assert!(csv.contains(",-120,USD,"), "the number stays plain: {csv}");
+        assert!(
+            !csv.contains("'-120"),
+            "a plain negative number is never apostrophe-prefixed: {csv}"
+        );
+        // Raw bytes: every line ends CRLF and there is no lone LF.
+        assert!(csv.ends_with("\r\n"));
+        for (index, byte) in csv.bytes().enumerate() {
+            if byte == b'\n' {
+                assert!(
+                    index > 0 && csv.as_bytes()[index - 1] == b'\r',
+                    "lone LF at byte {index}"
+                );
+            }
+        }
+        assert_eq!(csv.matches("\r\n").count(), 2, "header plus one finding");
     }
 
     #[test]

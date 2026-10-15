@@ -24,6 +24,7 @@
 //! | route | success | states |
 //! |---|---|---|
 //! | `GET /` | `200` overview | first-run state when no source exists |
+//! | `GET /console` | `303` to the change log | — |
 //! | `GET /console/audit` | `200` form or report | `400` bad query / unknown platform, `404` no snapshot, `500` read failure |
 //! | `GET /console/audit/findings/{id}` | `200` finding detail | `404` unknown id, `500` read failure |
 //! | `GET /console/audit/export.csv` | `200` RFC 4180 CSV | `400` missing or unknown platform, `404` no snapshot, `500` read failure |
@@ -49,7 +50,7 @@
 //! | `POST /console/settings/access/revoke` | `303` | `303` without a session, `400` bad handle or CSRF |
 //! | `GET /console/settings/policy` | `200` recorded policy | — |
 //! | `GET /console/settings/monitoring` | `200` health and plan | `500` connection store read failure |
-//! | `GET /console/analytics?view=&format=csv` | `200` tab or CSV | `400` unknown view or platform filter, `503` analytics store not configured |
+//! | `GET /console/analytics?view=&format=csv` | `200` tab, or CSV | `400` unknown view or platform filter, `503` store not configured (CSV exports answer `503 text/plain` with the reason) |
 //! | `POST /free-audit` | `303` to `/audit-requested/?ref=` | `400` field errors, `500`/`503` storage failure |
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
@@ -104,6 +105,8 @@ pub const MAX_BODY_BYTES: usize = 256 * 1024;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(console_overview))
+        .route("/console", get(console_bare))
+        .route("/console/", get(console_bare))
         .route("/console/audit", get(console_audit))
         .route("/console/audit/export.csv", get(console_audit_csv))
         .route("/console/audit/findings/{id}", get(console_finding))
@@ -611,6 +614,13 @@ async fn console_overview(State(state): State<AppState>) -> Html<String> {
     let ctx = ConsoleCtx::from_env();
     let data = collect_overview(&state).await;
     Html(overview::render(&ctx, &data))
+}
+
+/// `GET /console`: the bare address the deployment proxy routes to this
+/// service and the docs advertise as the change log, redirected to its
+/// stable location.
+async fn console_bare() -> Response {
+    Redirect::to("/console/ledger").into_response()
 }
 
 /// Read the real overview inputs: the newest snapshot across the three
@@ -1919,18 +1929,33 @@ async fn console_proposal_decision(
     };
     match store.record_decision(&id, &record).await {
         Ok(crate::proposals::DecisionOutcome::Recorded) => {
-            match decision {
+            // The emitted event derives from the winning record read back
+            // from disk: the published decision file is the single source of
+            // truth, so a request that lost an approve/decline race can never
+            // make the event state the loser's intent.
+            let durable = match store.approval(&id).await {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    return proposal_store_failure(
+                        &state,
+                        &ctx,
+                        ApiError::Internal("approval record missing after publish".to_string()),
+                    )
+                }
+                Err(error) => return proposal_store_failure(&state, &ctx, error),
+            };
+            match durable.decision {
                 crate::proposals::ApprovalDecision::Approved => {
                     state
                         .analytics
                         .emit_proposal_approved(
-                            now,
+                            durable.decided_at_unix_ms,
                             &publisher,
                             &id,
-                            &proposal.snapshot,
-                            &change_hash,
-                            &proposal.policy_version,
-                            crate::proposals::APPROVAL_ACTOR,
+                            &durable.snapshot,
+                            &durable.change_hash,
+                            &durable.policy_version,
+                            &durable.approval_actor,
                         )
                         .await;
                 }
@@ -1938,12 +1963,12 @@ async fn console_proposal_decision(
                     state
                         .analytics
                         .emit_proposal_declined(
-                            now,
+                            durable.decided_at_unix_ms,
                             &publisher,
                             &id,
-                            &proposal.snapshot,
-                            &change_hash,
-                            &proposal.policy_version,
+                            &durable.snapshot,
+                            &durable.change_hash,
+                            &durable.policy_version,
                         )
                         .await;
                 }
@@ -1955,6 +1980,9 @@ async fn console_proposal_decision(
             Redirect::to(&format!("/console/proposals/{id}")).into_response()
         }
         Ok(crate::proposals::DecisionOutcome::AlreadyDecided) => {
+            // The losing request reports the winner's recorded decision, so
+            // the page and the durable file always agree.
+            let winner = store.approval(&id).await.ok().flatten();
             let (_, session) = live_session(&state, &headers);
             page(
                 StatusCode::CONFLICT,
@@ -1964,7 +1992,7 @@ async fn console_proposal_decision(
                         publisher: &publisher,
                         id: &id,
                         proposal: &proposal,
-                        approval: None,
+                        approval: winner.as_ref(),
                         expired: false,
                         csrf: session.as_ref().map(|session| session.csrf.as_str()),
                         refusal: Some(
@@ -2535,6 +2563,17 @@ fn default_window(now_unix_ms: i64) -> (String, String) {
     (from, yesterday)
 }
 
+/// The `?format=csv` answer when no store can serve the export: a machine
+/// client must get a status and a plain-text reason, never an HTML page.
+fn csv_unavailable(reason: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        format!("export unavailable: {reason}\n"),
+    )
+        .into_response()
+}
+
 /// `GET /console/analytics?view=...&format=csv`.
 async fn console_analytics(
     State(state): State<AppState>,
@@ -2601,6 +2640,9 @@ async fn console_analytics(
             .analytics
             .disabled_reason()
             .unwrap_or(crate::analytics::NOT_CONFIGURED_REASON);
+        if csv_requested {
+            return csv_unavailable(reason);
+        }
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
             crate::html::analytics::render(
@@ -2684,6 +2726,9 @@ async fn console_analytics(
         Ok(data) => data,
         Err(error) => {
             tracing::warn!(%error, "analytics read failed");
+            if csv_requested {
+                return csv_unavailable(crate::analytics::UNREACHABLE_REASON);
+            }
             let unavailable = crate::html::analytics::AnalyticsPageData::unavailable(
                 &publisher,
                 tab,

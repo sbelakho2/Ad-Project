@@ -24,6 +24,7 @@ og_image = "og/guides.png"
 | [Console audit](/guides/api/console-audit/) | GET /console/audit, findings and export.csv; GET query values keep views linkable. |
 | [Console ledger](/guides/api/console-ledger/) | Token exchange, verified records and the session end form. CSRF on every mutation. |
 | [Console connections](/guides/api/console-connections/) | Credential submit, rotate and disconnect per platform; secrets never round-trip. |
+| [Console proposal index](/guides/api/console-proposals-index/) | GET /console/proposals lists every proposal with its setting, creation time and decision state. |
 | [Console proposals](/guides/api/console-proposals/) | Review a proposal and record an approve or decline decision with an idempotency key. |
 | [Console experiments](/guides/api/console-experiments/) | GET-link filters and tabs, plus the incident recovery state. |
 | [Console billing](/guides/api/console-billing/) | The fee register and one invoice period with its calculation. |

@@ -2,7 +2,7 @@
 title = "Console billing | Apex API reference"
 description = "The fee register and one invoice period with its calculation on the publisher console."
 template = "api.html"
-weight = 15
+weight = 16
 
 [extra]
 h1 = "Console billing"

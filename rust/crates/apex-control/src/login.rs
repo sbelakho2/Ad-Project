@@ -75,10 +75,16 @@ impl PendingLogins {
         let mut inner = self.lock();
         inner.prune(now_ms, self.ttl_ms);
         while inner.pending.len() >= self.capacity {
+            // The oldest pending login is evicted; equal creation times fall
+            // back to the lexicographically smallest token so the victim does
+            // not depend on `HashMap` iteration order.
             let Some(oldest) = inner
                 .pending
                 .iter()
-                .min_by_key(|(_, pending)| pending.created_at_ms)
+                .min_by(|(left_token, left), (right_token, right)| {
+                    (left.created_at_ms, left_token.as_str())
+                        .cmp(&(right.created_at_ms, right_token.as_str()))
+                })
                 .map(|(token, _)| token.clone())
             else {
                 break;
@@ -220,6 +226,25 @@ mod tests {
         let _third = pending.open("c", None, T0 + 2);
         assert_eq!(pending.len(), 2);
         assert!(pending.get(&first, T0 + 3).is_none(), "oldest evicted");
+    }
+
+    #[test]
+    fn equal_timestamp_eviction_picks_the_smallest_token() {
+        let pending = PendingLogins::new(2, 60_000);
+        let first = pending.open("a", None, T0);
+        let second = pending.open("b", None, T0);
+        let _third = pending.open("c", None, T0);
+        assert_eq!(pending.len(), 2);
+        let (victim, survivor) = if first < second {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        assert!(
+            pending.get(victim, T0 + 1).is_none(),
+            "the smallest token is evicted when timestamps tie"
+        );
+        assert!(pending.get(survivor, T0 + 1).is_some());
     }
 
     #[test]

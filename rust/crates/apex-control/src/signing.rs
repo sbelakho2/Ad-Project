@@ -63,6 +63,18 @@ pub fn idempotency_fingerprint(key: &str) -> String {
     format!("sha256:{}", sha256_hex(key.as_bytes()))
 }
 
+/// The fingerprint binding an idempotency key to what it submitted: SHA-256
+/// over the capability/kind name, the target and the canonical payload JSON.
+/// A remembered result or durable job is a duplicate only when the key *and*
+/// this fingerprint match; the same key with a different fingerprint is a
+/// conflict.
+pub fn payload_fingerprint(kind: &str, target: &str, payload: &serde_json::Value) -> String {
+    format!(
+        "sha256:{}",
+        sha256_hex(format!("{kind}\n{target}\n{payload}").as_bytes())
+    )
+}
+
 /// A well-formed opaque token: exactly 32 lowercase hex characters.
 pub fn is_random_hex_32(value: &str) -> bool {
     value.len() == 32
@@ -132,6 +144,40 @@ mod tests {
         );
         assert_ne!(digest_json(&a), digest_json(&c));
         assert_eq!(digest_json(&a).len(), 64);
+    }
+
+    #[test]
+    fn payload_fingerprint_binds_kind_target_and_payload() {
+        let payload = serde_json::json!({"platform": "applovin_max", "account": "acct_1"});
+        let fingerprint = payload_fingerprint("retry_read", "acct_1", &payload);
+        assert!(fingerprint.starts_with("sha256:"));
+        assert_eq!(fingerprint.len(), "sha256:".len() + 64);
+        // The same action in any order of payload keys is the same payload.
+        assert_eq!(
+            fingerprint,
+            payload_fingerprint(
+                "retry_read",
+                "acct_1",
+                &serde_json::json!({"account": "acct_1", "platform": "applovin_max"})
+            )
+        );
+        // A different kind, target or payload is a different fingerprint.
+        assert_ne!(
+            fingerprint,
+            payload_fingerprint("job_retry", "acct_1", &payload)
+        );
+        assert_ne!(
+            fingerprint,
+            payload_fingerprint("retry_read", "acct_2", &payload)
+        );
+        assert_ne!(
+            fingerprint,
+            payload_fingerprint(
+                "retry_read",
+                "acct_1",
+                &serde_json::json!({"account": "acct_2"})
+            )
+        );
     }
 
     #[test]

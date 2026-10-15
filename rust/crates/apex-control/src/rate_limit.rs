@@ -154,12 +154,26 @@ impl Inner {
         });
     }
 
+    /// Evict the oldest entry: unlocked before locked, then the oldest
+    /// window, then the lexicographically smallest key. The final tie-break
+    /// keeps eviction independent of `HashMap` iteration order.
     fn evict_to(&mut self, capacity: usize) {
         while self.attempts.len() > capacity {
             let Some(oldest) = self
                 .attempts
                 .iter()
-                .min_by_key(|(_, attempts)| (attempts.locked_until_ms, attempts.window_start_ms))
+                .min_by(|(left_key, left), (right_key, right)| {
+                    (
+                        left.locked_until_ms,
+                        left.window_start_ms,
+                        left_key.as_str(),
+                    )
+                        .cmp(&(
+                            right.locked_until_ms,
+                            right.window_start_ms,
+                            right_key.as_str(),
+                        ))
+                })
                 .map(|(key, _)| key.clone())
             else {
                 break;
@@ -253,6 +267,26 @@ mod tests {
         // Long after every window the entries are pruned to nothing.
         assert_eq!(limiter.check("k9", T0 + 10_000_000), LimitVerdict::Allowed);
         assert!(limiter.is_empty(), "{}", limiter.len());
+    }
+
+    #[test]
+    fn eviction_with_equal_timestamps_is_deterministic() {
+        let limiter = AttemptLimiter::new(2, 2, 60_000, 300_000);
+        assert_eq!(limiter.record_failure("b", T0), LimitVerdict::Allowed);
+        assert_eq!(limiter.record_failure("a", T0), LimitVerdict::Allowed);
+        // Both entries share locked_until and window_start, so the
+        // lexicographically smallest key ("a") is the victim.
+        assert_eq!(limiter.record_failure("c", T0), LimitVerdict::Allowed);
+        assert_eq!(limiter.len(), 2);
+        // "b" kept its first failure, so a second one locks it.
+        assert_eq!(
+            limiter.record_failure("b", T0 + 1),
+            LimitVerdict::Locked {
+                until_ms: T0 + 1 + 300_000
+            }
+        );
+        // "a" was evicted, so this is a fresh first failure, not a lockout.
+        assert_eq!(limiter.record_failure("a", T0 + 2), LimitVerdict::Allowed);
     }
 
     #[test]

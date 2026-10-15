@@ -46,6 +46,11 @@ pub struct ActionJournalEntry {
     pub after_digest: String,
     /// The idempotency key fingerprint (`sha256:<hex>`), never the raw key.
     pub idempotency_key: String,
+    /// The fingerprint of the submitted action (capability, target and
+    /// payload). A reused key with a different fingerprint is a conflict.
+    /// Absent on journal lines written before fingerprints existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_fingerprint: Option<String>,
     /// The result page id, when a result page exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_id: Option<String>,
@@ -163,11 +168,35 @@ impl ActionJournal {
     }
 }
 
+/// One remembered submission: the result page id plus the fingerprint of the
+/// action that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RememberedResult {
+    /// The result page id (`res_<12 hex>`).
+    pub result_id: String,
+    /// The payload fingerprint of the remembered action; `None` on records
+    /// rebuilt from journal lines written before fingerprints existed.
+    pub payload_fingerprint: Option<String>,
+}
+
+impl RememberedResult {
+    /// Whether a submission carrying `payload_fingerprint` may reuse this
+    /// result. A recorded fingerprint must match exactly; a legacy record
+    /// without one cannot establish a difference, so it keeps the original
+    /// duplicate behavior.
+    pub fn matches(&self, payload_fingerprint: &str) -> bool {
+        match &self.payload_fingerprint {
+            Some(recorded) => recorded == payload_fingerprint,
+            None => true,
+        }
+    }
+}
+
 /// The in-memory index built from the journal: idempotency fingerprints to
-/// result page ids, and object versions to their highest observed value.
+/// remembered results, and object versions to their highest observed value.
 #[derive(Debug, Clone, Default)]
 pub struct JournalIndex {
-    results_by_fingerprint: HashMap<String, String>,
+    results_by_fingerprint: HashMap<String, RememberedResult>,
 }
 
 impl JournalIndex {
@@ -178,7 +207,10 @@ impl JournalIndex {
             if let Some(result_id) = &entry.result_id {
                 results_by_fingerprint
                     .entry(entry.idempotency_key.clone())
-                    .or_insert_with(|| result_id.clone());
+                    .or_insert_with(|| RememberedResult {
+                        result_id: result_id.clone(),
+                        payload_fingerprint: entry.payload_fingerprint.clone(),
+                    });
             }
         }
         Self {
@@ -186,20 +218,23 @@ impl JournalIndex {
         }
     }
 
-    /// The result page id a duplicate POST with this idempotency key must
-    /// return, if the original is known.
-    pub fn result_for(&self, idempotency_key: &str) -> Option<&str> {
+    /// The remembered result a duplicate POST with this idempotency key must
+    /// consider, if the original is known.
+    pub fn result_for(&self, idempotency_key: &str) -> Option<&RememberedResult> {
         self.results_by_fingerprint
             .get(&idempotency_fingerprint(idempotency_key))
-            .map(String::as_str)
     }
 
-    /// Remember a result id for an idempotency key (the first write wins, so
-    /// a duplicate read later still resolves to the same page).
-    pub fn remember(&mut self, idempotency_key: &str, result_id: &str) {
+    /// Remember a result id for an idempotency key and payload fingerprint
+    /// (the first write wins, so a duplicate read later still resolves to the
+    /// same page).
+    pub fn remember(&mut self, idempotency_key: &str, payload_fingerprint: &str, result_id: &str) {
         self.results_by_fingerprint
             .entry(idempotency_fingerprint(idempotency_key))
-            .or_insert_with(|| result_id.to_string());
+            .or_insert_with(|| RememberedResult {
+                result_id: result_id.to_string(),
+                payload_fingerprint: Some(payload_fingerprint.to_string()),
+            });
     }
 
     /// Number of indexed results.
@@ -230,6 +265,11 @@ mod tests {
             before_digest: "aa".repeat(32),
             after_digest: "bb".repeat(32),
             idempotency_key: idempotency_fingerprint(idempotency_key),
+            payload_fingerprint: Some(crate::signing::payload_fingerprint(
+                "incident_resolve",
+                "inc_018",
+                &serde_json::json!({}),
+            )),
             result_id: result_id.map(str::to_string),
             job_id: None,
             correlation_id: "corr-1".to_string(),
@@ -284,15 +324,39 @@ mod tests {
             entry(key, Some("res_2")),
             entry(other, None),
         ]);
-        assert_eq!(index.result_for(key), Some("res_1"));
+        let remembered = index.result_for(key).expect("remembered");
+        assert_eq!(remembered.result_id, "res_1");
+        assert!(remembered.matches(&crate::signing::payload_fingerprint(
+            "incident_resolve",
+            "inc_018",
+            &serde_json::json!({})
+        )));
+        assert!(!remembered.matches("sha256:different"));
         assert_eq!(index.result_for(other), None);
         assert_eq!(index.len(), 1);
         let mut index = index;
-        index.remember(other, "res_3");
-        assert_eq!(index.result_for(other), Some("res_3"));
+        index.remember(other, "sha256:fresh", "res_3");
+        assert_eq!(
+            index.result_for(other).expect("remembered").result_id,
+            "res_3"
+        );
         // Remembering a duplicate does not overwrite the first result.
-        index.remember(key, "res_9");
-        assert_eq!(index.result_for(key), Some("res_1"));
+        index.remember(key, "sha256:fresh", "res_9");
+        assert_eq!(
+            index.result_for(key).expect("remembered").result_id,
+            "res_1"
+        );
+    }
+
+    #[test]
+    fn a_legacy_record_without_a_fingerprint_matches_any_payload() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let mut legacy = entry(key, Some("res_1"));
+        legacy.payload_fingerprint = None;
+        let index = JournalIndex::from_entries(&[legacy]);
+        let remembered = index.result_for(key).expect("remembered");
+        assert_eq!(remembered.result_id, "res_1");
+        assert!(remembered.matches("sha256:anything"));
     }
 
     #[test]

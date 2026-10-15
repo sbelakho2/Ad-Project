@@ -453,6 +453,262 @@ async fn unknown_and_unconfigured_proposals_keep_their_states() {
     assert_eq!(unconfigured.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// The proposal races run over a real analytics sink, so file and event can
+/// be compared.
+async fn racing_state(dir: &TempDir) -> (AppState, Arc<MemoryStore>) {
+    let store = Arc::new(MemoryStore::new());
+    store.ensure_schema().await.expect("schema");
+    let state = proposal_state(dir).with_analytics(AnalyticsAccess::enabled(
+        reader_over(&store),
+        client_over(&store),
+    ));
+    (state, store)
+}
+
+/// The decision form values of one proposal page: CSRF, the approve key and
+/// the separately noted decline key.
+async fn decision_form(router: &axum::Router, id: &str, cookie: &str) -> (String, String, String) {
+    let page = send(
+        router,
+        get_with_cookie(&format!("/console/proposals/{id}"), cookie),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    let csrf = common::extract_csrf(&page.body);
+    let approve_key = extract_idempotency_key(&page.body, "idempotency_key");
+    let anchor = "request key <code>";
+    let start = page.body.find(anchor).expect("the decline key note") + anchor.len();
+    let end = start + page.body[start..].find("</code>").expect("closing code");
+    let decline_key = page.body[start..end].to_string();
+    (csrf, approve_key, decline_key)
+}
+
+fn approval_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".approval.json"))
+        .collect()
+}
+
+fn temp_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("dir")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect()
+}
+
+/// The one recorded decision event of `id`, checked against the durable file.
+async fn assert_file_and_event_agree(
+    dir: &std::path::Path,
+    store: &Arc<MemoryStore>,
+    id: &str,
+) -> &'static str {
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join(format!("{id}.approval.json"))).expect("decision file"),
+    )
+    .expect("decision json");
+    let decision = record["decision"]
+        .as_str()
+        .expect("decision field")
+        .to_string();
+    let events = store.load_events().await.expect("events");
+    let proposal_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.payload.proposal_id.as_deref() == Some(id))
+        .collect();
+    assert_eq!(
+        proposal_events.len(),
+        1,
+        "exactly one decision event for {id}: {events:?}"
+    );
+    let event = proposal_events[0];
+    match decision.as_str() {
+        "approved" => assert_eq!(
+            event.event_type,
+            apex_analytics::EventType::ProposalApproved
+        ),
+        "declined" => assert_eq!(
+            event.event_type,
+            apex_analytics::EventType::ProposalDeclined
+        ),
+        other => panic!("unexpected recorded decision {other}"),
+    }
+    assert_eq!(
+        event.payload.change_hash.as_deref(),
+        record["changeHash"].as_str()
+    );
+    if decision == "approved" {
+        "Approved"
+    } else {
+        "Declined"
+    }
+}
+
+#[tokio::test]
+async fn concurrent_same_key_decisions_both_303_with_one_record_and_one_event() {
+    let dir = TempDir::new("p2-proposal-race-same");
+    write_proposal(&dir, "p_0247", Some(i64::MAX / 2));
+    let (state, store) = racing_state(&dir).await;
+    let router = app(state).await;
+    let cookie = open_ledger_session(&router).await;
+    let (csrf, key, _) = decision_form(&router, "p_0247", &cookie).await;
+    let request = || {
+        post_form_with_cookie(
+            "/console/proposals/p_0247/decision",
+            &format!("csrf_token={csrf}&decision=approve&idempotency_key={key}"),
+            &cookie,
+        )
+    };
+    let (first, second) = tokio::join!(async { send(&router, request()).await }, async {
+        send(&router, request()).await
+    });
+    assert_eq!(first.status, StatusCode::SEE_OTHER, "{}", first.body);
+    assert_eq!(second.status, StatusCode::SEE_OTHER, "{}", second.body);
+    assert_eq!(
+        approval_files(dir.path()).len(),
+        1,
+        "exactly one decision file"
+    );
+    let label = assert_file_and_event_agree(dir.path(), &store, "p_0247").await;
+    assert_eq!(label, "Approved");
+    assert!(
+        temp_files(dir.path()).is_empty(),
+        "no temp file survives: {:?}",
+        temp_files(dir.path())
+    );
+}
+
+#[tokio::test]
+async fn concurrent_approve_and_decline_agree_with_the_winner_everywhere() {
+    let dir = TempDir::new("p2-proposal-race-mixed");
+    write_proposal(&dir, "p_0247", Some(i64::MAX / 2));
+    let (state, store) = racing_state(&dir).await;
+    let router = app(state).await;
+    let cookie = open_ledger_session(&router).await;
+    let (csrf, approve_key, decline_key) = decision_form(&router, "p_0247", &cookie).await;
+    let approve = || {
+        post_form_with_cookie(
+            "/console/proposals/p_0247/decision",
+            &format!("csrf_token={csrf}&decision=approve&idempotency_key={approve_key}"),
+            &cookie,
+        )
+    };
+    let decline = || {
+        post_form_with_cookie(
+            "/console/proposals/p_0247/decision",
+            &format!("csrf_token={csrf}&decision=decline&idempotency_key={decline_key}"),
+            &cookie,
+        )
+    };
+    let (approved, declined) = tokio::join!(async { send(&router, approve()).await }, async {
+        send(&router, decline()).await
+    });
+    // Exactly one writer wins with a 303; the loser gets the typed conflict
+    // page and never an internal error.
+    let (winner, loser, winner_label) = match (approved.status, declined.status) {
+        (StatusCode::SEE_OTHER, StatusCode::CONFLICT) => (approved, declined, "Approved"),
+        (StatusCode::SEE_OTHER, StatusCode::SEE_OTHER) => {
+            unreachable!("different decisions cannot both replay")
+        }
+        (StatusCode::SEE_OTHER, other) => {
+            panic!("unexpected loser status {other}: {}", declined.body)
+        }
+        (other, StatusCode::SEE_OTHER) => {
+            assert_eq!(other, StatusCode::CONFLICT, "{}", approved.body);
+            (declined, approved, "Declined")
+        }
+        (first, second) => panic!("no winner: {first} / {second}"),
+    };
+    assert_eq!(
+        winner
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/console/proposals/p_0247"),
+        "the winner redirects to the decided page"
+    );
+    let label = assert_file_and_event_agree(dir.path(), &store, "p_0247").await;
+    assert_eq!(label, winner_label, "file and winner status agree");
+    assert!(
+        loser.body.contains("Already decided"),
+        "the loser gets the typed conflict page: {}",
+        loser.body
+    );
+    assert!(
+        loser.body.contains(winner_label),
+        "the conflict page names the winner's decision: {}",
+        loser.body
+    );
+    assert_eq!(approval_files(dir.path()).len(), 1);
+    assert!(
+        temp_files(dir.path()).is_empty(),
+        "no temp file survives: {:?}",
+        temp_files(dir.path())
+    );
+}
+
+#[tokio::test]
+async fn an_eight_way_same_key_storm_has_zero_500s_and_one_record() {
+    let dir = TempDir::new("p2-proposal-storm");
+    write_proposal(&dir, "p_0248", Some(i64::MAX / 2));
+    let (state, store) = racing_state(&dir).await;
+    let router = app(state).await;
+    let cookie = open_ledger_session(&router).await;
+    let (csrf, key, _) = decision_form(&router, "p_0248", &cookie).await;
+    let attempts = 8;
+    let mut tasks = Vec::new();
+    for _ in 0..attempts {
+        let router = router.clone();
+        let cookie = cookie.clone();
+        let csrf = csrf.clone();
+        let key = key.clone();
+        tasks.push(tokio::spawn(async move {
+            send(
+                &router,
+                post_form_with_cookie(
+                    "/console/proposals/p_0248/decision",
+                    &format!("csrf_token={csrf}&decision=approve&idempotency_key={key}"),
+                    &cookie,
+                ),
+            )
+            .await
+        }));
+    }
+    let mut statuses = Vec::new();
+    for task in tasks {
+        let response = task.await.expect("join");
+        assert!(
+            response.status.is_success() || response.status.is_redirection(),
+            "no request may fail (got {}): {}",
+            response.status,
+            response.body
+        );
+        statuses.push(response.status);
+    }
+    assert_eq!(
+        statuses,
+        vec![StatusCode::SEE_OTHER; attempts],
+        "every attempt either records or replays as 303"
+    );
+    println!("storm attempts: {attempts}, statuses: {statuses:?}");
+    assert_eq!(
+        approval_files(dir.path()).len(),
+        1,
+        "exactly one decision file"
+    );
+    let label = assert_file_and_event_agree(dir.path(), &store, "p_0248").await;
+    assert_eq!(label, "Approved");
+    assert!(
+        temp_files(dir.path()).is_empty(),
+        "no temp file survives the storm: {:?}",
+        temp_files(dir.path())
+    );
+}
+
 #[tokio::test]
 async fn expired_proposals_render_the_expired_state_without_a_form() {
     let dir = TempDir::new("p2-proposal-expired");
@@ -865,6 +1121,14 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
         csv.body.contains(",levelplay,1000000,USD"),
         "the stale source stays in the export"
     );
+    // Every line ends CRLF: there is no lone LF in the raw bytes.
+    assert!(csv.body.ends_with("\r\n"));
+    assert_eq!(
+        csv.body.matches('\n').count(),
+        csv.body.matches("\r\n").count(),
+        "no lone LF line ending: {:?}",
+        csv.body
+    );
 
     // The data-quality tab renders the stale source with the oldest gap.
     let quality = send(&router, get("/console/analytics?view=data-quality")).await;
@@ -928,6 +1192,45 @@ async fn analytics_unreachable_store_renders_the_reason_not_numbers() {
     assert_eq!(response.status, StatusCode::OK);
     assert!(response.body.contains("the analytics store did not answer"));
     assert!(!response.body.contains("$0.00"));
+}
+
+#[tokio::test]
+async fn analytics_csv_without_a_store_is_503_text_not_html() {
+    // Not configured: the CSV export is a machine answer, never an HTML page.
+    let dir = TempDir::new("p2-analytics-csv-off");
+    let router = app(console_state(&dir, None)).await;
+    let response = send(&router, get("/console/analytics?view=revenue&format=csv")).await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.content_type(), "text/plain; charset=utf-8");
+    assert!(
+        response.body.starts_with("export unavailable: "),
+        "one plain-text reason line: {}",
+        response.body
+    );
+    assert_eq!(response.body.lines().count(), 1);
+    assert!(!response.body.contains("<html"));
+    assert!(response
+        .body
+        .contains("the analytics store is not configured in this deployment"));
+    // The HTML view keeps its honest panel for a browser.
+    let html = send(&router, get("/console/analytics?view=revenue")).await;
+    assert_eq!(html.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(html.body.contains("This view is not available right now."));
+
+    // Configured but unreachable: the same 503 text contract.
+    let dir = TempDir::new("p2-analytics-csv-down");
+    let analytics = AnalyticsAccess::from_lookup(&|key| match key {
+        apex_api::analytics::CLICKHOUSE_HTTP_ENV => Some("http://127.0.0.1:1".to_string()),
+        apex_api::analytics::CLICKHOUSE_DB_ENV => Some("apex".to_string()),
+        _ => None,
+    });
+    let router = app(console_state(&dir, Some(analytics))).await;
+    let response = send(&router, get("/console/analytics?view=lift&format=csv")).await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.content_type(), "text/plain; charset=utf-8");
+    assert!(response.body.contains("the analytics store did not answer"));
+    assert_eq!(response.body.lines().count(), 1);
+    assert!(!response.body.contains("<html"));
 }
 
 /// The real-store check: when `APEX_CLICKHOUSE_HTTP` and `APEX_CLICKHOUSE_DB`

@@ -273,7 +273,7 @@ fn target_for(capability: Capability, state: &ControlState) -> String {
             );
             // The write is idempotent by key: repeated calls resolve to the
             // one durable job, whose id is the target.
-            state.jobs.write(&job).expect("job").job.job_id
+            state.jobs.write(&job).expect("job").job().job_id.clone()
         }
         Capability::FleetPauseScheduling | Capability::FleetResumeScheduling => {
             "fleet:scheduling".to_string()
@@ -839,42 +839,161 @@ async fn duplicate_submits_return_the_same_result_with_one_journal_entry_and_one
     assert!(html.contains("Confirming read"));
 }
 
+#[tokio::test]
+async fn a_reused_key_for_a_different_target_is_a_conflict_and_changes_nothing() {
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let key = "1de0000000000000000000000000feed";
+    let first = form_for(
+        &harness.state,
+        &signed,
+        Capability::RetryRead,
+        "northstar:applovin_max:acct_northstar_max_01",
+        key,
+    )
+    .await;
+    let (status, _, _, _) = post(
+        &app,
+        "/control/actions/retry_read",
+        Some(&signed.cookie),
+        &first,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let journal_rows = harness.state.journal.read().expect("journal").entries.len();
+    let job_rows = harness.state.jobs.list().expect("jobs").len();
+    // The same key now targets a different account: a fresh, valid form that
+    // would execute if the key were not bound to the first action.
+    let second = form_for(
+        &harness.state,
+        &signed,
+        Capability::RetryRead,
+        "northstar:applovin_max:acct_northstar_max_02",
+        key,
+    )
+    .await;
+    let (status, location, _, html) = post(
+        &app,
+        "/control/actions/retry_read",
+        Some(&signed.cookie),
+        &second,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{html}");
+    assert!(location.is_none());
+    assert!(
+        html.contains("This request key was already used for a different action."),
+        "{html}"
+    );
+    assert!(html.contains("Return to the object"));
+    // No state change: no new journal entry and no second durable job.
+    assert_eq!(
+        harness.state.journal.read().expect("journal").entries.len(),
+        journal_rows
+    );
+    assert_eq!(harness.state.jobs.list().expect("jobs").len(), job_rows);
+}
+
+#[tokio::test]
+async fn a_durable_job_claim_for_a_different_action_is_a_conflict() {
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let key = "1de0000000000000000000000000cafe";
+    // A restart between the job write and the journal append leaves a
+    // durable job under the key with no remembered result in the index.
+    let stale = apex_control::jobs::OperatorJob::queued(
+        apex_control::jobs::JobKind::RetryRead,
+        "maya",
+        harness.state.now_ms(),
+        "northstar:applovin_max:acct_northstar_max_01",
+        serde_json::json!({}),
+        key,
+        "corr-stale",
+    );
+    harness.state.jobs.write(&stale).expect("stale job");
+    let journal_rows = harness.state.journal.read().expect("journal").entries.len();
+    let form = form_for(
+        &harness.state,
+        &signed,
+        Capability::RetryRead,
+        "northstar:applovin_max:acct_northstar_max_02",
+        key,
+    )
+    .await;
+    let (status, _, _, html) = post(
+        &app,
+        "/control/actions/retry_read",
+        Some(&signed.cookie),
+        &form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{html}");
+    assert!(
+        html.contains("This request key was already used for a different action."),
+        "{html}"
+    );
+    assert_eq!(
+        harness.state.journal.read().expect("journal").entries.len(),
+        journal_rows,
+        "the conflict writes no journal entry"
+    );
+    assert_eq!(
+        harness.state.jobs.list().expect("jobs").len(),
+        1,
+        "the durable job claim is unchanged"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_submits_of_one_key_produce_one_job_and_one_journal_entry() {
     let harness = harness();
     let signed = open_session(&harness.state, "maya", Role::Operator);
     let key = "c0ffeec0ffeec0ffeec0ffeec0ffee01";
-    let spec = apex_control::routes::build_form_spec(
-        &harness.state,
-        &signed.view,
-        Capability::RetryRead,
-        "northstar:applovin_max:acct_northstar_max_01",
-        "/control/ingestion",
-        &[],
-    )
-    .await
-    .expect("spec");
-    let request = apex_control::actions::ActionRequest {
-        target: spec.target.clone(),
-        reason: "concurrency check".to_string(),
-        source_document: String::new(),
-        evidence: String::new(),
-        confirmation: String::new(),
-        idempotency_key: key.to_string(),
-        version_token: spec.version_token.clone(),
-        csrf_token: signed.view.csrf.clone(),
-        return_path: "/control/ingestion".to_string(),
-        payload: serde_json::json!({}),
-        customer_population: String::new(),
-        expected_effect: String::new(),
-        platform: None,
-        policy_id: String::new(),
+    let build_request = |target: &str| {
+        let state = harness.state.clone();
+        let view = signed.view.clone();
+        let key = key.to_string();
+        let target = target.to_string();
+        async move {
+            let spec = apex_control::routes::build_form_spec(
+                &state,
+                &view,
+                Capability::RetryRead,
+                &target,
+                "/control/ingestion",
+                &[],
+            )
+            .await
+            .expect("spec");
+            apex_control::actions::ActionRequest {
+                target: spec.target.clone(),
+                reason: "concurrency check".to_string(),
+                source_document: String::new(),
+                evidence: String::new(),
+                confirmation: String::new(),
+                idempotency_key: key,
+                version_token: spec.version_token.clone(),
+                csrf_token: view.csrf.clone(),
+                return_path: "/control/ingestion".to_string(),
+                payload: serde_json::json!({}),
+                customer_population: String::new(),
+                expected_effect: String::new(),
+                platform: None,
+                policy_id: String::new(),
+            }
+        }
     };
-    // Both tasks are released together on a two-worker runtime, so the
+    let request = build_request("northstar:applovin_max:acct_northstar_max_01").await;
+    // A third submission shares the key but targets another account: it must
+    // either execute (and then both same-key v1 submits conflict) or conflict
+    // itself, never return the other action's result.
+    let other = build_request("northstar:applovin_max:acct_northstar_max_02").await;
+    // All three tasks are released together on a two-worker runtime, so the
     // duplicate check genuinely races.
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let submit_once = |state: ControlState| {
-        let request = request.clone();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let submit_once = |state: ControlState, request: apex_control::actions::ActionRequest| {
         let barrier = Arc::clone(&barrier);
         tokio::spawn(async move {
             barrier.wait().await;
@@ -890,30 +1009,49 @@ async fn concurrent_submits_of_one_key_produce_one_job_and_one_journal_entry() {
             .await
         })
     };
-    let (first, second) = tokio::join!(
-        submit_once(harness.state.clone()),
-        submit_once(harness.state.clone())
+    let (first, second, third) = tokio::join!(
+        submit_once(harness.state.clone(), request.clone()),
+        submit_once(harness.state.clone(), request.clone()),
+        submit_once(harness.state.clone(), other.clone())
     );
-    let outcomes = [first.expect("join"), second.expect("join")];
-    let mut executed = 0usize;
+    let outcomes = [
+        first.expect("join"),
+        second.expect("join"),
+        third.expect("join"),
+    ];
+    let mut executed: Vec<(usize, String)> = Vec::new();
     let mut duplicated = 0usize;
-    let mut result_id = None;
-    for outcome in &outcomes {
+    let mut conflicted = 0usize;
+    for (index, outcome) in outcomes.iter().enumerate() {
         match outcome {
             apex_control::actions::SubmitOutcome::Result { result_id: id, .. } => {
-                executed += 1;
-                result_id = Some(id.clone());
+                executed.push((index, id.clone()));
             }
             apex_control::actions::SubmitOutcome::Duplicate { .. } => duplicated += 1,
+            apex_control::actions::SubmitOutcome::Conflict { .. } => conflicted += 1,
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
-    assert_eq!(executed, 1, "exactly one submission executes: {outcomes:?}");
-    assert_eq!(duplicated, 1, "the other returns the original result");
-    let result_id = result_id.expect("the executed submission recorded a result");
+    assert_eq!(
+        executed.len(),
+        1,
+        "exactly one submission executes: {outcomes:?}"
+    );
+    let (executor, result_id) = &executed[0];
+    if *executor == 2 {
+        // The different-action submission won the race: both same-payload
+        // duplicates are key conflicts.
+        assert_eq!(duplicated, 0, "{outcomes:?}");
+        assert_eq!(conflicted, 2, "{outcomes:?}");
+    } else {
+        // A same-payload submission executed: the twin is a duplicate and
+        // the different-action submission is a conflict.
+        assert_eq!(duplicated, 1, "{outcomes:?}");
+        assert_eq!(conflicted, 1, "{outcomes:?}");
+    }
     for outcome in &outcomes {
         if let apex_control::actions::SubmitOutcome::Duplicate { result_id: id } = outcome {
-            assert_eq!(id, &result_id, "the duplicate returns the original page");
+            assert_eq!(id, result_id, "the duplicate returns the original page");
         }
     }
     // Exactly one journal entry and one durable job carry the key.

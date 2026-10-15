@@ -1,9 +1,14 @@
 //! `apex-ingest` materializes Caddy JSON access logs as sanitized rows in
-//! the analytics `request_logs` table (30-day retention per the spec). The
-//! sanitized fields (route template, status, referrer host, campaign code,
-//! allow-listed query keys, bot class) are exactly the `request_logs`
+//! the analytics `request_logs` table (30-day retention per the spec) AND as
+//! `public_page_requested` domain events in `domain_events` (90-day
+//! retention): one sanitized row plus one bounded event per request line.
+//! The sanitized fields (route template, status, referrer host, campaign
+//! code, allow-listed query keys, bot class) are exactly the `request_logs`
 //! columns; client addresses, raw user agents and query values never reach
-//! the store.
+//! the store. The domain event carries only the bounded classification
+//! facts (route template, status, bot class and the campaign KEYS, never
+//! values or the referrer host), so a replay of one line derives the same
+//! stable event id and the `(source, event_id)` dedup key absorbs it.
 //!
 //! Usage:
 //!
@@ -19,6 +24,19 @@
 //! tail -n +1 /var/log/caddy/apex-access.json | apex-ingest --json
 //! ```
 //!
+//! A file input is consumed incrementally through a cursor: only lines after
+//! the last durably handled one are parsed and delivered, so the shipped
+//! hourly timer does not re-insert the whole file every run. The cursor is
+//! written (atomically, via a temp file and a rename) only after every
+//! consumed line was either delivered or preserved in the spool, and it
+//! records the byte offset plus a short identity (length and hash of the
+//! first line) of the file it belongs to: a replaced or shrunken file
+//! restarts at byte 0 and its lines are reprocessed, where the stable event
+//! id deduplicates replayed events while `request_logs` (a plain MergeTree)
+//! may hold the duplicate row. An unterminated final line is held back until
+//! a newline arrives; `--check` never reads or writes a cursor, and stdin
+//! input has no cursor at all.
+//!
 //! Environment:
 //!
 //! - `APEX_CLICKHOUSE_HTTP` (default `http://127.0.0.1:8123`)
@@ -26,6 +44,7 @@
 //! - `APEX_ENVIRONMENT` (default `production`)
 //! - `APEX_SERVICE_VERSION` (default `apex-ingest-<crate version>`)
 //! - `APEX_INGEST_SPOOL` (default `.apex/analytics-spool/apex-ingest.jsonl`)
+//! - `APEX_INGEST_CURSOR` (default `<input>.cursor`; file inputs only)
 //!
 //! Flags:
 //!
@@ -63,12 +82,16 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use apex_analytics::accesslog::{parse_line, AccessLogDefaults};
+use apex_analytics::accesslog::{event_for_row, parse_line, AccessLogDefaults};
 use apex_analytics::store::{ClickHouseConfig, ClickHouseStore, EventStore, RequestLogRow};
 use apex_analytics::timestamp::UtcMillis;
+use apex_analytics::DomainEvent;
 
 /// How many events one insert batch carries.
 const BATCH_SIZE: usize = 500;
+
+/// How many bytes of the first line identify a log file across rotations.
+const FILE_IDENTITY_BYTES: usize = 4_096;
 
 /// Parsed command-line options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -87,12 +110,25 @@ struct Summary {
     lines: u64,
     /// Sanitized request rows parsed from the log.
     request_logs: u64,
+    /// `public_page_requested` events built from those rows.
+    events: u64,
     skipped_non_request: u64,
     rejected: u64,
     /// Request rows written into `request_logs`.
     delivered: u64,
+    /// Events written into `domain_events`.
+    events_delivered: u64,
     spooled: u64,
     spool_path: String,
+    /// The consumed-offset cursor; absent for stdin and `--check` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_path: Option<String>,
+    /// First byte this run read from (0 after a rotation or a fresh file).
+    cursor_from: u64,
+    /// First byte the next run reads from (the durable consumption point).
+    cursor_to: u64,
+    /// Whether a rotated or shrunken file forced a restart at byte 0.
+    cursor_restarted: bool,
     /// First rejection reasons (bounded; the count above is complete).
     errors: Vec<String>,
 }
@@ -100,7 +136,8 @@ struct Summary {
 /// What one batch write did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct WriteOutcome {
-    written: usize,
+    rows_written: usize,
+    events_written: usize,
     spooled: usize,
 }
 
@@ -109,6 +146,178 @@ struct WriteOutcome {
 struct ReplayOutcome {
     replayed: usize,
     corrupt: usize,
+}
+
+/// The consumed-offset cursor beside a file input: how many bytes of the
+/// file are durably handled and which file those bytes belong to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileCursor {
+    offset: u64,
+    identity: String,
+}
+
+impl FileCursor {
+    /// The one-line cursor file format, versioned so a future change is
+    /// detectable rather than misread.
+    fn render(&self) -> String {
+        format!("v1 {} {}\n", self.offset, self.identity)
+    }
+
+    /// Parse a cursor file; anything unreadable yields `None` and the run
+    /// restarts at byte 0.
+    fn parse(text: &str) -> Option<Self> {
+        let mut fields = text.split_whitespace();
+        if fields.next() != Some("v1") {
+            return None;
+        }
+        let offset = fields.next()?.parse().ok()?;
+        let identity = fields.next()?;
+        if fields.next().is_some() || identity.is_empty() {
+            return None;
+        }
+        Some(Self {
+            offset,
+            identity: identity.to_string(),
+        })
+    }
+}
+
+/// FNV-1a 64-bit hex digest, used only to identify a file, never as a
+/// security primitive.
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut state: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{state:016x}")
+}
+
+/// A short, append-stable file identity: the length and hash of the first
+/// line (bounded to [`FILE_IDENTITY_BYTES`]). Appending lines leaves the
+/// first line untouched, while a rotated file starts with a different line;
+/// the line's content itself never leaves this function.
+fn file_identity(text: &str) -> Option<String> {
+    let first_line = text.split_inclusive('\n').next()?;
+    if first_line.is_empty() {
+        return None;
+    }
+    let bounded = &first_line.as_bytes()[..first_line.len().min(FILE_IDENTITY_BYTES)];
+    Some(format!("{}-{}", bounded.len(), fnv1a_hex(bounded)))
+}
+
+/// Where one run starts reading and the cursor it may advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadPlan {
+    cursor_path: Option<PathBuf>,
+    start: usize,
+    identity: Option<String>,
+    restarted: bool,
+}
+
+impl ReadPlan {
+    /// The plan for stdin or `--check` runs: everything, no cursor.
+    fn whole() -> Self {
+        Self {
+            cursor_path: None,
+            start: 0,
+            identity: None,
+            restarted: false,
+        }
+    }
+}
+
+/// The cursor file of a run: `APEX_INGEST_CURSOR` or `<input>.cursor`; stdin
+/// input has none.
+fn cursor_path(options: &Options, lookup: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let path = options.path.as_ref()?;
+    if let Some(configured) = lookup("APEX_INGEST_CURSOR").filter(|value| !value.trim().is_empty())
+    {
+        return Some(PathBuf::from(configured));
+    }
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".cursor");
+    Some(PathBuf::from(name))
+}
+
+/// Decide where this run starts reading a file from, based on the stored
+/// cursor and the file's current identity and size. A missing cursor starts
+/// at 0; a cursor whose file was replaced (identity differs), shrank past
+/// the offset, or holds an offset that is not a line boundary restarts at 0.
+async fn plan_read(
+    options: &Options,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    text: &str,
+) -> Result<ReadPlan, String> {
+    let Some(cursor_path) = cursor_path(options, lookup) else {
+        return Ok(ReadPlan::whole());
+    };
+    let identity = file_identity(text);
+    let stored = match tokio::fs::read_to_string(&cursor_path).await {
+        Ok(text) => FileCursor::parse(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "cannot read cursor {}: {error}",
+                cursor_path.display()
+            ))
+        }
+    };
+    let restart = |restarted: bool| ReadPlan {
+        cursor_path: Some(cursor_path.clone()),
+        start: 0,
+        identity: identity.clone(),
+        restarted,
+    };
+    match stored {
+        Some(cursor)
+            if Some(&cursor.identity) == identity.as_ref()
+                && cursor.offset <= text.len() as u64
+                && text.is_char_boundary(cursor.offset as usize) =>
+        {
+            Ok(ReadPlan {
+                cursor_path: Some(cursor_path),
+                start: cursor.offset as usize,
+                identity,
+                restarted: false,
+            })
+        }
+        Some(_) => Ok(restart(true)),
+        None => Ok(restart(false)),
+    }
+}
+
+/// Replace `path` through a `<path>.tmp` sibling and a rename: a crash
+/// mid-write leaves either the old complete file or the new complete file,
+/// never a truncated one.
+async fn replace_file(path: &Path, contents: &str) -> Result<(), String> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|error| format!("cannot write {}: {error}", tmp_path.display()))?;
+    file.write_all(contents.as_bytes())
+        .await
+        .map_err(|error| format!("cannot write {}: {error}", tmp_path.display()))?;
+    file.flush()
+        .await
+        .map_err(|error| format!("cannot write {}: {error}", tmp_path.display()))?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|error| format!("cannot replace {}: {error}", path.display()))
+}
+
+/// Write the consumed-offset cursor of a file input.
+async fn write_cursor(path: &Path, cursor: &FileCursor) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
+    replace_file(path, &cursor.render()).await
 }
 
 /// Writes sanitized request rows into the store with a JSONL spool: a
@@ -160,42 +369,86 @@ impl<S: EventStore> RequestLogWriter<S> {
             .map_err(|error| format!("cannot append to {}: {error}", path.display()))
     }
 
-    /// Insert one batch of rows; a store refusal spools the batch instead
-    /// of losing it.
-    async fn write(&self, rows: &[RequestLogRow]) -> Result<WriteOutcome, String> {
+    /// The `public_page_requested` events a batch of sanitized rows stands
+    /// for. The event is a pure function of the row's bounded fields, so the
+    /// parse path and a spool replay derive the same stable event id.
+    fn events_for(
+        &self,
+        rows: &[RequestLogRow],
+        defaults: &AccessLogDefaults,
+    ) -> Result<Vec<DomainEvent>, String> {
+        rows.iter()
+            .map(|row| {
+                event_for_row(row, defaults)
+                    .map_err(|error| format!("cannot build the page-request event: {error}"))
+            })
+            .collect()
+    }
+
+    /// Spool a refused batch (rows only; a replay rebuilds the events).
+    async fn spool(&self, rows: &[RequestLogRow], error: &str) -> Result<WriteOutcome, String> {
+        let mut lines = String::new();
+        for row in rows {
+            let line = serde_json::to_string(row)
+                .map_err(|serialize| format!("cannot spool row: {serialize}"))?;
+            lines.push_str(&line);
+            lines.push('\n');
+        }
+        self.append_lines(&self.spool_path, &lines).await?;
+        eprintln!(
+            "store refused the batch ({error}); {} rows spooled to {}",
+            rows.len(),
+            self.spool_path.display()
+        );
+        Ok(WriteOutcome {
+            rows_written: 0,
+            events_written: 0,
+            spooled: rows.len(),
+        })
+    }
+
+    /// Keep the undelivered spool lines in place through an atomic replace.
+    async fn keep_spooled(&self, deliverable_lines: &[&str]) -> Result<(), String> {
+        let remaining = if deliverable_lines.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", deliverable_lines.join("\n"))
+        };
+        replace_file(&self.spool_path, &remaining).await
+    }
+
+    /// Insert one batch: the `public_page_requested` events first, then the
+    /// `request_logs` rows. The events go first because a later row refusal
+    /// spools the batch and the replay re-inserts the events, which the
+    /// `(source, event_id)` dedup key collapses; the reverse order could
+    /// duplicate log rows the same way. A store refusal spools the rows
+    /// instead of losing them.
+    async fn write(
+        &self,
+        rows: &[RequestLogRow],
+        defaults: &AccessLogDefaults,
+    ) -> Result<WriteOutcome, String> {
         if rows.is_empty() {
             return Ok(WriteOutcome::default());
         }
+        let events = self.events_for(rows, defaults)?;
+        if let Err(error) = self.store.insert(&events).await {
+            return self.spool(rows, &error.to_string()).await;
+        }
         match self.store.insert_request_logs(rows).await {
             Ok(_) => Ok(WriteOutcome {
-                written: rows.len(),
+                rows_written: rows.len(),
+                events_written: events.len(),
                 spooled: 0,
             }),
-            Err(error) => {
-                let mut lines = String::new();
-                for row in rows {
-                    let line = serde_json::to_string(row)
-                        .map_err(|serialize| format!("cannot spool row: {serialize}"))?;
-                    lines.push_str(&line);
-                    lines.push('\n');
-                }
-                self.append_lines(&self.spool_path, &lines).await?;
-                eprintln!(
-                    "store refused the batch ({error}); {} rows spooled to {}",
-                    rows.len(),
-                    self.spool_path.display()
-                );
-                Ok(WriteOutcome {
-                    written: 0,
-                    spooled: rows.len(),
-                })
-            }
+            Err(error) => self.spool(rows, &error.to_string()).await,
         }
     }
 
-    /// Re-deliver every spooled row, then truncate. Corrupt lines move to
-    /// `<spool>.dead`. A failed delivery keeps the undelivered lines spooled.
-    async fn replay(&self) -> Result<ReplayOutcome, String> {
+    /// Re-deliver every spooled row and its event, then truncate atomically.
+    /// Corrupt lines move to `<spool>.dead`. A failed delivery keeps every
+    /// undelivered line spooled through an atomic replace.
+    async fn replay(&self, defaults: &AccessLogDefaults) -> Result<ReplayOutcome, String> {
         let text = match tokio::fs::read_to_string(&self.spool_path).await {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -227,24 +480,18 @@ impl<S: EventStore> RequestLogWriter<S> {
             self.append_lines(&self.dead_path(), &dead).await?;
         }
         if !rows.is_empty() {
-            if let Err(error) = self.store.insert_request_logs(&rows).await {
+            let events = self.events_for(&rows, defaults)?;
+            if let Err(error) = self.store.insert(&events).await {
                 // Keep every undelivered line spooled; nothing is lost.
-                let remaining = if deliverable_lines.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}\n", deliverable_lines.join("\n"))
-                };
-                tokio::fs::write(&self.spool_path, remaining)
-                    .await
-                    .map_err(|write_error| {
-                        format!("cannot keep {}: {write_error}", self.spool_path.display())
-                    })?;
+                self.keep_spooled(&deliverable_lines).await?;
+                return Err(error.to_string());
+            }
+            if let Err(error) = self.store.insert_request_logs(&rows).await {
+                self.keep_spooled(&deliverable_lines).await?;
                 return Err(error.to_string());
             }
         }
-        tokio::fs::write(&self.spool_path, "")
-            .await
-            .map_err(|error| format!("cannot truncate {}: {error}", self.spool_path.display()))?;
+        replace_file(&self.spool_path, "").await?;
         Ok(ReplayOutcome {
             replayed: rows.len(),
             corrupt,
@@ -335,30 +582,57 @@ fn print_summary(summary: &Summary, json: bool) {
         return;
     }
     println!(
-        "apex-ingest: {} lines, {} request logs, {} skipped, {} rejected",
-        summary.lines, summary.request_logs, summary.skipped_non_request, summary.rejected
+        "apex-ingest: {} lines, {} request logs, {} events, {} skipped, {} rejected",
+        summary.lines,
+        summary.request_logs,
+        summary.events,
+        summary.skipped_non_request,
+        summary.rejected
     );
     if summary.check_only {
-        println!("check only: no store contacted, nothing written");
+        println!("check only: no store contacted, nothing written, no cursor touched");
     } else {
         println!(
-            "delivered {}, spooled {} ({})",
-            summary.delivered, summary.spooled, summary.spool_path
+            "delivered {} rows + {} events, spooled {} ({})",
+            summary.delivered, summary.events_delivered, summary.spooled, summary.spool_path
         );
+    }
+    if let Some(cursor_path) = &summary.cursor_path {
+        println!(
+            "cursor: {cursor_path} bytes {} -> {}",
+            summary.cursor_from, summary.cursor_to
+        );
+        if summary.cursor_restarted {
+            println!("cursor restarted at byte 0: the file was rotated or shrank");
+        }
     }
     for error in &summary.errors {
         println!("rejected: {error}");
     }
 }
 
-async fn run(options: Options) -> Result<ExitCode, String> {
-    let lookup = |key: &str| std::env::var(key).ok();
-    let environment = environment_label(&lookup);
-    let service_version = service_version_label(&lookup);
+/// The full pipeline: read the input (from the cursor for file inputs),
+/// parse the consumed segment, replay any spooled rows, deliver rows and
+/// events, and advance the cursor only after everything is durably handled.
+///
+/// `store` is `None` only for `--check` runs, which contact nothing and
+/// write nothing (including no cursor).
+async fn run_with_store<S: EventStore>(
+    options: &Options,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    store: Option<S>,
+) -> Result<(ExitCode, Summary), String> {
+    let environment = environment_label(lookup);
+    let service_version = service_version_label(lookup);
     let received_at =
         UtcMillis::system_now().map_err(|error| format!("system clock unavailable: {error}"))?;
 
-    let text = read_input(&options).await?;
+    let text = read_input(options).await?;
+    let plan = if options.check {
+        ReadPlan::whole()
+    } else {
+        plan_read(options, lookup, &text).await?
+    };
     let input_label = options
         .path
         .as_ref()
@@ -366,8 +640,8 @@ async fn run(options: Options) -> Result<ExitCode, String> {
         .unwrap_or_else(|| "stdin".to_string());
 
     let defaults = AccessLogDefaults {
-        environment: environment.clone(),
-        service_version: service_version.clone(),
+        environment,
+        service_version,
         received_at,
     };
     let mut summary = Summary {
@@ -375,15 +649,37 @@ async fn run(options: Options) -> Result<ExitCode, String> {
         check_only: options.check,
         lines: 0,
         request_logs: 0,
+        events: 0,
         skipped_non_request: 0,
         rejected: 0,
         delivered: 0,
+        events_delivered: 0,
         spooled: 0,
-        spool_path: spool_path(&options, &lookup).display().to_string(),
+        spool_path: spool_path(options, lookup).display().to_string(),
+        cursor_path: plan
+            .cursor_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        cursor_from: plan.start as u64,
+        cursor_to: plan.start as u64,
+        cursor_restarted: plan.restarted,
         errors: Vec::new(),
     };
+
+    // Consume the segment line by line. An unterminated final line is held
+    // back so a partially written log line is never parsed; it is picked up
+    // by the next run once its newline arrives.
+    let mut consumed: u64 = 0;
+    let mut consumed_lines: u64 = 0;
     let mut rows = Vec::new();
-    for (index, line) in text.lines().enumerate() {
+    let mut rest = &text[plan.start..];
+    while let Some(newline) = rest.find('\n') {
+        let line = rest[..newline]
+            .strip_suffix('\r')
+            .unwrap_or(&rest[..newline]);
+        rest = &rest[newline + 1..];
+        consumed += newline as u64 + 1;
+        consumed_lines += 1;
         if line.trim().is_empty() {
             continue;
         }
@@ -391,13 +687,16 @@ async fn run(options: Options) -> Result<ExitCode, String> {
         match parse_line(line, &defaults) {
             Ok(Some(row)) => {
                 summary.request_logs += 1;
+                summary.events += 1;
                 rows.push(row);
             }
             Ok(None) => summary.skipped_non_request += 1,
             Err(error) => {
                 summary.rejected += 1;
                 if summary.errors.len() < 10 {
-                    summary.errors.push(format!("line {}: {error}", index + 1));
+                    summary
+                        .errors
+                        .push(format!("line {consumed_lines}: {error}"));
                 }
             }
         }
@@ -405,27 +704,26 @@ async fn run(options: Options) -> Result<ExitCode, String> {
 
     if options.check {
         print_summary(&summary, options.json);
-        return Ok(if summary.rejected > 0 {
-            ExitCode::from(3)
-        } else {
-            ExitCode::SUCCESS
-        });
+        return Ok((
+            if summary.rejected > 0 {
+                ExitCode::from(3)
+            } else {
+                ExitCode::SUCCESS
+            },
+            summary,
+        ));
     }
 
-    // A check-mode-free path: build the store and deliver.
-    let config = ClickHouseConfig::from_lookup(&lookup)
-        .map_err(|error| format!("store configuration: {error}"))?;
-    let store =
-        ClickHouseStore::new(config).map_err(|error| format!("store configuration: {error}"))?;
+    let store = store.ok_or_else(|| "a delivery run needs a store".to_string())?;
     store
         .ensure_schema()
         .await
         .map_err(|error| format!("schema setup failed: {error}"))?;
-    let writer = RequestLogWriter::new(store, spool_path(&options, &lookup));
+    let writer = RequestLogWriter::new(store, spool_path(options, lookup));
 
     // Opportunistically drain anything a previous run spooled. A failed
     // replay keeps those lines spooled and is reported, never dropped.
-    match writer.replay().await {
+    match writer.replay(&defaults).await {
         Ok(replayed) if replayed.replayed > 0 || replayed.corrupt > 0 => {
             println!(
                 "spool replay: {} delivered, {} corrupt lines preserved to {}.dead",
@@ -440,19 +738,49 @@ async fn run(options: Options) -> Result<ExitCode, String> {
 
     for batch in rows.chunks(BATCH_SIZE) {
         let outcome = writer
-            .write(batch)
+            .write(batch, &defaults)
             .await
             .map_err(|error| format!("delivery failed and spooling failed too: {error}"))?;
-        summary.delivered += outcome.written as u64;
+        summary.delivered += outcome.rows_written as u64;
+        summary.events_delivered += outcome.events_written as u64;
         summary.spooled += outcome.spooled as u64;
     }
 
+    // Advance the cursor only now: every consumed line was delivered or
+    // durably preserved in the spool, so a crash before this point re-reads
+    // the segment and the stable event id absorbs the replay.
+    if consumed > 0 {
+        if let (Some(cursor_path), Some(identity)) = (&plan.cursor_path, plan.identity.clone()) {
+            let cursor = FileCursor {
+                offset: summary.cursor_from + consumed,
+                identity,
+            };
+            write_cursor(cursor_path, &cursor).await?;
+            summary.cursor_to = cursor.offset;
+        }
+    }
+
     print_summary(&summary, options.json);
-    Ok(if summary.spooled > 0 || summary.rejected > 0 {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    })
+    Ok((
+        if summary.spooled > 0 || summary.rejected > 0 {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        },
+        summary,
+    ))
+}
+
+async fn run(options: Options) -> Result<(ExitCode, Summary), String> {
+    let lookup = |key: &str| std::env::var(key).ok();
+    if options.check {
+        return run_with_store(&options, &lookup, None::<ClickHouseStore>).await;
+    }
+    let config = ClickHouseConfig::from_lookup(&lookup)
+        .map_err(|error| format!("store configuration: {error}"))?;
+    let store =
+        ClickHouseStore::new(config).map_err(|error| format!("store configuration: {error}"))?;
+    run_with_store(&options, &lookup, Some(store)).await
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -466,7 +794,7 @@ async fn main() -> ExitCode {
         }
     };
     match run(options).await {
-        Ok(code) => code,
+        Ok((code, _summary)) => code,
         Err(message) => {
             eprintln!("apex-ingest: {message}");
             ExitCode::from(2)
@@ -479,6 +807,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use apex_analytics::ProjectionStore;
 
     #[test]
     fn arguments_parse_flags_and_one_path() {
@@ -518,9 +847,12 @@ mod tests {
     }
 
     fn request_row(id: &str) -> RequestLogRow {
+        // Distinct occurrence times per id, like distinct log lines: the
+        // derived event id is a function of the bounded row fields.
+        let offset = id.bytes().map(i64::from).sum::<i64>();
         RequestLogRow {
             event_id: id.to_string(),
-            occurred_at_utc: UtcMillis::from_unix_millis(1_792_055_400_125),
+            occurred_at_utc: UtcMillis::from_unix_millis(1_792_055_400_125 + offset),
             received_at_utc: UtcMillis::from_unix_millis(1_792_055_401_000),
             route_template: "/pricing".to_string(),
             status: 200,
@@ -533,22 +865,83 @@ mod tests {
         }
     }
 
+    fn defaults() -> AccessLogDefaults {
+        AccessLogDefaults {
+            environment: "production".to_string(),
+            service_version: "apex-ingest-test".to_string(),
+            received_at: UtcMillis::from_unix_millis(1_792_055_401_000),
+        }
+    }
+
     fn spool_file(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("apex-ingest-{label}-{}.jsonl", std::process::id()))
     }
 
+    /// A fresh working directory for one file-input test.
+    fn test_directory(label: &str) -> PathBuf {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "apex-ingest-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
+
+    fn tmp_sibling(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".tmp");
+        PathBuf::from(name)
+    }
+
+    fn log_line(uri: &str, status: u16, ts_seconds: f64) -> String {
+        serde_json::json!({
+            "ts": ts_seconds,
+            "status": status,
+            "request": {
+                "method": "GET",
+                "host": "apexmediation.ee",
+                "uri": uri,
+                "remote_ip": "203.0.113.9",
+                "headers": { "User-Agent": ["Mozilla/5.0 Safari/605.1.15"] }
+            }
+        })
+        .to_string()
+    }
+
+    /// A lookup that pins the cursor and the spool inside a test directory.
+    fn test_env<'a>(cursor: &'a Path, spool: &'a Path) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key: &str| match key {
+            "APEX_INGEST_CURSOR" => Some(cursor.display().to_string()),
+            "APEX_INGEST_SPOOL" => Some(spool.display().to_string()),
+            _ => None,
+        }
+    }
+
     #[tokio::test]
-    async fn delivery_writes_sanitized_rows_into_the_store() {
+    async fn delivery_writes_sanitized_rows_and_events_into_the_store() {
         use apex_analytics::store::MemoryStore;
         let store = MemoryStore::new();
         store.ensure_schema().await.expect("schema");
         let spool = spool_file("deliver");
         let writer = RequestLogWriter::new(store.clone(), spool.clone());
         let rows = vec![request_row("line_1"), request_row("line_2")];
-        let outcome = writer.write(&rows).await.expect("write");
-        assert_eq!(outcome.written, 2);
+        let outcome = writer.write(&rows, &defaults()).await.expect("write");
+        assert_eq!(outcome.rows_written, 2);
+        assert_eq!(outcome.events_written, 2);
         assert_eq!(outcome.spooled, 0);
         assert_eq!(store.request_logs(), rows);
+        let events = store.load_events().await.expect("events");
+        assert_eq!(events.len(), 2, "one public_page_requested per row");
+        for event in &events {
+            assert_eq!(
+                event.event_type,
+                apex_analytics::envelope::EventType::PublicPageRequested
+            );
+            assert_eq!(
+                event.source,
+                apex_analytics::envelope::EventSource::AccessLog
+            );
+        }
         assert!(tokio::fs::metadata(&spool).await.is_err(), "no spool file");
     }
 
@@ -562,32 +955,43 @@ mod tests {
 
         // The schema is missing, so the write fails and the batch spools.
         let rows = vec![request_row("line_1"), request_row("line_2")];
-        let outcome = writer.write(&rows).await.expect("spooled");
-        assert_eq!(outcome.written, 0);
+        let outcome = writer.write(&rows, &defaults()).await.expect("spooled");
+        assert_eq!(outcome.rows_written, 0);
+        assert_eq!(outcome.events_written, 0);
         assert_eq!(outcome.spooled, 2);
         let spooled = tokio::fs::read_to_string(&spool).await.expect("spool read");
         assert_eq!(spooled.lines().count(), 2);
         assert!(spooled.contains("\"route_template\":\"/pricing\""));
+        assert!(
+            !tmp_sibling(&spool).exists(),
+            "the spool is replaced atomically, never left as a temp file"
+        );
 
         // Replaying against the cold store fails and keeps the spool.
-        assert!(writer.replay().await.is_err());
+        assert!(writer.replay(&defaults()).await.is_err());
         let still = tokio::fs::read_to_string(&spool).await.expect("spool kept");
         assert_eq!(still.lines().count(), 2);
+        assert!(
+            !tmp_sibling(&spool).exists(),
+            "an interrupted keep leaves no temp file"
+        );
 
-        // Warm the store; the replay delivers and truncates.
+        // Warm the store; the replay delivers rows AND events, then truncates.
         store.ensure_schema().await.expect("schema");
-        let replayed = writer.replay().await.expect("replay");
+        let replayed = writer.replay(&defaults()).await.expect("replay");
         assert_eq!(replayed.replayed, 2);
         assert_eq!(replayed.corrupt, 0);
         assert_eq!(store.request_logs(), rows);
+        assert_eq!(store.load_events().await.expect("events").len(), 2);
         let truncated = tokio::fs::read_to_string(&spool)
             .await
             .expect("empty spool");
         assert!(truncated.is_empty());
+        assert!(!tmp_sibling(&spool).exists());
 
         // Replaying an absent spool is a no-op.
         let _ = std::fs::remove_file(&spool);
-        let replayed = writer.replay().await.expect("no spool");
+        let replayed = writer.replay(&defaults()).await.expect("no spool");
         assert_eq!(replayed.replayed, 0);
         let _ = std::fs::remove_file(&spool);
     }
@@ -603,15 +1007,369 @@ mod tests {
             .await
             .expect("write spool");
         let writer = RequestLogWriter::new(store.clone(), spool.clone());
-        let replayed = writer.replay().await.expect("replay");
+        let replayed = writer.replay(&defaults()).await.expect("replay");
         assert_eq!(replayed.replayed, 1);
         assert_eq!(replayed.corrupt, 1);
         assert_eq!(store.request_logs().len(), 1);
+        assert_eq!(store.load_events().await.expect("events").len(), 1);
         let dead = tokio::fs::read_to_string(writer.dead_path())
             .await
             .expect("dead file");
         assert_eq!(dead.trim(), "not json at all");
         let _ = std::fs::remove_file(&spool);
         let _ = std::fs::remove_file(writer.dead_path());
+    }
+
+    #[test]
+    fn cursor_files_round_trip_and_refuse_tampering() {
+        let cursor = FileCursor {
+            offset: 42,
+            identity: "10-abcd".to_string(),
+        };
+        assert_eq!(FileCursor::parse(&cursor.render()), Some(cursor));
+        assert_eq!(FileCursor::parse(""), None);
+        assert_eq!(FileCursor::parse("v2 1 x"), None);
+        assert_eq!(FileCursor::parse("v1 x y"), None);
+        assert_eq!(FileCursor::parse("v1 1"), None);
+        assert_eq!(FileCursor::parse("v1 1 x y"), None);
+        assert_eq!(FileCursor::parse("v1 1 "), None);
+    }
+
+    #[test]
+    fn file_identities_track_appends_and_rotations() {
+        let first = log_line("/pricing", 200, 10.0);
+        let second = log_line("/proof", 404, 11.0);
+        let appended = format!("{first}\n{second}\n");
+        let extended = format!("{first}\n{second}\n{}\n", log_line("/", 200, 12.0));
+        assert_eq!(
+            file_identity(&appended),
+            file_identity(&extended),
+            "an append never changes the identity"
+        );
+        let rotated = format!("{}\n", log_line("/other", 200, 13.0));
+        assert_ne!(file_identity(&appended), file_identity(&rotated));
+        assert_eq!(file_identity(""), None);
+        let huge_first_line = "x".repeat(10_000);
+        let identity = file_identity(&huge_first_line).expect("identity");
+        assert!(identity.starts_with("4096-"), "{identity}");
+    }
+
+    #[test]
+    fn cursor_paths_default_beside_the_input() {
+        let options = Options {
+            path: Some(PathBuf::from("/var/log/caddy/access.json")),
+            ..Options::default()
+        };
+        let none = |_key: &str| None;
+        assert_eq!(
+            cursor_path(&options, &none),
+            Some(PathBuf::from("/var/log/caddy/access.json.cursor"))
+        );
+        let configured =
+            |key: &str| (key == "APEX_INGEST_CURSOR").then(|| "/tmp/custom-cursor".to_string());
+        assert_eq!(
+            cursor_path(&options, &configured),
+            Some(PathBuf::from("/tmp/custom-cursor"))
+        );
+        let blank = |_key: &str| Some("  ".to_string());
+        assert_eq!(
+            cursor_path(&options, &blank),
+            Some(PathBuf::from("/var/log/caddy/access.json.cursor"))
+        );
+        // stdin input has no cursor.
+        assert_eq!(cursor_path(&Options::default(), &none), None);
+    }
+
+    #[tokio::test]
+    async fn a_file_is_delivered_once_and_the_rerun_reports_nothing_new() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-repeat");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            log_line("/pricing", 200, 1_767_225_600.0),
+            log_line("/proof", 404, 1_767_225_601.0)
+        );
+        tokio::fs::write(&log, &content).await.expect("write log");
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("first run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 2);
+        assert_eq!(summary.request_logs, 2);
+        assert_eq!(summary.events, 2);
+        assert_eq!(summary.delivered, 2);
+        assert_eq!(summary.events_delivered, 2);
+        assert_eq!(summary.spooled, 0);
+        assert!(!summary.cursor_restarted);
+        assert_eq!(summary.cursor_from, 0);
+        assert_eq!(summary.cursor_to, content.len() as u64);
+        assert_eq!(store.request_logs().len(), 2);
+        assert_eq!(store.load_events().await.expect("events").len(), 2);
+        assert!(
+            !tmp_sibling(&cursor).exists(),
+            "the cursor is replaced atomically"
+        );
+
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("second run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 0, "nothing new to read");
+        assert_eq!(summary.request_logs, 0, "summary reports 0 new");
+        assert_eq!(summary.events, 0);
+        assert_eq!(summary.delivered, 0);
+        assert_eq!(summary.events_delivered, 0);
+        assert_eq!(show_summary_cursor(&summary), content.len() as u64);
+        assert_eq!(
+            store.request_logs().len(),
+            2,
+            "request_logs count unchanged"
+        );
+        assert_eq!(
+            store.load_events().await.expect("events").len(),
+            2,
+            "event count unchanged"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    // The cursor offset a summary reports, for concise assertions.
+    fn show_summary_cursor(summary: &Summary) -> u64 {
+        summary.cursor_to
+    }
+
+    #[tokio::test]
+    async fn appended_lines_are_processed_incrementally() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-append");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        let first = log_line("/pricing", 200, 1_767_225_600.0);
+        tokio::fs::write(&log, format!("{first}\n"))
+            .await
+            .expect("write log");
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("first run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 1);
+        assert_eq!(store.request_logs().len(), 1);
+
+        // Append one line: only it is new.
+        let second = log_line("/proof", 200, 1_767_225_601.0);
+        let mut content = tokio::fs::read_to_string(&log).await.expect("read");
+        content.push_str(&format!("{second}\n"));
+        tokio::fs::write(&log, &content).await.expect("append");
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("second run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 1, "only the appended line is new");
+        assert_eq!(summary.request_logs, 1);
+        assert_eq!(summary.events, 1);
+        assert_eq!(summary.delivered, 1);
+        assert_eq!(show_summary_cursor(&summary), content.len() as u64);
+        assert_eq!(store.request_logs().len(), 2);
+        assert_eq!(store.load_events().await.expect("events").len(), 2);
+
+        // The stored cursor parses back to the durable offset.
+        let stored = tokio::fs::read_to_string(&cursor).await.expect("cursor");
+        let stored = FileCursor::parse(&stored).expect("cursor parses");
+        assert_eq!(stored.offset, content.len() as u64);
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn a_rotated_file_restarts_and_the_event_id_dedups() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-rotate");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        let first = log_line("/pricing", 200, 1_767_225_600.0);
+        let second = log_line("/proof", 200, 1_767_225_601.0);
+        tokio::fs::write(&log, format!("{first}\n{second}\n"))
+            .await
+            .expect("write log");
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+
+        let (_, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("first run");
+        assert_eq!(summary.lines, 2);
+        assert_eq!(store.request_logs().len(), 2);
+        assert_eq!(store.load_events().await.expect("events").len(), 2);
+
+        // Rotation that shrinks the file (same leading line): the offset is
+        // past the end, so the run restarts and reprocesses everything; the
+        // replayed event deduplicates, the plain log row may repeat.
+        tokio::fs::write(&log, format!("{first}\n"))
+            .await
+            .expect("rotate smaller");
+        let (code, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("shrunken run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(summary.cursor_restarted, "a shrunken file restarts at 0");
+        assert_eq!(summary.cursor_from, 0);
+        assert_eq!(summary.lines, 1);
+        assert_eq!(store.request_logs().len(), 3, "the log row repeats");
+        assert_eq!(
+            store.load_events().await.expect("events").len(),
+            2,
+            "the stable event id deduplicates the replay"
+        );
+
+        // Rotation to different content (identity changed): also a restart.
+        let rotated = format!(
+            "{}\n{}\n",
+            log_line("/other", 404, 1_767_225_700.0),
+            log_line("/terms", 200, 1_767_225_701.0)
+        );
+        tokio::fs::write(&log, &rotated).await.expect("rotate new");
+        let (_, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("rotated run");
+        assert!(summary.cursor_restarted, "a replaced file restarts at 0");
+        assert_eq!(summary.lines, 2);
+        assert_eq!(store.request_logs().len(), 5);
+        assert_eq!(store.load_events().await.expect("events").len(), 4);
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn bypassing_the_cursor_duplicates_the_log_row_but_not_the_event() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-bypass");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let spool = directory.join("spool.jsonl");
+        let line = log_line("/pricing", 200, 1_767_225_600.0);
+        tokio::fs::write(&log, format!("{line}\n"))
+            .await
+            .expect("write log");
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+
+        // Two runs with two different cursors read the same line twice, as a
+        // bypassed or lost cursor would.
+        let cursor_a = directory.join("cursor-a");
+        let cursor_b = directory.join("cursor_b");
+        let (_, first) =
+            run_with_store(&options, &test_env(&cursor_a, &spool), Some(store.clone()))
+                .await
+                .expect("run a");
+        let (_, second) =
+            run_with_store(&options, &test_env(&cursor_b, &spool), Some(store.clone()))
+                .await
+                .expect("run b");
+        assert_eq!(first.events, 1);
+        assert_eq!(second.events, 1, "the same line is processed again");
+        assert_eq!(store.request_logs().len(), 2, "the log row duplicates");
+        assert_eq!(
+            store.load_events().await.expect("events").len(),
+            1,
+            "the stable event id keeps one event"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn check_runs_never_touch_the_cursor() {
+        let directory = test_directory("cursor-check");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        tokio::fs::write(
+            &log,
+            format!("{}\n", log_line("/pricing", 200, 1_767_225_600.0)),
+        )
+        .await
+        .expect("write log");
+        let lookup = test_env(&cursor, &spool);
+        let options = Options {
+            path: Some(log.clone()),
+            check: true,
+            ..Options::default()
+        };
+        let (code, summary) = run_with_store(&options, &lookup, None::<ClickHouseStore>)
+            .await
+            .expect("check run");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(summary.lines, 1);
+        assert_eq!(summary.events, 1);
+        assert_eq!(summary.cursor_path, None);
+        assert!(
+            tokio::fs::metadata(&cursor).await.is_err(),
+            "--check writes no cursor"
+        );
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn an_unterminated_final_line_is_held_back_until_complete() {
+        let directory = test_directory("cursor-partial");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        let line = log_line("/pricing", 200, 1_767_225_600.0);
+        tokio::fs::write(&log, &line)
+            .await
+            .expect("write partial line");
+        let lookup = test_env(&cursor, &spool);
+        let options = Options {
+            path: Some(log.clone()),
+            check: true,
+            ..Options::default()
+        };
+        let (_, summary) = run_with_store(&options, &lookup, None::<ClickHouseStore>)
+            .await
+            .expect("check run");
+        assert_eq!(summary.lines, 0, "a line without its newline is not parsed");
+
+        // Completing the line makes it processable.
+        tokio::fs::write(&log, format!("{line}\n"))
+            .await
+            .expect("complete line");
+        let (_, summary) = run_with_store(&options, &lookup, None::<ClickHouseStore>)
+            .await
+            .expect("check again");
+        assert_eq!(summary.lines, 1);
+        let _ = tokio::fs::remove_dir_all(&directory).await;
     }
 }

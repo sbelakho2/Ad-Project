@@ -44,8 +44,10 @@
 //!   without it those pages answer the not-configured panel;
 //! - `APEX_PROPOSALS_ROOT` — the directory of the runner's proposal files
 //!   (`<id>.json`) and the console's decision records (`<id>.approval.json`);
-//! - `APEX_ALERTS_FILE` — the runner's alert log (`FileAlertSink` JSONL); a
-//!   `failedRollback` alert renders the restore-failed incident state;
+//! - `APEX_ALERT_FILE` — the runner's alert log (`FileAlertSink` JSONL); a
+//!   `failedRollback` alert renders the restore-failed incident state. The
+//!   historical `APEX_ALERTS_FILE` is read as a fallback (with one logged
+//!   line) when only that name is set;
 //! - `APEX_POLICY_FILE` — the runner's recorded `AutopilotPolicy` JSON (or
 //!   `{"policy": {...}}`), read-only behind `/console/settings/policy`;
 //! - `APEX_CONSOLE_CONTACT`, `APEX_CONSOLE_TIMEZONE` (default `UTC`) and
@@ -91,6 +93,14 @@ const DEFAULT_LEDGER_ROOT: &str = ".apex/ledgers";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Operational log lines (tracing warn/error) must be visible in
+    // production: initialize the stderr subscriber once, tolerating an
+    // already-installed global subscriber.
+    let _ = tracing_subscriber::fmt()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let bind: SocketAddr = env_value("APEX_API_BIND")
         .unwrap_or_else(|| DEFAULT_BIND.to_string())
         .parse()
@@ -233,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The workspace publisher the phase-2 console surfaces read
     // (`APEX_CONSOLE_PUBLISHER`), and the proposal files the runner writes
     // (`APEX_PROPOSALS_ROOT`) plus the runner's alert log
-    // (`APEX_ALERTS_FILE`).
+    // (`APEX_ALERT_FILE`, with `APEX_ALERTS_FILE` as a fallback).
     if let Some(publisher) = env_value("APEX_CONSOLE_PUBLISHER") {
         state = state.with_workspace_publisher(publisher);
     }
@@ -241,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state =
             state.with_proposal_store(Arc::new(apex_api::proposals::FileProposalStore::new(path)));
     }
-    if let Some(path) = env_value(apex_api::experiments::ALERTS_FILE_ENV) {
+    if let Some(path) = apex_api::experiments::alerts_file_from_env(&env_value) {
         state = state.with_alerts_path(path);
     }
     if let Some(path) = env_value("APEX_COLLECTION_FILE") {

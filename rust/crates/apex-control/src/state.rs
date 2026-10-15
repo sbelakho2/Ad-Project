@@ -24,7 +24,7 @@ use crate::data::ControlData;
 use crate::events::EventEmitter;
 use crate::governance::GovernanceStore;
 use crate::jobs::JobStore;
-use crate::journal::{ActionJournal, JournalIndex};
+use crate::journal::{ActionJournal, JournalIndex, RememberedResult};
 use crate::login::PendingLogins;
 use crate::rate_limit::AttemptLimiter;
 use crate::session::OperatorSessions;
@@ -265,22 +265,29 @@ impl ControlState {
         lock.lock_owned().await
     }
 
-    /// The result id remembered for an idempotency key, when any.
-    pub fn remembered_result(&self, idempotency_key: &str) -> Option<String> {
+    /// The result remembered for an idempotency key, when any; the payload
+    /// fingerprint distinguishes a duplicate from a reused key.
+    pub fn remembered_result(&self, idempotency_key: &str) -> Option<RememberedResult> {
         let index = match self.index.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        index.result_for(idempotency_key).map(str::to_string)
+        index.result_for(idempotency_key).cloned()
     }
 
-    /// Remember a result id for an idempotency key.
-    pub fn remember_result(&self, idempotency_key: &str, result_id: &str) {
+    /// Remember a result id and its payload fingerprint for an idempotency
+    /// key.
+    pub fn remember_result(
+        &self,
+        idempotency_key: &str,
+        payload_fingerprint: &str,
+        result_id: &str,
+    ) {
         let mut index = match self.index.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        index.remember(idempotency_key, result_id);
+        index.remember(idempotency_key, payload_fingerprint, result_id);
     }
 }
 
@@ -337,13 +344,25 @@ mod tests {
             before_digest: "a".repeat(64),
             after_digest: "b".repeat(64),
             idempotency_key: crate::signing::idempotency_fingerprint("key1"),
+            payload_fingerprint: Some(crate::signing::payload_fingerprint(
+                "retry_read",
+                "acct",
+                &serde_json::json!({}),
+            )),
             result_id: Some("res_1".to_string()),
             job_id: None,
             correlation_id: "c".to_string(),
         };
         journal.append(&entry).expect("append");
         let state = ControlState::new(config, ControlData::fixtures()).expect("state");
-        assert_eq!(state.remembered_result("key1").as_deref(), Some("res_1"));
+        let remembered = state.remembered_result("key1").expect("remembered");
+        assert_eq!(remembered.result_id, "res_1");
+        assert!(remembered.matches(&crate::signing::payload_fingerprint(
+            "retry_read",
+            "acct",
+            &serde_json::json!({})
+        )));
+        assert!(!remembered.matches("sha256:other"));
         assert_eq!(state.remembered_result("key2"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }

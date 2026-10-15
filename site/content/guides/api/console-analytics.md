@@ -2,7 +2,7 @@
 title = "Console analytics | Apex API reference"
 description = "Revenue, lift, fees and data-quality views over the analytics store, with CSV export."
 template = "api.html"
-weight = 17
+weight = 18
 
 [extra]
 h1 = "Console analytics"

@@ -102,6 +102,16 @@ pub enum PaymentError {
         /// The parse failure.
         reason: String,
     },
+    /// A reference's received total overflowed i64 micros while accumulating
+    /// its receipts; the pass fails rather than fabricating a balance. The
+    /// offending provider event is named.
+    #[error("payment event {psp_reference} for reference {reference}: the received total overflows i64 micros")]
+    Overflow {
+        /// The provider event that tipped the total over.
+        psp_reference: String,
+        /// The collected reference being accumulated.
+        reference: String,
+    },
 }
 
 /// What one processing pass did.
@@ -353,6 +363,11 @@ fn day_of(at_unix_ms: i64) -> String {
 /// `analytics` and `telemetry` are optional collaborators: tests and dry-run
 /// deployments run without them, and the durable collection file stays the
 /// source of truth either way.
+///
+/// The pass fails with a typed [`PaymentError::Overflow`] when a reference's
+/// received total cannot be accumulated in i64 micros: the remaining balance
+/// is never fabricated from a wrapped total (the batch is re-processed after
+/// the corrupt source is fixed; every emit is dedup-keyed).
 #[allow(clippy::too_many_arguments)]
 pub async fn process_payment_events(
     events: &[CollectionEvent],
@@ -363,7 +378,7 @@ pub async fn process_payment_events(
     telemetry: Option<&RunnerTelemetry>,
     publisher: &str,
     now_unix_ms: i64,
-) -> PaymentsReport {
+) -> Result<PaymentsReport, PaymentError> {
     use apex_analytics::EventType;
     use apex_metrics::vocab::{PaymentEventClass, PaymentResult};
 
@@ -402,7 +417,16 @@ pub async fn process_payment_events(
                 let total = received_by_reference
                     .entry(event.merchant_reference.clone())
                     .or_default();
-                *total += amount_micros;
+                // A corrupt row must not wrap the total: fail the pass,
+                // naming the event, and let the batch retry after the
+                // source is fixed.
+                *total =
+                    total
+                        .checked_add(amount_micros)
+                        .ok_or_else(|| PaymentError::Overflow {
+                            psp_reference: event.psp_reference.clone(),
+                            reference: event.merchant_reference.clone(),
+                        })?;
                 if let Some(notifier) = notifier {
                     let due = ledger
                         .iter()
@@ -410,7 +434,10 @@ pub async fn process_payment_events(
                         .map(|row| row.amount_micros);
                     match due {
                         Some(due) => {
-                            let remaining = (due - *total).max(0);
+                            // A ledger row below the received total (or at
+                            // i64::MIN) saturates to a zero remainder; it
+                            // never underflows or fabricates a balance.
+                            let remaining = due.saturating_sub(*total).max(0);
                             notifier
                                 .payment_received(
                                     publisher,
@@ -535,7 +562,7 @@ pub async fn process_payment_events(
             report.skipped += 1;
         }
     }
-    report
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -600,7 +627,8 @@ mod tests {
             "northstar",
             1_797_235_200_000,
         )
-        .await;
+        .await
+        .expect("pass");
         assert_eq!(
             report,
             PaymentsReport {
@@ -665,7 +693,8 @@ mod tests {
             "northstar",
             1_797_235_200_000,
         )
-        .await;
+        .await
+        .expect("pass");
         assert_eq!(report.received, 2);
         let rows = outbox(&dir);
         assert_eq!(rows.len(), 2, "one message per receipt");
@@ -700,7 +729,8 @@ mod tests {
             "northstar",
             1_797_235_200_000,
         )
-        .await;
+        .await
+        .expect("pass");
         assert_eq!(report.received, 1);
         assert_eq!(report.failed, 1);
         assert_eq!(report.skipped, 1, "the received message needs a balance");
@@ -756,7 +786,8 @@ mod tests {
             "northstar",
             1_797_235_200_000,
         )
-        .await;
+        .await
+        .expect("pass");
         assert_eq!(report.retries, 1);
         assert_eq!(report.skipped, 1, "the dateless schedule sends nothing");
         let rows = outbox(&dir);
@@ -820,7 +851,8 @@ mod tests {
             "northstar",
             1_797_235_200_000,
         )
-        .await;
+        .await
+        .expect("pass");
         assert_eq!(report.received, 1);
         let rows = outbox(&dir);
         assert_eq!(rows.len(), 1);
@@ -831,6 +863,100 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("USD"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn overflowing_totals_fail_typed_and_extreme_ledgers_saturate() {
+        // Two receipts for one reference whose micros sum past i64::MAX:
+        // the pass fails, naming the offending event, and never fabricates
+        // a wrapped remaining balance.
+        let events = vec![
+            event("AUTHORISATION", "true", "psp_1", 922_337_203_685_477),
+            event("AUTHORISATION", "true", "psp_2", 922_337_203_685_477),
+        ];
+        let error = process_payment_events(
+            &events,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            "northstar",
+            1_797_235_200_000,
+        )
+        .await
+        .expect_err("overflow");
+        assert!(
+            matches!(
+                &error,
+                PaymentError::Overflow { psp_reference, reference }
+                    if psp_reference == "psp_2"
+                        && reference == "apex-fee:northstar:ch_0246:2026-10"
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("psp_2"), "{error}");
+
+        // An i64::MIN ledger row saturates to a zero remainder instead of
+        // underflowing; an i64::MAX row still renders the exact balance.
+        let dir = std::env::temp_dir().join(format!("apex-payments-ext-{}", std::process::id()));
+        let min_plan = plan(&dir).await;
+        let min_ledger = vec![PaymentLedgerRow {
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            amount_micros: i64::MIN,
+            currency: "USD".into(),
+            at_unix_ms: 0,
+        }];
+        let report = process_payment_events(
+            &[event("AUTHORISATION", "true", "psp_1", 300)],
+            &min_ledger,
+            &[],
+            Some(&min_plan),
+            None,
+            None,
+            "northstar",
+            1_797_235_200_000,
+        )
+        .await
+        .expect("i64::MIN ledger row");
+        assert_eq!(report.received, 1);
+        let rows = outbox(&dir);
+        let text = rows[0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("The remaining balance is USD 0.00."),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = std::env::temp_dir().join(format!("apex-payments-max-{}", std::process::id()));
+        let max_plan = plan(&dir).await;
+        let max_ledger = vec![PaymentLedgerRow {
+            reference: "apex-fee:northstar:ch_0246:2026-10".into(),
+            amount_micros: i64::MAX,
+            currency: "USD".into(),
+            at_unix_ms: 0,
+        }];
+        let report = process_payment_events(
+            &[event("AUTHORISATION", "true", "psp_7", 300)],
+            &max_ledger,
+            &[],
+            Some(&max_plan),
+            None,
+            None,
+            "northstar",
+            1_797_235_200_000,
+        )
+        .await
+        .expect("i64::MAX ledger row");
+        assert_eq!(report.received, 1);
+        let expected = apex_notify::format_usd(i64::MAX - 3_000_000).expect("balance renders");
+        let rows = outbox(&dir);
+        let text = rows[0]["text"].as_str().unwrap();
+        assert!(
+            text.contains(&format!("The remaining balance is {expected}.")),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -9,7 +9,9 @@
 //!
 //! The store is opened on `APEX_NOTIFY_STATE`; without a path it still
 //! deduplicates within the process, and that limitation is recorded in
-//! [`DeliveryLog::path`].
+//! [`DeliveryLog::path`]. A missing file is a first run; a file that exists
+//! but cannot be read (permissions, I/O) is a typed error, never an empty
+//! deduplication index.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -122,29 +124,42 @@ pub struct DeliveryLog {
 }
 
 impl DeliveryLog {
-    /// Open the log at `path` (creating parent directories). An existing file
-    /// is loaded; a corrupt line is a typed error, never a silent reset.
+    /// Open the log at `path` (creating parent directories). A missing file
+    /// is a first run (an empty log); any other read failure (permissions,
+    /// I/O) is a typed error, so a deduplication index is never silently
+    /// emptied and messages never silently re-send. A corrupt line is a
+    /// typed error, never a silent reset.
     pub fn open(path: Option<&Path>) -> Result<Self, StateError> {
         let mut sent = BTreeSet::new();
         if let Some(path) = path {
-            if let Ok(bytes) = std::fs::read(path) {
-                let text = String::from_utf8_lossy(&bytes);
-                for (index, line) in text.lines().enumerate() {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let row: DeliveryStateRow =
-                        serde_json::from_str(line).map_err(|error| StateError::Corrupt {
-                            path: path.display().to_string(),
-                            line: index + 1,
-                            reason: error.to_string(),
+            match std::fs::read(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(StateError::Io {
+                        path: path.display().to_string(),
+                        reason: error.to_string(),
+                    })
+                }
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for (index, line) in text.lines().enumerate() {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let row: DeliveryStateRow =
+                            serde_json::from_str(line).map_err(|error| StateError::Corrupt {
+                                path: path.display().to_string(),
+                                line: index + 1,
+                                reason: error.to_string(),
+                            })?;
+                        let kind = StateKind::parse(&row.state).ok_or_else(|| {
+                            StateError::UnknownState {
+                                state: row.state.clone(),
+                            }
                         })?;
-                    let kind =
-                        StateKind::parse(&row.state).ok_or_else(|| StateError::UnknownState {
-                            state: row.state.clone(),
-                        })?;
-                    if kind.blocks_resend() {
-                        sent.insert((row.template_class, row.dedup_key, row.to));
+                        if kind.blocks_resend() {
+                            sent.insert((row.template_class, row.dedup_key, row.to));
+                        }
                     }
                 }
             }
@@ -362,11 +377,72 @@ mod tests {
     fn a_write_failure_to_a_configured_file_is_typed() {
         let dir =
             std::env::temp_dir().join(format!("apex-notify-state-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // The path is a directory: appending the first row fails typed.
-        let log = DeliveryLog::open(Some(&dir)).expect("open tolerates a missing file");
+        // Open with a missing file (a first run), then make the configured
+        // path a directory: appending the first row fails typed.
+        let path = dir.join("delivery.jsonl");
+        let log = DeliveryLog::open(Some(&path)).expect("open tolerates a missing file");
+        std::fs::create_dir(&path).unwrap();
         let error = log.record(&row("requested", "k1")).expect_err("dir path");
         assert!(matches!(error, StateError::Io { .. }), "{error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_read_is_a_typed_open_error_not_an_empty_log() {
+        // A directory as the state path is a non-NotFound read error on
+        // every platform: opening must fail loud, never start from empty.
+        let dir =
+            std::env::temp_dir().join(format!("apex-notify-state-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = DeliveryLog::open(Some(&dir)).expect_err("directory path");
+        assert!(matches!(error, StateError::Io { .. }), "{error:?}");
+        assert!(error.to_string().contains("notification state"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_state_file_fails_open_instead_of_emptying_the_index() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("apex-notify-state-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("delivery.jsonl");
+        let log = DeliveryLog::open(Some(&path)).expect("open");
+        log.record(&row("accepted", "k1")).unwrap();
+        drop(log);
+        let readable_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let mut locked = std::fs::metadata(&path).unwrap().permissions();
+        locked.set_mode(0o000);
+        std::fs::set_permissions(&path, locked).unwrap();
+
+        if std::fs::read(&path).is_ok() {
+            // Running as root (or on a filesystem that ignores the mode):
+            // the permission bit did not take effect, so assert the same
+            // fail-loud contract with a read error that cannot be bypassed.
+            let mut restore = std::fs::metadata(&path).unwrap().permissions();
+            restore.set_mode(readable_mode);
+            std::fs::set_permissions(&path, restore).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let error = DeliveryLog::open(Some(&path)).expect_err("directory path");
+            assert!(matches!(error, StateError::Io { .. }), "{error:?}");
+        } else {
+            let error = DeliveryLog::open(Some(&path)).expect_err("unreadable file");
+            assert!(matches!(error, StateError::Io { .. }), "{error:?}");
+            // Restore the mode and reopen: the dedup index loads again,
+            // because a permission problem never trades the index away.
+            let mut restore = std::fs::metadata(&path).unwrap().permissions();
+            restore.set_mode(readable_mode);
+            std::fs::set_permissions(&path, restore).unwrap();
+            let reopened = DeliveryLog::open(Some(&path)).expect("reopen");
+            assert!(reopened.has_sent("payment_failed", "k1", "ops@example.com"));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

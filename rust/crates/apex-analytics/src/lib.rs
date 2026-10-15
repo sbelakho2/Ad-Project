@@ -26,10 +26,17 @@
 //!   STAGED (unpublished) rows, compared, and only then published
 //!   ([`projections::rebuild`], [`projections::compare`],
 //!   [`projections::publish`]): a failed compare leaves readers on the
-//!   previous version.
+//!   previous version. A database created before staging existed is migrated
+//!   at boot: `ensure_schema` detects the legacy sorting keys and rebuilds
+//!   every staged table through a crash-safe swap before any rebuild can
+//!   collapse a published version away ([`schema::staged_migration_plan`]).
 //! - No personal data, platform secrets, raw authorization headers or
 //!   complete query strings are stored; the access-log parser reduces the
-//!   user agent to a bounded class and never copies addresses.
+//!   user agent to a bounded class and never copies addresses. The
+//!   `public_page_requested` event it feeds carries only the bounded
+//!   classification facts (route template, status, bot class, campaign
+//!   parameter keys) and powers the site-wide
+//!   [`queries::AnalyticsReader::page_requests_daily`] counts.
 
 #![forbid(unsafe_code)]
 // Production code is held to the strict workspace lints; tests may
@@ -61,8 +68,8 @@ pub use queries::{
     ActivationFunnel, AnalyticsReader, BreakdownDimension, ClickHouseReader, DataQuality,
     ExperimentEffectiveness, ExperimentLandscapeRow, FeeDetail, FeeRow, FeeState, FreshnessStatus,
     FunnelStageRow, GrowthCohortRow, IngestionHealthRow, LiftRow, MemoryReader, Money,
-    ObjectTimelineEntry, OperatorQueues, QueryScope, RevenueBreakdownRow, RevenueDailyRow,
-    StaleSource,
+    ObjectTimelineEntry, OperatorQueues, PageRequestsDay, QueryScope, RevenueBreakdownRow,
+    RevenueDailyRow, StaleSource,
 };
 pub use schema::{
     all_ddl, validate_identifier, SchemaError, AGGREGATE_RETENTION_MONTHS,

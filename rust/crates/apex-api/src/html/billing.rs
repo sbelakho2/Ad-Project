@@ -6,11 +6,13 @@
 //! and the tax line as its own visible fact. Every amount is the signed
 //! record's amount; nothing is recomputed in HTML.
 
+use std::fmt::Write as _;
+
 use apex_ui::components::{data_table, kpi_card, kpi_row, notice, panel, Cell, EmptyState};
 use apex_ui::format::{money_fixed, or_not_available, percent, utc_datetime};
 use apex_ui::status::StatusKind;
 
-use crate::billing_view::{BillingFeeLine, BillingView, InvoiceStateView};
+use crate::billing_view::{excluded_foreign_note, BillingFeeLine, BillingView, InvoiceStateView};
 
 use super::{console_document, html_escape, ConsoleCtx};
 
@@ -126,6 +128,12 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
             ]
         })
         .collect();
+    let mut register_note = FINANCIAL_LANGUAGE.to_string();
+    for row in &view.register {
+        if let Some(note) = excluded_foreign_note(row.excluded_foreign_receipts) {
+            let _ = write!(register_note, " {} {}", month_name(&row.period), note);
+        }
+    }
     body.push_str(&data_table(
         Some("Invoice register"),
         &["Period", "Invoice", "State", "Total before tax"],
@@ -134,7 +142,7 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
             reason: "No signed monthly billing record is stored for this workspace.".to_string(),
             action: None,
         }),
-        Some(FINANCIAL_LANGUAGE),
+        Some(register_note.as_str()),
     ));
     console_document(ctx, "Billing", "Billing", &body)
 }
@@ -366,11 +374,15 @@ fn payments_section(view: &BillingView, period: &str) -> String {
         })
         .collect();
     let balance = view.balance_due_for(period);
-    let note = format!(
+    let mut note = format!(
         "Balance due: {} / verified collections: {}.",
         money_fixed(balance, &view.currency),
         money_fixed(view.collected_for(period), &view.currency)
     );
+    if let Some(exclusion) = excluded_foreign_note(view.excluded_foreign_for(period)) {
+        note.push(' ');
+        note.push_str(&exclusion);
+    }
     data_table(
         Some("Payment events"),
         &[
@@ -386,7 +398,7 @@ fn payments_section(view: &BillingView, period: &str) -> String {
             reason: "No payment event is recorded for this period.".to_string(),
             action: None,
         }),
-        Some(&note),
+        Some(note.as_str()),
     )
 }
 
@@ -523,16 +535,25 @@ mod tests {
         let mut register: Vec<_> = view
             .fee_lines
             .iter()
-            .map(|line| crate::billing_view::InvoiceRegisterRow {
-                period: line.month.clone(),
-                state: if line.month == view.current_month {
+            .map(|line| {
+                let collected = view.collected_for(&line.month);
+                let state = if line.month == view.current_month {
                     InvoiceStateView::Draft
-                } else {
+                } else if collected >= line.fee_micros && line.fee_micros > 0 {
                     InvoiceStateView::Paid
-                },
-                total_micros: line.fee_micros,
-                collected_micros: line.fee_micros,
-                is_current: line.month == view.current_month,
+                } else if collected > 0 {
+                    InvoiceStateView::Pending
+                } else {
+                    InvoiceStateView::NotCollected
+                };
+                crate::billing_view::InvoiceRegisterRow {
+                    period: line.month.clone(),
+                    state,
+                    total_micros: line.fee_micros,
+                    collected_micros: collected,
+                    excluded_foreign_receipts: view.excluded_foreign_for(&line.month),
+                    is_current: line.month == view.current_month,
+                }
             })
             .collect();
         register.sort_by(|a, b| b.period.cmp(&a.period));
@@ -721,6 +742,49 @@ mod tests {
         let html = render_period_not_found(&ctx());
         assert!(html.contains("<h1>Invoice not found</h1>"));
         assert!(html.contains("No fee period matches this address."));
+    }
+
+    #[test]
+    fn foreign_currency_receipts_are_excluded_with_an_explicit_note() {
+        let view = view_with(
+            vec![line("ch_0246", "2026-09", 225_000_000)],
+            vec![CollectionEvent {
+                at_unix_ms: 1_792_055_400_000,
+                event_code: "AUTHORISATION".to_string(),
+                psp_reference: "psp-eur".to_string(),
+                merchant_reference: "apex-fee:northstar:exp:2026-09".to_string(),
+                success: "true".to_string(),
+                amount_value: 300,
+                amount_currency: "EUR".to_string(),
+            }],
+        );
+        // The register page notes the exclusion against the period.
+        let register = render_billing(
+            &ctx(),
+            &BillingPageData {
+                view: &view,
+                as_of_unix_ms: 1_792_055_400_000,
+            },
+        );
+        assert!(
+            register.contains(
+                "September 2026 1 receipt in another currency is excluded from this balance."
+            ),
+            "the register names the excluded receipts: {register}"
+        );
+        // The invoice page states the untouched balance and the note.
+        let html = render_invoice(
+            &ctx(),
+            &InvoicePageData {
+                view: &view,
+                period: "2026-09",
+                vat_rate_bp: None,
+            },
+        );
+        assert!(html.contains("Balance due: $225.00"));
+        assert!(html.contains("verified collections: $0.00"));
+        assert!(html.contains("1 receipt in another currency is excluded from this balance."));
+        assert!(html.contains("<code>psp-eur</code>"));
     }
 
     #[test]

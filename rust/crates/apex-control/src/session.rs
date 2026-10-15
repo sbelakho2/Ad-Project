@@ -141,7 +141,7 @@ impl OperatorSessions {
             let Some(oldest) = inner
                 .sessions
                 .iter()
-                .min_by_key(|(_, state)| state.last_seen_ms)
+                .min_by_key(|(id, state)| (state.last_seen_ms, id.as_str()))
                 .map(|(id, _)| id.clone())
             else {
                 break;
@@ -457,6 +457,26 @@ mod tests {
         assert!(store.touch(&second.id, T0 + 3_000).is_none(), "evicted");
         assert!(store.touch(&first.id, T0 + 3_000).is_some());
         assert!(store.touch(&third.id, T0 + 3_000).is_some());
+    }
+
+    #[test]
+    fn equal_timestamp_eviction_picks_the_smallest_id_deterministically() {
+        let store = OperatorSessions::new(2, SESSION_IDLE_MS, SESSION_ABSOLUTE_MS, 600_000);
+        let first = store.open("a", "A", Role::Observer, "d", T0);
+        let second = store.open("b", "B", Role::Observer, "d", T0);
+        // Both entries share the same last-seen millisecond; the victim must
+        // be the lexicographically smallest id, not HashMap order.
+        let victim = std::cmp::min(first.id.clone(), second.id.clone());
+        let survivor = if victim == first.id {
+            second.id.clone()
+        } else {
+            first.id.clone()
+        };
+        let third = store.open("c", "C", Role::Observer, "d", T0);
+        assert_eq!(store.len(), 2);
+        assert!(store.touch(&victim, T0).is_none(), "smallest id evicted");
+        assert!(store.touch(&survivor, T0).is_some());
+        assert!(store.touch(&third.id, T0).is_some());
     }
 
     #[test]

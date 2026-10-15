@@ -2,7 +2,7 @@
 title = "Console settings | Apex API reference"
 description = "Account, theme, sessions, policy and monitoring pages on the publisher console."
 template = "api.html"
-weight = 16
+weight = 17
 
 [extra]
 h1 = "Console settings"

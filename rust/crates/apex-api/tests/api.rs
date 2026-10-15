@@ -10,8 +10,9 @@ use std::sync::Arc;
 use apex_api::{router, MAX_BODY_BYTES};
 
 use axum::body::Body;
+use axum::http::header;
 use axum::http::header::CONTENT_LENGTH;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use common::*;
 use serde_json::json;
 
@@ -562,11 +563,29 @@ async fn webhook_malformed_events_are_refused() {
 async fn unknown_routes_fall_back_to_json_not_found() {
     let temp = TempDir::new("fallback");
     let app = router(file_state(temp.path(), pub1_keys()));
-    for path in ["/nope", "/v1", "/console", "/v1/audit/admob/extra"] {
+    for path in ["/nope", "/v1", "/console/other", "/v1/audit/admob/extra"] {
         let response = send(&app, get(path)).await;
         assert_eq!(response.status, 404, "{path}");
         assert!(response.content_type().starts_with(JSON), "{path}");
         assert_eq!(response.json(), json!({"error": "not_found"}), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn bare_console_redirects_to_the_advertised_change_log() {
+    let temp = TempDir::new("console-bare");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    for path in ["/console", "/console/"] {
+        let response = send(&app, get(path)).await;
+        assert_eq!(response.status, StatusCode::SEE_OTHER, "{path}");
+        assert_eq!(
+            response
+                .headers
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/console/ledger"),
+            "{path}"
+        );
     }
 }
 

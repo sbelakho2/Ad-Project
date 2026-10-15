@@ -953,6 +953,766 @@ async fn real_clickhouse_round_trip() {
     }
 }
 
+/// The pre-staging DDL, written out as a legacy deployment created it:
+/// `projection_versions` ordered by `projection_name` and the projection
+/// tables ordered by their business keys only (no `as_of_version`), so a
+/// staged rebuild and the published version collapse into one row per key at
+/// merge time exactly as the adversarial probe reproduced.
+fn legacy_ddl(database: &str) -> Vec<String> {
+    vec![
+        format!(
+            "CREATE TABLE {database}.projection_versions (\n\
+             \x20   projection_name LowCardinality(String),\n\
+             \x20   as_of_version UInt64,\n\
+             \x20   batch_id String,\n\
+             \x20   source_event_max Nullable(DateTime64(3, 'UTC')),\n\
+             \x20   rebuilt_at DateTime64(3, 'UTC')\n\
+             ) ENGINE = ReplacingMergeTree(rebuilt_at)\n\
+             ORDER BY projection_name"
+        ),
+        format!(
+            "CREATE TABLE {database}.customer_daily (\n\
+             \x20   publisher_id LowCardinality(String),\n\
+             \x20   day Date,\n\
+             \x20   platform LowCardinality(String),\n\
+             \x20   currency LowCardinality(String),\n\
+             \x20   revenue_micros Int64,\n\
+             \x20   impressions Nullable(UInt64),\n\
+             \x20   source_days UInt32,\n\
+             \x20   final_days UInt32,\n\
+             \x20   provisional_days UInt32,\n\
+             \x20   as_of_version UInt64\n\
+             ) ENGINE = ReplacingMergeTree(as_of_version)\n\
+             ORDER BY (publisher_id, day, platform, currency)\n\
+             TTL day + INTERVAL 24 MONTH"
+        ),
+        format!(
+            "CREATE TABLE {database}.platform_daily (\n\
+             \x20   platform LowCardinality(String),\n\
+             \x20   day Date,\n\
+             \x20   currency LowCardinality(String),\n\
+             \x20   revenue_micros Int64,\n\
+             \x20   impressions Nullable(UInt64),\n\
+             \x20   final_accounts UInt32,\n\
+             \x20   provisional_accounts UInt32,\n\
+             \x20   as_of_version UInt64\n\
+             ) ENGINE = ReplacingMergeTree(as_of_version)\n\
+             ORDER BY (platform, day, currency)\n\
+             TTL day + INTERVAL 24 MONTH"
+        ),
+        format!(
+            "CREATE TABLE {database}.lifecycle_cohorts (\n\
+             \x20   cohort_month Date,\n\
+             \x20   publisher_id LowCardinality(String),\n\
+             \x20   stage LowCardinality(String),\n\
+             \x20   accounts UInt32,\n\
+             \x20   as_of_version UInt64\n\
+             ) ENGINE = ReplacingMergeTree(as_of_version)\n\
+             ORDER BY (cohort_month, publisher_id, stage)\n\
+             TTL cohort_month + INTERVAL 24 MONTH"
+        ),
+        format!(
+            "CREATE TABLE {database}.operator_queues (\n\
+             \x20   queue LowCardinality(String),\n\
+             \x20   object_id String,\n\
+             \x20   publisher_id LowCardinality(String),\n\
+             \x20   severity LowCardinality(String),\n\
+             \x20   age_seconds UInt64,\n\
+             \x20   owner Nullable(String),\n\
+             \x20   next_action String,\n\
+             \x20   as_of_version UInt64\n\
+             ) ENGINE = ReplacingMergeTree(as_of_version)\n\
+             ORDER BY (queue, object_id)"
+        ),
+    ]
+}
+
+/// Insert raw JSONEachRow rows through the admin path (used for the legacy
+/// shapes and other statements the typed API deliberately does not support).
+async fn insert_rows(
+    store: &ClickHouseStore,
+    table: &str,
+    rows: &[serde_json::Value],
+) -> Result<(), String> {
+    let mut body = format!(
+        "INSERT INTO {}.{table} FORMAT JSONEachRow\n",
+        store.database()
+    );
+    for row in rows {
+        body.push_str(&serde_json::to_string(row).map_err(|error| error.to_string())?);
+        body.push('\n');
+    }
+    store
+        .execute_statement(&body)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn u64_field(row: &serde_json::Value, key: &str) -> u64 {
+    row.get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0)
+}
+
+async fn sorting_keys(store: &ClickHouseStore) -> Result<Vec<(String, String)>, String> {
+    let rows = store
+        .fetch_rows(
+            "SELECT name, sorting_key FROM system.tables WHERE database = {db:String}",
+            &[("db", store.database())],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.get("name")?.as_str()?.to_string(),
+                row.get("sorting_key")?
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            ))
+        })
+        .collect())
+}
+
+async fn table_counts(store: &ClickHouseStore) -> Result<Vec<(String, u64)>, String> {
+    let mut counts = Vec::new();
+    for table in apex_analytics::schema::STAGED_TABLES {
+        let rows = store
+            .fetch_rows(
+                &format!(
+                    "SELECT count() AS n FROM {}.{}",
+                    store.database(),
+                    table.name
+                ),
+                &[],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        counts.push((
+            table.name.to_string(),
+            rows.first().map(|row| u64_field(row, "n")).unwrap_or(0),
+        ));
+    }
+    Ok(counts)
+}
+
+/// The legacy migration scenario: a database created with the old DDL, one
+/// published v1 per projection, then `ensure_schema` migrates every shape.
+/// A staged rebuild plus forced merges must leave readers on v1 (the
+/// adversarial probe observed an empty read), publish must switch to v2,
+/// and a second `ensure_schema` must be a no-op.
+async fn run_legacy_migration(store: &ClickHouseStore) -> Result<(), String> {
+    let map = |error: apex_analytics::store::StoreError| error.to_string();
+    let reader = ClickHouseReader::new(store.clone());
+    let scope = QueryScope::new("northstar", time(HORIZON));
+
+    store
+        .execute_statement(&format!(
+            "CREATE DATABASE IF NOT EXISTS {}",
+            store.database()
+        ))
+        .await
+        .map_err(map)?;
+    for statement in legacy_ddl(store.database()) {
+        store.execute_statement(&statement).await.map_err(map)?;
+    }
+    // One reader-visible v1 version row per projection and one v1 data row
+    // for customer_daily whose value differs from the recomputed v2.
+    let version_rows: Vec<serde_json::Value> = [
+        "customer_daily",
+        "platform_daily",
+        "lifecycle_cohorts",
+        "operator_queues",
+    ]
+    .iter()
+    .map(|name| {
+        serde_json::json!({
+            "projection_name": name,
+            "as_of_version": 1,
+            "batch_id": "legacy-batch",
+            "source_event_max": "2026-10-01 00:00:00.000",
+            "rebuilt_at": "2026-10-02 00:00:00.000",
+        })
+    })
+    .collect();
+    insert_rows(store, "projection_versions", &version_rows).await?;
+    insert_rows(
+        store,
+        "customer_daily",
+        &[serde_json::json!({
+            "publisher_id": "northstar",
+            "day": "2026-10-01",
+            "platform": "applovin_max",
+            "currency": "USD",
+            "revenue_micros": 1_000_000,
+            "impressions": 10,
+            "source_days": 1,
+            "final_days": 1,
+            "provisional_days": 0,
+            "as_of_version": 1,
+        })],
+    )
+    .await?;
+    insert_rows(
+        store,
+        "platform_daily",
+        &[serde_json::json!({
+            "platform": "applovin_max",
+            "day": "2026-10-01",
+            "currency": "USD",
+            "revenue_micros": 1_000_000,
+            "impressions": 10,
+            "final_accounts": 1,
+            "provisional_accounts": 0,
+            "as_of_version": 1,
+        })],
+    )
+    .await?;
+    insert_rows(
+        store,
+        "lifecycle_cohorts",
+        &[serde_json::json!({
+            "cohort_month": "2026-08-01",
+            "publisher_id": "northstar",
+            "stage": "qualified",
+            "accounts": 1,
+            "as_of_version": 1,
+        })],
+    )
+    .await?;
+    insert_rows(
+        store,
+        "operator_queues",
+        &[serde_json::json!({
+            "queue": "incidents",
+            "object_id": "inc_legacy",
+            "publisher_id": "northstar",
+            "severity": "critical",
+            "age_seconds": 120,
+            "owner": "maya",
+            "next_action": "review_incident",
+            "as_of_version": 1,
+        })],
+    )
+    .await?;
+
+    let legacy_keys = sorting_keys(store).await?;
+    println!("legacy sorting keys: {legacy_keys:?}");
+
+    // The boot migration under test.
+    store.ensure_schema().await.map_err(map)?;
+
+    let migrated_keys = sorting_keys(store).await?;
+    println!("migrated sorting keys: {migrated_keys:?}");
+    for table in apex_analytics::schema::STAGED_TABLES {
+        let key = migrated_keys
+            .iter()
+            .find(|(name, _)| name == table.name)
+            .map(|(_, key)| key.clone())
+            .expect("every staged table exists after ensure_schema");
+        assert_eq!(
+            key.replace(' ', ""),
+            table.sorting_key,
+            "{} must carry the staged sorting key",
+            table.name
+        );
+    }
+    let leftovers = store
+        .fetch_rows(
+            "SELECT count() AS n FROM system.tables \
+             WHERE database = {db:String} AND name LIKE '%__migration'",
+            &[("db", store.database())],
+        )
+        .await
+        .map_err(map)?;
+    assert_eq!(
+        u64_field(&leftovers[0], "n"),
+        0,
+        "a migrated boot leaves no migration siblings"
+    );
+
+    // Readers see the migrated published v1, and its bookkeeping is exact.
+    assert_eq!(
+        store
+            .projection_version(ProjectionName::CustomerDaily)
+            .await
+            .map_err(map)?,
+        Some(1)
+    );
+    let rows = reader.revenue_daily(&scope).await.map_err(map)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].revenue.micros, 1_000_000);
+    let preserved = store
+        .fetch_rows(
+            &format!(
+                "SELECT batch_id, toString(as_of_version) AS v, toString(published) AS p \
+                 FROM {}.projection_versions WHERE projection_name = 'customer_daily'",
+                store.database()
+            ),
+            &[],
+        )
+        .await
+        .map_err(map)?;
+    assert_eq!(preserved[0]["batch_id"].as_str(), Some("legacy-batch"));
+    assert_eq!(preserved[0]["v"].as_str(), Some("1"));
+    assert_eq!(preserved[0]["p"].as_str(), Some("1"));
+
+    // Facts for the staged v2: two days at 5,150.00 each.
+    let facts: Vec<ReportDayRow> = ["2026-10-01", "2026-10-02"]
+        .iter()
+        .map(|day| ReportDayRow {
+            publisher_id: "northstar".into(),
+            platform: "applovin_max".into(),
+            platform_account_id: "max_acct_1".into(),
+            day: (*day).into(),
+            finality: "final".into(),
+            revenue_micros: Some(5_150_000_000),
+            impressions: Some(2_500_000),
+            currency: Some("USD".into()),
+            country: None,
+            ad_unit_id: None,
+            format: None,
+            source_digest: None,
+        })
+        .collect();
+    store.insert_report_days(&facts).await.map_err(map)?;
+    let staged = rebuild_batch(store, "legacy-1")
+        .await
+        .map_err(|error| error.to_string())?;
+    let customer = staged
+        .rebuilt
+        .iter()
+        .find(|entry| entry.projection == ProjectionName::CustomerDaily)
+        .expect("customer_daily rebuilt");
+    assert_eq!(customer.as_of_version, 2, "the rebuild stages v2");
+
+    // Force the merges that collapsed the published v1 away on the legacy
+    // shape.
+    for table in ["projection_versions", "customer_daily"] {
+        store
+            .execute_statement(&format!(
+                "OPTIMIZE TABLE {}.{table} FINAL",
+                store.database()
+            ))
+            .await
+            .map_err(map)?;
+    }
+    let rows = reader.revenue_daily(&scope).await.map_err(map)?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "readers must not fall off the published version after merges"
+    );
+    assert_eq!(
+        rows[0].revenue.micros, 1_000_000,
+        "readers still see the published v1 value"
+    );
+    assert_eq!(
+        store
+            .projection_version(ProjectionName::CustomerDaily)
+            .await
+            .map_err(map)?,
+        Some(1)
+    );
+    println!("after staged v2 + OPTIMIZE FINAL, readers still see v1 (no empty read)");
+
+    // Publishing switches readers to v2.
+    let published = publish(store, "legacy-1")
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(published, 2);
+    let rows = reader.revenue_daily(&scope).await.map_err(map)?;
+    assert_eq!(rows.len(), 2);
+    let total: i64 = rows.iter().map(|row| row.revenue.micros).sum();
+    assert_eq!(total, 10_300_000_000, "v2 carries the recomputed value");
+    println!("publish switched readers to v2 (total micros {total})");
+
+    // A second ensure_schema is a no-op: same shapes, same rows, same
+    // readers, still no migration siblings.
+    let before_counts = table_counts(store).await?;
+    let before_keys = migrated_keys.clone();
+    store.ensure_schema().await.map_err(map)?;
+    let after_counts = table_counts(store).await?;
+    let after_keys = sorting_keys(store).await?;
+    assert_eq!(before_counts, after_counts, "a second boot changes no rows");
+    let staged_after: Vec<(String, String)> = after_keys
+        .into_iter()
+        .filter(|(name, _)| {
+            apex_analytics::schema::STAGED_TABLES
+                .iter()
+                .any(|table| table.name == name)
+        })
+        .collect();
+    let staged_before: Vec<(String, String)> = before_keys
+        .into_iter()
+        .filter(|(name, _)| {
+            apex_analytics::schema::STAGED_TABLES
+                .iter()
+                .any(|table| table.name == name)
+        })
+        .collect();
+    assert_eq!(
+        staged_before, staged_after,
+        "a second boot changes no shape"
+    );
+    let leftovers = store
+        .fetch_rows(
+            "SELECT count() AS n FROM system.tables \
+             WHERE database = {db:String} AND name LIKE '%__migration'",
+            &[("db", store.database())],
+        )
+        .await
+        .map_err(map)?;
+    assert_eq!(u64_field(&leftovers[0], "n"), 0);
+    let rows = reader.revenue_daily(&scope).await.map_err(map)?;
+    assert_eq!(rows.len(), 2, "readers stay on v2 after the second boot");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_legacy_staged_tables_migrate() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set; start the dev server and run APEX_CLICKHOUSE_HTTP=http://127.0.0.1:8123 cargo test -p apex-analytics -- --nocapture");
+            return;
+        }
+    };
+    let database = unique_database();
+    let config = ClickHouseConfig {
+        http_url,
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    };
+    let store = match ClickHouseStore::new(config) {
+        Ok(store) => store,
+        Err(error) => panic!("store configuration: {error}"),
+    };
+    println!("legacy-migration database: {database}");
+    let result = run_legacy_migration(&store).await;
+    let dropped = store.drop_database().await;
+    match (result, dropped) {
+        (Ok(()), Ok(())) => println!("legacy-migration PASS; test database {database} dropped"),
+        (Err(error), _) => panic!("legacy-migration failed: {error}"),
+        (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
+    }
+}
+
+/// Page-request events spread over two days: three on 14 October (one 404)
+/// and one 404 on 15 October.
+fn page_request_events() -> Vec<DomainEvent> {
+    let page = |event_id: &str, occurred_at: &str, route: &str, status: u16, bot_class: &str| {
+        builder(EventType::PublicPageRequested, EventSource::AccessLog)
+            .with_event_id(event_id)
+            .with_occurred_at(time(occurred_at))
+            .with_received_at(time(occurred_at))
+            .with_object("document", route)
+            .with_outcome(apex_analytics::accesslog::status_class(status))
+            .with_payload(EventPayload {
+                route_template: Some(route.into()),
+                status: Some(status),
+                bot_class: Some(bot_class.into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("page event")
+    };
+    vec![
+        page(
+            "evt_page_1",
+            "2026-10-14T08:00:00.000Z",
+            "/pricing",
+            200,
+            "unclassified",
+        ),
+        page(
+            "evt_page_2",
+            "2026-10-14T09:00:00.000Z",
+            "/",
+            200,
+            "search_engine_bot",
+        ),
+        page(
+            "evt_page_3",
+            "2026-10-14T23:59:59.999Z",
+            "/unmatched",
+            404,
+            "unclassified",
+        ),
+        page(
+            "evt_page_4",
+            "2026-10-15T00:00:00.000Z",
+            "/unmatched",
+            404,
+            "automation_client",
+        ),
+    ]
+}
+
+/// Memory vs ClickHouse parity for `page_requests_daily`, exact sums, and
+/// the site-wide contract (tenant parameters are not filters).
+async fn run_page_requests_parity(store: &ClickHouseStore) -> Result<(), String> {
+    let map = |error: apex_analytics::store::StoreError| error.to_string();
+    store.ensure_schema().await.map_err(map)?;
+    let events = page_request_events();
+    store.insert(&events).await.map_err(map)?;
+    let memory = MemoryStore::new();
+    memory.ensure_schema().await.map_err(map)?;
+    memory.insert(&events).await.map_err(map)?;
+    let reader = ClickHouseReader::new(store.clone());
+    let memory_reader = MemoryReader::new(memory);
+    let wide = QueryScope::operator_wide(time(HORIZON));
+
+    let ch = reader
+        .page_requests_daily(&wide, "2026-10-14", "2026-10-15")
+        .await
+        .map_err(map)?;
+    let mem = memory_reader
+        .page_requests_daily(&wide, "2026-10-14", "2026-10-15")
+        .await
+        .map_err(map)?;
+    assert_eq!(ch, mem, "memory vs clickhouse parity");
+    assert_eq!(ch.len(), 2);
+    assert_eq!(ch[0].day, "2026-10-14");
+    assert_eq!(ch[0].requests, 3);
+    assert_eq!(ch[0].not_found, 1);
+    assert_eq!(
+        ch[0].bot_class_mix,
+        vec![
+            ("search_engine_bot".to_string(), 1),
+            ("unclassified".to_string(), 2),
+        ]
+    );
+    assert_eq!(ch[1].day, "2026-10-15");
+    assert_eq!(ch[1].requests, 1);
+    assert_eq!(ch[1].not_found, 1);
+    assert_eq!(
+        ch[1].bot_class_mix,
+        vec![("automation_client".to_string(), 1)]
+    );
+    println!("page-request parity: {ch:?}");
+
+    // The family is site-wide: publisher/platform/currency and a scope day
+    // range are not filters, so a tampered scope returns the same counts.
+    let tampered = QueryScope::new("orbit", time(HORIZON))
+        .with_platform("levelplay")
+        .with_currency("EUR")
+        .with_day_range("2020-01-01", "2020-12-31");
+    let same = reader
+        .page_requests_daily(&tampered, "2026-10-14", "2026-10-15")
+        .await
+        .map_err(map)?;
+    assert_eq!(same, ch, "a tampered scope changes nothing");
+    let memory_same = memory_reader
+        .page_requests_daily(&tampered, "2026-10-14", "2026-10-15")
+        .await
+        .map_err(map)?;
+    assert_eq!(memory_same, mem, "memory agrees on the site-wide contract");
+
+    // Inclusive day bounds; only 15 October in the one-day window.
+    let single = reader
+        .page_requests_daily(&wide, "2026-10-15", "2026-10-15")
+        .await
+        .map_err(map)?;
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].requests, 1);
+    assert_eq!(single[0].not_found, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_page_requests_daily_parity() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set");
+            return;
+        }
+    };
+    let database = unique_database();
+    let config = ClickHouseConfig {
+        http_url,
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    };
+    let store = match ClickHouseStore::new(config) {
+        Ok(store) => store,
+        Err(error) => panic!("store configuration: {error}"),
+    };
+    println!("page-requests database: {database}");
+    let result = run_page_requests_parity(&store).await;
+    let dropped = store.drop_database().await;
+    match (result, dropped) {
+        (Ok(()), Ok(())) => println!("page-requests PASS; test database {database} dropped"),
+        (Err(error), _) => panic!("page-requests failed: {error}"),
+        (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
+    }
+}
+
+/// The whole binary against the real server: the cursor makes a rerun a
+/// no-op, an appended line is delivered alone, and a rotated (smaller) file
+/// reprocesses from byte 0 where the stable event id deduplicates while the
+/// plain log table may repeat the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_ingest_cursor_is_incremental() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set");
+            return;
+        }
+    };
+    let database = unique_database();
+    let directory = std::env::temp_dir().join(format!(
+        "apex-ingest-live-{}-{}",
+        std::process::id(),
+        database
+    ));
+    tokio::fs::create_dir_all(&directory).await.expect("dir");
+    let log = directory.join("access.json");
+    let cursor = directory.join("ingest.cursor");
+    let spool = directory.join("ingest-spool.jsonl");
+    // Timestamps near the fixture horizon: the 30/90-day TTLs must not drop
+    // the freshly ingested rows inside the test.
+    let line_a = serde_json::json!({
+        "ts": 1_792_055_400.0_f64,
+        "status": 200,
+        "request": { "method": "GET", "host": "apexmediation.ee", "uri": "/pricing",
+            "remote_ip": "203.0.113.9",
+            "headers": { "User-Agent": ["Mozilla/5.0 Safari/605.1.15"] } }
+    })
+    .to_string();
+    let line_b = serde_json::json!({
+        "ts": 1_792_055_401.0_f64,
+        "status": 404,
+        "request": { "method": "GET", "host": "apexmediation.ee", "uri": "/gone",
+            "remote_ip": "203.0.113.9",
+            "headers": { "User-Agent": ["curl/8.4.0"] } }
+    })
+    .to_string();
+    tokio::fs::write(&log, format!("{line_a}\n{line_b}\n"))
+        .await
+        .expect("write log");
+
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_apex-ingest"))
+            .arg("--json")
+            .arg(&log)
+            .env("APEX_CLICKHOUSE_HTTP", &http_url)
+            .env("APEX_CLICKHOUSE_DB", &database)
+            .env("APEX_INGEST_CURSOR", &cursor)
+            .env("APEX_INGEST_SPOOL", &spool)
+            .env("APEX_SERVICE_VERSION", "apex-ingest-live-test")
+            .output()
+            .expect("run apex-ingest")
+    };
+    let summary = |output: &std::process::Output| -> serde_json::Value {
+        assert!(
+            output.status.success(),
+            "apex-ingest failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("json summary")
+    };
+
+    let first = summary(&run());
+    assert_eq!(first["lines"], 2);
+    assert_eq!(first["request_logs"], 2);
+    assert_eq!(first["events"], 2);
+    assert_eq!(first["delivered"], 2);
+    assert_eq!(first["events_delivered"], 2);
+    assert_eq!(first["spooled"], 0);
+
+    let store = ClickHouseStore::new(ClickHouseConfig {
+        http_url: http_url.clone(),
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    })
+    .expect("store");
+    async fn ingest_counts(store: &ClickHouseStore, database: &str) -> (u64, u64) {
+        let rows = store
+            .fetch_rows(
+                &format!(
+                    "SELECT (SELECT count() FROM {database}.request_logs) AS logs, \
+                     (SELECT count() FROM {database}.domain_events FINAL \
+                      WHERE event_type = 'public_page_requested') AS events"
+                ),
+                &[],
+            )
+            .await
+            .expect("counts");
+        (
+            rows.first().map(|row| u64_field(row, "logs")).unwrap_or(0),
+            rows.first()
+                .map(|row| u64_field(row, "events"))
+                .unwrap_or(0),
+        )
+    }
+    assert_eq!(
+        ingest_counts(&store, &database).await,
+        (2, 2),
+        "one row and one event per line"
+    );
+
+    // The rerun sees nothing new: same counts, summary reports 0 new.
+    let second = summary(&run());
+    assert_eq!(second["lines"], 0);
+    assert_eq!(second["request_logs"], 0);
+    assert_eq!(second["events"], 0);
+    assert_eq!(second["delivered"], 0);
+    assert_eq!(
+        ingest_counts(&store, &database).await,
+        (2, 2),
+        "a rerun inserts nothing"
+    );
+    println!("rerun summary: lines=0 request_logs=0 events=0; counts still (2, 2)");
+
+    // An appended line is delivered alone.
+    let mut content = tokio::fs::read_to_string(&log).await.expect("read log");
+    content.push_str(&format!(
+        "{}\n",
+        serde_json::json!({
+            "ts": 1_792_055_402.0_f64,
+            "status": 200,
+            "request": { "method": "GET", "host": "apexmediation.ee", "uri": "/proof",
+                "remote_ip": "203.0.113.9",
+                "headers": { "User-Agent": ["Mozilla/5.0 Safari/605.1.15"] } }
+        })
+    ));
+    tokio::fs::write(&log, &content).await.expect("append");
+    let third = summary(&run());
+    assert_eq!(third["lines"], 1, "only the appended line is new");
+    assert_eq!(third["events"], 1);
+    assert_eq!(ingest_counts(&store, &database).await, (3, 3));
+    println!("appended line: lines=1; counts (3, 3)");
+
+    // A rotated smaller file (same leading line) restarts at byte 0 and
+    // reprocesses; the event id deduplicates, the log row repeats.
+    tokio::fs::write(&log, format!("{line_a}\n"))
+        .await
+        .expect("rotate");
+    let fourth = summary(&run());
+    assert_eq!(fourth["cursor_restarted"], true);
+    assert_eq!(fourth["lines"], 1);
+    assert_eq!(
+        ingest_counts(&store, &database).await,
+        (4, 3),
+        "log row repeats, event dedups"
+    );
+    println!("rotation: cursor_restarted=true; counts (4, 3) (event dedup by stable id)");
+
+    store.drop_database().await.expect("drop database");
+    let _ = tokio::fs::remove_dir_all(&directory).await;
+}
+
 /// The `rebuild_sql` fast path against the portable Rust path, on the same
 /// facts: totals agree, and an incident sequence open -> acknowledged ->
 /// resolved leaves no queue row for the resolved incident and exactly one

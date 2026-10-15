@@ -20,8 +20,10 @@ pub fn flag(args: &[String], name: &str) -> Option<String> {
 pub const SCHEDULED_AT_ENV: &str = "APEX_SCHEDULED_AT_MS";
 
 /// The expected start time in unix milliseconds: `--scheduled-at <unix-ms>`
-/// wins, the `APEX_SCHEDULED_AT_MS` fallback is second. A malformed value is
-/// a typed error, never a silently skipped lag sample.
+/// wins, the `APEX_SCHEDULED_AT_MS` fallback is second. A malformed value or
+/// a non-positive timestamp is a typed error, never a silently skipped (or
+/// ~57-year) lag sample. A timestamp in the future is accepted: the lag is
+/// clamped to zero at the recording site.
 pub fn scheduled_at(
     args: &[String],
     env: impl Fn(&str) -> Option<String>,
@@ -31,11 +33,18 @@ pub fn scheduled_at(
         None => env(SCHEDULED_AT_ENV),
     };
     match raw {
-        Some(raw) if !raw.trim().is_empty() => raw
-            .trim()
-            .parse::<i64>()
-            .map(Some)
-            .map_err(|_| "--scheduled-at must be unix milliseconds".to_string()),
+        Some(raw) if !raw.trim().is_empty() => {
+            let value = raw
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| "--scheduled-at must be unix milliseconds".to_string())?;
+            if value <= 0 {
+                return Err(
+                    "scheduled-at must be a positive unix-millisecond timestamp".to_string()
+                );
+            }
+            Ok(Some(value))
+        }
         _ => Ok(None),
     }
 }
@@ -248,12 +257,19 @@ pub fn build_runner(
         runner = runner.with_adyen(std::sync::Arc::new(client), transport);
     }
     if let Some(path) = env_nonempty(&env, "APEX_RUNNER_PRIORS") {
+        // A missing priors file is "no priors yet" (the defaults); a file
+        // that exists but cannot be read is a typed error, never silently
+        // replaced by defaults.
         let priors = match std::fs::read_to_string(&path) {
             Ok(raw) if !raw.trim().is_empty() => {
                 serde_json::from_str::<apex_lift::priors::LiftPriors>(&raw)
                     .map_err(|e| format!("priors: {e}"))?
             }
-            _ => apex_lift::priors::LiftPriors::default(),
+            Ok(_) => apex_lift::priors::LiftPriors::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                apex_lift::priors::LiftPriors::default()
+            }
+            Err(error) => return Err(format!("priors at {path}: {error}")),
         };
         runner = runner.with_priors(priors, &path);
     }
@@ -585,6 +601,7 @@ pub async fn dispatch(
             if let Some(events) = runner.events() {
                 events
                     .job_run(
+                        job_type_of(command).as_str(),
                         &run_reference(now_unix_ms),
                         now_unix_ms,
                         "failed",
@@ -661,6 +678,7 @@ pub async fn dispatch(
     if let Some(events) = runner.events() {
         events
             .job_run(
+                report.job_type.as_str(),
                 &run_reference(now_unix_ms),
                 now_unix_ms,
                 job_label,
@@ -1126,6 +1144,29 @@ mod tests {
         assert!(scheduled_at(&bad, |_| None)
             .expect_err("bad")
             .contains("unix milliseconds"));
+        // Zero or negative timestamps are refused: 0 would record ~57 years
+        // of lag, and a negative one is not a schedule at all.
+        for bad in ["0", "-1", "-1792087200000", " 0 "] {
+            let args = vec!["daily".to_string(), "--scheduled-at".into(), bad.into()];
+            let error = scheduled_at(&args, |_| None).expect_err(bad);
+            assert!(
+                error.contains("positive unix-millisecond timestamp"),
+                "{bad}: {error}"
+            );
+        }
+        let env_zero = |name: &str| (name == SCHEDULED_AT_ENV).then(|| "0".to_string());
+        assert!(scheduled_at(&[], env_zero).is_err());
+        // A future timestamp is valid here; the recording site clamps its
+        // lag to zero.
+        let future = vec![
+            "daily".to_string(),
+            "--scheduled-at".into(),
+            "9999999999999".into(),
+        ];
+        assert_eq!(
+            scheduled_at(&future, |_| None).unwrap(),
+            Some(9_999_999_999_999)
+        );
     }
 
     #[test]
@@ -1285,6 +1326,37 @@ mod tests {
             &instrumentation,
         )
         .is_err());
+        // A missing priors file means "no priors yet" (the defaults); a
+        // path that exists but cannot be read is a typed error, never
+        // silently replaced by defaults.
+        let priors_dir =
+            std::env::temp_dir().join(format!("apex-cli-priors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&priors_dir);
+        std::fs::create_dir_all(&priors_dir).unwrap();
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PRIORS" => Some(priors_dir.display().to_string()),
+            _ => None,
+        };
+        let error = build_runner(
+            env,
+            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect_err("directory priors");
+        assert!(error.contains("priors"), "{error}");
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PRIORS" => Some("/nope/priors.json".to_string()),
+            _ => None,
+        };
+        assert!(build_runner(
+            env,
+            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .is_ok());
+        let _ = std::fs::remove_dir_all(&priors_dir);
         assert!(instrumentation.events.is_none());
         assert!(instrumentation.projections.is_none());
         assert!(instrumentation.notify.is_none());
@@ -1569,6 +1641,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_future_scheduled_at_clamps_the_lag_to_zero() {
+        let registry = std::sync::Arc::new(apex_metrics::Registry::new());
+        let runner = golden_runner()
+            .with_telemetry(crate::telemetry::RunnerTelemetry::new(registry.clone()));
+        let scheduled = (golden_now() + 60_000).to_string();
+        let outcome = run(
+            &runner,
+            "daily",
+            &["--scheduled-at", scheduled.as_str()],
+            golden_now(),
+        )
+        .await;
+        assert!(!outcome.failed);
+        let family = registry
+            .family_snapshot("apex_job_schedule_lag_seconds")
+            .expect("lag family");
+        let histogram = family.series[0].histogram.as_ref().expect("histogram");
+        assert_eq!(histogram.count, 1);
+        assert!(histogram.sum.abs() < 1e-9, "lag was {}", histogram.sum);
+    }
+
+    #[tokio::test]
     async fn dispatch_replays_the_analytics_spool_before_the_command() {
         use apex_analytics::store::{EventStore as _, ProjectionStore as _};
 
@@ -1604,7 +1698,7 @@ mod tests {
         .with_environment("dev")
         .with_publisher("northstar");
         spooled
-            .job_run("job_spooled", golden_now(), "completed", 1)
+            .job_run("daily", "job_spooled", golden_now(), "completed", 1)
             .await;
         let withheld = tokio::fs::read_to_string(&spool).await.expect("spool");
         assert_eq!(
@@ -1638,13 +1732,12 @@ mod tests {
         assert!(
             stored
                 .iter()
-                .any(|event| event.event_id == "job_run:job_spooled"),
+                .any(|event| event.event_id == "job_run:daily:job_spooled"),
             "the spooled batch was re-delivered at runner start"
         );
         assert!(
-            stored
-                .iter()
-                .any(|event| event.event_id == format!("job_run:{}", run_reference(golden_now()))),
+            stored.iter().any(|event| event.event_id
+                == format!("job_run:recheck:{}", run_reference(golden_now()))),
             "the command's own event landed too"
         );
         assert!(tokio::fs::read_to_string(&spool)
@@ -1786,6 +1879,19 @@ mod tests {
         assert!(dispatch("bogus", &[], &runner, &mut ledger, 1)
             .await
             .is_err());
+
+        // A zero or negative --scheduled-at is a typed error, never a
+        // ~57-year lag sample.
+        let err = dispatch(
+            "daily",
+            &["--scheduled-at".to_string(), "0".to_string()],
+            &runner,
+            &mut ledger,
+            1,
+        )
+        .await
+        .expect_err("zero scheduled-at");
+        assert!(err.contains("positive unix-millisecond timestamp"), "{err}");
     }
 
     #[tokio::test]

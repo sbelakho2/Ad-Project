@@ -28,6 +28,7 @@ sha2 = "0.10"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -14,7 +14,8 @@
 //! - A session expires after [`SESSION_IDLE_MS`] of idleness (15 minutes);
 //!   every successful read renews it.
 //! - The store keeps at most its capacity; when full, the least recently used
-//!   session is evicted first.
+//!   session is evicted first (oldest `last_seen_ms`, ties broken by the
+//!   smallest session id so eviction is deterministic).
 //! - Each session carries a per-session CSRF token for the session-end form
 //!   and every other state-changing console action (settings, connections,
 //!   proposal decisions).
@@ -111,10 +112,17 @@ impl LedgerSessions {
         let mut inner = self.lock();
         inner.prune(now_unix_ms, self.idle_ms);
         while inner.sessions.len() >= self.capacity {
+            // Oldest `last_seen_ms` first; equal millisecond timestamps are
+            // broken by the smallest session id so the victim is
+            // deterministic instead of arbitrary map order.
             let Some(oldest) = inner
                 .sessions
                 .iter()
-                .min_by_key(|(_, state)| state.last_seen_ms)
+                .min_by(|(id_a, a), (id_b, b)| {
+                    a.last_seen_ms
+                        .cmp(&b.last_seen_ms)
+                        .then_with(|| id_a.cmp(id_b))
+                })
                 .map(|(id, _)| id.clone())
             else {
                 break;
@@ -420,6 +428,36 @@ mod tests {
                 .publisher,
             "three"
         );
+    }
+
+    #[test]
+    fn equal_millisecond_sessions_evict_the_smallest_id_deterministically() {
+        let sessions = LedgerSessions::new(2, SESSION_IDLE_MS);
+        let first = sessions.open("one", T0);
+        let second = sessions.open("two", T0);
+        // Same-millisecond opens make the two candidates indistinguishable by
+        // last_seen_ms; the smallest id is the deterministic victim.
+        let victim = if first.id < second.id {
+            first.id.clone()
+        } else {
+            second.id.clone()
+        };
+        let survivor = if first.id < second.id {
+            second.id.clone()
+        } else {
+            first.id.clone()
+        };
+        let third = sessions.open("three", T0);
+        assert_eq!(sessions.len(), 2);
+        assert!(
+            sessions.touch(&victim, T0).is_none(),
+            "the lexicographically smallest id is evicted on a tie"
+        );
+        assert!(
+            sessions.touch(&survivor, T0).is_some(),
+            "the other session survives"
+        );
+        assert!(sessions.touch(&third.id, T0).is_some());
     }
 
     #[test]

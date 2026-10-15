@@ -5,7 +5,7 @@
 //! and `apex_autopilot::cycle`) so it is unit tested; this binary only reads
 //! the environment, builds the platform adapter and the runner, prints the
 //! report (human by default, `--json` for the versioned document) and exports
-//! the bounded metrics textfile.
+//! the bounded metrics textfile on every exit path, hard errors included.
 //!
 //! Commands: `audit`, `cycle`, `daily`, `monthly`, `recheck`, `aa`, `aa-eval`.
 //! Configuration (environment): `APEX_RUNNER_LEDGER`, `APEX_RUNNER_PUBLISHER`,
@@ -20,7 +20,9 @@
 //! `APEX_MONITORING_MONTHLY_MICROS` still reads as a deprecated fallback),
 //! `APEX_ALERT_FILE`,
 //! `APEX_METRICS_TEXTFILE`, `APEX_CLICKHOUSE_HTTP`,
-//! `APEX_ANALYTICS_ENVIRONMENT`, `APEX_ANALYTICS_SPOOL` (default
+//! `APEX_ANALYTICS_ENV` (the apex-api name; the historical
+//! `APEX_ANALYTICS_ENVIRONMENT` still reads as a deprecated fallback),
+//! `APEX_ANALYTICS_SPOOL` (default
 //! `<APEX_RUNNER_DATA_DIR>/analytics/spool.jsonl`), `APEX_RUNNER_DATA_DIR`
 //! (default `.apex`), `APEX_NOTIFY_CONTACTS`,
 //! `APEX_CONSOLE_URL`, `APEX_NOTIFY_WEBHOOK`, `APEX_NOTIFY_STATE`,
@@ -68,6 +70,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for line in &instrumentation.logs {
         eprintln!("{line}");
     }
+
+    // Every exit path past this point exports the registry: the textfile is
+    // the pending telemetry of a run that already recorded lag/failure
+    // samples, so even a hard error must deliver it before the process ends.
+    let result = run_with_textfile_export(
+        &instrumentation.registry,
+        |name| std::env::var(name).ok(),
+        run_job(command, &args, as_json, now_unix_ms, &instrumentation),
+    )
+    .await;
+    match result {
+        Ok(false) => Ok(()),
+        Ok(true) => std::process::exit(1),
+        Err(error) => Err(error),
+    }
+}
+
+/// Run one command against the built instrumentation. `Ok(true)` means the
+/// command reported a failure the process must exit non-zero for; `Err` is a
+/// hard error. The caller exports the metrics textfile on both outcomes.
+async fn run_job(
+    command: &str,
+    args: &[String],
+    as_json: bool,
+    now_unix_ms: i64,
+    instrumentation: &apex_autopilot::cli::Instrumentation,
+) -> Result<bool, Box<dyn std::error::Error>> {
     // One idempotent schema setup per process: the first run on a fresh
     // deployment creates the store instead of spooling against nothing.
     if let Some(projections) = &instrumentation.projections {
@@ -104,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // A timer that knows its expected start passes it; the audit job's
         // lag sample lands the same way the dispatch path records its own.
         if let Some(scheduled_at) =
-            apex_autopilot::cli::scheduled_at(&args, |name| std::env::var(name).ok())?
+            apex_autopilot::cli::scheduled_at(args, |name| std::env::var(name).ok())?
         {
             let lag_seconds = (now_unix_ms.saturating_sub(scheduled_at) as f64 / 1_000.0).max(0.0);
             instrumentation
@@ -131,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .map_err(|e| format!("snapshot: {e}"))?;
-        let out = apex_autopilot::cli::flag(&args, "--out")
+        let out = apex_autopilot::cli::flag(args, "--out")
             .or_else(|| optional("APEX_RUNNER_SNAPSHOT"))
             .ok_or("audit requires --out (or APEX_RUNNER_SNAPSHOT)")?;
         apex_autopilot::write_snapshot(std::path::Path::new(&out), &snapshot)?;
@@ -235,8 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Run reference: {run_reference}");
         }
-        export_textfile(&registry);
-        return Ok(());
+        return Ok(false);
     }
 
     let keypair = Keypair::from_bytes(&apex_autopilot::cli::parse_seed(&cli_required(
@@ -251,11 +279,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |name| std::env::var(name).ok(),
         ops,
         transport,
-        &instrumentation,
+        instrumentation,
     )
     .map_err(|e| format!("configuration: {e}"))?;
 
-    let outcome = apex_autopilot::cli::dispatch(command, &args, &runner, &mut ledger, now_unix_ms)
+    let outcome = apex_autopilot::cli::dispatch(command, args, &runner, &mut ledger, now_unix_ms)
         .await
         .map_err(|e| e.to_string())?;
     if as_json {
@@ -263,17 +291,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("{}", outcome.human);
     }
-    export_textfile(&registry);
-    if outcome.failed {
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(outcome.failed)
+}
+
+/// Run `job` and export the registry's textfile afterwards, whatever the job
+/// did: a dispatch error must still produce the textfile the run recorded.
+/// The job's own result is returned unchanged.
+async fn run_with_textfile_export<T, E>(
+    registry: &apex_metrics::Registry,
+    lookup: impl Fn(&str) -> Option<String>,
+    job: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let result = job.await;
+    export_textfile_with(&lookup, registry);
+    result
 }
 
 /// Write the bounded metrics textfile when `APEX_METRICS_TEXTFILE` is set; a
-/// write failure is reported, never fatal to the job that already ran.
-fn export_textfile(registry: &apex_metrics::Registry) {
-    match apex_metrics::textfile::export_from_env(|name| std::env::var(name).ok(), registry) {
+/// write failure is reported, never fatal to the job that already ran. The
+/// lookup drives `APEX_METRICS_TEXTFILE` resolution so the module tests can
+/// exercise both configured and unconfigured states without touching the
+/// process environment.
+fn export_textfile_with(
+    lookup: &impl Fn(&str) -> Option<String>,
+    registry: &apex_metrics::Registry,
+) {
+    match apex_metrics::textfile::export_from_env(lookup, registry) {
         Ok(Some(path)) => eprintln!("apex-metrics: wrote {}", path.display()),
         Ok(None) => {}
         Err(error) => eprintln!("apex-metrics: textfile export failed: {error}"),
@@ -305,7 +348,6 @@ mod tests {
 
     #[test]
     fn textfile_export_is_a_no_op_without_configuration() {
-        std::env::remove_var(apex_metrics::textfile::TEXTFILE_ENV);
         let registry = apex_metrics::Registry::new();
         let _ = registry.increment(
             &apex_metrics::catalog::JOB_RUNS_TOTAL,
@@ -315,6 +357,54 @@ mod tests {
                 ("outcome", "completed"),
             ],
         );
-        super::export_textfile(&registry);
+        super::export_textfile_with(&|_| None, &registry);
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_error_still_produces_the_textfile() {
+        let dir = std::env::temp_dir().join(format!("apex-runner-textfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("runner.prom");
+        let registry = apex_metrics::Registry::new();
+        let _ = registry.increment(
+            &apex_metrics::catalog::JOB_RUNS_TOTAL,
+            &[
+                ("job_type", "daily"),
+                ("platform", "applovin_max"),
+                ("outcome", "failed"),
+            ],
+        );
+        // The same lookup path the process environment provides, driven
+        // explicitly so the test is independent of the real environment.
+        let lookup = |name: &str| {
+            (name == apex_metrics::textfile::TEXTFILE_ENV).then(|| path.display().to_string())
+        };
+        let result: Result<(), String> =
+            super::run_with_textfile_export(&registry, lookup, async {
+                Err("dispatch: the platform refused the pull".to_string())
+            })
+            .await;
+        assert!(result.is_err(), "the job error is returned unchanged");
+        let text = std::fs::read_to_string(&path).expect("textfile written despite the error");
+        assert!(text.contains("apex_job_runs_total"), "{text}");
+        assert!(text.contains("outcome=\"failed\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_successful_job_exports_the_textfile_too() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-runner-textfile-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("runner.prom");
+        let registry = apex_metrics::Registry::new();
+        let lookup = |name: &str| {
+            (name == apex_metrics::textfile::TEXTFILE_ENV).then(|| path.display().to_string())
+        };
+        let result: Result<bool, String> =
+            super::run_with_textfile_export(&registry, lookup, async { Ok(true) }).await;
+        assert!(result.expect("job ok"));
+        assert!(path.is_file(), "the textfile was written");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

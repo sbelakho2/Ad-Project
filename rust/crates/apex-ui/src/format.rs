@@ -16,7 +16,9 @@
 //! - Missing is not zero: [`or_not_available`] renders `Not available (reason)`
 //!   for absent data. A real zero displays as `0` with a known denominator.
 //! - Timestamps are complete UTC dates with a named timezone; exports keep
-//!   UTC. [`csv_field`] is RFC 4180 quoting.
+//!   UTC. [`csv_field`] is RFC 4180 quoting; [`csv_text_field`] adds
+//!   spreadsheet-formula neutralisation for text fields before the same
+//!   quoting.
 
 /// The month abbreviations used by the UTC date formats.
 const MONTHS: [&str; 12] = [
@@ -27,8 +29,13 @@ const MONTHS: [&str; 12] = [
 ///
 /// Rounds to the nearest cent (half away from zero) so exactly two decimals
 /// are always shown; the integer micros stay recoverable via
-/// [`micros_exact`].
+/// [`micros_exact`]. An empty or whitespace-only currency code cannot label
+/// the amount and returns [`or_not_available`] with the reason
+/// `currency unavailable`.
 pub fn money(micros: i64, currency: &str) -> String {
+    if currency.trim().is_empty() {
+        return or_not_available("currency unavailable");
+    }
     format!("{currency} {}", amount_2dp(micros))
 }
 
@@ -37,8 +44,12 @@ pub fn money(micros: i64, currency: &str) -> String {
 /// The symbol mapping is USD to `$`, EUR to `€`, GBP to `£` (codes match
 /// case-insensitively). An unknown currency stays in code form,
 /// `CODE 1,250.00`, so it is never mistaken for a currency this module
-/// knows.
+/// knows. An empty or whitespace-only currency code returns
+/// [`or_not_available`] with the reason `currency unavailable`.
 pub fn money_fixed(micros: i64, currency: &str) -> String {
+    if currency.trim().is_empty() {
+        return or_not_available("currency unavailable");
+    }
     match currency_symbol(currency) {
         Some(symbol) => format!("{symbol}{}", amount_2dp(micros)),
         None => format!("{currency} {}", amount_2dp(micros)),
@@ -154,6 +165,49 @@ pub fn csv_field(value: &str) -> String {
     }
 }
 
+/// Quote a CSV *text* field per RFC 4180 after neutralising spreadsheet
+/// formula triggers.
+///
+/// Spreadsheets treat a leading `=`, `+`, `@`, tab or carriage return as a
+/// formula, and `-` the same unless the value is a plain integer or decimal
+/// number. Such values get one leading apostrophe so the cell stays text;
+/// negative numbers keep their natural form. The result then goes through
+/// the same quoting as [`csv_field`].
+pub fn csv_text_field(value: &str) -> String {
+    let needs_apostrophe = match value.chars().next() {
+        Some('=' | '+' | '@' | '\t' | '\r') => true,
+        Some('-') => !is_plain_number(value),
+        _ => false,
+    };
+    if needs_apostrophe {
+        csv_field(&format!("'{value}"))
+    } else {
+        csv_field(value)
+    }
+}
+
+/// Whether a value is a plain integer or decimal number: an optional
+/// leading `-`, digits with at most one `.`, and no other characters. The
+/// digits must be non-empty (`-` and `-.` are not numbers).
+fn is_plain_number(value: &str) -> bool {
+    let body = value.strip_prefix('-').unwrap_or(value);
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    for ch in body.chars() {
+        if ch == '.' {
+            dots += 1;
+            if dots > 1 {
+                return false;
+            }
+        } else if ch.is_ascii_digit() {
+            digits += 1;
+        } else {
+            return false;
+        }
+    }
+    digits > 0
+}
+
 fn currency_symbol(currency: &str) -> Option<&'static str> {
     match currency.to_ascii_uppercase().as_str() {
         "USD" => Some("$"),
@@ -259,6 +313,22 @@ mod tests {
         assert_eq!(money(999_995, "USD"), "USD 1.00");
         assert_eq!(money(123_456_789, "EUR"), "EUR 123.46");
         assert_eq!(money(1_000_000, "SEK"), "SEK 1.00");
+    }
+
+    #[test]
+    fn money_without_a_currency_is_not_available() {
+        assert_eq!(money(0, ""), "Not available (currency unavailable)");
+        assert_eq!(
+            money(1_250_000_000, "   "),
+            "Not available (currency unavailable)"
+        );
+        assert_eq!(money_fixed(0, ""), "Not available (currency unavailable)");
+        assert_eq!(
+            money_fixed(1_250_000_000, "\t"),
+            "Not available (currency unavailable)"
+        );
+        assert_eq!(money(1_000_000, "SEK"), "SEK 1.00");
+        assert_eq!(money_fixed(1_000_000, "JPY"), "JPY 1.00");
     }
 
     #[test]
@@ -377,5 +447,38 @@ mod tests {
         assert_eq!(csv_field("line\nbreak"), "\"line\nbreak\"");
         assert_eq!(csv_field("cr\rreturn"), "\"cr\rreturn\"");
         assert_eq!(csv_field(""), "");
+    }
+
+    #[test]
+    fn csv_text_field_neutralises_formula_triggers() {
+        assert_eq!(csv_text_field("=cmd"), "'=cmd");
+        assert_eq!(csv_text_field("@user"), "'@user");
+        assert_eq!(csv_text_field("+SUM(1,1)"), "\"'+SUM(1,1)\"");
+        assert_eq!(csv_text_field("+A1"), "'+A1");
+        assert_eq!(csv_text_field("\tcmd"), "'\tcmd");
+        assert_eq!(csv_text_field("\rrow"), "\"'\rrow\"");
+        assert_eq!(csv_text_field("plain"), "plain");
+        assert_eq!(csv_text_field(""), "");
+    }
+
+    #[test]
+    fn csv_text_field_keeps_plain_numbers_and_prefixes_lone_minus() {
+        assert_eq!(csv_text_field("-120"), "-120");
+        assert_eq!(csv_text_field("-12.5"), "-12.5");
+        assert_eq!(csv_text_field("-0.5"), "-0.5");
+        assert_eq!(csv_text_field("-"), "'-");
+        assert_eq!(csv_text_field("-."), "'-.");
+        // One dot and at least one digit is a plain decimal, like `-0.5`.
+        assert_eq!(csv_text_field("-.5"), "-.5");
+        assert_eq!(csv_text_field("-abc"), "'-abc");
+        assert_eq!(csv_text_field("-12,"), "\"'-12,\"");
+    }
+
+    #[test]
+    fn csv_text_field_respects_unicode_boundaries() {
+        assert_eq!(csv_text_field("\u{20ac}120"), "\u{20ac}120");
+        assert_eq!(csv_text_field("=\u{20ac}"), "'=\u{20ac}");
+        assert_eq!(csv_text_field("-1\u{20ac}"), "'-1\u{20ac}");
+        assert_eq!(csv_text_field("caf\u{e9},bar"), "\"caf\u{e9},bar\"");
     }
 }

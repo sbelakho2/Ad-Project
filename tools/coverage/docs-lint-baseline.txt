@@ -322,8 +322,8 @@
 0 rust/crates/apex-api/src/error.rs
 1 rust/crates/apex-api/src/experiments.rs
 0 rust/crates/apex-api/src/favicon.rs
-0 rust/crates/apex-api/src/html/analytics.rs
-0 rust/crates/apex-api/src/html/audit.rs
+5 rust/crates/apex-api/src/html/analytics.rs
+2 rust/crates/apex-api/src/html/audit.rs
 0 rust/crates/apex-api/src/html/billing.rs
 0 rust/crates/apex-api/src/html/connections.rs
 0 rust/crates/apex-api/src/html/errors.rs
@@ -349,7 +349,7 @@
 0 rust/crates/apex-api/tests/api.rs
 2 rust/crates/apex-api/tests/common/mod.rs
 0 rust/crates/apex-api/tests/console.rs
-2 rust/crates/apex-api/tests/console_phase2.rs
+3 rust/crates/apex-api/tests/console_phase2.rs
 0 rust/crates/apex-audit/src/digest.rs
 0 rust/crates/apex-audit/src/engine.rs
 0 rust/crates/apex-audit/src/errors.rs
@@ -544,7 +544,8 @@
 8 site/content/guides/api/console-connections.md
 13 site/content/guides/api/console-experiments.md
 9 site/content/guides/api/console-ledger.md
-10 site/content/guides/api/console-proposals.md
+8 site/content/guides/api/console-proposals-index.md
+13 site/content/guides/api/console-proposals.md
 10 site/content/guides/api/console-settings.md
 11 site/content/guides/api/console.md
 8 site/content/guides/api/cycle.md
@@ -568,4 +569,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 7935
+TOTAL 7954

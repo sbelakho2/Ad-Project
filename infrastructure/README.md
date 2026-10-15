@@ -46,7 +46,9 @@ Current deployment layout for the no-SDK autopilot product:
   `apex-ingest /var/log/caddy/apex-access.json --spool
   /var/lib/apex/.apex/analytics-spool/apex-ingest.jsonl`; failed batches
   spool for the next run and replays deduplicate in the store by
-  `(source, event_id)`. `/etc/apex/ingest.env` carries
+  `(source, event_id)`. A consumed-offset cursor
+  (`APEX_INGEST_CURSOR`, default `<log>.cursor`) keeps each hourly run
+  incremental; log rotation restarts it safely. `/etc/apex/ingest.env` carries
   `APEX_CLICKHOUSE_HTTP` (default `http://127.0.0.1:8123`),
   `APEX_CLICKHOUSE_DB` (default `apex_analytics`), `APEX_ENVIRONMENT`
   (default `production`), `APEX_SERVICE_VERSION` and `APEX_INGEST_SPOOL`
@@ -63,9 +65,17 @@ Current deployment layout for the no-SDK autopilot product:
   `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS`, `APEX_RUNNER_SNAPSHOT`,
   `APEX_DEVELOPER_SITE`, `APEX_EXPECTED_NETWORKS`,
   `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`,
-  `APEX_ADYEN_CHECKOUT_BASE`, `APEX_INVOICE_VAT_BP`,
-  `APEX_MONITORING_MONTHLY_MICROS`, `APEX_ALERT_FILE`,
-  `APEX_CLICKHOUSE_HTTP`, `APEX_ANALYTICS_SPOOL`, `APEX_METRICS_TEXTFILE`
+  `APEX_ADYEN_CHECKOUT_BASE`, `APEX_BILLING_VAT_RATE_BP`,
+  `APEX_MONITORING_FEE_MICROS` (the older `APEX_INVOICE_VAT_BP` and
+  `APEX_MONITORING_MONTHLY_MICROS` are read as deprecated fallbacks and
+  announce themselves on stderr), `APEX_ALERT_FILE` (the console reads the
+  same variable; `APEX_ALERTS_FILE` remains a fallback), `APEX_CLICKHOUSE_HTTP`,
+  `APEX_ANALYTICS_ENV` (fallback `APEX_ANALYTICS_ENVIRONMENT`),
+  `APEX_ANALYTICS_SPOOL`, `APEX_METRICS_TEXTFILE`, `APEX_PAYMENT_EVENTS`,
+  `APEX_PAYMENT_LEDGER`, `APEX_PAYMENT_CURSOR`, `APEX_NOTIFY_CONTACTS`,
+  `APEX_NOTIFY_WEBHOOK`, `APEX_NOTIFY_WEBHOOK_TOKEN`, `APEX_NOTIFY_STATE`,
+  `APEX_RUNNER_DATA_DIR`, `APEX_PAYMENT_RETRIES`, `APEX_NOTIFY_FILE`,
+  `APEX_CONSOLE_URL`, `APEX_MAX_MANAGEMENT_BASE`, `APEX_MAX_REPORTING_BASE`
   and `APEX_SCHEDULED_AT_MS`.
 
   Every unit pins `WorkingDirectory=/var/lib/apex`, so the relative defaults

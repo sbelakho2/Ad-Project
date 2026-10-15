@@ -47,14 +47,17 @@ What the rules are written against (verified in code, one spelling only):
   `apex_notification_attempts_total` and `apex_operator_actions_total`: the
   domain counters, all with bounded label vocabularies only.
 
+- `apex_projection_lag_seconds{projection_name,environment}`: written by
+  the runner's daily projection refresh (`apex-runner daily`), per
+  projection and environment; the sample is recorded whether the invocation
+  is timer-scheduled or manual.
+
 Declared in the catalog but not written by any process yet, so no rule
-targets them (a rule over a series nothing emits would never fire):
+targets it (a rule over a series nothing emits would never fire):
 
 - `apex_jobs_overdue`: the scheduler workstream's gauge; systemd timers
   invoke the runner, nothing sets it. The overdue signal today is the
   schedule-lag recording rule.
-- `apex_projection_lag_seconds`: no projection writer runs on a schedule
-  yet.
 
 Run and test:
 
