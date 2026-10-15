@@ -1,7 +1,13 @@
 # Edge for the current product. Set APEX_DOMAIN and SITE_DOMAIN in the
 # environment; the defaults are placeholders for local validation only.
+#
+# The API never serves a publisher's ledger unauthenticated: `/v1/ledger/*`
+# and `/console/ledger` require that publisher's bearer token, and the routes
+# answer 503 when no token is configured. The edge only reverse-proxies the
+# loopback-bound API, so nothing is reachable without a token.
 {$APEX_DOMAIN:apex.example} {
 	encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	reverse_proxy 127.0.0.1:8787
 }
 

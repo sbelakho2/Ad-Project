@@ -132,6 +132,15 @@ pub fn get(uri: &str) -> Request<Body> {
         .expect("request")
 }
 
+/// A GET carrying `Authorization: Bearer <token>`.
+pub fn get_with_bearer(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request")
+}
+
 pub fn post(uri: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -168,13 +177,17 @@ pub fn pub1_keys() -> HashMap<String, VerifyingKey> {
     HashMap::from([(PUBLISHER.to_string(), seed_keypair(7).verifying_key())])
 }
 
+/// The ledger token `/v1/ledger/{PUBLISHER}` and `/console/ledger` require.
+pub const LEDGER_TOKEN: &str = "ledger-token-pub1";
+
 /// File-backed state over `dir` (snapshots and ledgers share the directory in
-/// tests) with the given key allow-list.
+/// tests) with the given key allow-list and the publisher's ledger token.
 pub fn file_state(dir: &Path, keys: HashMap<String, VerifyingKey>) -> AppState {
     AppState::new(
         Arc::new(JsonFileAuditSource::new(dir)),
         Arc::new(FileLedgerSource::new(dir, keys)),
     )
+    .with_ledger_token(PUBLISHER, LEDGER_TOKEN)
 }
 
 /// A minimal snapshot for one or more ad units:

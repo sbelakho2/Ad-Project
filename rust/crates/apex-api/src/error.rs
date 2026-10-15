@@ -38,18 +38,23 @@ pub enum ApiError {
     #[error("live audit is not configured")]
     LiveAuditNotConfigured,
 
-    /// The live-audit bearer token is missing or wrong.
+    /// The live-audit or ledger bearer token is missing or wrong.
     #[error("unauthorized")]
     Unauthorized,
+
+    /// No per-publisher ledger token is configured: the ledger is closed
+    /// rather than served without authentication.
+    #[error("ledger authentication is not configured")]
+    LedgerAuthNotConfigured,
 
     /// An upstream platform refused or failed the call; the detail is logged
     /// but not exposed.
     #[error("platform unavailable: {0}")]
     PlatformUnavailable(String),
 
-    /// The Stripe signature did not pass verification. The response never says
-    /// which check failed.
-    #[error("invalid stripe signature")]
+    /// The Adyen webhook signature did not pass verification. The response
+    /// never says which check failed.
+    #[error("invalid webhook signature")]
     InvalidSignature,
 
     /// An unexpected failure while reading a source; the detail is logged but
@@ -68,6 +73,7 @@ impl ApiError {
             ApiError::AdyenWebhookNotConfigured => "adyen_webhook_not_configured",
             ApiError::LiveAuditNotConfigured => "live_audit_not_configured",
             ApiError::Unauthorized => "unauthorized",
+            ApiError::LedgerAuthNotConfigured => "ledger_auth_not_configured",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
             ApiError::InvalidSignature => "invalid_signature",
             ApiError::Internal(_) => "internal",
@@ -80,9 +86,9 @@ impl ApiError {
             ApiError::BadRequest(_) | ApiError::InvalidSignature => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::LedgerUnverified { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::AdyenWebhookNotConfigured | ApiError::LiveAuditNotConfigured => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            ApiError::AdyenWebhookNotConfigured
+            | ApiError::LiveAuditNotConfigured
+            | ApiError::LedgerAuthNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -106,6 +112,7 @@ impl IntoResponse for ApiError {
                 json!({ "error": "adyen_webhook_not_configured" })
             }
             ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
+            ApiError::LedgerAuthNotConfigured => json!({ "error": "ledger_auth_not_configured" }),
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
             ApiError::PlatformUnavailable(detail) => {

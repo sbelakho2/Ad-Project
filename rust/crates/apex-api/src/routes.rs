@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `GET /healthz` | `200 {"status":"ok"}` | — |
 //! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
-//! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
+//! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
 //! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
 //!
@@ -173,6 +173,7 @@ async fn live_audit(
 
 async fn ledger(
     State(state): State<AppState>,
+    headers: HeaderMap,
     publisher: Result<Path<String>, PathRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Ok(Path(publisher)) = publisher else {
@@ -181,6 +182,12 @@ async fn ledger(
     if !is_valid_publisher(&publisher) {
         return Err(ApiError::BadRequest("invalid_publisher"));
     }
+    state.authorize_ledger(
+        &publisher,
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )?;
     let records = state.ledger_source.records(&publisher).await?;
     Ok(Json(json!({
         "publisher": publisher,
@@ -347,6 +354,9 @@ async fn console_audit(
 struct LedgerConsoleParams {
     #[serde(default)]
     publisher: Option<String>,
+    /// The publisher's ledger token, submitted by the console form.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 async fn console_ledger(
@@ -373,6 +383,31 @@ async fn console_ledger(
                 Some("invalid publisher name (allowed: A-Z a-z 0-9 _ -, 1..=64 characters)"),
             ),
         );
+    }
+    let authorization = params
+        .token
+        .as_deref()
+        .map(|token| format!("Bearer {token}"));
+    match state.authorize_ledger(&publisher, authorization.as_deref()) {
+        Ok(()) => {}
+        Err(ApiError::LedgerAuthNotConfigured) => {
+            return page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                render_error_page(
+                    "ledger closed",
+                    "ledger authentication is not configured for this deployment",
+                ),
+            );
+        }
+        Err(_) => {
+            return page(
+                StatusCode::UNAUTHORIZED,
+                render_ledger_form(
+                    Some(&publisher),
+                    Some("enter the publisher's ledger token to read the ledger"),
+                ),
+            );
+        }
     }
     match state.ledger_source.records(&publisher).await {
         Ok(records) => page(StatusCode::OK, render_ledger_records(&publisher, &records)),

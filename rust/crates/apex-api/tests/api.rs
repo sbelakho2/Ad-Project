@@ -103,7 +103,11 @@ async fn ledger_returns_verified_records_in_read_only_mode() {
     let temp = TempDir::new("ledger");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 200);
     assert!(response.content_type().starts_with(JSON));
     let body = response.json();
@@ -129,7 +133,11 @@ async fn ledger_unverified_is_422_with_the_offending_line() {
     );
     tamper_line(&path, 3);
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 422);
     assert_eq!(
         response.json(),
@@ -149,7 +157,11 @@ async fn ledger_signed_with_a_foreign_key_is_422_on_line_one() {
         vec![change_record(1)],
     );
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 422);
     assert_eq!(
         response.json(),
@@ -161,18 +173,49 @@ async fn ledger_signed_with_a_foreign_key_is_422_on_line_one() {
 async fn ledger_missing_file_is_404() {
     let temp = TempDir::new("ledger-404");
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert_eq!(response.json()["error"], "not_found");
 }
 
 #[tokio::test]
-async fn ledger_unknown_valid_publisher_is_404() {
+async fn ledger_unknown_valid_publisher_is_closed_without_a_token() {
+    // A publisher with no configured token is not readable at all: the route
+    // fails closed with 503 rather than revealing whether a ledger exists.
     let temp = TempDir::new("ledger-unknown");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
     let response = send(&app, get("/v1/ledger/not-onboarded")).await;
-    assert_eq!(response.status, 404);
+    assert_eq!(response.status, 503);
+    assert_eq!(response.json()["error"], "ledger_auth_not_configured");
+}
+
+#[tokio::test]
+async fn ledger_without_a_bearer_token_is_401() {
+    let temp = TempDir::new("ledger-401");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    assert_eq!(response.status, 401);
+    assert_eq!(response.json()["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn ledger_with_a_wrong_token_is_401() {
+    let temp = TempDir::new("ledger-wrong-token");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), "not-the-token"),
+    )
+    .await;
+    assert_eq!(response.status, 401);
+    assert_eq!(response.json()["error"], "unauthorized");
 }
 
 #[tokio::test]
@@ -212,8 +255,12 @@ async fn publisher_length_boundary_is_64_bytes() {
     let app = router(file_state(temp.path(), pub1_keys()));
     let exactly_64 = "a".repeat(64);
     let response = send(&app, get(&format!("/v1/ledger/{exactly_64}"))).await;
-    // 64 bytes is a well-formed name: the allow-list then decides (404 here).
-    assert_eq!(response.status, 404, "64-char name must reach the source");
+    // 64 bytes is a well-formed name: the name check passes and the publisher
+    // is then refused for having no configured token (503).
+    assert_eq!(
+        response.status, 503,
+        "64-char name must pass the name check"
+    );
     let overlong = "a".repeat(65);
     let response = send(&app, get(&format!("/v1/ledger/{overlong}"))).await;
     assert_eq!(response.status, 400);
@@ -253,7 +300,11 @@ async fn cycle_summarises_audit_and_ledger_without_mutating() {
         "{body}"
     );
     // Nothing mutated: the ledger file still verifies and has two records.
-    let ledger = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let ledger = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(
         ledger.json()["records"].as_array().expect("records").len(),
         2
@@ -498,7 +549,7 @@ async fn every_api_success_carries_application_json() {
     let requests = [
         get("/healthz"),
         get("/v1/audit/admob"),
-        get(&format!("/v1/ledger/{PUBLISHER}")),
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
         post(&format!("/v1/cycle/{PUBLISHER}?platform=admob")),
         post_json("/v1/adyen/webhook", &webhook_body()),
     ];
@@ -609,11 +660,21 @@ async fn ledger_symlink_escaping_the_root_is_refused() {
     symlink(&target, root.path().join(format!("{PUBLISHER}.jsonl"))).expect("create symlink");
     let app = router(file_state(root.path(), pub1_keys()));
 
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 404, "{}", response.body);
     assert_eq!(response.json()["error"], "not_found");
 
-    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert!(response.body.contains("no ledger exists"));
 }
@@ -625,7 +686,11 @@ async fn empty_ledger_verifies_to_zero_records() {
     let temp = TempDir::new("ledger-empty");
     write_ledger(temp.path(), PUBLISHER, &seed_keypair(7), vec![]);
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/v1/ledger/{PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 200, "{}", response.body);
     assert_eq!(response.json()["records"], json!([]));
 }

@@ -7,7 +7,9 @@ Current deployment layout for the no-SDK autopilot product:
 - `caddy/`: the edge config. One host reverse-proxies `apex-api`, the other
   serves the built Zola site.
 - `systemd/apex-api.service`: the service unit; the environment file holds
-  the vault key, account root, live-audit token and Adyen settings.
+  the vault key, account root, live-audit token, per-publisher ledger tokens
+  (`APEX_LEDGER_TOKENS_FILE`, a JSON object of publisher to token) and Adyen
+  settings. Without the ledger tokens file, no ledger is readable over HTTP.
 - `systemd/apex-runner-*.service` and `*.timer`: the scheduled measurement and
   billing jobs. `apex-runner-daily.timer` runs the daily pull/settle pass at
   03:30 UTC; `apex-runner-monthly.timer` bills the month just closed at 04:30

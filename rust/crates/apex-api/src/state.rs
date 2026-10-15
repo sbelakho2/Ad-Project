@@ -6,13 +6,15 @@
 //! kept anywhere, which is what makes the read-only deployment trivially
 //! reproducible.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use apex_billing::AdyenClient;
 
 use crate::clock::{Clock, SystemClock};
 use crate::cycle::{CycleRunner, LedgerOnlyRunner};
-use crate::live::LiveAuditor;
+use crate::error::ApiError;
+use crate::live::{constant_time_eq, LiveAuditor};
 use crate::sources::{AuditSource, LedgerSource};
 
 /// The complete dependency set of the HTTP surface.
@@ -36,6 +38,10 @@ pub struct AppState {
     /// The live read-only auditor behind `POST /v1/audit/{platform}`. `None`
     /// makes the route answer `503 live_audit_not_configured`.
     pub live_auditor: Option<Arc<LiveAuditor>>,
+    /// Per-publisher ledger tokens. A publisher with no token here cannot have
+    /// its ledger read: the route answers `503 ledger_auth_not_configured`
+    /// rather than serving it unauthenticated.
+    pub ledger_tokens: Arc<HashMap<String, Vec<u8>>>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
 }
@@ -57,7 +63,52 @@ impl AppState {
             clock: Arc::new(SystemClock),
             cycle_runner,
             live_auditor: None,
+            ledger_tokens: Arc::new(HashMap::new()),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+        }
+    }
+
+    /// Attach the per-publisher ledger tokens.
+    #[must_use]
+    pub fn with_ledger_tokens(mut self, tokens: HashMap<String, Vec<u8>>) -> Self {
+        self.ledger_tokens = Arc::new(tokens);
+        self
+    }
+
+    /// Attach one publisher's ledger token.
+    #[must_use]
+    pub fn with_ledger_token(
+        mut self,
+        publisher: impl Into<String>,
+        token: impl Into<Vec<u8>>,
+    ) -> Self {
+        let mut tokens = (*self.ledger_tokens).clone();
+        tokens.insert(publisher.into(), token.into());
+        self.ledger_tokens = Arc::new(tokens);
+        self
+    }
+
+    /// Authorize a read of `publisher`'s ledger. Fails closed: a publisher
+    /// with no configured token is refused (`503`), and a missing or wrong
+    /// token is `401`. The comparison is constant-time.
+    pub fn authorize_ledger(
+        &self,
+        publisher: &str,
+        authorization: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let Some(expected) = self.ledger_tokens.get(publisher) else {
+            return Err(ApiError::LedgerAuthNotConfigured);
+        };
+        if expected.is_empty() {
+            return Err(ApiError::Unauthorized);
+        }
+        let presented = authorization
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or_default();
+        if constant_time_eq(presented.as_bytes(), expected.as_slice()) {
+            Ok(())
+        } else {
+            Err(ApiError::Unauthorized)
         }
     }
 

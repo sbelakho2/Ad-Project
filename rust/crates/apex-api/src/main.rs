@@ -19,7 +19,10 @@
 //!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
 //!   client) — the webhook verifies each `notificationItems` item's
 //!   `additionalData.hmacSignature` against this key; without it the endpoint
-//!   answers `503 adyen_webhook_not_configured`.
+//!   answers `503 adyen_webhook_not_configured`;
+//! - `APEX_LEDGER_TOKENS_FILE` — a JSON object of publisher to ledger token;
+//!   without it no ledger is readable over HTTP (the routes answer
+//!   `503 ledger_auth_not_configured`).
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
@@ -90,6 +93,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(hmac_key) = env_value("APEX_ADYEN_HMAC_KEY") {
         state = state.with_adyen_hmac_key(hmac_key.into_bytes());
+    }
+
+    // Per-publisher ledger tokens: a JSON object of publisher -> token, read
+    // from the file named by `APEX_LEDGER_TOKENS_FILE`. Without it no ledger
+    // is readable over HTTP (the routes answer 503).
+    if let Some(path) = env_value("APEX_LEDGER_TOKENS_FILE") {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|error| format!("APEX_LEDGER_TOKENS_FILE could not be read: {error}"))?;
+        let tokens: HashMap<String, String> = serde_json::from_str(&raw)
+            .map_err(|error| format!("APEX_LEDGER_TOKENS_FILE is not a JSON object: {error}"))?;
+        let tokens = tokens
+            .into_iter()
+            .map(|(publisher, token)| (publisher, token.into_bytes()))
+            .collect();
+        state = state.with_ledger_tokens(tokens);
     }
 
     match (

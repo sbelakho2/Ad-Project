@@ -206,6 +206,8 @@ pub fn render_ledger_form(raw_publisher: Option<&str>, problem: Option<&str>) ->
          <form method=\"get\" action=\"/console/ledger\">\n\
          <label for=\"publisher\">Publisher</label>\n\
          <input type=\"text\" id=\"publisher\" name=\"publisher\" maxlength=\"64\" value=\"{publisher}\">\n\
+         <label for=\"token\">Ledger token</label>\n\
+         <input type=\"password\" id=\"token\" name=\"token\" autocomplete=\"off\">\n\
          <button type=\"submit\">Load ledger</button>\n\
          </form>",
         publisher = html_escape(raw_publisher.unwrap_or("")),

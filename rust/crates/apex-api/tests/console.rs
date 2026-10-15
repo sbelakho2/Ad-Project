@@ -189,6 +189,40 @@ async fn ledger_form_is_a_plain_get_form() {
     assert!(response
         .body
         .contains("<button type=\"submit\">Load ledger</button>"));
+    assert!(response
+        .body
+        .contains("<input type=\"password\" id=\"token\" name=\"token\""));
+}
+
+#[tokio::test]
+async fn ledger_console_without_a_token_is_401() {
+    let temp = TempDir::new("console-ledger-401");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    assert_eq!(response.status, 401);
+    assert!(response.body.contains("token to read the ledger"));
+}
+
+#[tokio::test]
+async fn ledger_console_with_no_tokens_configured_is_503() {
+    let temp = TempDir::new("console-ledger-503");
+    write_standard_fixture(temp.path());
+    let app = router(apex_api::AppState::new(
+        std::sync::Arc::new(apex_api::JsonFileAuditSource::new(temp.path())),
+        std::sync::Arc::new(apex_api::FileLedgerSource::new(temp.path(), pub1_keys())),
+    ));
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
+    assert_eq!(response.status, 503);
+    assert!(response
+        .body
+        .contains("ledger authentication is not configured"));
 }
 
 #[tokio::test]
@@ -196,7 +230,13 @@ async fn ledger_records_are_rendered_as_a_verified_table() {
     let temp = TempDir::new("console-ledger-table");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
     assert_eq!(response.status, 200);
     for header in [
         "<th>Seq</th>",
@@ -225,7 +265,13 @@ async fn ledger_verification_failure_renders_a_422_banner_with_the_line() {
     );
     tamper_line(&path, 3);
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
     assert_eq!(response.status, 422);
     assert!(response.content_type().starts_with(HTML));
     assert!(
@@ -284,8 +330,15 @@ async fn ledger_quote_breaking_publisher_cannot_escape_the_attribute() {
 async fn ledger_unknown_publisher_renders_a_404_banner() {
     let temp = TempDir::new("console-ledger-404");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/console/ledger?publisher=ghost")).await;
+    // The publisher is authorized but has no ledger on this deployment.
+    let app = router(file_state(temp.path(), pub1_keys()).with_ledger_token("ghost", LEDGER_TOKEN));
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher=ghost&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert!(response
         .body
@@ -303,7 +356,7 @@ async fn console_pages_are_html_and_contain_no_script_elements() {
         "/console/audit".to_string(),
         "/console/audit?platform=admob".to_string(),
         "/console/ledger".to_string(),
-        format!("/console/ledger?publisher={PUBLISHER}"),
+        format!("/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"),
     ] {
         let response = send(&app, get(&uri)).await;
         assert!(response.content_type().starts_with(HTML), "{uri}");
@@ -397,7 +450,13 @@ async fn hostile_ledger_record_fields_render_escaped() {
         )],
     );
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get(&format!("/console/ledger?publisher={PUBLISHER}"))).await;
+    let response = send(
+        &app,
+        get(&format!(
+            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
+        )),
+    )
+    .await;
     assert_eq!(response.status, 200);
     assert!(
         response
