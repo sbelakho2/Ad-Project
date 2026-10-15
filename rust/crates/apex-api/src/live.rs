@@ -24,7 +24,7 @@ use apex_audit::{AuditReport, BidderAccount};
 use apex_connectors::admob::AdmobClient;
 use apex_connectors::app_ads::AppAdsTxtFetcher;
 use apex_connectors::levelplay::LevelPlayClient;
-use apex_connectors::max::MaxClient;
+use apex_connectors::max::{MaxClient, MaxReportClient};
 use apex_connectors::snapshot::{
     admob_snapshot, levelplay_snapshot, max_snapshot, PublisherContext,
 };
@@ -50,6 +50,14 @@ pub struct LiveCredentials {
     /// The platform API base url, no trailing slash. Required so live calls
     /// never silently target a guessed host.
     pub base_url: String,
+    /// MAX Revenue Reporting key (a separate credential from the management
+    /// key). When present, the audit feeds 30-day country revenue into the
+    /// floor rules instead of scoring with an empty reporting context.
+    #[serde(default)]
+    pub report_key: Option<String>,
+    /// MAX reporting base url; defaults to the documented host when absent.
+    #[serde(default)]
+    pub reporting_base_url: Option<String>,
 }
 
 /// The publisher's onboarding record: context plus one key set per platform.
@@ -218,7 +226,7 @@ impl LiveAuditor {
         let credentials = account
             .credentials(platform)
             .ok_or(ApiError::BadRequest("platform_not_onboarded"))?;
-        let context = PublisherContext {
+        let mut context = PublisherContext {
             expected_networks: account.expected_networks.clone(),
             developer_site: Some(account.developer_site.clone()),
             bidder_accounts: account.bidder_accounts.clone(),
@@ -226,6 +234,34 @@ impl LiveAuditor {
         };
         let fetcher = AppAdsTxtFetcher::new(Arc::clone(&self.transport));
         let now_unix_ms = self.clock.now_unix_s().saturating_mul(1000);
+
+        // With a MAX report key, the audit is scored against real 30-day
+        // country revenue: a free audit that cannot see revenue cannot find a
+        // stale floor's cost.
+        if platform == PlatformId::AppLovinMax {
+            if let Some(report_key) = credentials.report_key.as_deref() {
+                let reporting_base = credentials
+                    .reporting_base_url
+                    .clone()
+                    .unwrap_or_else(|| apex_connectors::max::MAX_REPORTING_BASE.to_string());
+                let report =
+                    MaxReportClient::new(report_key, &reporting_base, Arc::clone(&self.transport))?;
+                let rows = report.country_revenue_30d(now_unix_ms).await?;
+                context.country_revenue = rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let country = row.country?;
+                        let ad_unit_id = row.ad_unit_id?;
+                        Some(apex_audit::CountryRevenueRow {
+                            country,
+                            ad_unit_id,
+                            revenue_30d: row.revenue,
+                            impressions_30d: row.impressions,
+                        })
+                    })
+                    .collect();
+            }
+        }
         let snapshot = match platform {
             PlatformId::AppLovinMax => {
                 let client = MaxClient::new(
@@ -371,6 +407,8 @@ mod tests {
                 api_key: "key".to_string(),
                 account_id: "acct".to_string(),
                 base_url: "https://api.example.test".to_string(),
+                report_key: None,
+                reporting_base_url: None,
             },
         );
         LiveAccount {
@@ -380,6 +418,16 @@ mod tests {
             bidder_accounts: vec![],
             platforms,
         }
+    }
+
+    /// A MAX account that also carries the Revenue Reporting key.
+    fn max_account_with_report_key(developer_site: &str) -> LiveAccount {
+        let mut account = max_account(developer_site);
+        if let Some(credentials) = account.platforms.get_mut("applovin_max") {
+            credentials.report_key = Some("report-key".to_string());
+            credentials.reporting_base_url = Some("https://r.example.test".to_string());
+        }
+        account
     }
 
     fn auditor_with(
@@ -465,6 +513,48 @@ mod tests {
         );
         let calls = transport.calls.lock().map(|c| c.len()).unwrap_or(0);
         assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn live_audit_fetches_country_revenue_when_a_report_key_is_set() {
+        let (auditor, transport) = auditor_with(
+            Some(max_account_with_report_key("studio.example.com")),
+            // Reporting is pulled first (it fills the audit context), then the
+            // management calls.
+            vec![
+                ok(
+                    200,
+                    r#"{"code":200,"count":1,"results":[{"day":"2026-10-01","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"12.5","impressions":"100000"}]}"#,
+                ),
+                ok(
+                    200,
+                    r#"[{"id":"u1","name":"Banner","platform":"ios","package_name":"com.x","ad_format":"BANNER"}]"#,
+                ),
+                ok(
+                    200,
+                    "google.com, pub-1, DIRECT\nunityads.com, pub-2, DIRECT\n",
+                ),
+            ],
+        );
+        let (status, report) = post_audit(
+            live_state(Some(auditor)),
+            "applovin_max",
+            r#"{"publisher":"pub1"}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{report}");
+        let calls = transport
+            .calls
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        assert_eq!(calls.len(), 3, "reporting + management + app-ads.txt");
+        let report_call = calls
+            .iter()
+            .find(|call| call.url.contains("/maxReport?"))
+            .expect("a MAX reporting call");
+        assert!(report_call.url.contains("api_key=report-key"));
+        assert!(report_call.url.contains("country"));
     }
 
     #[tokio::test]
@@ -695,6 +785,8 @@ mod tests {
                 api_key: "key".to_string(),
                 account_id: "app-key".to_string(),
                 base_url: "https://api.example.test".to_string(),
+                report_key: None,
+                reporting_base_url: None,
             },
         );
         let (auditor, transport) = auditor_with(
@@ -734,6 +826,8 @@ mod tests {
                 api_key: "token".to_string(),
                 account_id: "accounts/pub-1234567890".to_string(),
                 base_url: "https://api.example.test".to_string(),
+                report_key: None,
+                reporting_base_url: None,
             },
         );
         let (auditor, _) = auditor_with(

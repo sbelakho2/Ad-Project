@@ -600,6 +600,19 @@ impl MaxReportClient {
         .await
     }
 
+    /// The last 30 complete days of country/ad-unit revenue rows, for the
+    /// floor rules. `now_unix_ms` bounds the window (the day before today is
+    /// the last complete day).
+    pub async fn country_revenue_30d(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<Vec<ReportRow>, PlatformError> {
+        let today = now_unix_ms.div_euclid(86_400_000);
+        let start = format_day(today - 30);
+        let end = format_day(today - 1);
+        self.country_ad_unit_rows(&start, &end).await
+    }
+
     /// Total reported revenue of one ad unit over `[start, end]`, in micros.
     /// Used by the monthly billing pass to bill the pre-registered scope's
     /// incremental revenue.
@@ -781,6 +794,22 @@ fn parse_ad_format(raw: &str) -> Option<AdFormat> {
 
 fn encode_id(id: &str) -> String {
     urlencoding(id)
+}
+
+/// `YYYY-MM-DD` from a day number since the Unix epoch (Howard Hinnant's
+/// civil-from-days algorithm).
+fn format_day(day: i64) -> String {
+    let z = day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn encode_query(value: &str) -> String {
