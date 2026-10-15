@@ -119,6 +119,145 @@ impl Runner {
     }
 }
 
+/// What one monthly billing pass did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MonthlyReport {
+    pub month: String,
+    /// Scopes (ad units) that had at least one kept change in force.
+    pub billed_scopes: u32,
+    /// One entry per billed change: its id and the fee in micros.
+    pub fees: Vec<(String, i64)>,
+}
+
+impl Runner {
+    /// One monthly billing pass: bill every kept change still in force for
+    /// `month`, from the platform-reported revenue of its pre-registered
+    /// scope. A change past its term or covered by a publisher override is
+    /// skipped by [`apex_lift::run::run_month`].
+    pub async fn run_monthly(
+        &self,
+        ledger: &mut dyn LedgerLog,
+        month: &str,
+        month_start: &str,
+        month_days: u32,
+        now_unix_ms: i64,
+    ) -> Result<MonthlyReport, PlanError> {
+        let month_end = month_end(month_start, month_days)?;
+        let mut by_scope: std::collections::BTreeMap<String, Vec<apex_lift::billing::KeptChange>> =
+            std::collections::BTreeMap::new();
+        for (scope, change) in kept_changes(ledger) {
+            by_scope.entry(scope).or_default().push(change);
+        }
+        let mut report = MonthlyReport {
+            month: month.to_string(),
+            ..MonthlyReport::default()
+        };
+        for (scope, changes) in by_scope {
+            let revenue = self
+                .ops
+                .scope_revenue(&scope, month_start, &month_end)
+                .await
+                .map_err(|source| PlanError::ApplyFailed { source })?;
+            let run = apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
+                .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
+            for fee in &run.fees {
+                let record = apex_lift::emit::monthly_billing(fee, month)
+                    .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
+                let payload = record
+                    .record
+                    .canonical_json()
+                    .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
+                ledger
+                    .append(LedgerRecord::lift_record(
+                        now_unix_ms,
+                        &record.sha256,
+                        &payload,
+                    ))
+                    .map_err(PlanError::Ledger)?;
+                report.fees.push((fee.change_id.clone(), fee.fee_micros));
+            }
+            report.billed_scopes += 1;
+        }
+        Ok(report)
+    }
+}
+
+/// The last calendar day of a month, `YYYY-MM-DD`.
+fn month_end(month_start: &str, month_days: u32) -> Result<String, PlanError> {
+    let start = crate::live_max::day_number(month_start).ok_or_else(|| {
+        PlanError::Validation(format!("month start '{month_start}' is not a valid day"))
+    })?;
+    Ok(crate::live_max::format_day(
+        start + i64::from(month_days.max(1)) - 1,
+    ))
+}
+
+/// Every kept change in the ledger, paired with its pre-registered scope.
+fn kept_changes(ledger: &dyn LedgerLog) -> Vec<(String, apex_lift::billing::KeptChange)> {
+    let records = ledger.records();
+    let mut out = Vec::new();
+    for record in &records {
+        let LedgerRecord::ExperimentStarted { spec, .. } = record else {
+            continue;
+        };
+        let name = &spec.name;
+        let pre = records.iter().find_map(|candidate| match candidate {
+            LedgerRecord::LiftRecord {
+                payload_sha256,
+                payload,
+                ..
+            } => match parse_lift_record(payload) {
+                Some(apex_lift::records::LiftRecord::PreRegistration {
+                    experiment_id,
+                    rate_bp,
+                    ..
+                }) if &experiment_id == name => Some((payload_sha256.clone(), rate_bp)),
+                _ => None,
+            },
+            _ => None,
+        });
+        let result = records.iter().find_map(|candidate| match candidate {
+            LedgerRecord::LiftRecord {
+                at_unix_ms,
+                payload_sha256,
+                payload,
+                ..
+            } => match parse_lift_record(payload) {
+                Some(apex_lift::records::LiftRecord::Result {
+                    experiment_id,
+                    decision,
+                    lambda,
+                    ..
+                }) if &experiment_id == name && decision == "keep" && lambda > 0.0 => {
+                    Some((*at_unix_ms, payload_sha256.clone(), lambda))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        if let (Some((pre_hash, rate_bp)), Some((at_unix_ms, result_hash, lambda))) = (pre, result)
+        {
+            out.push((
+                spec.ad_unit_id.clone(),
+                apex_lift::billing::KeptChange {
+                    change_id: name.clone(),
+                    lambda,
+                    rate_bp,
+                    kept_day: crate::live_max::format_day(at_unix_ms.div_euclid(86_400_000)),
+                    overridden_day: None,
+                    pre_registration_hash: pre_hash,
+                    result_hash,
+                },
+            ));
+        }
+    }
+    out
+}
+
+fn parse_lift_record(payload: &str) -> Option<apex_lift::records::LiftRecord> {
+    serde_json::from_str(payload).ok()
+}
+
 fn status_label(outcome: &SettleOutcome) -> String {
     match outcome {
         SettleOutcome::Kept { .. } => "kept".into(),
@@ -390,6 +529,111 @@ mod tests {
         let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
         assert_eq!(report.pulled, 1);
         assert_eq!(report.settled, 0, "the window is not complete yet");
+    }
+
+    #[tokio::test]
+    async fn monthly_pass_bills_a_kept_change_for_its_scope() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        ops.put_scope_revenue("u1", 1_000_000_000);
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(
+            kept_changes(&l).len(),
+            1,
+            "one kept change is on the ledger"
+        );
+
+        let report = runner
+            .run_monthly(&mut l, "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.billed_scopes, 1);
+        assert_eq!(report.fees.len(), 1);
+        assert!(report.fees[0].1 > 0, "a proven lift bills a positive fee");
+        let billing = l
+            .records()
+            .iter()
+            .filter(|r| match r {
+                LedgerRecord::LiftRecord { payload, .. } => payload.contains("monthlyBilling"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(billing, 1);
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_change_is_never_billed() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 3_600_000));
+        ops.put_scope_revenue("u1", 1_000_000_000);
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+
+        let report = runner
+            .run_monthly(&mut l, "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert_eq!(report.billed_scopes, 0, "no kept change, no scope");
+        assert!(report.fees.is_empty());
     }
 
     /// A minimal adapter used to prove the runner is generic over PlatformOps.

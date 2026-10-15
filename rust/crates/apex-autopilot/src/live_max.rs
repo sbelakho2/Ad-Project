@@ -169,6 +169,15 @@ impl PlatformOps for MaxPlatformOps {
         Ok(arms_from_rows(&rows, today))
     }
 
+    async fn scope_revenue(
+        &self,
+        ad_unit_id: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<apex_core::Micros, PlatformError> {
+        self.reporting.ad_unit_revenue(ad_unit_id, start, end).await
+    }
+
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
         self.management.promote_experiment(experiment_id).await
     }
@@ -231,7 +240,7 @@ fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> ExperimentDays {
 
 /// `YYYY-MM-DD` from a day number since the Unix epoch (Howard Hinnant's
 /// civil-from-days algorithm).
-fn format_day(day: i64) -> String {
+pub(crate) fn format_day(day: i64) -> String {
     let z = day + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -246,7 +255,7 @@ fn format_day(day: i64) -> String {
 }
 
 /// Inverse of [`format_day`], used to tell whether a day is final.
-fn day_number(day: &str) -> Option<i64> {
+pub(crate) fn day_number(day: &str) -> Option<i64> {
     let mut parts = day.split('-');
     let y: i64 = parts.next()?.parse().ok()?;
     let m: i64 = parts.next()?.parse().ok()?;

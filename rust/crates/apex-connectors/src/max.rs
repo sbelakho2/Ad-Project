@@ -600,6 +600,34 @@ impl MaxReportClient {
         .await
     }
 
+    /// Total reported revenue of one ad unit over `[start, end]`, in micros.
+    /// Used by the monthly billing pass to bill the pre-registered scope's
+    /// incremental revenue.
+    pub async fn ad_unit_revenue(
+        &self,
+        ad_unit_id: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<i64, PlatformError> {
+        let rows = self
+            .rows(
+                start,
+                end,
+                &["day", "max_ad_unit_id", "estimated_revenue"],
+                None,
+            )
+            .await?;
+        let mut total: i64 = 0;
+        for row in rows {
+            if row.ad_unit_id.as_deref() == Some(ad_unit_id) {
+                total = total
+                    .checked_add(row.revenue)
+                    .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+            }
+        }
+        Ok(total)
+    }
+
     /// Per-arm rows for one experiment: revenue and impressions grouped by the
     /// `max_ad_unit_test` arm label.
     pub async fn experiment_rows(

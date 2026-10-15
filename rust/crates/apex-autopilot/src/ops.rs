@@ -64,6 +64,20 @@ pub trait PlatformOps: Send + Sync {
         )))
     }
 
+    /// The platform-reported revenue of one pre-registered scope (ad unit) over
+    /// `[start, end]`, in micros. The monthly billing pass bills this scope's
+    /// incremental revenue; an adapter without reporting refuses.
+    async fn scope_revenue(
+        &self,
+        ad_unit_id: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<apex_core::Micros, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "scope_revenue is not supported by this adapter for {ad_unit_id} ({start}..{end})"
+        )))
+    }
+
     /// Apply the change to all users and end the test: the kept outcome.
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError>;
 
@@ -96,6 +110,7 @@ pub struct RecordingOps {
     rollback_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
+    scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -168,6 +183,14 @@ impl RecordingOps {
     pub fn put_experiment_days(&self, id: &str, days: ExperimentDays) -> &Self {
         if let Ok(mut map) = self.days.lock() {
             map.insert(id.to_string(), days);
+        }
+        self
+    }
+
+    /// Script the reported revenue of one scope (ad unit) for the billing pass.
+    pub fn put_scope_revenue(&self, ad_unit_id: &str, micros: apex_core::Micros) -> &Self {
+        if let Ok(mut map) = self.scope_revenues.lock() {
+            map.insert(ad_unit_id.to_string(), micros);
         }
         self
     }
@@ -245,6 +268,27 @@ impl PlatformOps for RecordingOps {
             Err(_) => Err(PlatformError::Network {
                 platform: apex_core::PlatformId::Admob,
                 operation: "experimentDays".into(),
+                detail: "lock poisoned".into(),
+            }),
+        }
+    }
+
+    async fn scope_revenue(
+        &self,
+        ad_unit_id: &str,
+        _start: &str,
+        _end: &str,
+    ) -> Result<apex_core::Micros, PlatformError> {
+        push_log(&self.log, format!("scope_revenue:{ad_unit_id}"));
+        match self.scope_revenues.lock() {
+            Ok(map) => map.get(ad_unit_id).copied().ok_or(PlatformError::Schema {
+                platform: apex_core::PlatformId::Admob,
+                operation: "scopeRevenue".into(),
+                detail: format!("no scripted scope revenue for {ad_unit_id}"),
+            }),
+            Err(_) => Err(PlatformError::Network {
+                platform: apex_core::PlatformId::Admob,
+                operation: "scopeRevenue".into(),
                 detail: "lock poisoned".into(),
             }),
         }

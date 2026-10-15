@@ -33,7 +33,7 @@ pub use model::{
 };
 pub use ops::{PlatformOps, RecordingOps};
 pub use plan::run_cycle;
-pub use runner::{DailyReport, Runner};
+pub use runner::{DailyReport, MonthlyReport, Runner};
 pub use settle::settle_experiment;
 
 #[cfg(test)]
