@@ -5,13 +5,13 @@
 # and `/console/ledger` require that publisher's bearer token, and the routes
 # answer 503 when no token is configured. The edge only reverse-proxies the
 # loopback-bound API, so nothing is reachable without a token.
-{$APEX_DOMAIN:apex.example} {
+{$APEX_DOMAIN:api.apexmediation.ee} {
 	encode gzip
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	reverse_proxy 127.0.0.1:8787
 }
 
-{$SITE_DOMAIN:www.apex.example} {
+{$SITE_DOMAIN:www.apexmediation.ee} {
 	encode gzip
 	root * /srv/site/public
 	file_server

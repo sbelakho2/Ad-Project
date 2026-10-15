@@ -9,6 +9,7 @@
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
 //! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
+//! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
 //! with the wrong method is axum's `405` (asserted by tests).
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ledger/{publisher}", get(ledger))
         .route("/v1/cycle/{publisher}", post(run_cycle))
         .route("/v1/adyen/webhook", post(adyen_webhook))
+        .route("/v1/leads", post(lead_capture))
         .route("/", get(console_overview))
         .route("/console/audit", get(console_audit))
         .route("/console/ledger", get(console_ledger))
@@ -169,6 +171,27 @@ async fn live_audit(
         return Err(ApiError::BadRequest("invalid_publisher"));
     }
     Ok(Json(auditor.audit(&body.publisher, platform).await?))
+}
+
+/// Capture a free-audit lead: validate the shape, store it append-only, and
+/// forward it to the mail webhook when one is configured.
+async fn lead_capture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let Some(store) = &state.leads else {
+        return Err(ApiError::LeadCaptureNotConfigured);
+    };
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let lead = crate::leads::parse_lead(&body, content_type)
+        .map_err(|_| ApiError::BadRequest("invalid_lead"))?;
+    crate::leads::validate_lead(&lead).map_err(|_| ApiError::BadRequest("invalid_lead"))?;
+    let now_unix_ms = state.clock.now_unix_s().saturating_mul(1000);
+    store.store(&lead, now_unix_ms).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "received": true }))))
 }
 
 async fn ledger(

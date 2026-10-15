@@ -16,7 +16,7 @@ zola serve
 
 ## Deploy
 
-`base_url` in `config.toml` is set to `https://apexmediation.example`, the site's canonical example domain. A production deploy replaces it with the live domain, and the `Sitemap:` line in `static/robots.txt` must be updated to the same domain at the same time.
+`base_url` in `config.toml` is set to `https://apexmediation.ee`, the site's canonical example domain. A production deploy replaces it with the live domain, and the `Sitemap:` line in `static/robots.txt` must be updated to the same domain at the same time.
 
 ## Measurement notes
 

@@ -22,7 +22,9 @@
 //!   answers `503 adyen_webhook_not_configured`;
 //! - `APEX_LEDGER_TOKENS_FILE` — a JSON object of publisher to ledger token;
 //!   without it no ledger is readable over HTTP (the routes answer
-//!   `503 ledger_auth_not_configured`).
+//!   `503 ledger_auth_not_configured`);
+//! - `APEX_LEADS_FILE` — the append-only lead log for `POST /v1/leads`;
+//!   `APEX_MAIL_WEBHOOK` optionally forwards each lead to ApexMail.
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
@@ -93,6 +95,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(hmac_key) = env_value("APEX_ADYEN_HMAC_KEY") {
         state = state.with_adyen_hmac_key(hmac_key.into_bytes());
+    }
+
+    // Lead capture: append-only JSONL at the path named by `APEX_LEADS_FILE`,
+    // forwarded to `APEX_MAIL_WEBHOOK` (the ApexMail hook) when set.
+    if let Some(path) = env_value("APEX_LEADS_FILE") {
+        let transport = Arc::new(
+            ReqwestTransport::new()
+                .map_err(|error| format!("lead webhook transport could not be built: {error}"))?,
+        );
+        let store: Arc<dyn apex_api::LeadStore> = match env_value("APEX_MAIL_WEBHOOK") {
+            Some(url) => {
+                Arc::new(apex_api::FileLeadStore::new(path).with_mail_webhook(url, transport))
+            }
+            None => Arc::new(apex_api::FileLeadStore::new(path)),
+        };
+        state = state.with_leads(store);
     }
 
     // Per-publisher ledger tokens: a JSON object of publisher -> token, read

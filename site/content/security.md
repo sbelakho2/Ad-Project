@@ -53,4 +53,4 @@ The signed change log is a local, append-only file. It is created with owner-onl
 
 We do not need user-level advertising identifiers to do any of this, and we do not query them. If a platform requires an API surface we cannot use without unnecessary data, that surface stays unused.
 
-Security contact: [hello@apexmediation.example](mailto:hello@apexmediation.example).
+Security contact: [hello@apexmediation.ee](mailto:hello@apexmediation.ee).

@@ -53,7 +53,11 @@ You can revoke write credentials at any time; the audit and your exported ledger
 
 **How do I know the lift is real?** You don't take our word for it: every gain is proven by the platform's own built-in A/B experiment, visible in your own account, and billed only from those results.
 
-**How do I start?** Write to [hello@apexmediation.example](mailto:hello@apexmediation.example) with the platforms and monthly revenue range of your apps. You get an audit timeline and a first findings report before anyone discusses a contract.
+**How do I start?** Leave your contact and portfolio below, or write to [hello@apexmediation.ee](mailto:hello@apexmediation.ee). You get an audit timeline and a first findings report before anyone discusses a contract.
+
+{{< lead-form >}}
+
+The form posts to our lead endpoint and we reply by email. Nothing else is stored.
 
 ## The fine print worth reading twice
 

@@ -56,4 +56,4 @@ Apex's difference is structural: no code in the app, no new ad path, no Apex-sid
 
 Apex serves no ads and ships no SDK. No new mediation layer. No partnerships needed with your networks. Nothing flows through Apex — not ad requests, not bids, not user data. Apex touches only the management APIs of the platform you already use, and the fee only exists when those platforms' own numbers say your revenue went up.
 
-Questions about the band, the thresholds or the worked example: write to [hello@apexmediation.example](mailto:hello@apexmediation.example).
+Questions about the band, the thresholds or the worked example: write to [hello@apexmediation.ee](mailto:hello@apexmediation.ee).

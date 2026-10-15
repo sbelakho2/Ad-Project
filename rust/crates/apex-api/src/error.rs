@@ -47,6 +47,10 @@ pub enum ApiError {
     #[error("ledger authentication is not configured")]
     LedgerAuthNotConfigured,
 
+    /// No lead store is configured in this deployment.
+    #[error("lead capture is not configured")]
+    LeadCaptureNotConfigured,
+
     /// An upstream platform refused or failed the call; the detail is logged
     /// but not exposed.
     #[error("platform unavailable: {0}")]
@@ -74,6 +78,7 @@ impl ApiError {
             ApiError::LiveAuditNotConfigured => "live_audit_not_configured",
             ApiError::Unauthorized => "unauthorized",
             ApiError::LedgerAuthNotConfigured => "ledger_auth_not_configured",
+            ApiError::LeadCaptureNotConfigured => "lead_capture_not_configured",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
             ApiError::InvalidSignature => "invalid_signature",
             ApiError::Internal(_) => "internal",
@@ -88,7 +93,8 @@ impl ApiError {
             ApiError::LedgerUnverified { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::AdyenWebhookNotConfigured
             | ApiError::LiveAuditNotConfigured
-            | ApiError::LedgerAuthNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::LedgerAuthNotConfigured
+            | ApiError::LeadCaptureNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -113,6 +119,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
             ApiError::LedgerAuthNotConfigured => json!({ "error": "ledger_auth_not_configured" }),
+            ApiError::LeadCaptureNotConfigured => json!({ "error": "lead_capture_not_configured" }),
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
             ApiError::PlatformUnavailable(detail) => {

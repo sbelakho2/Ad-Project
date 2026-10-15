@@ -45,6 +45,7 @@ pub mod clock;
 pub mod cycle;
 pub mod error;
 pub mod html;
+pub mod leads;
 pub mod live;
 pub mod metrics;
 pub mod routes;
@@ -62,6 +63,7 @@ pub use html::{
     html_escape, render_audit_form, render_audit_page, render_error_page, render_ledger_form,
     render_ledger_records, render_overview,
 };
+pub use leads::{validate_lead, FileLeadStore, Lead, LeadStore};
 pub use live::{
     LiveAccount, LiveAccountStore, LiveAuditor, LiveCredentials, VaultedFileAccountStore,
 };

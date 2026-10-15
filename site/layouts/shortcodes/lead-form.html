@@ -1,0 +1,17 @@
+<form method="post" action="https://api.apexmediation.ee/v1/leads">
+  <label for="publisher">Publisher or studio</label>
+  <input type="text" id="publisher" name="publisher" maxlength="64" required>
+  <label for="email">Work email</label>
+  <input type="email" id="email" name="email" required>
+  <label for="platforms">Platforms</label>
+  <select id="platforms" name="platforms" multiple>
+    <option value="applovin_max">AppLovin MAX</option>
+    <option value="levelplay">LevelPlay</option>
+    <option value="admob">AdMob</option>
+  </select>
+  <label for="monthlyRevenueRange">Monthly revenue range</label>
+  <input type="text" id="monthlyRevenueRange" name="monthlyRevenueRange" placeholder="10k-50k">
+  <label for="notes">Anything else</label>
+  <textarea id="notes" name="notes" rows="3"></textarea>
+  <button type="submit">Request the free audit</button>
+</form>

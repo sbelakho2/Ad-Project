@@ -610,6 +610,52 @@ async fn invalid_utf8_path_segments_are_json_bad_request() {
 }
 
 #[tokio::test]
+async fn lead_capture_requires_configuration() {
+    let temp = TempDir::new("leads-503");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &app,
+        post_json(
+            "/v1/leads",
+            br#"{"publisher":"pub1","email":"a@studio.example","platforms":["admob"]}"#,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 503);
+    assert_eq!(response.json()["error"], "lead_capture_not_configured");
+}
+
+#[tokio::test]
+async fn lead_capture_accepts_a_valid_lead_and_refuses_bad_shapes() {
+    let temp = TempDir::new("leads-202");
+    let store = Arc::new(apex_api::FileLeadStore::new(
+        temp.path().join("leads.jsonl"),
+    ));
+    let app = router(file_state(temp.path(), pub1_keys()).with_leads(store));
+    let response = send(
+        &app,
+        post_json(
+            "/v1/leads",
+            br#"{"publisher":"pub1","email":"a@studio.example","platforms":["admob"]}"#,
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 202, "{}", response.body);
+    assert_eq!(response.json(), json!({"received": true}));
+
+    for body in [
+        br#"{"publisher":"pub1","email":"no-at-sign","platforms":["admob"]}"#.to_vec(),
+        br#"{"publisher":"../etc","email":"a@b.co","platforms":["admob"]}"#.to_vec(),
+        br#"{"publisher":"pub1","email":"a@b.co","platforms":["tiktok"]}"#.to_vec(),
+        br#"{"publisher":"pub1","email":"a@b.co","platforms":[]}"#.to_vec(),
+    ] {
+        let response = send(&app, post_json("/v1/leads", &body)).await;
+        assert_eq!(response.status, 400, "body {body:?}");
+        assert_eq!(response.json(), json!({"error": "invalid_lead"}));
+    }
+}
+
+#[tokio::test]
 async fn oversized_request_body_is_json_413() {
     let temp = TempDir::new("cycle-oversized");
     write_standard_fixture(temp.path());

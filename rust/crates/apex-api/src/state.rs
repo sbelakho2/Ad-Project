@@ -14,6 +14,7 @@ use apex_billing::AdyenClient;
 use crate::clock::{Clock, SystemClock};
 use crate::cycle::{CycleRunner, LedgerOnlyRunner};
 use crate::error::ApiError;
+use crate::leads::LeadStore;
 use crate::live::{constant_time_eq, LiveAuditor};
 use crate::sources::{AuditSource, LedgerSource};
 
@@ -42,6 +43,9 @@ pub struct AppState {
     /// its ledger read: the route answers `503 ledger_auth_not_configured`
     /// rather than serving it unauthenticated.
     pub ledger_tokens: Arc<HashMap<String, Vec<u8>>>,
+    /// Lead capture behind `POST /v1/leads`. `None` makes the route answer
+    /// `503 lead_capture_not_configured`.
+    pub leads: Option<Arc<dyn LeadStore>>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
 }
@@ -64,8 +68,16 @@ impl AppState {
             cycle_runner,
             live_auditor: None,
             ledger_tokens: Arc::new(HashMap::new()),
+            leads: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
         }
+    }
+
+    /// Attach the lead store.
+    #[must_use]
+    pub fn with_leads(mut self, store: Arc<dyn LeadStore>) -> Self {
+        self.leads = Some(store);
+        self
     }
 
     /// Attach the per-publisher ledger tokens.

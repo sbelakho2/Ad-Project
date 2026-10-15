@@ -2,7 +2,7 @@
 # The production deploy replaces base_url with the live domain; the Sitemap line
 # in static/robots.txt must be updated to match at the same time.
 
-base_url = "https://apexmediation.example"
+base_url = "https://apexmediation.ee"
 title = "Apex"
 description = "Apex is the no-SDK autopilot that works on top of the mediation you already run: a free read-only revenue-leak audit, changes applied through each platform's own management API, and fees only on lift the platform's own A/B test measured."
 default_language = "en"
@@ -15,7 +15,7 @@ taxonomies = []
 smart_punctuation = true
 
 [extra]
-contact_email = "hello@apexmediation.example"
+contact_email = "hello@apexmediation.ee"
 footer_text = "Apex runs on top of AppLovin MAX, LevelPlay and AdMob. No SDK, no ad serving, nothing flows through Apex."
 nav = [
   { name = "How it works", path = "@/how-it-works.md" },
