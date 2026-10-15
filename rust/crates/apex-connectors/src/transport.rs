@@ -451,6 +451,11 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
     pub fn new() -> Result<Self, PlatformError> {
         let client = reqwest::Client::builder()
+            // Redirects are never followed silently: a hostile app-ads.txt
+            // host could otherwise bounce the request to an internal address.
+            // Callers that want redirects (the app-ads.txt fetcher) handle the
+            // 3xx themselves and validate every hop.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| PlatformError::Network {
                 platform: PlatformId::Admob,

@@ -11,6 +11,9 @@
 //!   brackets, spaces or non hostname characters, and a reserved or numeric
 //!   literal host is refused. A literal address such as `127.0.0.1` or a name
 //!   such as `localhost` can never be reached.
+//! - Redirects are never followed by the transport; the fetcher handles each
+//!   3xx itself, validating every hop's scheme and host with the same rules,
+//!   and refuses a chain longer than [`MAX_REDIRECTS`].
 //! - DNS rebinding is not decided here. Egress that must survive a hostile
 //!   domain needs a resolve-time check at the network layer.
 //! - Response bodies above [`MAX_APP_ADS_BYTES`] are refused before parsing so
@@ -36,6 +39,10 @@ pub const APP_ADS_PATH: &str = "/app-ads.txt";
 
 /// Parse cap for one app-ads.txt response.
 pub const MAX_APP_ADS_BYTES: usize = 1024 * 1024;
+
+/// Redirect cap: every hop is validated, and a chain longer than this is
+/// refused rather than followed.
+pub const MAX_REDIRECTS: usize = 5;
 
 /// Suffixes that never name a public developer website.
 const RESERVED_SUFFIXES: [&str; 6] = [".local", ".internal", ".home", ".lan", ".test", ".invalid"];
@@ -82,32 +89,59 @@ impl AppAdsTxtFetcher {
         let host = normalize_domain(raw_domain).map_err(|detail| {
             PlatformError::Validation(format!("{platform} fetchAppAdsTxt: {detail}"))
         })?;
-        let request = HttpRequest {
-            platform,
-            operation: "fetchAppAdsTxt".to_string(),
-            method: HttpMethod::Get,
-            url: format!("https://{host}{APP_ADS_PATH}"),
-            headers: vec![("Accept".into(), "text/plain".into())],
-            body: None,
-            timeout_ms: self.timeout_ms,
-        };
-        let response = match self.transport.request(request).await {
-            Ok(response) => response,
-            Err(TransportError::Network(detail)) => {
-                return Err(PlatformError::Network {
-                    platform,
-                    operation: "fetchAppAdsTxt".to_string(),
-                    detail,
-                });
+        let mut current = format!("https://{host}{APP_ADS_PATH}");
+        let mut hops = 0usize;
+        let response = loop {
+            let request = HttpRequest {
+                platform,
+                operation: "fetchAppAdsTxt".to_string(),
+                method: HttpMethod::Get,
+                url: current.clone(),
+                headers: vec![("Accept".into(), "text/plain".into())],
+                body: None,
+                timeout_ms: self.timeout_ms,
+            };
+            let response = match self.transport.request(request).await {
+                Ok(response) => response,
+                Err(TransportError::Network(detail)) => {
+                    return Err(PlatformError::Network {
+                        platform,
+                        operation: "fetchAppAdsTxt".to_string(),
+                        detail,
+                    });
+                }
+                Err(TransportError::Timeout(detail)) => {
+                    return Err(PlatformError::Network {
+                        platform,
+                        operation: "fetchAppAdsTxt".to_string(),
+                        detail: format!("timeout: {detail}"),
+                    });
+                }
+                Err(TransportError::Platform(error)) => return Err(error),
+            };
+            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                hops += 1;
+                if hops > MAX_REDIRECTS {
+                    return Err(PlatformError::Schema {
+                        platform,
+                        operation: "fetchAppAdsTxt".to_string(),
+                        detail: format!("redirect chain exceeds {MAX_REDIRECTS} hops"),
+                    });
+                }
+                let location =
+                    response
+                        .header("location")
+                        .ok_or_else(|| PlatformError::Schema {
+                            platform,
+                            operation: "fetchAppAdsTxt".to_string(),
+                            detail: "redirect without a Location header".to_string(),
+                        })?;
+                current = resolve_redirect(&current, location).map_err(|detail| {
+                    PlatformError::Validation(format!("{platform} fetchAppAdsTxt: {detail}"))
+                })?;
+                continue;
             }
-            Err(TransportError::Timeout(detail)) => {
-                return Err(PlatformError::Network {
-                    platform,
-                    operation: "fetchAppAdsTxt".to_string(),
-                    detail: format!("timeout: {detail}"),
-                });
-            }
-            Err(TransportError::Platform(error)) => return Err(error),
+            break response;
         };
         match response.status {
             200 => {
@@ -151,6 +185,61 @@ impl AppAdsTxtFetcher {
                 status,
             }),
         }
+    }
+}
+
+/// Resolve one redirect hop against the request url, refusing any hop that
+/// leaves https or targets a non-public host. Root-relative and same-host
+/// locations keep the current host; absolute and protocol-relative locations
+/// must pass [`normalize_domain`] so a redirect can never reach an internal
+/// address.
+fn resolve_redirect(current_url: &str, location: &str) -> Result<String, String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return Err("redirect has an empty Location".to_string());
+    }
+    let current_host = host_of(current_url);
+    if let Some(rest) = location.strip_prefix("//") {
+        let (host, path) = split_host(rest);
+        let host = normalize_domain(host)?;
+        return Ok(format!(
+            "https://{host}{}",
+            if path.is_empty() { APP_ADS_PATH } else { path }
+        ));
+    }
+    if let Some((scheme, rest)) = location.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("https") {
+            return Err(format!("redirect scheme '{scheme}' is not https"));
+        }
+        let (host, path) = split_host(rest);
+        let host = normalize_domain(host)?;
+        return Ok(format!(
+            "https://{host}{}",
+            if path.is_empty() { APP_ADS_PATH } else { path }
+        ));
+    }
+    if let Some(path) = location.strip_prefix('/') {
+        return Ok(format!("https://{current_host}/{path}"));
+    }
+    // Any other relative location stays on the same (already validated) host,
+    // resolved against the current path's directory.
+    let base = current_url
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or(current_url);
+    Ok(format!("{base}/{location}"))
+}
+
+/// The host of a `https://host/...` url (assumed already validated).
+fn host_of(url: &str) -> &str {
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    split_host(rest).0
+}
+
+fn split_host(rest: &str) -> (&str, &str) {
+    match rest.find(['/', '?', '#']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
     }
 }
 
@@ -268,6 +357,107 @@ mod tests {
         }
     }
 
+    fn redirect(status: u16, location: &str) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: vec![("Location".into(), location.to_string())],
+            body: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn follows_a_same_host_redirect_and_validates_every_hop() {
+        let transport = ScriptedTransport::new(vec![
+            Ok(redirect(301, "/app-ads.txt")),
+            Ok(ok(200, b"google.com, pub-1, DIRECT\n")),
+        ]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let txt = fetcher
+            .fetch(PlatformId::AppLovinMax, "example.com", vec![])
+            .await
+            .expect("fetch");
+        assert!(txt.present);
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].url, "https://example.com/app-ads.txt");
+        assert_eq!(calls[1].url, "https://example.com/app-ads.txt");
+    }
+
+    #[tokio::test]
+    async fn follows_a_protocol_relative_redirect_to_a_public_host() {
+        let transport = ScriptedTransport::new(vec![
+            Ok(redirect(302, "//cdn.example.net/app-ads.txt")),
+            Ok(ok(200, b"google.com, pub-1, DIRECT\n")),
+        ]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect("fetch");
+        let calls = transport.calls();
+        assert_eq!(calls[1].url, "https://cdn.example.net/app-ads.txt");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_redirect_to_an_internal_host() {
+        let transport =
+            ScriptedTransport::new(vec![Ok(redirect(302, "https://127.0.0.1/app-ads.txt"))]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let err = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect_err("refuse");
+        assert!(matches!(err, PlatformError::Validation(_)), "{err}");
+        assert_eq!(
+            transport.calls().len(),
+            1,
+            "the internal host is never requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_a_redirect_that_leaves_https() {
+        let transport =
+            ScriptedTransport::new(vec![Ok(redirect(302, "http://example.com/app-ads.txt"))]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let err = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect_err("refuse");
+        assert!(matches!(err, PlatformError::Validation(_)), "{err}");
+        assert_eq!(transport.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_over_long_redirect_chain() {
+        let mut script = Vec::new();
+        for _ in 0..(MAX_REDIRECTS + 1) {
+            script.push(Ok(redirect(302, "/app-ads.txt")));
+        }
+        let transport = ScriptedTransport::new(script);
+        let fetcher = AppAdsTxtFetcher::new(transport);
+        let err = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect_err("refuse");
+        assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_redirect_without_a_location() {
+        let transport = ScriptedTransport::new(vec![Ok(HttpResponse {
+            status: 302,
+            headers: vec![],
+            body: Vec::new(),
+        })]);
+        let fetcher = AppAdsTxtFetcher::new(transport);
+        let err = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect_err("refuse");
+        assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+    }
+
     #[test]
     fn normalize_accepts_website_forms() {
         for raw in [
@@ -377,7 +567,7 @@ mod tests {
             (403, "http"),
             (429, "rate"),
             (500, "http"),
-            (302, "http"),
+            (418, "http"),
         ];
         for (status, kind) in cases {
             let transport = ScriptedTransport::new(vec![Ok(ok(status, b""))]);
