@@ -58,6 +58,9 @@ pub struct LiveCredentials {
     /// MAX reporting base url; defaults to the documented host when absent.
     #[serde(default)]
     pub reporting_base_url: Option<String>,
+    /// LevelPlay refresh token (the secret key travels in `api_key`).
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 /// The publisher's onboarding record: context plus one key set per platform.
@@ -272,8 +275,16 @@ impl LiveAuditor {
                 max_snapshot(&client, &fetcher, &context, now_unix_ms).await?
             }
             PlatformId::LevelPlay => {
+                let refresh_token =
+                    credentials
+                        .refresh_token
+                        .as_deref()
+                        .ok_or(ApiError::BadRequest(
+                            "levelplay_credentials_need_refresh_token",
+                        ))?;
                 let client = LevelPlayClient::new(
                     &credentials.api_key,
+                    refresh_token,
                     &credentials.account_id,
                     &credentials.base_url,
                     Arc::clone(&self.transport),
@@ -409,6 +420,7 @@ mod tests {
                 base_url: "https://api.example.test".to_string(),
                 report_key: None,
                 reporting_base_url: None,
+                refresh_token: None,
             },
         );
         LiveAccount {
@@ -787,18 +799,21 @@ mod tests {
                 base_url: "https://api.example.test".to_string(),
                 report_key: None,
                 reporting_base_url: None,
+                refresh_token: Some("refresh".to_string()),
             },
         );
         let (auditor, transport) = auditor_with(
             Some(account),
             vec![
+                // The bearer is minted once, then cached: exactly one auth call.
+                ok(200, r#""bearer-token""#),
                 ok(
                     200,
-                    r#"{"waterfall":[{"entry_id":"e1","network":"admob","position":1,"price_ecpm":1.0}]}"#,
+                    r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","price":1.0,"position":1}]}"#,
                 ),
                 ok(
                     200,
-                    r#"{"waterfall":[{"entry_id":"e2","network":"meta","position":1,"price_ecpm":2.0}]}"#,
+                    r#"{"instances":[{"instanceId":"e2","adapterNetwork":"meta","instanceName":"META_1","price":2.0,"position":1}]}"#,
                 ),
                 ok(
                     200,
@@ -813,7 +828,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK, "{report}");
-        assert_eq!(transport.calls.lock().map(|c| c.len()).unwrap_or(0), 3);
+        let calls = transport
+            .calls
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default();
+        assert_eq!(calls.len(), 4, "auth + two units + app-ads.txt");
+        assert!(calls[0].url.contains("/partners/publisher/auth"));
+        assert!(calls[1].url.contains("/mediation/instances/v4"));
     }
 
     #[tokio::test]
@@ -828,6 +850,7 @@ mod tests {
                 base_url: "https://api.example.test".to_string(),
                 report_key: None,
                 reporting_base_url: None,
+                refresh_token: None,
             },
         );
         let (auditor, _) = auditor_with(

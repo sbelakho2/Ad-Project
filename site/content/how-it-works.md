@@ -25,7 +25,7 @@ Each finding carries an estimated monthly recovery, a severity, and the evidence
 
 ## Step 2: changes go through the platform's own management API
 
-Nothing is injected into your app and nothing is interposed in ad serving. On AppLovin MAX, Apex reads and writes through MAX's own management API. On LevelPlay, price changes go through LevelPlay's Ad Unit price API. On AdMob, mediation group updates are read-modify-write replacements through AdMob's API.
+Nothing is injected into your app and nothing is interposed in ad serving. On AppLovin MAX, Apex reads and writes through MAX's own management API. On LevelPlay, price changes go through the instances of LevelPlay's mediation management API. On AdMob, mediation group updates are read-modify-write replacements through AdMob's API.
 
 Two hard rules govern writes:
 

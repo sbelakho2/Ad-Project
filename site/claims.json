@@ -14,7 +14,7 @@
     },
     {
       "id": "levelplay-management-api",
-      "claim": "On LevelPlay, price changes go through LevelPlay's Ad Unit price API.",
+      "claim": "On LevelPlay, price changes go through the instances of LevelPlay's mediation management API.",
       "anchor": "rust/crates/apex-connectors/src/levelplay.rs",
       "test": "lp_price_update_pins_body_and_key (rust/crates/apex-connectors/src/tests.rs)"
     },

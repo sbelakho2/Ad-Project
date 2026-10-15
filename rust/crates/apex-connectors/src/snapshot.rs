@@ -283,13 +283,15 @@ mod tests {
     #[tokio::test]
     async fn levelplay_snapshot_fills_the_waterfall() {
         let transport = ScriptedTransport::new(vec![
+            ok(r#""bearer-token""#),
             ok(
-                r#"{"waterfall":[{"entry_id":"e1","network":"admob","instance_name":"ADM_1","position":1,"price_ecpm":3.2}]}"#,
+                r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
             ),
             ok("admob.com, pub-9, DIRECT\n"),
         ]);
         let client = LevelPlayClient::new(
-            "key",
+            "secret",
+            "refresh",
             "app-key",
             "https://api.example.test",
             transport.clone(),

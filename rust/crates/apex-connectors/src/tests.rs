@@ -561,56 +561,71 @@ fn lp_client(mock: Arc<MockTransport>) -> LevelPlayClient {
         0,
         Arc::new(RecordingSleeper::default()),
     ));
-    LevelPlayClient::new("tok", "acct", "https://lp.test", retry).expect("client")
+    LevelPlayClient::new("tok", "refresh", "acct", "https://lp.test", retry).expect("client")
 }
 
 #[tokio::test]
 async fn lp_list_waterfall_and_fallback() {
-    let body = r#"{"waterfall":[
-        {"entry_id":"e1","network":"admob","instance_name":"ADM_1","position":1,"price_ecpm":3.2},
-        {"id":"e2","network":"facebook","position":2,"price_ecpm":"1.1"}
+    let body = r#"{"instances":[
+        {"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2},
+        {"id":"e2","network":"facebook","position":2,"price":"1.1"}
     ]}"#;
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(body),
-    ))]));
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-token""#))),
+        Ok(MockTransport::ok(200, Some(body))),
+    ]));
     let entries = lp_client(mock.clone()).list_waterfall("u/1").await.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].instance_name, "ADM_1");
-    assert_eq!(entries[1].instance_name, "facebook", "fallback to network");
+    assert_eq!(
+        entries[1].instance_name, "e2",
+        "fallback to the instance id"
+    );
     assert_eq!(entries[0].price_ecpm, 3_200_000);
     assert_eq!(
         entries[1].price_ecpm, 1_100_000,
         "string decimals parse exactly"
     );
-    assert!(mock.calls()[0]
+    // The first call mints the bearer; the second carries it.
+    assert_eq!(mock.calls()[0].method, HttpMethod::Post);
+    assert!(mock.calls()[0].url.ends_with("/partners/publisher/auth"));
+    assert!(mock.calls()[1]
         .header("Authorization")
         .unwrap()
         .starts_with("Bearer "));
+    assert!(mock.calls()[1].url.contains("/mediation/instances/v4"));
 
-    let drift = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some(r#"{"waterfall":[{"entry_id":"e","network":"x"}]}"#),
-    ))]));
+    let drift = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"instances":[{"instanceId":"e","network":"x"}]}"#),
+        )),
+    ]));
     let err = lp_client(drift).list_waterfall("u").await.unwrap_err();
     assert!(matches!(err, PlatformError::Schema { .. }));
 }
 
 #[tokio::test]
 async fn lp_price_update_pins_body_and_key() {
-    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200, None,
-    ))]));
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, None)),
+    ]));
     let entry = lp_client(mock.clone())
         .update_entry_price("u1", "e1", 2_345_000)
         .await
         .unwrap();
     assert_eq!(entry.price_ecpm, 2_345_000);
-    let call = &mock.calls()[0];
-    assert_eq!(call.method, HttpMethod::Patch);
-    assert_eq!(call.url, "https://lp.test/v1/adunits/u1/waterfall/e1");
+    let call = &mock.calls()[1];
+    assert_eq!(call.method, HttpMethod::Put);
+    assert!(call.url.contains("/mediation/instances/v4"));
     assert_eq!(
-        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["price_ecpm"],
+        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["instanceId"],
+        "e1"
+    );
+    assert_eq!(
+        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["price"],
         2_345_000
     );
     assert_eq!(
@@ -632,7 +647,8 @@ async fn lp_price_update_pins_body_and_key() {
 #[tokio::test]
 async fn lp_create_and_remove_contract() {
     let mock = Arc::new(MockTransport::scripted(vec![
-        Ok(MockTransport::ok(200, Some(r#"{"entry_id":"new-1"}"#))),
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(r#"{"instanceId":"new-1"}"#))),
         Ok(MockTransport::ok(204, None)),
     ]));
     let client = lp_client(mock.clone());
@@ -642,13 +658,13 @@ async fn lp_create_and_remove_contract() {
         .unwrap();
     assert_eq!(id, "new-1");
     assert_eq!(
-        mock.calls()[0].header("Idempotency-Key"),
+        mock.calls()[1].header("Idempotency-Key"),
         Some("levelplay-create:u1:mintegral:MTG_1:0.75")
     );
     client.remove_entry("u1", "e9").await.unwrap();
-    assert_eq!(mock.calls()[1].method, HttpMethod::Delete);
+    assert_eq!(mock.calls()[2].method, HttpMethod::Delete);
     assert_eq!(
-        mock.calls()[1].header("Idempotency-Key"),
+        mock.calls()[2].header("Idempotency-Key"),
         Some("levelplay-remove:u1:e9")
     );
 
@@ -656,16 +672,34 @@ async fn lp_create_and_remove_contract() {
         client.create_entry("u", " ", "i", 1_000_000).await,
         Err(PlatformError::Schema { .. })
     ));
-    let missing = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
-        200,
-        Some("{}"),
-    ))]));
+    let missing = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some("{}"))),
+    ]));
     assert!(matches!(
         lp_client(missing)
             .create_entry("u", "n", "i", 1_000_000)
             .await,
         Err(PlatformError::Schema { .. })
     ));
+}
+
+#[tokio::test]
+async fn lp_bearer_token_is_minted_once_and_reused() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(r#"{"instances":[]}"#))),
+        Ok(MockTransport::ok(200, Some(r#"{"instances":[]}"#))),
+    ]));
+    let client = lp_client(mock.clone());
+    client.list_waterfall("u1").await.unwrap();
+    client.list_waterfall("u2").await.unwrap();
+    let auth_calls = mock
+        .calls()
+        .iter()
+        .filter(|call| call.url.ends_with("/partners/publisher/auth"))
+        .count();
+    assert_eq!(auth_calls, 1, "the token is minted once and cached");
 }
 
 // ---------------- AdMob client ----------------
@@ -823,7 +857,7 @@ fn endpoint_metas_are_pinned() {
         .all(|m| m.verification == SourceVerification::VerifyLive));
     assert!(!MAX_ENDPOINTS.iter().any(|m| m.writable()));
 
-    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 4);
+    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 5);
     assert!(
         LEVELPLAY_ENDPOINTS
             .iter()

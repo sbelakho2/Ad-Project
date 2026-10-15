@@ -12,7 +12,7 @@ Apex is the autopilot that sits on top of AppLovin MAX, LevelPlay and AdMob. Not
 
 1. **Audit.** Apex reads your live platform snapshot and reports revenue leaks the platform's own dashboards leave buried: stale floors, disabled bidders, missing per-country floors, reporting gaps and app-ads.txt errors. The audit is free and read-only.
 
-2. **Apply changes.** With your approval and your credentials, Apex changes the settings through each platform's own management API: floors in MAX, price entries in LevelPlay, mediation mappings in AdMob.
+2. **Apply changes.** With your approval and your credentials, Apex changes the settings through each platform's own management API: floors in MAX, instance prices in LevelPlay, mediation mappings in AdMob.
 
 3. **Prove.** Every change runs as the platform's own built-in A/B experiment, on your app, inside your account. The platform's built-in A/B experiment is what proves each gain.
 
