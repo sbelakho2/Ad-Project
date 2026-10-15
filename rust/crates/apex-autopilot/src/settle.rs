@@ -14,7 +14,7 @@
 use apex_lift::decision::{decide, Decision, DecisionInput, PreRegistration};
 use apex_lift::guardrails::FillFormat;
 use apex_lift::window::{build_window, incident_runs};
-use apex_proof::{ChangeKind, InMemoryLedger, LedgerRecord};
+use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 
 use crate::keys::platform_of;
 use crate::model::{Action, PlanError, SettleOutcome};
@@ -76,7 +76,7 @@ fn parse_lift_record(payload: &str) -> Option<apex_lift::records::LiftRecord> {
 }
 
 /// The experiment name pinned by the `experimentStarted` record.
-fn started_experiment_name(ledger: &InMemoryLedger, experiment_id: &str) -> Option<String> {
+fn started_experiment_name(ledger: &dyn LedgerLog, experiment_id: &str) -> Option<String> {
     ledger.records().iter().find_map(|record| match record {
         LedgerRecord::ExperimentStarted {
             experiment_id: e,
@@ -90,7 +90,7 @@ fn started_experiment_name(ledger: &InMemoryLedger, experiment_id: &str) -> Opti
 /// The signed pre-registration for `experiment_id` (the platform id), read
 /// back from the ledger.
 fn signed_pre_registration(
-    ledger: &InMemoryLedger,
+    ledger: &dyn LedgerLog,
     experiment_id: &str,
 ) -> Result<PreRegistration, PlanError> {
     let name =
@@ -117,7 +117,7 @@ fn signed_pre_registration(
 #[allow(clippy::too_many_arguments)]
 pub async fn settle_experiment(
     ops: &dyn PlatformOps,
-    ledger: &mut InMemoryLedger,
+    ledger: &mut dyn LedgerLog,
     experiment_id: &str,
     change_seq: u64,
     fill_format: FillFormat,

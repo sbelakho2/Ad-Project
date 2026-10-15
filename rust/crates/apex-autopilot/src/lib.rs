@@ -24,6 +24,7 @@ pub mod live_max;
 pub mod model;
 pub mod ops;
 pub mod plan;
+pub mod runner;
 pub mod settle;
 
 pub use keys::{experiment_name, idempotency_key, platform_of};
@@ -32,6 +33,7 @@ pub use model::{
 };
 pub use ops::{PlatformOps, RecordingOps};
 pub use plan::run_cycle;
+pub use runner::{DailyReport, Runner};
 pub use settle::settle_experiment;
 
 #[cfg(test)]

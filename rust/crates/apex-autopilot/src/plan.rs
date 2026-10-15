@@ -2,7 +2,7 @@
 //! Daily accounting reads the signed ledger, never caller state.
 
 use apex_audit::{Finding, Severity};
-use apex_proof::{ChangeKind, InMemoryLedger, LedgerRecord};
+use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, CycleOutcome, PlanError, Proposal};
@@ -106,7 +106,7 @@ fn validate_action_values(action: &Action) -> Result<(), PlanError> {
 /// True when the same change (equal idempotency key and equal payload)
 /// is already in the ledger; a rerun must never re-apply it, and a rerun with
 /// a different value under a colliding key must never be mistaken for it.
-pub fn already_applied(ledger: &InMemoryLedger, key: &str, action: &Action) -> bool {
+pub fn already_applied(ledger: &dyn LedgerLog, key: &str, action: &Action) -> bool {
     let expected = change_kind_of(action);
     let rolled_back: std::collections::HashSet<u64> = ledger
         .records()
@@ -142,7 +142,7 @@ fn prereg_experiment_id(payload: &str) -> Option<String> {
 
 /// True when the ledger already carries the signed pre-registration for
 /// `experiment_id` (a rerun must not stack duplicate registrations).
-pub fn pre_registration_exists(ledger: &InMemoryLedger, experiment_id: &str) -> bool {
+pub fn pre_registration_exists(ledger: &dyn LedgerLog, experiment_id: &str) -> bool {
     ledger.records().iter().any(|record| match record {
         LedgerRecord::LiftRecord { payload, .. } => {
             prereg_experiment_id(payload).as_deref() == Some(experiment_id)
@@ -152,7 +152,7 @@ pub fn pre_registration_exists(ledger: &InMemoryLedger, experiment_id: &str) -> 
 }
 
 /// The ledger sequence of the signed pre-registration for `experiment_id`.
-fn pre_registration_seq(ledger: &InMemoryLedger, experiment_id: &str) -> u64 {
+fn pre_registration_seq(ledger: &dyn LedgerLog, experiment_id: &str) -> u64 {
     ledger
         .records()
         .iter()
@@ -171,7 +171,7 @@ fn pre_registration_seq(ledger: &InMemoryLedger, experiment_id: &str) -> u64 {
 /// a refused proposal costs zero platform calls.
 pub async fn run_cycle(
     ops: &dyn PlatformOps,
-    ledger: &mut InMemoryLedger,
+    ledger: &mut dyn LedgerLog,
     policy: &AutopilotPolicy,
     findings: &[Finding],
     proposals: Vec<Proposal>,
@@ -309,7 +309,7 @@ pub async fn run_cycle(
         }
         let prereg_seq = pre_registration_seq(ledger, &spec.name);
 
-        let record_change = |ledger: &mut InMemoryLedger| -> Result<u64, PlanError> {
+        let record_change = |ledger: &mut dyn LedgerLog| -> Result<u64, PlanError> {
             Ok(ledger
                 .append(LedgerRecord::change_applied(
                     now_unix_ms,

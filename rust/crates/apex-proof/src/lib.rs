@@ -57,6 +57,105 @@ pub use record::{ChangeKind, LedgerRecord};
 
 pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
+/// The append-and-read surface shared by [`InMemoryLedger`] and the
+/// file-backed [`Ledger`], so the write loop and the scheduled runner work
+/// against either without a generic parameter.
+pub trait LedgerLog {
+    fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, LedgerError>;
+    fn append_rollback(
+        &mut self,
+        at_unix_ms: i64,
+        platform: apex_core::PlatformId,
+        ad_unit_id: &str,
+        rolled_back_seq: u64,
+        reason: &str,
+    ) -> Result<LedgerRecord, LedgerError>;
+    fn records(&self) -> Vec<&LedgerRecord>;
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Option<&LedgerRecord>;
+    fn is_empty(&self) -> bool;
+}
+
+impl LedgerLog for InMemoryLedger {
+    fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, LedgerError> {
+        InMemoryLedger::append(self, draft)
+    }
+
+    fn append_rollback(
+        &mut self,
+        at_unix_ms: i64,
+        platform: apex_core::PlatformId,
+        ad_unit_id: &str,
+        rolled_back_seq: u64,
+        reason: &str,
+    ) -> Result<LedgerRecord, LedgerError> {
+        InMemoryLedger::append_rollback(
+            self,
+            at_unix_ms,
+            platform,
+            ad_unit_id,
+            rolled_back_seq,
+            reason,
+        )
+    }
+
+    fn records(&self) -> Vec<&LedgerRecord> {
+        InMemoryLedger::records(self)
+    }
+
+    fn len(&self) -> usize {
+        InMemoryLedger::len(self)
+    }
+
+    fn get(&self, index: usize) -> Option<&LedgerRecord> {
+        InMemoryLedger::get(self, index)
+    }
+
+    fn is_empty(&self) -> bool {
+        InMemoryLedger::is_empty(self)
+    }
+}
+
+impl LedgerLog for Ledger {
+    fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, LedgerError> {
+        Ledger::append(self, draft)
+    }
+
+    fn append_rollback(
+        &mut self,
+        at_unix_ms: i64,
+        platform: apex_core::PlatformId,
+        ad_unit_id: &str,
+        rolled_back_seq: u64,
+        reason: &str,
+    ) -> Result<LedgerRecord, LedgerError> {
+        Ledger::append_rollback(
+            self,
+            at_unix_ms,
+            platform,
+            ad_unit_id,
+            rolled_back_seq,
+            reason,
+        )
+    }
+
+    fn records(&self) -> Vec<&LedgerRecord> {
+        Ledger::records(self).iter().collect()
+    }
+
+    fn len(&self) -> usize {
+        Ledger::len(self)
+    }
+
+    fn get(&self, index: usize) -> Option<&LedgerRecord> {
+        Ledger::get(self, index)
+    }
+
+    fn is_empty(&self) -> bool {
+        Ledger::is_empty(self)
+    }
+}
+
 /// The ed25519 signing key the ledgers use.
 ///
 /// ed25519-dalek v2 names this type `SigningKey`; the alias keeps the product
