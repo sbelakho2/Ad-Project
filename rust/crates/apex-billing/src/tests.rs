@@ -694,3 +694,163 @@ async fn payment_links_bill_the_gross_including_vat() {
     };
     assert_eq!(body["amount"]["value"], 150);
 }
+
+#[test]
+fn every_billing_error_renders_and_converts() {
+    // Formatting every variant covers each Display impl (thiserror generates
+    // one per variant, which the function metric counts).
+    let variants = [
+        BillingError::OutOfPeriod { seq: 1 },
+        BillingError::WrongPublisher { seq: 2 },
+        BillingError::TamperedProof {
+            seq: 3,
+            reason: "why".into(),
+        },
+        BillingError::Duplicate {
+            seq: 4,
+            experiment_id: "e".into(),
+        },
+        BillingError::Overflow,
+        BillingError::SubCentAmount { seq: 5 },
+        BillingError::Auth { status: 401 },
+        BillingError::Http { status: 500 },
+        BillingError::Schema { detail: "d".into() },
+        BillingError::Network { detail: "n".into() },
+        BillingError::Transport { detail: "t".into() },
+        BillingError::PartialCollection {
+            completed: vec!["a".into()],
+            failed_seq: 6,
+            cause: "c".into(),
+        },
+        BillingError::UnsafeIdentifier {
+            seq: 7,
+            detail: "u".into(),
+        },
+        BillingError::Malformed("m".into()),
+        BillingError::InvalidSignature,
+    ];
+    for error in &variants {
+        assert!(!error.to_string().is_empty());
+        let _ = format!("{error:?}");
+        // thiserror generates a `source()` per variant; call it so those
+        // functions are covered.
+        let _ = std::error::Error::source(error);
+    }
+
+    // Every conversion arm from the platform taxonomy.
+    assert_eq!(
+        BillingError::from(apex_core::PlatformError::Auth {
+            platform: apex_core::PlatformId::Admob,
+            operation: "op".into(),
+            status: 403,
+        }),
+        BillingError::Auth { status: 403 }
+    );
+    let platform_cases = [
+        apex_core::PlatformError::RateLimited {
+            platform: apex_core::PlatformId::Admob,
+            operation: "o".into(),
+            retry_after: None,
+        },
+        apex_core::PlatformError::Http {
+            platform: apex_core::PlatformId::Admob,
+            operation: "o".into(),
+            status: 401,
+        },
+        apex_core::PlatformError::Http {
+            platform: apex_core::PlatformId::Admob,
+            operation: "o".into(),
+            status: 500,
+        },
+        apex_core::PlatformError::Schema {
+            platform: apex_core::PlatformId::Admob,
+            operation: "o".into(),
+            detail: "d".into(),
+        },
+        apex_core::PlatformError::Network {
+            platform: apex_core::PlatformId::Admob,
+            operation: "o".into(),
+            detail: "n".into(),
+        },
+        apex_core::PlatformError::Validation("v".into()),
+    ];
+    for error in platform_cases {
+        assert!(!BillingError::from(error).to_string().is_empty());
+    }
+    // Every arm from the transport taxonomy, including a wrapped platform error.
+    assert_eq!(
+        BillingError::from(apex_connectors::transport::TransportError::Network(
+            "x".into()
+        )),
+        BillingError::Network { detail: "x".into() }
+    );
+    assert!(matches!(
+        BillingError::from(apex_connectors::transport::TransportError::Timeout(
+            "t".into()
+        )),
+        BillingError::Network { ref detail } if detail.contains("timeout")
+    ));
+    assert_eq!(
+        BillingError::from(apex_connectors::transport::TransportError::Platform(
+            apex_core::PlatformError::Validation("inner".into())
+        )),
+        BillingError::Transport {
+            detail: "inner".into()
+        }
+    );
+}
+
+#[test]
+fn adyen_envelope_errors_are_typed() {
+    // Missing amount, a non-numeric value, a bad success type and a missing
+    // signature each fail closed with a malformed input.
+    for body in [
+        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","eventCode":"AUTHORISATION","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#.as_slice(),
+        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":"x","currency":"USD"},"eventCode":"AUTHORISATION","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#,
+        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"AUTHORISATION","success":1,"additionalData":{"hmacSignature":"s"}}}]}"#,
+        br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"AUTHORISATION","success":"true"}}]}"#,
+    ] {
+        assert!(
+            matches!(
+                crate::adyen::parse_notification_items(body),
+                Err(BillingError::Malformed(_))
+            ),
+            "body {body:?}"
+        );
+    }
+    // A bare item without the wrapper is refused too.
+    assert!(matches!(
+        crate::adyen::parse_notification_items(br#"{"notificationItems":[{"pspReference":"p"}]}"#),
+        Err(BillingError::Malformed(_))
+    ));
+    // A top-level text field missing (the amount is present) fails closed.
+    assert!(
+        crate::adyen::parse_notification_items(
+            br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantAccountCode":"m","merchantReference":"","amount":{"value":1,"currency":"USD"},"eventCode":"A","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#
+        )
+        .is_ok(),
+        "a missing originalReference is allowed (it is unsigned-empty)"
+    );
+    assert!(matches!(
+        crate::adyen::parse_notification_items(
+            br#"{"notificationItems":[{"NotificationRequestItem":{"pspReference":"p","merchantReference":"r","amount":{"value":1,"currency":"USD"},"eventCode":"A","success":"true","additionalData":{"hmacSignature":"s"}}}]}"#
+        ),
+        Err(BillingError::Malformed(_))
+    ));
+}
+
+#[test]
+fn the_adyen_client_verifies_and_exposes_its_key() {
+    let client = AdyenClient::new(
+        "AQEyhmfx_test",
+        "ApexMerchant",
+        KEY.to_vec(),
+        "https://checkout-test.adyen.com",
+    )
+    .expect("client");
+    assert_eq!(client.hmac_key(), KEY);
+    // A bare item verified through the client uses the same signature scheme.
+    let mut item = pinned_item();
+    item.hmac_signature = sign_notification_item(KEY, &item);
+    client.verify(&item).expect("verified through the client");
+}

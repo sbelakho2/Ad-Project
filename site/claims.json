@@ -28,7 +28,7 @@
       "id": "platform-native-ab-proof",
       "claim": "Every gain is proven by the platform's own built-in A/B experiment.",
       "anchor": "rust/crates/apex-autopilot/src/settle.rs",
-      "test": "settle_keep_golden_arithmetic_and_billing_proof (rust/crates/apex-autopilot/src/tests.rs)"
+      "test": "settle_keep_promotes_and_records_the_signed_lift (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "lift-fee-band",
@@ -52,13 +52,13 @@
       "id": "automatic-rollback",
       "claim": "If a change fails to clear the keep threshold, Apex automatically rolls it back.",
       "anchor": "rust/crates/apex-autopilot/src/settle.rs",
-      "test": "settle_rolls_back_below_lift_floor (rust/crates/apex-autopilot/src/tests.rs)"
+      "test": "settle_below_the_point_floor_rolls_back_and_deprecates (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "zero-lift-rollback-no-billing",
       "claim": "A zero-lift outcome triggers a rollback without creating a billable proof.",
       "anchor": "rust/crates/apex-autopilot/src/settle.rs",
-      "test": "settle_rolls_back_zero_lift_without_billing (rust/crates/apex-autopilot/src/tests.rs)"
+      "test": "settle_zero_lift_rolls_back_without_billing (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "free-audit-read-only",
@@ -152,7 +152,7 @@
     },
     {
       "id": "monitoring-plan",
-      "claim": "Continuous monitoring is an optional flat monthly plan billed as its own invoice line.",
+      "claim": "Continuous monitoring is an optional flat plan at $500 per month, which you can start and stop month to month.",
       "anchor": "rust/crates/apex-billing/src/subscription.rs",
       "test": "the_standard_plan_is_a_flat_monthly_fee (rust/crates/apex-billing/src/subscription.rs)"
     }

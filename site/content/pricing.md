@@ -11,7 +11,7 @@ No lift, no fee is not a slogan; it is enforced by the billing path. Before anyt
 
 You are billed on the lower bound of the lift, never the point estimate. No lift proven, no fee. Every test is pre-registered and signed before it starts. User experience outranks revenue: the test stops when fill drops, whatever the revenue says.
 
-There is no required subscription, no seat fee, no platform fee and no minimum commitment. Continuous monitoring is an optional flat plan at **$500 per month**, which you can start and stop month to month. It covers the daily measurement pass, guardrail monitoring and customer-impact alerts across your whole account, whether or not a change is under test. It is billed as its own invoice line, through the same proof-checked, VAT-applied, Adyen-collected path as a lift fee. The free read-only audit carries no obligation to continue.
+There is no required subscription, no seat fee, no platform fee and no minimum commitment. Continuous monitoring is an optional flat plan at $500 per month, which you can start and stop month to month. It covers the daily measurement pass, guardrail monitoring and customer-impact alerts across your whole account, whether or not a change is under test. It is billed as its own invoice line, through the same proof-checked, VAT-applied, Adyen-collected path as a lift fee. The free read-only audit carries no obligation to continue.
 
 ## Worked example
 

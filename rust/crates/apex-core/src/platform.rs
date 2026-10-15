@@ -182,6 +182,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn platform_ids_name_and_display_consistently() {
+        assert_eq!(PlatformId::AppLovinMax.as_str(), "applovin_max");
+        assert_eq!(PlatformId::LevelPlay.as_str(), "levelplay");
+        assert_eq!(PlatformId::Admob.as_str(), "admob");
+        assert_eq!(PlatformId::AppLovinMax.to_string(), "applovin_max");
+        assert_eq!(format!("{}", PlatformId::LevelPlay), "levelplay");
+    }
+
+    #[test]
+    fn a_spec_without_an_allocation_defaults_to_fifty() {
+        // The serde default keeps older specs readable.
+        let spec: ExperimentSpec = serde_json::from_value(serde_json::json!({
+            "name": "n",
+            "adUnitId": "u",
+            "metric": "revenue",
+            "variants": 2,
+            "changeDescription": "c"
+        }))
+        .expect("spec");
+        assert_eq!(spec.test_group_allocation, 50);
+    }
+
+    #[test]
     fn platform_id_serde_matches_ts_contract() {
         for (id, s) in [
             (PlatformId::AppLovinMax, "\"applovin_max\""),

@@ -355,6 +355,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn platform_parsing_and_source_paths_are_pinned() {
+        assert_eq!(
+            parse_platform("applovin_max"),
+            Some(PlatformId::AppLovinMax)
+        );
+        assert_eq!(parse_platform("levelplay"), Some(PlatformId::LevelPlay));
+        assert_eq!(parse_platform("admob"), Some(PlatformId::Admob));
+        assert_eq!(parse_platform("tiktok"), None);
+
+        let audit = JsonFileAuditSource::new("/tmp/apex");
+        assert_eq!(audit.root(), std::path::Path::new("/tmp/apex"));
+        assert!(audit.path_for(PlatformId::Admob).ends_with("admob.json"));
+
+        let mut keys = HashMap::new();
+        keys.insert(
+            "pub".to_string(),
+            apex_proof::Keypair::from_bytes(&[1u8; 32]).verifying_key(),
+        );
+        let ledger = FileLedgerSource::new("/tmp/apex-ledgers", keys);
+        assert!(ledger.path_for("pub").ends_with("pub.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn the_static_ledger_source_answers_known_and_unknown_publishers() {
+        let mut source = StaticLedgerSource::new(HashMap::new());
+        assert!(matches!(
+            source.records("pub").await,
+            Err(ApiError::NotFound)
+        ));
+        source.insert("pub", vec![]);
+        assert_eq!(source.records("pub").await.expect("records").len(), 0);
+        assert!(matches!(
+            source.records("a/b").await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
+    }
+
+    #[test]
     fn publisher_charset_boundaries_are_pinned() {
         for valid in ["a", "A9", "publisher_1", "p-2", &"a".repeat(64)] {
             assert!(is_valid_publisher(valid), "{valid:?} must be valid");

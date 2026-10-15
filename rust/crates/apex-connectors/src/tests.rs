@@ -1012,3 +1012,60 @@ async fn admob_missing_format_defaults_to_banner_and_unknown_fails_closed() {
         .unwrap_err();
     assert!(matches!(err, PlatformError::Schema { .. }), "got {err}");
 }
+
+#[tokio::test]
+async fn max_ad_unit_revenue_sums_only_the_requested_unit() {
+    let body = r#"{"code":200,"count":3,"results":[
+        {"day":"2026-10-01","max_ad_unit_id":"u1","estimated_revenue":"1.5","impressions":"10"},
+        {"day":"2026-10-02","max_ad_unit_id":"u1","estimated_revenue":"2.5","impressions":"10"},
+        {"day":"2026-10-02","max_ad_unit_id":"u2","estimated_revenue":"9.0","impressions":"10"}
+    ]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![ok(200, Some(body))]));
+    let total = report_client(mock.clone())
+        .ad_unit_revenue("u1", "2026-10-01", "2026-10-02")
+        .await
+        .expect("revenue");
+    assert_eq!(total, 4_000_000, "1.5 + 2.5 for u1 only");
+    assert!(mock.calls()[0].url.contains("max_ad_unit_id"));
+}
+
+#[tokio::test]
+async fn max_country_revenue_30d_requests_the_trailing_window() {
+    let body = r#"{"code":200,"count":1,"results":[
+        {"day":"2026-10-01","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"1.25","impressions":"100"}
+    ]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![ok(200, Some(body))]));
+    // 1_700_000_000_000 ms is 2023-11-14; the window is the 30 days ending the
+    // day before, exclusive of today.
+    let rows = report_client(mock.clone())
+        .country_revenue_30d(1_700_000_000_000)
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].revenue, 1_250_000);
+    let url = &mock.calls()[0].url;
+    assert!(url.contains("start="), "{url}");
+    assert!(url.contains("end="), "{url}");
+    assert!(url.contains("country"), "{url}");
+}
+
+#[tokio::test]
+async fn lp_groups_and_token_shapes_are_read() {
+    // The auth endpoint may return a bare JSON string or an object.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#"{"token":"tok-2"}"#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(
+                r#"{"groups":[{"groupId":"g1","name":"Main","floorPrice":1.5,"countriesRate":0.8}]}"#,
+            ),
+        )),
+    ]));
+    let groups = lp_client(mock.clone()).list_groups().await.expect("groups");
+    assert_eq!(groups["groups"][0]["groupId"], "g1");
+    assert!(mock.calls()[1].url.contains("/mediation/groups/v4"));
+    assert_eq!(
+        mock.calls()[1].header("Authorization"),
+        Some("Bearer tok-2")
+    );
+}

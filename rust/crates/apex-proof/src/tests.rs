@@ -1001,3 +1001,124 @@ fn append_refuses_when_the_file_was_swapped_for_a_shorter_valid_chain() {
     let err = ledger.append(change(9)).expect_err("shorter swap refused");
     assert!(matches!(err, LedgerError::StateDiverged { .. }), "{err}");
 }
+
+#[test]
+fn the_ledger_log_trait_covers_both_backings() {
+    use crate::LedgerLog;
+
+    // In-memory backend.
+    let mut memory = InMemoryLedger::new(keypair(7));
+    let appended = LedgerLog::append(
+        &mut memory,
+        LedgerRecord::change_applied(
+            1,
+            PlatformId::Admob,
+            "u1",
+            ChangeKind::EcpmSet {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u1".into(),
+                ecpm: 1,
+            },
+            "key-1",
+            "prev",
+        ),
+    )
+    .expect("append");
+    assert_eq!(appended.seq(), 0);
+    assert!(LedgerLog::get(&memory, 0).is_some());
+    assert_eq!(LedgerLog::len(&memory), 1);
+    assert!(!LedgerLog::is_empty(&memory));
+    assert_eq!(LedgerLog::records(&memory).len(), 1);
+    let rollback = LedgerLog::append_rollback(&mut memory, 2, PlatformId::Admob, "u1", 0, "why")
+        .expect("memory rollback");
+    assert_eq!(rollback.seq(), 1);
+    assert_eq!(LedgerLog::len(&memory), 2);
+
+    // File backend over the same records.
+    let dir = TempDir::new("ledger-log-file");
+    let path = dir.file("ledger.jsonl");
+    let mut file = Ledger::open(&path, keypair(7)).expect("open");
+    LedgerLog::append(
+        &mut file,
+        LedgerRecord::change_applied(
+            1,
+            PlatformId::Admob,
+            "u1",
+            ChangeKind::EcpmSet {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u1".into(),
+                ecpm: 1,
+            },
+            "key-1",
+            "prev",
+        ),
+    )
+    .expect("append");
+    let rollback = LedgerLog::append_rollback(&mut file, 2, PlatformId::Admob, "u1", 0, "why")
+        .expect("rollback");
+    assert_eq!(rollback.seq(), 1);
+    assert_eq!(LedgerLog::len(&file), 2);
+    assert!(LedgerLog::get(&file, 0).is_some());
+    assert!(!LedgerLog::is_empty(&file));
+    assert_eq!(LedgerLog::records(&file).len(), 2);
+}
+
+#[test]
+fn record_constructors_and_accessors_are_exercised() {
+    let lift = LedgerRecord::lift_record(123, "sha", "{\"record\":{}}");
+    assert_eq!(lift.at_unix_ms(), 123);
+    assert_eq!(lift.platform(), None, "a lift record has no platform");
+    assert_eq!(lift.seq(), 0);
+    assert!(matches!(lift, LedgerRecord::LiftRecord { .. }));
+
+    let started = LedgerRecord::experiment_started(
+        9,
+        PlatformId::AppLovinMax,
+        "exp",
+        apex_core::ExperimentSpec {
+            name: "n".into(),
+            ad_unit_id: "u".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "c".into(),
+            test_group_allocation: 25,
+        },
+    );
+    assert_eq!(started.platform(), Some(PlatformId::AppLovinMax));
+    assert_eq!(started.at_unix_ms(), 9);
+}
+
+#[test]
+fn billing_proof_builds_errors_and_verifies_memory() {
+    let proof = crate::build_billing_proof(
+        "pub",
+        "exp",
+        50_000 * 1_000_000,
+        55_000 * 1_000_000,
+        2_000,
+        7,
+    )
+    .expect("proof");
+    assert!(matches!(proof, LedgerRecord::BillingProof { .. }));
+    assert!(crate::build_billing_proof("pub", "exp", 0, 1, 2_000, 7).is_err());
+
+    let mut memory = InMemoryLedger::new(keypair(3));
+    memory.append(proof).expect("append");
+    memory.verify().expect("verify");
+}
+
+#[test]
+fn the_file_ledger_opens_from_owned_and_borrowed_paths() {
+    let dir = TempDir::new("proof-open-paths");
+    let owned = dir.file("owned.jsonl");
+    let borrowed = dir.file("borrowed.jsonl");
+    let mut a = Ledger::open(owned.clone(), keypair(4)).expect("owned");
+    a.append(LedgerRecord::lift_record(1, "s", "{}"))
+        .expect("append");
+    assert_eq!(a.len(), 1);
+    // A second open sees the same on-disk history (refresh path).
+    let b = Ledger::open(&borrowed, keypair(4)).expect("borrowed");
+    assert_eq!(b.len(), 0);
+    let c = Ledger::open(&owned, keypair(4)).expect("reopen");
+    assert_eq!(c.len(), 1);
+}

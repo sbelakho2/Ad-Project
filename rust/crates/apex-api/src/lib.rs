@@ -42,6 +42,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod clock;
+pub mod config;
 pub mod cycle;
 pub mod error;
 pub mod html;
@@ -54,6 +55,7 @@ pub mod state;
 pub mod vault;
 
 pub use clock::{Clock, FixedClock, SystemClock};
+pub use config::{env_value, parse_keys};
 pub use cycle::{
     CyclePolicy, CycleRequest, CycleRunner, CycleSummary, LedgerOnlyRunner, READ_ONLY_MODE,
     READ_ONLY_NOTE,

@@ -26,7 +26,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.next()
             .ok_or("usage: render-fixtures <fixtures-dir> <out-dir>")?,
     );
-    std::fs::create_dir_all(&out)?;
+    run(&fixtures, &out).await
+}
+
+/// Render the fixtures into `out`, generating the ledger fixture when absent.
+async fn run(
+    fixtures: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(out)?;
 
     // The ledger fixture is generated once with the published test key so the
     // file verifies offline; regeneration happens only when the fixture format
@@ -51,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keypair = Keypair::from_bytes(&TEST_KEY_SEED);
     let mut keys: HashMap<String, VerifyingKey> = HashMap::new();
     keys.insert("pub-1".to_string(), keypair.verifying_key());
-    let ledger_source = FileLedgerSource::new(fixtures.clone(), keys);
-    let audit_source = JsonFileAuditSource::new(fixtures.clone());
+    let ledger_source = FileLedgerSource::new(fixtures.to_path_buf(), keys);
+    let audit_source = JsonFileAuditSource::new(fixtures.to_path_buf());
 
     let snapshot = audit_source
         .snapshot(PlatformId::Admob)
@@ -80,4 +88,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("rendered 4 console pages to {}", out.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn renders_every_console_page_from_the_committed_fixtures() {
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let out = std::env::temp_dir().join(format!("apex-fixtures-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        super::run(&fixtures, &out).await.expect("render");
+        for page in ["overview.html", "audit.html", "ledger.html", "error.html"] {
+            assert!(out.join(page).exists(), "{page} was not rendered");
+        }
+        // Rendering generates the ledger fixture when it is absent.
+        let generated = fixtures.join("pub-1.jsonl");
+        assert!(generated.exists());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[tokio::test]
+    async fn the_ledger_fixture_is_generated_when_missing() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let dir = std::env::temp_dir().join(format!("apex-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(source.join("admob.json"), dir.join("admob.json")).unwrap();
+        assert!(!dir.join("pub-1.jsonl").exists());
+        let out = dir.join("out");
+        super::run(&dir, &out).await.expect("render");
+        assert!(dir.join("pub-1.jsonl").exists(), "the ledger is generated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

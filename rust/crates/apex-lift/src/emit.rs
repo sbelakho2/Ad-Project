@@ -411,3 +411,82 @@ mod tests {
         assert_eq!(rows["test"][0]["fill"], 0.9);
     }
 }
+
+#[cfg(test)]
+mod from_record_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::decision::{GuardrailThresholds, Metric, PreRegistration};
+    use crate::records::LiftRecord;
+
+    fn prereg() -> PreRegistration {
+        PreRegistration {
+            experiment_id: "exp-1".into(),
+            scope: "u1".into(),
+            change_description: "raise EE".into(),
+            before_value: "{\"floor\":1000000}".into(),
+            test_share: 0.25,
+            metric: Metric::RevenuePerUser,
+            burn_in_days: 3,
+            window_days: 7,
+            interim_look: true,
+            extension_allowed: true,
+            code_version_hash: "sha256:x".into(),
+            rate_bp: 2_000,
+            thresholds: GuardrailThresholds::default(),
+        }
+    }
+
+    #[test]
+    fn from_record_reads_back_every_field() {
+        let emitted = pre_registration(&prereg()).expect("emit");
+        let back = PreRegistration::from_record(&emitted.record).expect("from record");
+        assert_eq!(back, prereg());
+    }
+
+    #[test]
+    fn from_record_refuses_every_malformed_registration() {
+        let mut record = pre_registration(&prereg()).expect("emit").record;
+
+        // Not a pre-registration at all.
+        assert!(PreRegistration::from_record(&LiftRecord::Result {
+            experiment_id: "e".into(),
+            daily_log_ratios: vec![0.01, 0.02],
+            mean_log: 0.015,
+            lower_90: 0.01,
+            lower_99: 0.005,
+            bootstrap_lower: 0.01,
+            decision: "keep".into(),
+            lambda: 0.1,
+        })
+        .is_err());
+
+        // Unknown metric.
+        if let LiftRecord::PreRegistration { metric, .. } = &mut record {
+            *metric = "clicks".into();
+        }
+        assert!(PreRegistration::from_record(&record).is_err());
+
+        // A registration that lost its change description.
+        let mut missing_change = pre_registration(&prereg()).expect("emit").record;
+        if let LiftRecord::PreRegistration { after_value, .. } = &mut missing_change {
+            *after_value = serde_json::json!({});
+        }
+        assert!(PreRegistration::from_record(&missing_change).is_err());
+
+        // A registration that lost a guardrail threshold.
+        let mut missing_threshold = pre_registration(&prereg()).expect("emit").record;
+        if let LiftRecord::PreRegistration {
+            guardrail_thresholds,
+            ..
+        } = &mut missing_threshold
+        {
+            guardrail_thresholds
+                .as_object_mut()
+                .unwrap()
+                .remove("fillBanner");
+        }
+        assert!(PreRegistration::from_record(&missing_threshold).is_err());
+    }
+}

@@ -116,7 +116,20 @@ impl std::fmt::Debug for HttpRequest {
 }
 
 fn is_sensitive_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("idempotency-key")
+    const SENSITIVE: [&str; 8] = [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "idempotency-key",
+        "api-key",
+        "x-api-key",
+        "secretkey",
+    ];
+    SENSITIVE
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+        || name.eq_ignore_ascii_case("refreshtoken")
 }
 
 impl HttpRequest {
@@ -522,5 +535,131 @@ impl Transport for ReqwestTransport {
             headers,
             body,
         })
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn method_and_body_accessors_are_total() {
+        assert_eq!(HttpMethod::Get.as_str(), "GET");
+        assert_eq!(HttpMethod::Delete.as_str(), "DELETE");
+        assert!(HttpMethod::Get.is_read());
+        assert!(!HttpMethod::Post.is_read());
+
+        let json = HttpBody::Json(serde_json::json!({"a": 1}));
+        assert_eq!(json.as_json().unwrap()["a"], 1);
+        assert!(json.as_form().is_none());
+        let form = HttpBody::Form("a=1".into());
+        assert_eq!(form.as_form(), Some("a=1"));
+        assert!(form.as_json().is_none());
+    }
+
+    #[test]
+    fn request_accessors_and_retryability() {
+        let request = HttpRequest {
+            platform: PlatformId::Admob,
+            operation: "op".into(),
+            method: HttpMethod::Get,
+            url: "https://x".into(),
+            headers: vec![("X-A".into(), "1".into())],
+            body: None,
+            timeout_ms: 1000,
+        };
+        assert_eq!(request.header("x-a"), Some("1"));
+        assert!(request.retryable(), "a GET is idempotent");
+        let post = HttpRequest {
+            method: HttpMethod::Post,
+            ..request
+        };
+        assert!(!post.retryable(), "a POST is not retried by default");
+    }
+
+    #[test]
+    fn response_helpers_and_debug_redaction() {
+        let response = HttpResponse {
+            status: 200,
+            headers: vec![("X-B".into(), "2".into())],
+            body: br#"{"ok":true}"#.to_vec(),
+        };
+        assert_eq!(response.header("x-b"), Some("2"));
+        let request = HttpRequest {
+            platform: PlatformId::Admob,
+            operation: "op".into(),
+            method: HttpMethod::Post,
+            url: "https://x".into(),
+            headers: vec![("Authorization".into(), "Bearer secret".into())],
+            body: Some(HttpBody::Json(serde_json::json!({"a": 1}))),
+            timeout_ms: 1000,
+        };
+        assert!(response.parse_json(&request).is_ok());
+        let rendered = format!("{request:?}");
+        assert!(
+            !rendered.contains("secret"),
+            "credentials redacted: {rendered}"
+        );
+        let _ = format!(
+            "{:?} {:?} {:?}",
+            HttpBody::Json(serde_json::json!(1)),
+            response.body,
+            HttpMethod::Get
+        );
+    }
+
+    #[test]
+    fn header_sensitivity_covers_the_known_names() {
+        for name in [
+            "authorization",
+            "X-API-Key",
+            "secretkey",
+            "refreshToken",
+            "Cookie",
+        ] {
+            assert!(is_sensitive_header(name), "{name}");
+        }
+        assert!(!is_sensitive_header("accept"));
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_dates_and_refuses_junk() {
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            parse_retry_after(Some("5"), now),
+            Some(Duration::from_millis(5000))
+        );
+        assert_eq!(parse_retry_after(Some("   "), now), None);
+        assert_eq!(parse_retry_after(None, now), None);
+        assert_eq!(parse_retry_after(Some("not-a-date"), now), None);
+        assert_eq!(parse_retry_after(Some("0"), now), Some(Duration::ZERO));
+    }
+
+    #[tokio::test]
+    async fn tokio_sleeper_returns_and_recording_sleeper_records() {
+        TokioSleeper.sleep(Duration::from_millis(1)).await;
+        let sleeper = RecordingSleeper::default();
+        sleeper.sleep(Duration::from_millis(250)).await;
+        sleeper.sleep(Duration::from_millis(500)).await;
+        assert_eq!(sleeper.slept_ms(), vec![250, 500]);
+    }
+
+    #[tokio::test]
+    async fn the_reqwest_transport_builds_and_parses_headers() {
+        let transport = ReqwestTransport::new().expect("client");
+        let request = HttpRequest {
+            platform: PlatformId::Admob,
+            operation: "op".into(),
+            method: HttpMethod::Get,
+            url: "https://127.0.0.1:1/never".into(),
+            headers: vec![],
+            body: None,
+            timeout_ms: 1,
+        };
+        // The call fails fast (connection refused); the constructor and the
+        // request-mapping path are what is exercised here.
+        assert!(transport.request(request).await.is_err());
     }
 }

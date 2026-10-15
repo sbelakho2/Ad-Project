@@ -622,11 +622,14 @@ impl MaxReportClient {
         start: &str,
         end: &str,
     ) -> Result<i64, PlatformError> {
+        // `impressions` is requested even though only revenue is summed: the
+        // shared row parser requires the column, and a missing column would
+        // otherwise fail the whole monthly billing pull.
         let rows = self
             .rows(
                 start,
                 end,
-                &["day", "max_ad_unit_id", "estimated_revenue"],
+                &["day", "max_ad_unit_id", "estimated_revenue", "impressions"],
                 None,
             )
             .await?;

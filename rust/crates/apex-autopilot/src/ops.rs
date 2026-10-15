@@ -411,7 +411,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use apex_core::ExperimentResult;
+    use apex_core::{ExperimentResult, ExperimentSpec};
 
     /// An adapter with no reporting access: the default method must refuse.
     struct BareOps;
@@ -462,6 +462,80 @@ mod tests {
     async fn adapters_without_reporting_refuse_instead_of_fabricating() {
         let err = BareOps.experiment_days("exp-1").await.expect_err("refuse");
         assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn default_capabilities_refuse_instead_of_guessing() {
+        // The trait defaults must fail closed: a bare adapter cannot read a
+        // scope's revenue, read its settings, or start an A/A run.
+        let err = BareOps
+            .scope_revenue("u1", "2026-10-01", "2026-10-31")
+            .await
+            .expect_err("refuse");
+        assert!(err.to_string().contains("not supported"), "{err}");
+        assert!(BareOps.current_settings("u1").await.is_err());
+        let spec = ExperimentSpec {
+            name: "apex-aa".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "aa".into(),
+            test_group_allocation: 50,
+        };
+        assert!(BareOps.start_null_experiment(&spec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn every_action_shape_logs_a_stable_key() {
+        let ops = RecordingOps::new();
+        let actions = [
+            Action::SetCountryFloor {
+                ad_unit_id: "u".into(),
+                country: "EE".into(),
+                floor_ecpm: 1,
+            },
+            Action::SetMappingEcpm {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u".into(),
+                ecpm: 2,
+            },
+            Action::SetWaterfallPrice {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+                price_ecpm: 3,
+            },
+            Action::CreateWaterfallEntry {
+                ad_unit_id: "u".into(),
+                network: "n".into(),
+                instance_name: "i".into(),
+                price_ecpm: 4,
+            },
+            Action::RemoveWaterfallEntry {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+            },
+        ];
+        for action in &actions {
+            ops.apply(action, "k").await.expect("apply");
+            ops.rollback(action).await.expect("rollback");
+        }
+        let log = ops.call_log();
+        assert_eq!(log.len(), actions.len() * 2);
+        assert!(log.iter().any(|entry| entry == "apply:floor:u:EE:k"));
+        assert!(log.iter().any(|entry| entry == "apply:create:u:n:k"));
+        assert!(log.iter().any(|entry| entry == "rollback:remove:u:e"));
+    }
+
+    #[tokio::test]
+    async fn scripted_promote_deprecate_and_writable_flags_are_honored() {
+        let ops = RecordingOps::new();
+        ops.set_writable("updateEntryPrice", false);
+        assert!(!ops.writable("updateEntryPrice").await);
+        assert!(ops.writable("anything-else").await);
+        ops.script_promote(vec![Err(PlatformError::Validation("no".into()))]);
+        assert!(ops.promote_experiment("exp").await.is_err());
+        ops.script_deprecate(vec![Err(PlatformError::Validation("no".into()))]);
+        assert!(ops.deprecate_experiment("exp").await.is_err());
     }
 
     #[tokio::test]

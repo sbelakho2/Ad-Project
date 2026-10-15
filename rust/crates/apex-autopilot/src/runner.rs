@@ -1120,6 +1120,96 @@ mod tests {
         assert!(report.fees.is_empty());
     }
 
+    #[tokio::test]
+    async fn due_rechecks_finds_a_kept_change_after_six_months() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+
+        // The kept day is late 2023; six months on, the re-check is due.
+        let later = crate::calendar::day_number("2024-06-01").expect("day") * 86_400_000;
+        let due = runner.due_rechecks(&l, later);
+        assert_eq!(due.len(), 1, "{due:?}");
+        assert!(due[0].months_since_keep >= 6);
+    }
+
+    #[tokio::test]
+    async fn policy_rechecks_and_debug_are_all_reachable() {
+        let ops = Arc::new(RecordingOps::new());
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        assert_eq!(runner.policy().window_days, 7);
+        assert!(format!("{runner:?}").contains("Runner"));
+
+        let mut l = ledger();
+        // A months-later clock makes the month-6 re-check due for a kept change.
+        let later = crate::calendar::day_number("2024-06-01").expect("day") * 86_400_000;
+        assert!(
+            runner.due_rechecks(&l, later).is_empty(),
+            "nothing kept yet"
+        );
+
+        // Exercise the null adapter so its trait surface is covered too.
+        let null = NullOps;
+        assert!(!null.writable("op").await);
+        assert!(null.experiment("x").await.is_err());
+        assert!(null.apply(&floor_action(), "k").await.is_ok());
+        assert!(null.rollback(&floor_action()).await.is_ok());
+        assert!(null
+            .start_experiment(&crate::ops::ExperimentRequest {
+                experiment_id: "e".into(),
+                spec: apex_core::ExperimentSpec {
+                    name: "e".into(),
+                    ad_unit_id: "u".into(),
+                    metric: apex_core::ExperimentMetric::Revenue,
+                    variants: 2,
+                    change_description: "c".into(),
+                    test_group_allocation: 50,
+                },
+                change: apex_proof::ChangeKind::CountryFloorSet {
+                    country: "EE".into(),
+                    floor_ecpm: 1,
+                },
+                prev_value: "{}".into(),
+            })
+            .await
+            .is_ok());
+        assert!(null.promote_experiment("x").await.is_ok());
+        assert!(null.deprecate_experiment("x").await.is_ok());
+        assert!(null.call_log().is_empty());
+        assert!(!null.change_in_test_arm());
+        let _ = &mut l;
+    }
+
     /// A minimal adapter used to prove the runner is generic over PlatformOps.
     struct NullOps;
 

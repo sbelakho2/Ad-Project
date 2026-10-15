@@ -392,6 +392,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_whole_adapter_surface_is_exercised() {
+        let transport = Arc::new(FakeTransport::default());
+        // start_null_experiment: create an experiment with no floor change.
+        transport.push(200, serde_json::json!({"id": "u1"}));
+        // scope_revenue: a maxReport with two rows for the unit.
+        transport.push(
+            200,
+            serde_json::json!({
+                "code": 200,
+                "results": [
+                    {"day": "2026-10-01", "max_ad_unit_id": "u1", "estimated_revenue": "1.5", "impressions": "10"},
+                    {"day": "2026-10-02", "max_ad_unit_id": "u1", "estimated_revenue": "2.5", "impressions": "10"},
+                    {"day": "2026-10-02", "max_ad_unit_id": "u2", "estimated_revenue": "9.0", "impressions": "10"}
+                ]
+            }),
+        );
+        // current_settings: the unit's floors, unsorted on the wire.
+        transport.push(
+            200,
+            serde_json::json!({
+                "id": "u1",
+                "name": "Rewarded",
+                "ad_format": "REWARD",
+                "bid_floors": [
+                    {"country_group_name": "b", "cpm": "2.0", "countries": {"values": ["us"]}},
+                    {"country_group_name": "a", "cpm": "1.0", "countries": {"values": ["ee"]}}
+                ]
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+
+        assert!(adapter.change_in_test_arm());
+        assert!(adapter.call_log().is_empty());
+        assert!(adapter
+            .apply(
+                &crate::model::Action::RemoveWaterfallEntry {
+                    ad_unit_id: "u".into(),
+                    entry_id: "e".into(),
+                },
+                "k"
+            )
+            .await
+            .is_err());
+        assert!(adapter
+            .rollback(&crate::model::Action::RemoveWaterfallEntry {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+            })
+            .await
+            .is_err());
+
+        let id = adapter
+            .start_null_experiment(&spec())
+            .await
+            .expect("null experiment");
+        assert_eq!(id, "u1");
+
+        let revenue = adapter
+            .scope_revenue("u1", "2026-10-01", "2026-10-02")
+            .await
+            .expect("revenue");
+        assert_eq!(revenue, 4_000_000, "only u1 rows are summed");
+
+        let settings = adapter.current_settings("u1").await.expect("settings");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&settings).expect("json");
+        assert_eq!(parsed.len(), 2);
+        let countries: Vec<&str> = parsed
+            .iter()
+            .filter_map(|floor| floor.get("country").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            countries.windows(2).all(|w| w[0] <= w[1]),
+            "sorted: {countries:?}"
+        );
+
+        assert!(SystemWall.now_unix_s() > 1_700_000_000);
+        assert!(format!("{adapter:?}").contains("MaxPlatformOps"));
+    }
+
+    #[tokio::test]
     async fn writes_are_refused_without_the_allow_list() {
         let transport = Arc::new(FakeTransport::default());
         let adapter = ops(Arc::clone(&transport), false);

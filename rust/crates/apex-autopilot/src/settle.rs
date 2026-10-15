@@ -322,3 +322,46 @@ pub async fn settle_experiment(
         result_seq: result_entry.seq(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn every_change_kind_maps_back_to_an_action() {
+        let cases = [
+            ChangeKind::CountryFloorSet {
+                country: "EE".into(),
+                floor_ecpm: 1,
+            },
+            ChangeKind::EcpmSet {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u".into(),
+                ecpm: 2,
+            },
+            ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+                price_ecpm: 3,
+            },
+            ChangeKind::WaterfallEntryCreated {
+                ad_unit_id: "u".into(),
+                network: "n".into(),
+                instance_name: "i".into(),
+                price_ecpm: 4,
+            },
+            ChangeKind::WaterfallEntryRemoved {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+            },
+        ];
+        for change in cases {
+            assert!(
+                change_to_action(&change).is_some(),
+                "every change kind must map back to an action: {change:?}"
+            );
+        }
+    }
+}

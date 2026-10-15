@@ -26,6 +26,11 @@ use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper}
 use apex_lift::guardrails::FillFormat;
 use apex_proof::{Keypair, Ledger};
 
+/// `cli::required` bound to the process environment.
+fn cli_required(name: &str) -> Result<String, String> {
+    apex_autopilot::cli::required(|key| std::env::var(key).ok(), name)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,8 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "usage: apex-runner <daily|monthly|recheck|aa> [--month YYYY-MM] [--start YYYY-MM-DD] [--days N] [--unit U] [--name N]",
     )?;
 
-    let ledger_path = required("APEX_RUNNER_LEDGER")?;
-    let keypair = Keypair::from_bytes(&parse_seed(&required("APEX_RUNNER_SIGNING_KEY_HEX")?)?);
+    let ledger_path = cli_required("APEX_RUNNER_LEDGER")?;
+    let keypair = Keypair::from_bytes(&apex_autopilot::cli::parse_seed(&cli_required(
+        "APEX_RUNNER_SIGNING_KEY_HEX",
+    )?)?);
     let ledger = Ledger::open(&ledger_path, keypair).map_err(|e| format!("ledger: {e}"))?;
 
     let transport: Arc<dyn apex_connectors::transport::Transport> = Arc::new(RetryTransport::new(
@@ -50,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(str::to_string)
         .collect();
     let ops = MaxPlatformOps::new(
-        &required("APEX_MAX_API_KEY")?,
-        &required("APEX_MAX_REPORT_KEY")?,
+        &cli_required("APEX_MAX_API_KEY")?,
+        &cli_required("APEX_MAX_REPORT_KEY")?,
         &std::env::var("APEX_MAX_MANAGEMENT_BASE")
             .unwrap_or_else(|_| MAX_MANAGEMENT_BASE.to_string()),
         &std::env::var("APEX_MAX_REPORTING_BASE")
@@ -69,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => AutopilotPolicy::conservative(),
     };
     let runner = Runner::new(Arc::new(ops), policy, FillFormat::Rewarded);
-    let now_unix_ms = now_unix_ms();
+    let now_unix_ms = apex_autopilot::cli::now_unix_ms();
 
     match command {
         "daily" => {
@@ -84,18 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         "monthly" => {
-            let (month, start, days) = match flag(&args, "--month") {
+            let (month, start, days) = match apex_autopilot::cli::flag(&args, "--month") {
                 Some(month) => {
-                    let start =
-                        flag(&args, "--start").ok_or("monthly with --month requires --start")?;
-                    let days: u32 = flag(&args, "--days")
+                    let start = apex_autopilot::cli::flag(&args, "--start")
+                        .ok_or("monthly with --month requires --start")?;
+                    let days: u32 = apex_autopilot::cli::flag(&args, "--days")
                         .unwrap_or_else(|| "30".to_string())
                         .parse()
                         .map_err(|_| "--days must be a number")?;
                     (month, start, days)
                 }
                 // No month given: bill the calendar month just closed.
-                None => previous_month(now_unix_ms)?,
+                None => apex_autopilot::cli::previous_month(now_unix_ms)?,
             };
             let mut ledger = ledger;
             let report = runner
@@ -111,8 +118,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         "aa" => {
-            let unit = flag(&args, "--unit").ok_or("aa requires --unit")?;
-            let name = flag(&args, "--name").unwrap_or_else(|| format!("apex-aa-{unit}"));
+            let unit = apex_autopilot::cli::flag(&args, "--unit").ok_or("aa requires --unit")?;
+            let name = apex_autopilot::cli::flag(&args, "--name")
+                .unwrap_or_else(|| format!("apex-aa-{unit}"));
             let spec = apex_core::ExperimentSpec {
                 name,
                 ad_unit_id: unit,
@@ -152,77 +160,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The calendar month just closed, as `(YYYY-MM, YYYY-MM-01, day count)`.
-fn previous_month(now_unix_ms: i64) -> Result<(String, String, u32), String> {
-    let today = now_unix_ms.div_euclid(86_400_000);
-    let text = format_day(today);
-    let (year, month) = parse_year_month(&text).ok_or("system clock out of range")?;
-    let (prev_year, prev_month) = if month == 1 {
-        (year - 1, 12)
-    } else {
-        (year, month - 1)
-    };
-    let start = format!("{prev_year:04}-{prev_month:02}-01");
-    let start_day = day_number(&start).ok_or("bad month start")?;
-    let this_start = day_number(&format!("{year:04}-{month:02}-01")).ok_or("bad month start")?;
-    let days = u32::try_from(this_start - start_day).map_err(|_| "bad month length")?;
-    Ok((format!("{prev_year:04}-{prev_month:02}"), start, days))
-}
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-fn parse_year_month(text: &str) -> Option<(i64, u32)> {
-    let mut parts = text.split('-');
-    let year = parts.next()?.parse().ok()?;
-    let month = parts.next()?.parse().ok()?;
-    Some((year, month))
-}
-
-fn format_day(day: i64) -> String {
-    apex_autopilot::calendar::format_day(day)
-}
-
-fn day_number(day: &str) -> Option<i64> {
-    apex_autopilot::calendar::day_number(day)
-}
-
-fn required(name: &str) -> Result<String, String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("{name} is required"))
-}
-
-fn flag(args: &[String], name: &str) -> Option<String> {
-    let index = args.iter().position(|arg| arg == name)?;
-    args.get(index + 1).cloned()
-}
-
-fn parse_seed(hex: &str) -> Result<[u8; 32], String> {
-    let hex = hex.trim();
-    if hex.len() != 64 {
-        return Err("APEX_RUNNER_SIGNING_KEY_HEX must be 64 hex characters".into());
+    #[test]
+    fn cli_required_reads_the_process_environment() {
+        std::env::set_var("APEX_RUNNER_TEST_VAR", "value");
+        assert_eq!(
+            super::cli_required("APEX_RUNNER_TEST_VAR").unwrap(),
+            "value"
+        );
+        std::env::remove_var("APEX_RUNNER_TEST_VAR");
+        assert!(super::cli_required("APEX_RUNNER_TEST_VAR").is_err());
     }
-    let bytes = hex.as_bytes();
-    let mut seed = [0u8; 32];
-    for (index, byte) in seed.iter_mut().enumerate() {
-        let high = nibble(bytes[2 * index]).ok_or("signing key is not hex")?;
-        let low = nibble(bytes[2 * index + 1]).ok_or("signing key is not hex")?;
-        *byte = (high << 4) | low;
-    }
-    Ok(seed)
-}
-
-fn nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }

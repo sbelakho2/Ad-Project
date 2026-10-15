@@ -21,6 +21,7 @@
 
 pub mod alerts;
 pub mod calendar;
+pub mod cli;
 pub mod keys;
 pub mod live_max;
 pub mod model;

@@ -189,6 +189,20 @@ mod tests {
     }
 
     #[test]
+    fn order_key_handles_non_floor_actions() {
+        let proposal = Proposal {
+            action: Action::RemoveWaterfallEntry {
+                ad_unit_id: "u1".into(),
+                entry_id: "e1".into(),
+            },
+            rationale: "r".into(),
+            expected_effect_bp: 1,
+            prev_value: "{}".into(),
+        };
+        assert_eq!(order_key(&proposal), ("u1".to_string(), String::new(), 0));
+    }
+
+    #[test]
     fn disabled_units_are_never_proposed_against() {
         let snap = snapshot(vec![unit(
             false,
