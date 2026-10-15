@@ -390,16 +390,7 @@ async fn cycle_get_is_405() {
 async fn webhook_without_configuration_is_503() {
     let temp = TempDir::new("webhook-503");
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 503);
     assert_eq!(
         response.json(),
@@ -412,18 +403,9 @@ async fn webhook_valid_signature_is_200() {
     let temp = TempDir::new("webhook-200");
     let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(response.json(), json!({"received": true}));
+    assert_eq!(response.json(), json!({"received": true, "items": 1}));
 }
 
 #[tokio::test]
@@ -439,47 +421,30 @@ async fn webhook_key_can_come_from_the_adyen_client() {
         .expect("client"),
     ));
     let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
     assert_eq!(response.json()["received"], true);
 }
 
 #[tokio::test]
-async fn webhook_missing_header_is_400() {
-    let temp = TempDir::new("webhook-no-header");
+async fn webhook_missing_signature_is_400() {
+    let temp = TempDir::new("webhook-no-sig");
     let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
-    let response = send(&app, post("/v1/adyen/webhook")).await;
+    let body = webhook_body_with("", 1_000);
+    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
     assert_eq!(response.status, 400);
-    assert_eq!(response.json(), json!({"error": "invalid_signature"}));
+    assert_eq!(response.json(), json!({"error": "malformed_event"}));
 }
 
 #[tokio::test]
-async fn webhook_tampered_body_is_400() {
+async fn webhook_tampered_item_is_400() {
     let temp = TempDir::new("webhook-tampered");
     let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
     let app = router(state);
-    let mut tampered = WEBHOOK_BODY.to_vec();
-    tampered.push(b' ');
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            &tampered,
-        ),
-    )
-    .await;
+    // A signed field changed (the amount) but the signature left as-is.
+    let body = webhook_body_with(WEBHOOK_SIGNATURE, 2_000);
+    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
     assert_eq!(response.status, 400);
     assert_eq!(response.json(), json!({"error": "invalid_signature"}));
 }
@@ -490,16 +455,7 @@ async fn webhook_wrong_key_is_400() {
     let state =
         file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(b"some_other_key".to_vec());
     let app = router(state);
-    let response = send(
-        &app,
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
-    )
-    .await;
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 400);
     assert_eq!(response.json(), json!({"error": "invalid_signature"}));
 }
@@ -512,14 +468,10 @@ async fn webhook_malformed_events_are_refused() {
     for body in [
         b"not json".to_vec(),
         br#"{"eventCode":"AUTHORISATION"}"#.to_vec(),
-        br#"{"pspReference":"9916934567890123"}"#.to_vec(),
+        br#"{"notificationItems":[]}"#.to_vec(),
+        br#"{"notificationItems":[{"pspReference":"9916934567890123"}]}"#.to_vec(),
     ] {
-        let header = apex_billing::sign_adyen_payload(WEBHOOK_HMAC_KEY, &body);
-        let response = send(
-            &app,
-            post_with_header("/v1/adyen/webhook", "x-adyen-hmac-sha256", &header, &body),
-        )
-        .await;
+        let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
         assert_eq!(response.status, 400, "body {body:?}");
         assert_eq!(response.json(), json!({"error": "malformed_event"}));
     }
@@ -548,12 +500,7 @@ async fn every_api_success_carries_application_json() {
         get("/v1/audit/admob"),
         get(&format!("/v1/ledger/{PUBLISHER}")),
         post(&format!("/v1/cycle/{PUBLISHER}?platform=admob")),
-        post_with_header(
-            "/v1/adyen/webhook",
-            "x-adyen-hmac-sha256",
-            &webhook_header(),
-            WEBHOOK_BODY,
-        ),
+        post_json("/v1/adyen/webhook", &webhook_body()),
     ];
     for request in requests {
         let uri = request.uri().to_string();

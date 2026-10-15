@@ -26,15 +26,34 @@ pub const PUBLISHER: &str = "pub1";
 
 /// Webhook HMAC key of the pinned vector.
 pub const WEBHOOK_HMAC_KEY: &[u8] = b"hmac_api_test";
-/// Exact raw body of the pinned webhook vector.
-pub const WEBHOOK_BODY: &[u8] =
-    br#"{"eventCode":"AUTHORISATION","pspReference":"9916934567890123","success":"true"}"#;
-/// base64(HMAC-SHA256(key = `hmac_api_test`, body = WEBHOOK_BODY)).
-pub const WEBHOOK_SIGNATURE: &str = "Ty6Oev1JYY5G0ANzwIBCb0AIQyaDsUWletqzDv5aOK4=";
+/// base64(HMAC-SHA256 over the eight signed fields of the pinned item below).
+pub const WEBHOOK_SIGNATURE: &str = "DCVYHJK+/X/7a7OmfIVJTaIZylmJtM+z6OT1b5Ky/D0=";
 
-/// The valid `Stripe-Signature` header for the pinned vector.
-pub fn webhook_header() -> String {
-    WEBHOOK_SIGNATURE.to_string()
+/// The pinned `AUTHORISATION` notification item, in the envelope Adyen sends.
+pub fn webhook_body() -> Vec<u8> {
+    webhook_body_with(WEBHOOK_SIGNATURE, 1_000)
+}
+
+/// The same envelope with a chosen signature and amount, for the negative
+/// cases.
+pub fn webhook_body_with(signature: &str, amount_value: i64) -> Vec<u8> {
+    serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "pspReference": "9916934567890123",
+                "originalReference": "",
+                "merchantAccountCode": "ApexMerchant",
+                "merchantReference": "apex-fee:pub1:exp:2026-10",
+                "amount": {"value": amount_value, "currency": "USD"},
+                "eventCode": "AUTHORISATION",
+                "success": "true",
+                "additionalData": {"hmacSignature": signature}
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
 }
 
 /// Unique temporary directory removed on drop.

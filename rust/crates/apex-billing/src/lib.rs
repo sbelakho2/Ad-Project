@@ -25,12 +25,13 @@ pub mod invoice;
 pub mod webhook;
 
 pub use adyen::{
-    create_payment_links, sign_adyen_payload, verify_adyen_hmac, AdyenClient, AdyenClientError,
-    AdyenHmacError, BillingReceipt, InvoiceLineItem, PaymentLinkResponse, ADYEN_CURRENCY,
-    MAX_REFERENCE_LEN, MICROS_PER_MINOR_UNIT,
+    create_payment_links, parse_notification_items, sign_notification_item,
+    verify_notification_item, AdyenClient, AdyenClientError, AdyenHmacError, BillingReceipt,
+    InvoiceLineItem, NotificationItem, PaymentLinkResponse, ADYEN_CURRENCY, MAX_REFERENCE_LEN,
+    MICROS_PER_MINOR_UNIT,
 };
 pub use errors::BillingError;
-pub use webhook::{verify_adyen_webhook, VerifiedDelivery};
+pub use webhook::verify_adyen_webhook;
 
 #[cfg(test)]
 mod tests;

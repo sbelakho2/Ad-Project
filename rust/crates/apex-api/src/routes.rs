@@ -8,7 +8,7 @@
 //! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
-//! | `POST /v1/adyen/webhook` | `200 {"received":true}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
+//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
 //! with the wrong method is axum's `405` (asserted by tests).
@@ -255,7 +255,6 @@ fn parse_cycle_request(body: &[u8]) -> Result<CycleRequest, ApiError> {
 
 async fn adyen_webhook(
     State(state): State<AppState>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Precedence, pinned by tests: a configured AdyenClient supplies the HMAC
@@ -268,29 +267,25 @@ async fn adyen_webhook(
             None => return Err(ApiError::AdyenWebhookNotConfigured),
         },
     };
-    let signature_header = headers
-        .get("x-adyen-hmac-sha256")
-        .and_then(|value| value.to_str().ok())
-        .ok_or(ApiError::InvalidSignature)?;
-    apex_billing::verify_adyen_webhook(&body, signature_header, &hmac_key).map_err(|error| {
-        tracing::debug!(%error, "adyen signature refused");
-        ApiError::InvalidSignature
-    })?;
-    // The event must be a shaped notification: every collected event carries
-    // an eventCode and a pspReference; anything else is refused so a malformed
-    // delivery can never masquerade as handled.
-    let event: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("malformed_event"))?;
-    let event_code = event
-        .get("eventCode")
-        .and_then(|v| v.as_str())
-        .ok_or(ApiError::BadRequest("malformed_event"))?;
-    let psp_reference = event
-        .get("pspReference")
-        .and_then(|v| v.as_str())
-        .ok_or(ApiError::BadRequest("malformed_event"))?;
-    tracing::info!(%event_code, %psp_reference, "adyen webhook accepted");
-    Ok(Json(json!({ "received": true })))
+    // The signature travels inside each notification item; a malformed
+    // envelope is a bad request and a digest mismatch is an invalid signature.
+    let items =
+        apex_billing::verify_adyen_webhook(&body, &hmac_key).map_err(|error| match error {
+            apex_billing::BillingError::InvalidSignature => ApiError::InvalidSignature,
+            other => {
+                tracing::debug!(%other, "adyen delivery refused");
+                ApiError::BadRequest("malformed_event")
+            }
+        })?;
+    for item in &items {
+        tracing::info!(
+            event_code = %item.event_code,
+            psp_reference = %item.psp_reference,
+            success = %item.success,
+            "adyen webhook item accepted"
+        );
+    }
+    Ok(Json(json!({ "received": true, "items": items.len() })))
 }
 
 async fn console_overview() -> Html<String> {

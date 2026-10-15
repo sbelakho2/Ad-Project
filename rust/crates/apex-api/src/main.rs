@@ -17,9 +17,9 @@
 //!   answers `503 live_audit_not_configured`;
 //! - `APEX_ADYEN_HMAC_KEY` (and optionally `APEX_ADYEN_API_KEY`,
 //!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
-//!   client) — without the HMAC key the webhook endpoint answers
-//!   `503 adyen_webhook_not_configured`;
-//! - `APEX_STRIPE_TOLERANCE_SECS` — accepted signature age, default 300.
+//!   client) — the webhook verifies each `notificationItems` item's
+//!   `additionalData.hmacSignature` against this key; without it the endpoint
+//!   answers `503 adyen_webhook_not_configured`.
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router

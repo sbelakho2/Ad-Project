@@ -1,43 +1,49 @@
 //! Adyen webhook verification at the billing boundary.
 //!
-//! [`verify_adyen_webhook`] collapses the low-level HMAC taxonomy into the
-//! billing taxonomy:
+//! [`verify_adyen_webhook`] parses the `notificationItems` envelope and
+//! verifies **each** item's `additionalData.hmacSignature`, collapsing the
+//! low-level HMAC taxonomy into the billing one:
 //!
-//! - a missing or unparseable `X-Adyen-Hmac-SHA256` header is a
+//! - a malformed envelope or a missing/unparseable signature is a
 //!   [`BillingError::Malformed`] input,
-//! - a digest that does not match the body under the HMAC key is
+//! - a digest that does not match the eight signed fields is
 //!   [`BillingError::InvalidSignature`].
 //!
-//! The HMAC scheme itself (base64(HMAC-SHA256(raw body, key)), constant-time
-//! comparison) lives in [`crate::adyen`]. Adyen signs no timestamp, so
-//! replay protection is the caller's job: deduplicate on `eventCode` plus
+//! The scheme itself (base64(HMAC-SHA256(fields joined by `:`)), constant-time
+//! comparison) lives in [`crate::adyen`]. Adyen signs no timestamp, so replay
+//! protection is the caller's job: deduplicate on `eventCode` plus
 //! `pspReference` and record processed events.
 
-use crate::adyen::{verify_adyen_hmac, AdyenHmacError};
+use crate::adyen::{
+    parse_notification_items, verify_notification_item, AdyenHmacError, NotificationItem,
+};
 use crate::errors::BillingError;
 
-/// Proof that a webhook delivery was signed by the endpoint HMAC key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VerifiedDelivery;
-
-/// Verify an Adyen webhook delivery.
+/// Verify every notification item in an Adyen delivery and return them.
 ///
-/// `payload` is the exact raw request body (never a re-serialized JSON
-/// value), `sig_header` the `X-Adyen-Hmac-SHA256` header value and `hmac_key`
-/// the endpoint's webhook HMAC key.
+/// `body` is the exact raw request body and `hmac_key` the endpoint's webhook
+/// HMAC key. An empty envelope is refused: a delivery that verifies nothing
+/// must never be treated as handled.
 pub fn verify_adyen_webhook(
-    payload: &[u8],
-    sig_header: &str,
+    body: &[u8],
     hmac_key: &[u8],
-) -> Result<VerifiedDelivery, BillingError> {
-    match verify_adyen_hmac(hmac_key, payload, sig_header) {
-        Ok(()) => Ok(VerifiedDelivery),
-        Err(AdyenHmacError::MissingHeader) => Err(BillingError::Malformed(
-            "X-Adyen-Hmac-SHA256 header is missing".to_string(),
-        )),
-        Err(AdyenHmacError::MalformedHeader) => Err(BillingError::Malformed(
-            "X-Adyen-Hmac-SHA256 header is not base64".to_string(),
-        )),
-        Err(AdyenHmacError::NoMatchingSignature) => Err(BillingError::InvalidSignature),
+) -> Result<Vec<NotificationItem>, BillingError> {
+    let items = parse_notification_items(body)?;
+    if items.is_empty() {
+        return Err(BillingError::Malformed(
+            "notification envelope carried no items".to_string(),
+        ));
     }
+    for item in &items {
+        verify_notification_item(hmac_key, item).map_err(|error| match error {
+            AdyenHmacError::MissingHeader => BillingError::Malformed(
+                "notification item has no additionalData.hmacSignature".to_string(),
+            ),
+            AdyenHmacError::MalformedHeader => {
+                BillingError::Malformed("hmacSignature is not base64".to_string())
+            }
+            AdyenHmacError::NoMatchingSignature => BillingError::InvalidSignature,
+        })?;
+    }
+    Ok(items)
 }

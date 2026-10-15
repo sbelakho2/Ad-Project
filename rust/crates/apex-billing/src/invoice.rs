@@ -80,7 +80,8 @@ impl BillingProofRecord {
     }
 }
 
-/// One billable line: a re-verified proof with its recomputed fee.
+/// One billable line: a re-verified proof with its recomputed net fee and the
+/// VAT split applied to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvoiceLine {
@@ -88,7 +89,14 @@ pub struct InvoiceLine {
     pub experiment_id: String,
     pub proven_lift: Micros,
     pub rate_bp: u16,
+    /// The net fee (the proven-lift rate). VAT is added on top.
     pub fee_micros: Micros,
+    /// VAT on the net fee, at the invoice's rate.
+    #[serde(default)]
+    pub vat_micros: Micros,
+    /// The gross amount collected: net + VAT.
+    #[serde(default)]
+    pub gross_micros: Micros,
 }
 
 /// A monthly invoice: the verified lines (ordered by `seq`) and their checked
@@ -103,7 +111,65 @@ pub struct Invoice {
     pub publisher_id: String,
     pub period: BillingPeriod,
     pub line_items: Vec<InvoiceLine>,
+    /// Net total (sum of the line fees).
     pub total_micros: Micros,
+    /// VAT rate applied to every line, in basis points (0 = no VAT).
+    #[serde(default)]
+    pub vat_rate_bp: u16,
+    /// Total VAT over the net.
+    #[serde(default)]
+    pub vat_micros: Micros,
+    /// Gross total collected: net + VAT.
+    #[serde(default)]
+    pub gross_micros: Micros,
+}
+
+impl Invoice {
+    /// Apply a VAT rate to the invoice: VAT is computed per line (round
+    /// half-up to the micro) and added to the net to form the gross. A
+    /// non-positive rate marks the invoice as not subject to VAT.
+    #[must_use]
+    pub fn with_vat(mut self, vat_rate_bp: u16) -> Self {
+        self.vat_rate_bp = vat_rate_bp;
+        let mut vat_total: Micros = 0;
+        for line in &mut self.line_items {
+            line.vat_micros = vat_micros(line.fee_micros, vat_rate_bp);
+            line.gross_micros = line.fee_micros.saturating_add(line.vat_micros);
+            vat_total = vat_total.saturating_add(line.vat_micros);
+        }
+        self.vat_micros = vat_total;
+        self.gross_micros = self.total_micros.saturating_add(vat_total);
+        self
+    }
+
+    /// Render the invoice as the human-facing VAT document Adyen's invoice
+    /// template and the customer see.
+    pub fn render_vat_invoice(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Apex invoice {} for {}\n",
+            self.period.year_month, self.publisher_id
+        ));
+        for line in &self.line_items {
+            out.push_str(&format!(
+                "  #{} {}: net {} micros, VAT {} micros, gross {} micros\n",
+                line.seq, line.experiment_id, line.fee_micros, line.vat_micros, line.gross_micros
+            ));
+        }
+        out.push_str(&format!(
+            "  net {} micros\n  VAT ({} bp) {} micros\n  gross {} micros\n",
+            self.total_micros, self.vat_rate_bp, self.vat_micros, self.gross_micros
+        ));
+        out
+    }
+}
+
+/// VAT on `net` at `rate_bp` basis points, rounded half-up to the micro.
+fn vat_micros(net: Micros, rate_bp: u16) -> Micros {
+    if net <= 0 || rate_bp == 0 {
+        return 0;
+    }
+    (net.saturating_mul(i64::from(rate_bp)) + 5_000) / 10_000
 }
 
 /// Re-verify `proofs` and build the invoice for `publisher_id` in `period`.
@@ -150,6 +216,8 @@ pub fn compute_invoice(
             proven_lift: proof.proven_lift,
             rate_bp: proof.rate_bp,
             fee_micros,
+            vat_micros: 0,
+            gross_micros: fee_micros,
         });
     }
 
@@ -167,6 +235,9 @@ pub fn compute_invoice(
         period,
         line_items,
         total_micros,
+        vat_rate_bp: 0,
+        vat_micros: 0,
+        gross_micros: total_micros,
     })
 }
 

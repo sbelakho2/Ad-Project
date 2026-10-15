@@ -3,20 +3,23 @@
 //!
 //! ## Webhook verification
 //!
-//! Adyen signs webhook deliveries with HMAC-SHA256 over the raw request body;
-//! the digest travels base64-encoded in the `X-Adyen-Hmac-SHA256` header.
-//! There is no timestamp in the scheme, so freshness and replay protection
-//! live with the caller: it must deduplicate on `eventCode` + `pspReference`
-//! (the API layer records processed events in the billing ledger).
+//! Adyen standard webhooks arrive as a `notificationItems` envelope; each
+//! `NotificationRequestItem` carries its own signature in
+//! `additionalData.hmacSignature`. The signature is HMAC-SHA256 (base64) over
+//! the eight documented fields joined with `:`, in order:
+//! `pspReference`, `originalReference`, `merchantAccountCode`,
+//! `merchantReference`, `amount.value`, `amount.currency`, `eventCode`,
+//! `success`. Verification is per item and constant-time. There is no
+//! timestamp in the scheme, so replay protection lives with the caller: it
+//! deduplicates on `eventCode` plus `pspReference`.
 //!
 //! ## Payment links
 //!
 //! Monthly fees are collected with Checkout payment links
-//! (`POST /v1/paymentLinks`): the customer gets the link, Adyen collects, and
-//! the webhook turns the collection state into ledger records. The link
-//! `reference` doubles as the deterministic idempotency key: Adyen returns
-//! the existing link when a reference repeats, so a resumed run never double
-//! bills.
+//! (`POST /v71/paymentLinks`): the customer gets the link, Adyen collects, and
+//! the webhook turns the collection state into ledger records. The deterministic
+//! `reference` is also sent as the `Idempotency-Key` header, so a resumed run
+//! returns the same link instead of double billing.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -142,10 +145,9 @@ impl AdyenClient {
         &self.hmac_key
     }
 
-    /// Verify `signature_header` (the `X-Adyen-Hmac-SHA256` value) against the
-    /// exact raw `payload` bytes.
-    pub fn verify(&self, payload: &[u8], signature_header: &str) -> Result<(), AdyenHmacError> {
-        verify_adyen_hmac(&self.hmac_key, payload, signature_header)
+    /// Verify one parsed notification item's `hmacSignature`.
+    pub fn verify(&self, item: &NotificationItem) -> Result<(), AdyenHmacError> {
+        verify_notification_item(&self.hmac_key, item)
     }
 
     /// Create one payment link for one non-zero invoice line. The reference is
@@ -169,11 +171,14 @@ impl AdyenClient {
             operation: "createPaymentLink".to_string(),
             method: HttpMethod::Post,
             url: format!(
-                "{}/v1/paymentLinks",
+                "{}/v71/paymentLinks",
                 self.checkout_base.trim_end_matches('/')
             ),
             headers: vec![
                 ("X-API-Key".into(), self.api_key.clone()),
+                // Adyen deduplicates on this header; the deterministic
+                // reference makes a resumed month return the same link.
+                ("Idempotency-Key".into(), item.reference.clone()),
                 ("Accept".into(), "application/json".into()),
                 ("Content-Type".into(), "application/json".into()),
             ],
@@ -245,28 +250,153 @@ impl AdyenClient {
     }
 }
 
-/// Verify an Adyen webhook delivery.
+/// One parsed Adyen standard-webhook notification item.
 ///
-/// `hmac_key` is the endpoint's webhook HMAC key, `payload` the exact raw
-/// request bytes (never a re-serialized JSON value) and `signature_header`
-/// the `X-Adyen-Hmac-SHA256` value. The comparison is constant-time.
-pub fn verify_adyen_hmac(
+/// Adyen signs the eight fields below (joined with `:`, in this exact order)
+/// with HMAC-SHA256 and carries the base64 digest in
+/// `additionalData.hmacSignature`. Verification is over the *item*, not the
+/// raw body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationItem {
+    pub psp_reference: String,
+    #[serde(default)]
+    pub original_reference: String,
+    pub merchant_account_code: String,
+    pub merchant_reference: String,
+    /// `amount.value` in minor units.
+    pub amount_value: i64,
+    pub amount_currency: String,
+    pub event_code: String,
+    /// `"true"` or `"false"` (Adyen sends a string).
+    pub success: String,
+    /// `additionalData.hmacSignature`, base64.
+    pub hmac_signature: String,
+    /// `additionalData.merchantReference`-independent payment method, kept for
+    /// auditability.
+    #[serde(default)]
+    pub payment_method: String,
+}
+
+impl NotificationItem {
+    /// The exact string Adyen signs: the eight documented fields, colon
+    /// separated, in order.
+    pub fn signed_message(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}:{}",
+            self.psp_reference,
+            self.original_reference,
+            self.merchant_account_code,
+            self.merchant_reference,
+            self.amount_value,
+            self.amount_currency,
+            self.event_code,
+            self.success
+        )
+    }
+}
+
+/// Parse the `notificationItems` envelope into items. Fails closed on any
+/// shape it does not recognise, so a malformed delivery can never be read as
+/// a smaller, valid one.
+pub fn parse_notification_items(body: &[u8]) -> Result<Vec<NotificationItem>, BillingError> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+        BillingError::Malformed(format!("notification body is not JSON: {error}"))
+    })?;
+    let items = value
+        .get("notificationItems")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            BillingError::Malformed("notification body has no notificationItems array".to_string())
+        })?;
+    let mut out = Vec::with_capacity(items.len());
+    for wrapper in items {
+        let item = wrapper.get("NotificationRequestItem").ok_or_else(|| {
+            BillingError::Malformed(
+                "notification item is not wrapped in NotificationRequestItem".to_string(),
+            )
+        })?;
+        out.push(parse_item(item)?);
+    }
+    Ok(out)
+}
+
+fn parse_item(item: &serde_json::Value) -> Result<NotificationItem, BillingError> {
+    let text = |value: &serde_json::Value, key: &str| -> Result<String, BillingError> {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| BillingError::Malformed(format!("notification item missing '{key}'")))
+    };
+    let amount = item
+        .get("amount")
+        .ok_or_else(|| BillingError::Malformed("notification item missing 'amount'".to_string()))?;
+    let amount_value = amount
+        .get("value")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| BillingError::Malformed("amount.value is not an integer".to_string()))?;
+    let amount_currency = text(amount, "currency")?;
+    let success = match item.get("success") {
+        Some(serde_json::Value::Bool(flag)) => flag.to_string(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        _ => {
+            return Err(BillingError::Malformed(
+                "notification item missing 'success'".to_string(),
+            ))
+        }
+    };
+    let hmac_signature = item
+        .get("additionalData")
+        .and_then(|v| v.get("hmacSignature"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            BillingError::Malformed(
+                "notification item missing additionalData.hmacSignature".to_string(),
+            )
+        })?;
+    let payment_method = item
+        .get("paymentMethod")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(NotificationItem {
+        psp_reference: text(item, "pspReference")?,
+        original_reference: item
+            .get("originalReference")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        merchant_account_code: text(item, "merchantAccountCode")?,
+        merchant_reference: text(item, "merchantReference")?,
+        amount_value,
+        amount_currency,
+        event_code: text(item, "eventCode")?,
+        success,
+        hmac_signature,
+        payment_method,
+    })
+}
+
+/// Verify one notification item's `hmacSignature` against the endpoint's HMAC
+/// key. Constant-time comparison.
+pub fn verify_notification_item(
     hmac_key: &[u8],
-    payload: &[u8],
-    signature_header: &str,
+    item: &NotificationItem,
 ) -> Result<(), AdyenHmacError> {
-    if signature_header.trim().is_empty() {
+    if item.hmac_signature.trim().is_empty() {
         return Err(AdyenHmacError::MissingHeader);
     }
     let mut expected = [0u8; 32];
-    let decoded_len = base64_decode_into(signature_header, &mut expected)
+    let decoded_len = base64_decode_into(&item.hmac_signature, &mut expected)
         .ok_or(AdyenHmacError::MalformedHeader)?;
     if decoded_len != 32 {
         return Err(AdyenHmacError::NoMatchingSignature);
     }
     let mut mac =
         HmacSha256::new_from_slice(hmac_key).map_err(|_| AdyenHmacError::NoMatchingSignature)?;
-    mac.update(payload);
+    mac.update(item.signed_message().as_bytes());
     let computed = mac.finalize().into_bytes();
     let mut difference = 0u8;
     for (a, b) in expected.iter().zip(computed.iter()) {
@@ -279,16 +409,15 @@ pub fn verify_adyen_hmac(
     }
 }
 
-/// Test and tooling helper: produce the header value Adyen would send for a
-/// payload, so tests sign real deliveries.
-pub fn sign_adyen_payload(hmac_key: &[u8], payload: &[u8]) -> String {
+/// Test and tooling helper: the base64 digest Adyen would put in
+/// `additionalData.hmacSignature` for `item`.
+pub fn sign_notification_item(hmac_key: &[u8], item: &NotificationItem) -> String {
     let mut mac = match HmacSha256::new_from_slice(hmac_key) {
         Ok(mac) => mac,
         Err(_) => return base64_encode(&[]),
     };
-    mac.update(payload);
-    let digest = mac.finalize().into_bytes();
-    base64_encode(&digest)
+    mac.update(item.signed_message().as_bytes());
+    base64_encode(&mac.finalize().into_bytes())
 }
 
 fn base64_decode_into(input: &str, output: &mut [u8; 32]) -> Option<usize> {
@@ -375,13 +504,20 @@ impl InvoiceLineItem {
         publisher_id: &str,
         year_month: &str,
     ) -> Result<Self, BillingError> {
-        if line.fee_micros < 0 {
+        // The collected amount is the gross (net fee + VAT); an invoice with no
+        // VAT set has gross == fee.
+        let gross_micros = if line.gross_micros > 0 {
+            line.gross_micros
+        } else {
+            line.fee_micros
+        };
+        if gross_micros < 0 {
             return Err(BillingError::TamperedProof {
                 seq: line.seq,
-                reason: format!("line fee {} micros is negative", line.fee_micros),
+                reason: format!("line gross {gross_micros} micros is negative"),
             });
         }
-        if line.fee_micros % MICROS_PER_MINOR_UNIT != 0 {
+        if gross_micros % MICROS_PER_MINOR_UNIT != 0 {
             return Err(BillingError::SubCentAmount { seq: line.seq });
         }
         let reference = format!(
@@ -410,7 +546,7 @@ impl InvoiceLineItem {
         Ok(Self {
             seq: line.seq,
             experiment_id: line.experiment_id.clone(),
-            amount_minor_units: line.fee_micros / MICROS_PER_MINOR_UNIT,
+            amount_minor_units: gross_micros / MICROS_PER_MINOR_UNIT,
             currency: ADYEN_CURRENCY.to_string(),
             shopper_reference,
             reference,
@@ -466,7 +602,12 @@ pub async fn create_payment_links(
     let mut links = Vec::new();
     let mut total_minor_units = 0i64;
     for line in &invoice.line_items {
-        if line.fee_micros == 0 {
+        let billable = if line.gross_micros > 0 {
+            line.gross_micros
+        } else {
+            line.fee_micros
+        };
+        if billable == 0 {
             continue;
         }
         let item = InvoiceLineItem::from_invoice_line(

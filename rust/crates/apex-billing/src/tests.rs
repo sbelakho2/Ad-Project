@@ -13,8 +13,9 @@ use apex_connectors::transport::{
 use async_trait::async_trait;
 
 use crate::adyen::{
-    create_payment_links, sign_adyen_payload, verify_adyen_hmac, AdyenClient, AdyenClientError,
-    AdyenHmacError, BillingReceipt, InvoiceLineItem, PaymentLinkResponse, MAX_REFERENCE_LEN,
+    create_payment_links, sign_notification_item, verify_notification_item, AdyenClient,
+    AdyenClientError, AdyenHmacError, BillingReceipt, InvoiceLineItem, NotificationItem,
+    PaymentLinkResponse, MAX_REFERENCE_LEN,
 };
 use crate::errors::BillingError;
 use crate::invoice::{compute_invoice, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine};
@@ -22,9 +23,44 @@ use crate::webhook::verify_adyen_webhook;
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
 const KEY: &[u8] = b"hmac-key";
-const PINNED_BODY: &[u8] = br#"{"eventCode":"AUTHORISATION"}"#;
-// base64(HMAC-SHA256(body, KEY)), computed independently.
-const PINNED_SIGNATURE: &str = "MFWKL2VdoZW+gays2ZQnfSUnj31xiSh2KghqSCoIR/0=";
+// base64(HMAC-SHA256(signed_message, KEY)) over the pinned item below,
+// computed independently of the crate.
+const PINNED_SIGNATURE: &str = "0go3p4FePtmEGTPKiahYDi0eiRXMcB4te4FZJhVRmDs=";
+
+fn pinned_item() -> NotificationItem {
+    NotificationItem {
+        psp_reference: "PSP123".into(),
+        original_reference: String::new(),
+        merchant_account_code: "ApexMerchant".into(),
+        merchant_reference: "apex-fee:pub:exp:2026-10".into(),
+        amount_value: 12_345,
+        amount_currency: "USD".into(),
+        event_code: "AUTHORISATION".into(),
+        success: "true".into(),
+        hmac_signature: PINNED_SIGNATURE.into(),
+        payment_method: String::new(),
+    }
+}
+
+fn webhook_body(item: &NotificationItem) -> Vec<u8> {
+    serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "pspReference": item.psp_reference,
+                "originalReference": item.original_reference,
+                "merchantAccountCode": item.merchant_account_code,
+                "merchantReference": item.merchant_reference,
+                "amount": {"value": item.amount_value, "currency": item.amount_currency},
+                "eventCode": item.event_code,
+                "success": item.success,
+                "additionalData": {"hmacSignature": item.hmac_signature},
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
+}
 
 struct MockTransport {
     script: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
@@ -79,78 +115,111 @@ fn client() -> AdyenClient {
 
 #[test]
 fn pinned_vector_verifies() {
-    verify_adyen_hmac(KEY, PINNED_BODY, PINNED_SIGNATURE)
+    verify_notification_item(KEY, &pinned_item())
         .unwrap_or_else(|_| panic!("pinned digest must verify"));
-    verify_adyen_webhook(PINNED_BODY, PINNED_SIGNATURE, KEY).expect("billing boundary");
+    let body = webhook_body(&pinned_item());
+    let items = verify_adyen_webhook(&body, KEY).expect("billing boundary");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].event_code, "AUTHORISATION");
+}
+
+#[test]
+fn the_signed_message_is_the_eight_fields_in_order() {
+    assert_eq!(
+        pinned_item().signed_message(),
+        "PSP123::ApexMerchant:apex-fee:pub:exp:2026-10:12345:USD:AUTHORISATION:true"
+    );
 }
 
 #[test]
 fn sign_helper_roundtrips() {
-    let header = sign_adyen_payload(KEY, PINNED_BODY);
-    verify_adyen_hmac(KEY, PINNED_BODY, &header).expect("roundtrip");
+    let signed = sign_notification_item(KEY, &pinned_item());
+    assert_eq!(signed, PINNED_SIGNATURE);
+    let mut item = pinned_item();
+    item.hmac_signature = signed;
+    verify_notification_item(KEY, &item).expect("roundtrip");
 }
 
 #[test]
-fn signature_is_sensitive_to_key_and_body() {
-    let header = sign_adyen_payload(KEY, PINNED_BODY);
+fn signature_is_sensitive_to_key_and_every_signed_field() {
     assert_eq!(
-        verify_adyen_hmac(b"other", PINNED_BODY, &header),
+        verify_notification_item(b"other", &pinned_item()),
         Err(AdyenHmacError::NoMatchingSignature)
     );
-    let tampered = br#"{"eventCode":"CANCELLED"}"#;
-    assert_eq!(
-        verify_adyen_hmac(KEY, tampered, &header),
-        Err(AdyenHmacError::NoMatchingSignature)
-    );
+    for mutate in [
+        |item: &mut NotificationItem| item.amount_value += 1,
+        |item: &mut NotificationItem| item.event_code = "CANCELLED".into(),
+        |item: &mut NotificationItem| item.success = "false".into(),
+        |item: &mut NotificationItem| item.merchant_reference = "other".into(),
+        |item: &mut NotificationItem| item.amount_currency = "EUR".into(),
+    ] {
+        let mut item = pinned_item();
+        mutate(&mut item);
+        assert_eq!(
+            verify_notification_item(KEY, &item),
+            Err(AdyenHmacError::NoMatchingSignature),
+            "{item:?}"
+        );
+    }
 }
 
 #[test]
-fn missing_and_malformed_headers_are_refused() {
+fn missing_and_malformed_signatures_are_refused() {
+    let mut missing = pinned_item();
+    missing.hmac_signature = String::new();
     assert_eq!(
-        verify_adyen_hmac(KEY, PINNED_BODY, ""),
+        verify_notification_item(KEY, &missing),
         Err(AdyenHmacError::MissingHeader)
     );
+    let mut malformed = pinned_item();
+    malformed.hmac_signature = "not base64!!".into();
     assert_eq!(
-        verify_adyen_hmac(KEY, PINNED_BODY, "not base64!!"),
+        verify_notification_item(KEY, &malformed),
         Err(AdyenHmacError::MalformedHeader)
     );
     assert!(matches!(
-        verify_adyen_webhook(PINNED_BODY, "", KEY),
+        verify_adyen_webhook(&webhook_body(&missing), KEY),
         Err(BillingError::Malformed(_))
     ));
     assert!(matches!(
-        verify_adyen_webhook(PINNED_BODY, "!!", KEY),
+        verify_adyen_webhook(&webhook_body(&malformed), KEY),
         Err(BillingError::Malformed(_))
     ));
     assert_eq!(
-        verify_adyen_webhook(PINNED_BODY, PINNED_SIGNATURE, b"wrong"),
+        verify_adyen_webhook(&webhook_body(&pinned_item()), b"wrong"),
         Err(BillingError::InvalidSignature)
     );
 }
 
 #[test]
-fn wrong_length_digests_never_match() {
-    // 31 bytes of valid base64 cannot decode to the required 32-byte digest.
-    // A 31-byte digest cannot match a 32-byte HMAC, and base64 padding
-    // leftovers are refused as malformed rather than silently truncated.
-    let short = base64_of(&[0u8; 31]);
-    assert!(
-        verify_adyen_hmac(KEY, PINNED_BODY, &short).is_err(),
-        "31-byte digest must never verify"
-    );
-    let long = base64_of(&[0u8; 33]);
-    assert!(
-        verify_adyen_hmac(KEY, PINNED_BODY, &long).is_err(),
-        "33-byte digest must never verify"
-    );
+fn malformed_envelopes_are_refused() {
+    assert!(matches!(
+        verify_adyen_webhook(b"not json", KEY),
+        Err(BillingError::Malformed(_))
+    ));
+    assert!(matches!(
+        verify_adyen_webhook(br#"{"notificationItems":[]}"#, KEY),
+        Err(BillingError::Malformed(_))
+    ));
+    // An item without the NotificationRequestItem wrapper.
+    assert!(matches!(
+        verify_adyen_webhook(br#"{"notificationItems":[{"pspReference":"x"}]}"#, KEY),
+        Err(BillingError::Malformed(_))
+    ));
 }
 
 #[test]
-fn empty_payload_is_signed_like_any_other() {
-    let header = sign_adyen_payload(b"k", b"");
-    // independent value computed outside the crate
-    assert_eq!(header, "i7mQxAp9YcuXWXqUISUCW+UKyL63RDbjc1uYiTp/ZiA=");
-    verify_adyen_hmac(b"k", b"", &header).expect("empty body");
+fn wrong_length_digests_never_match() {
+    // A 31- or 33-byte digest cannot match a 32-byte HMAC; base64 padding
+    // leftovers are refused rather than silently truncated.
+    for length in [31usize, 33] {
+        let mut item = pinned_item();
+        item.hmac_signature = base64_of(&vec![0u8; length]);
+        assert!(
+            verify_notification_item(KEY, &item).is_err(),
+            "{length}-byte digest must never verify"
+        );
+    }
 }
 
 fn base64_of(bytes: &[u8]) -> String {
@@ -218,6 +287,7 @@ fn error_response(status: u16) -> HttpResponse {
 }
 
 fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
+    let total_micros: i64 = lines.iter().map(|l| l.fee_micros).sum();
     Invoice {
         publisher_id: "pub-1".to_string(),
         period: BillingPeriod {
@@ -225,8 +295,11 @@ fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
             start_unix_ms: 0,
             end_unix_ms: 1,
         },
-        total_micros: lines.iter().map(|l| l.fee_micros).sum(),
+        total_micros,
         line_items: lines,
+        vat_rate_bp: 0,
+        vat_micros: 0,
+        gross_micros: total_micros,
     }
 }
 
@@ -237,6 +310,8 @@ fn invoice_line(seq: u64, experiment: &str, fee_micros: i64) -> InvoiceLine {
         proven_lift: fee_micros * 2,
         rate_bp: 1_500,
         fee_micros,
+        vat_micros: 0,
+        gross_micros: fee_micros,
     }
 }
 
@@ -262,11 +337,20 @@ async fn payment_links_post_one_idempotent_link_per_line() {
     let calls = mock.calls();
     assert_eq!(calls.len(), 2);
     for call in &calls {
-        assert!(call.url.contains("/v1/paymentLinks"), "{}", call.url);
+        assert!(call.url.contains("/v71/paymentLinks"), "{}", call.url);
         assert!(call
             .headers
             .iter()
             .any(|(k, v)| k == "X-API-Key" && v == client().api_key()));
+        // The deterministic reference is also the Idempotency-Key header.
+        let reference = match call.body.as_ref().expect("body") {
+            HttpBody::Json(value) => value["reference"].as_str().unwrap_or_default().to_string(),
+            other => panic!("unexpected body {other:?}"),
+        };
+        assert!(call
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Idempotency-Key" && *v == reference));
     }
     let first = match calls[0].body.as_ref().expect("body") {
         HttpBody::Json(value) => value.clone(),
@@ -565,4 +649,48 @@ fn billing_proof_flattening_roundtrips_sealed_records() {
         BillingProofRecord::from_ledger_record(&change),
         Err(BillingError::Malformed(_x))
     ));
+}
+
+#[test]
+fn vat_is_added_on_top_of_the_net_fee() {
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
+    assert_eq!(invoice.total_micros, 1_250_000, "net is unchanged");
+    assert_eq!(invoice.vat_micros, 250_000, "20% of the net");
+    assert_eq!(invoice.gross_micros, 1_500_000);
+    assert_eq!(invoice.line_items[0].gross_micros, 1_500_000);
+    let rendered = invoice.render_vat_invoice();
+    assert!(rendered.contains("VAT (2000 bp)"), "{rendered}");
+    assert!(rendered.contains("gross 1500000 micros"), "{rendered}");
+}
+
+#[test]
+fn vat_rounds_half_up_to_the_micro() {
+    // 1 micro net at 20% is 0.2 micro -> 0; 3 micros -> 0.6 -> 1.
+    let zero = invoice_with(vec![invoice_line(1, "e", 1)]).with_vat(2_000);
+    assert_eq!(zero.vat_micros, 0);
+    let one = invoice_with(vec![invoice_line(1, "e", 3)]).with_vat(2_000);
+    assert_eq!(one.vat_micros, 1);
+}
+
+#[tokio::test]
+async fn payment_links_bill_the_gross_including_vat() {
+    let mock = MockTransport::new(vec![Ok(MockTransport::ok(
+        200,
+        Some(r#"{"id":"PL1","url":"https://pay.adyen.com/1"}"#),
+    ))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
+    let receipt = create_payment_links(&client(), &transport, &invoice)
+        .await
+        .expect("links");
+    assert_eq!(
+        receipt.total_minor_units, 150,
+        "gross 1_500_000 micros = 150 cents"
+    );
+    let call = &mock.calls()[0];
+    let body = match call.body.as_ref().expect("body") {
+        HttpBody::Json(value) => value.clone(),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(body["amount"]["value"], 150);
 }
