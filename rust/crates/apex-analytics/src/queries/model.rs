@@ -15,14 +15,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::envelope::{DomainEvent, EventType};
+use crate::projections::OperatorQueueRow;
 use crate::store::ReportDayRow;
 use crate::timestamp::{UtcMillis, MILLIS_PER_DAY};
 
 use super::dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
     ExperimentLandscapeRow, FeeDetail, FeeRow, FeeState, FreshnessStatus, FunnelStageRow,
-    GrowthCohortRow, IngestionHealthRow, LiftRow, Money, ObjectTimelineEntry, PageRequestsDay,
-    QueryScope, RevenueBreakdownRow, RevenueDailyRow, StaleSource,
+    GrowthCohortRow, IngestionHealthRow, LiftRow, Money, ObjectTimelineEntry, OperatorQueues,
+    PageRequestsDay, QueryScope, RevenueBreakdownRow, RevenueDailyRow, StaleSource,
 };
 
 /// A source is stale when its latest finalized day is more than this many
@@ -127,6 +128,14 @@ pub fn fee_before_tax_micros(increment_micros: i64, rate_bp: u16) -> Option<i64>
 }
 
 /// Daily revenue rows for the scope.
+///
+/// Rows are accumulated per publisher as well as per day, platform and
+/// currency: the ClickHouse reader reads the `customer_daily` projection,
+/// which carries one row per publisher, so an operator-wide scope must never
+/// merge two publishers into one number even though the DTO itself does not
+/// carry the publisher identity. The returned order is `(day, platform,
+/// currency, publisher)`, the same total order the ClickHouse statement
+/// applies, so both readers emit an identical `Vec`.
 pub fn revenue_daily(scope: &QueryScope, report_days: &[ReportDayRow]) -> Vec<RevenueDailyRow> {
     struct Accumulator {
         revenue_micros: i64,
@@ -135,7 +144,7 @@ pub fn revenue_daily(scope: &QueryScope, report_days: &[ReportDayRow]) -> Vec<Re
         final_days: u32,
         provisional_days: u32,
     }
-    let mut map: BTreeMap<(String, String, String), Accumulator> = BTreeMap::new();
+    let mut map: BTreeMap<(String, String, String, String), Accumulator> = BTreeMap::new();
     for row in report_days
         .iter()
         .filter(|row| report_day_in_scope(scope, row))
@@ -144,7 +153,12 @@ pub fn revenue_daily(scope: &QueryScope, report_days: &[ReportDayRow]) -> Vec<Re
         else {
             continue;
         };
-        let key = (row.day.clone(), row.platform.clone(), currency.to_string());
+        let key = (
+            row.publisher_id.clone(),
+            row.day.clone(),
+            row.platform.clone(),
+            currency.to_string(),
+        );
         let accumulator = map.entry(key).or_insert_with(|| Accumulator {
             revenue_micros: 0,
             impressions: Some(0),
@@ -164,22 +178,41 @@ pub fn revenue_daily(scope: &QueryScope, report_days: &[ReportDayRow]) -> Vec<Re
             _ => {}
         }
     }
-    map.into_iter()
-        .map(|((day, platform, currency), accumulator)| RevenueDailyRow {
-            day,
-            platform,
-            revenue: Money::new(accumulator.revenue_micros, currency),
-            impressions: accumulator.impressions,
-            source_days: accumulator.source_days,
-            final_days: accumulator.final_days,
-            provisional_days: accumulator.provisional_days,
+    let mut rows: Vec<(String, RevenueDailyRow)> = map
+        .into_iter()
+        .map(|((publisher_id, day, platform, currency), accumulator)| {
+            (
+                publisher_id,
+                RevenueDailyRow {
+                    day,
+                    platform,
+                    revenue: Money::new(accumulator.revenue_micros, currency),
+                    impressions: accumulator.impressions,
+                    source_days: accumulator.source_days,
+                    final_days: accumulator.final_days,
+                    provisional_days: accumulator.provisional_days,
+                },
+            )
         })
-        .collect()
+        .collect();
+    rows.sort_by(|(left_publisher, left), (right_publisher, right)| {
+        left.day
+            .cmp(&right.day)
+            .then(left.platform.cmp(&right.platform))
+            .then(left.revenue.currency.cmp(&right.revenue.currency))
+            .then(left_publisher.cmp(right_publisher))
+    });
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 /// Revenue broken down by one dimension. Rows missing the dimension value
 /// cannot be attributed and are excluded here; the data-quality badge counts
 /// them as unmapped.
+///
+/// Both readers return the identical order: revenue descending, then the
+/// dimension value ascending, then the currency. The ClickHouse statement
+/// applies the same `ORDER BY revenue_micros DESC, dimension_value, currency`
+/// so the two Vecs compare equal without re-sorting.
 pub fn revenue_breakdown(
     scope: &QueryScope,
     report_days: &[ReportDayRow],
@@ -233,7 +266,8 @@ pub fn revenue_breakdown(
         }
         totals
     };
-    map.into_iter()
+    let mut rows: Vec<RevenueBreakdownRow> = map
+        .into_iter()
         .map(|((dimension_value, _), accumulator)| {
             let total = totals_by_currency
                 .get(&accumulator.currency)
@@ -252,7 +286,16 @@ pub fn revenue_breakdown(
                 share_bp,
             }
         })
-        .collect()
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .revenue
+            .micros
+            .cmp(&left.revenue.micros)
+            .then(left.dimension_value.cmp(&right.dimension_value))
+            .then(left.revenue.currency.cmp(&right.revenue.currency))
+    });
+    rows
 }
 
 /// Lift rows from registered experiments and decisions.
@@ -333,10 +376,18 @@ struct FeeAccumulator {
     held: bool,
     invoiced: bool,
     credited: bool,
-    latest_occurred: Option<UtcMillis>,
+    latest_key: Option<(UtcMillis, &'static str, String)>,
 }
 
 /// Fee rows with states, invoice references and proof hashes.
+///
+/// The fold is a latest-fact-wins reduction with a deterministic tie rule:
+/// only a candidate strictly newer by `(occurred_at, source, event_id)` may
+/// overwrite the accumulated fields, so an older replayed fact can never
+/// win regardless of insertion order. An exact tie keeps the row folded
+/// first; identical keys cannot carry different content because
+/// `(source, event_id)` is the dedup key. Both readers feed events in the
+/// same chronological order (`occurred_at_utc, source, event_id`).
 pub fn fee_rows(
     scope: &QueryScope,
     events: &[DomainEvent],
@@ -366,13 +417,19 @@ pub fn fee_rows(
                 period,
                 ..FeeAccumulator::default()
             });
-        let newer = accumulator
-            .latest_occurred
-            .map(|latest| event.occurred_at_utc >= latest)
-            .unwrap_or(true);
-        if newer {
-            accumulator.latest_occurred = Some(event.occurred_at_utc);
+        let candidate = (
+            event.occurred_at_utc,
+            event.source.as_str(),
+            event.event_id.clone(),
+        );
+        let strictly_newer = match &accumulator.latest_key {
+            Some(current) => candidate > *current,
+            None => true,
+        };
+        if !strictly_newer {
+            continue;
         }
+        accumulator.latest_key = Some(candidate);
         match event.event_type {
             EventType::FeeComputed => {
                 if let Some(currency) = event.payload.currency.clone() {
@@ -561,7 +618,7 @@ pub fn data_quality(
 
     let mut unavailable = Vec::new();
     if dedup_rejects.is_none() {
-        unavailable.push("dedup_rejects: this store removes duplicates at merge time".to_string());
+        unavailable.push("dedup_rejects: this store cannot report raw duplicate rows".to_string());
     }
 
     // Gaps: per account, requested days minus covered days. Without a
@@ -721,6 +778,51 @@ pub fn ingestion_health(
             },
         )
         .collect()
+}
+
+/// Group computed queue entries into the five [`OperatorQueues`] lists.
+///
+/// The snapshot is as of the covered data: its membership and ages come
+/// from the covered-data horizon the caller computed against, never from
+/// the wall clock.
+pub(crate) fn group_operator_queues(
+    as_of: UtcMillis,
+    rows: Vec<OperatorQueueRow>,
+) -> OperatorQueues {
+    let mut queues = OperatorQueues {
+        as_of: as_of.to_rfc3339_millis(),
+        incidents: Vec::new(),
+        due_decisions: Vec::new(),
+        stale_accounts: Vec::new(),
+        overdue_jobs: Vec::new(),
+        held_fees: Vec::new(),
+    };
+    for row in rows {
+        match row.queue.as_str() {
+            "incidents" => queues.incidents.push(row),
+            "due_decisions" => queues.due_decisions.push(row),
+            "stale_accounts" => queues.stale_accounts.push(row),
+            "overdue_jobs" => queues.overdue_jobs.push(row),
+            "held_fees" => queues.held_fees.push(row),
+            _ => {}
+        }
+    }
+    queues
+}
+
+/// The covered-data anchor of a queue read: the newest occurrence among the
+/// events the queues are computed from, falling back to `fallback` when the
+/// store holds no events at all. Both readers use their store's version of
+/// this anchor: the memory store takes the max `occurred_at_utc` over its
+/// stored events, the ClickHouse reader takes the published snapshot's
+/// recorded `source_event_max`, which the rebuild wrote from the same
+/// maximum.
+pub(crate) fn covered_data_anchor(events: &[DomainEvent], fallback: UtcMillis) -> UtcMillis {
+    events
+        .iter()
+        .map(|event| event.occurred_at_utc)
+        .max()
+        .unwrap_or(fallback)
 }
 
 /// Does `cohort_month` (YYYY-MM) meet the maturity horizon at `as_of`?

@@ -86,7 +86,7 @@ fn report_days() -> Vec<ReportDayRow> {
             country: Some(if day <= 6 { "DE" } else { "GB" }.into()),
             ad_unit_id: Some("rw_de_01".into()),
             format: Some("rewarded".into()),
-            source_digest: Some(format!("{:064x}", day)),
+            source_digest: Some(format!("{day:064x}")),
         })
         .collect()
 }
@@ -372,7 +372,10 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
     replay_store.insert(&fixture).await.map_err(map)?;
     let (inserts, duplicates) = replay_store.insert_stats();
     assert_eq!(inserts, 2 * fixture.len() as u64);
-    assert_eq!(duplicates, fixture.len() as u64, "memory replay dedups");
+    assert_eq!(
+        duplicates, 0,
+        "an equal-received replay replaces (last insert wins), mirroring ReplacingMergeTree"
+    );
 
     let loaded = store.load_events().await.map_err(map)?;
     assert_eq!(loaded.len(), fixture.len(), "FINAL collapses the replay");
@@ -717,31 +720,35 @@ async fn run(store: &ClickHouseStore) -> Result<(), String> {
     assert_eq!(effectiveness.keep_rate_valid_bp, Some(10_000));
     assert_eq!(effectiveness.completion_p50_days, Some(14));
 
-    // Operator queues: the memory reader derives them from events, the
-    // ClickHouse reader reads the rebuilt projection.
+    // Operator queues: both readers compute membership and ages against the
+    // covered-data horizon (the published snapshot's recorded
+    // `source_event_max` for ClickHouse, the newest stored occurrence for
+    // memory), so the full snapshots must be identical.
     let mem_queues = memory_reader
         .operator_queues(&QueryScope::operator_wide(time(HORIZON)))
         .await
         .map_err(map)?;
-    assert_eq!(mem_queues.incidents.len(), 1);
-    assert_eq!(mem_queues.incidents[0].object_id, "inc_018");
-    assert_eq!(mem_queues.incidents[0].severity, "critical");
-    assert_eq!(mem_queues.held_fees.len(), 1);
-    assert_eq!(mem_queues.held_fees[0].object_id, "ch_0247:2026-10");
     let ch_queues = reader
         .operator_queues(&QueryScope::operator_wide(time(HORIZON)))
         .await
         .map_err(map)?;
     assert_eq!(
-        ch_queues.incidents.len(),
-        mem_queues.incidents.len(),
-        "incident queue parity (projection vs events)"
+        ch_queues, mem_queues,
+        "operator queue parity (ages and membership)"
     );
-    assert_eq!(
-        ch_queues.incidents.first().map(|row| row.object_id.clone()),
-        Some("inc_018".to_string())
-    );
-    assert_eq!(ch_queues.held_fees.len(), mem_queues.held_fees.len());
+    assert_eq!(ch_queues.incidents.len(), 1);
+    assert_eq!(ch_queues.incidents[0].object_id, "inc_018");
+    assert_eq!(ch_queues.incidents[0].severity, "critical");
+    // The horizon is the experiment decision at 10:00; the incident at 09:10
+    // is 50 minutes old at the covered data, not however old the wall clock
+    // makes it.
+    assert_eq!(ch_queues.incidents[0].age_seconds, 3_000);
+    assert!(ch_queues.due_decisions.is_empty());
+    assert!(ch_queues.overdue_jobs.is_empty());
+    assert!(ch_queues.stale_accounts.is_empty());
+    assert_eq!(ch_queues.held_fees.len(), 1);
+    assert_eq!(ch_queues.held_fees[0].object_id, "ch_0247:2026-10");
+    assert_eq!(ch_queues.held_fees[0].age_seconds, 3_000);
 
     // Tenant isolation: another publisher sees nothing.
     let other = QueryScope::new("orbit", time(HORIZON));
@@ -1857,6 +1864,410 @@ async fn real_clickhouse_sql_fast_path_agrees_with_the_portable_path() {
     match (result, dropped) {
         (Ok(()), Ok(())) => println!("sql-parity PASS; test database {database} dropped"),
         (Err(error), _) => panic!("sql-parity failed: {error}"),
+        (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
+    }
+}
+
+/// Operator-wide revenue keeps the published projection's per-publisher row
+/// shape in both readers, and breakdowns come back in one deterministic
+/// order (revenue descending, then the key ascending).
+async fn run_operator_wide_revenue(store: &ClickHouseStore) -> Result<(), String> {
+    let map = |error: apex_analytics::store::StoreError| error.to_string();
+    store.ensure_schema().await.map_err(map)?;
+    let day = |publisher: &str, platform: &str, country: Option<&str>, revenue: i64| ReportDayRow {
+        publisher_id: publisher.into(),
+        platform: platform.into(),
+        platform_account_id: "acct_orm".into(),
+        day: "2026-10-02".into(),
+        finality: "final".into(),
+        revenue_micros: Some(revenue),
+        impressions: Some(1_000),
+        currency: Some("USD".into()),
+        country: country.map(str::to_string),
+        ad_unit_id: None,
+        format: None,
+        source_digest: None,
+    };
+    // Two publishers, two platforms: the same (day, platform, currency)
+    // appears once per publisher, and the revenue order is the reverse of
+    // the alphabetical platform order. `bpub` also splits one day by
+    // country: the per-dimension rows are separate source facts and both
+    // must reach the daily total.
+    let rows = vec![
+        day("apub", "zeta", None, 2_000_000),
+        day("apub", "alpha", None, 1_000_000),
+        day("bpub", "zeta", Some("DE"), 1_500_000),
+        day("bpub", "zeta", Some("GB"), 1_500_000),
+    ];
+    store.insert_report_days(&rows).await.map_err(map)?;
+    let memory = MemoryStore::new();
+    memory.ensure_schema().await.map_err(map)?;
+    memory.insert_report_days(&rows).await.map_err(map)?;
+
+    let report = rebuild_batch(store, "operator-wide")
+        .await
+        .map_err(|error| error.to_string())?;
+    let comparison = compare_report(store, &report)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(comparison.is_clean(), "{comparison:?}");
+    publish(store, "operator-wide")
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let reader = ClickHouseReader::new(store.clone());
+    let memory_reader = MemoryReader::new(memory);
+    let wide = QueryScope::operator_wide(time(HORIZON));
+
+    let ch_daily = reader.revenue_daily(&wide).await.map_err(map)?;
+    let mem_daily = memory_reader.revenue_daily(&wide).await.map_err(map)?;
+    assert_eq!(ch_daily, mem_daily, "operator-wide revenue_daily parity");
+    assert_eq!(
+        ch_daily.len(),
+        3,
+        "one row per publisher and platform, never merged"
+    );
+    let amounts: Vec<(&str, i64)> = ch_daily
+        .iter()
+        .map(|row| (row.platform.as_str(), row.revenue.micros))
+        .collect();
+    assert_eq!(
+        amounts,
+        vec![
+            ("alpha", 1_000_000),
+            ("zeta", 2_000_000),
+            ("zeta", 3_000_000)
+        ],
+        "ordered by day, platform, currency, publisher"
+    );
+    assert_eq!(
+        ch_daily[2].source_days, 2,
+        "the DE and GB rows both contributed to bpub's total"
+    );
+
+    let ch_breakdown = reader
+        .revenue_breakdown(&wide, BreakdownDimension::Platform)
+        .await
+        .map_err(map)?;
+    let mem_breakdown = memory_reader
+        .revenue_breakdown(&wide, BreakdownDimension::Platform)
+        .await
+        .map_err(map)?;
+    assert_eq!(ch_breakdown, mem_breakdown, "breakdown parity");
+    let order: Vec<(&str, i64)> = ch_breakdown
+        .iter()
+        .map(|row| (row.dimension_value.as_str(), row.revenue.micros))
+        .collect();
+    assert_eq!(
+        order,
+        vec![("zeta", 5_000_000), ("alpha", 1_000_000)],
+        "revenue descending, identical in both readers"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_operator_wide_revenue_shape() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set");
+            return;
+        }
+    };
+    let database = unique_database();
+    let config = ClickHouseConfig {
+        http_url,
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    };
+    let store = match ClickHouseStore::new(config) {
+        Ok(store) => store,
+        Err(error) => panic!("store configuration: {error}"),
+    };
+    println!("operator-wide revenue database: {database}");
+    let result = run_operator_wide_revenue(&store).await;
+    let dropped = store.drop_database().await;
+    match (result, dropped) {
+        (Ok(()), Ok(())) => println!("operator-wide revenue PASS; database {database} dropped"),
+        (Err(error), _) => panic!("operator-wide revenue failed: {error}"),
+        (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
+    }
+}
+
+/// Queue ages and membership are as of the covered data on both readers:
+/// the memory anchor is the newest stored occurrence and the ClickHouse
+/// anchor is the published snapshot's recorded `source_event_max`. The
+/// requested as-of never enters either.
+async fn run_queue_anchor(store: &ClickHouseStore) -> Result<(), String> {
+    let map = |error: apex_analytics::store::StoreError| error.to_string();
+    store.ensure_schema().await.map_err(map)?;
+    let horizon = time(HORIZON);
+    let at = |offset_ms: i64| UtcMillis::from_unix_millis(horizon.unix_millis() + offset_ms);
+    let minutes = |count: i64| count * 60 * 1_000;
+    let fixture = vec![
+        // An open incident three hours before the horizon.
+        scoped(builder(EventType::IncidentChanged, EventSource::Operator))
+            .with_event_id("anchor_incident")
+            .with_occurred_at(at(-minutes(180)))
+            .with_received_at(at(-minutes(180)))
+            .with_outcome("critical")
+            .with_payload(EventPayload {
+                incident_id: Some("inc_anchor".into()),
+                owner: Some("maya".into()),
+                impact: Some("anchor parity fixture".into()),
+                state: Some("open".into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("incident"),
+        // A held fee thirty minutes after the horizon, with no release.
+        scoped(builder(EventType::FeeHeld, EventSource::Finance))
+            .with_event_id("anchor_fee_held")
+            .with_occurred_at(at(minutes(30)))
+            .with_received_at(at(minutes(30)))
+            .with_reason_code("proof_hold")
+            .with_payload(EventPayload {
+                change_id: Some("ch_anchor".into()),
+                period: Some("2026-10".into()),
+                currency: Some("USD".into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("held fee"),
+        // A registered window that completes one day AFTER the newest fact:
+        // it must not be queued, because the queues are as of the covered
+        // data.
+        scoped(builder(
+            EventType::ExperimentRegistered,
+            EventSource::Worker,
+        ))
+        .with_event_id("anchor_registered")
+        .with_occurred_at(at(minutes(60)))
+        .with_received_at(at(minutes(60)))
+        .with_payload(EventPayload {
+            experiment_id: Some("exp_anchor".into()),
+            source_digest: Some("c".repeat(64)),
+            registered_metric: Some("revenue_per_user".into()),
+            window_days: Some(14),
+            ..EventPayload::default()
+        })
+        .build()
+        .expect("registered"),
+        scoped(builder(EventType::ExperimentStarted, EventSource::Worker))
+            .with_event_id("anchor_started")
+            .with_occurred_at(at(-13 * 24 * 60 * minutes(1)))
+            .with_received_at(at(-13 * 24 * 60 * minutes(1)))
+            .with_payload(EventPayload {
+                experiment_id: Some("exp_anchor".into()),
+                state: Some("running".into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("started"),
+    ];
+
+    let account = apex_analytics::store::AccountRow {
+        publisher_id: "northstar".into(),
+        account_id: "acct_anchor".into(),
+        stage: "audit_delivered".into(),
+        owner: Some("maya".into()),
+        platforms: vec!["applovin_max".into()],
+        first_seen: "2026-09-01".into(),
+        stage_updated: "2026-09-20".into(),
+    };
+
+    store.insert(&fixture).await.map_err(map)?;
+    store
+        .insert_accounts(std::slice::from_ref(&account))
+        .await
+        .map_err(map)?;
+    let memory = MemoryStore::new();
+    memory.ensure_schema().await.map_err(map)?;
+    memory.insert(&fixture).await.map_err(map)?;
+    memory
+        .insert_accounts(std::slice::from_ref(&account))
+        .await
+        .map_err(map)?;
+
+    let report = rebuild_batch(store, "queue-anchor")
+        .await
+        .map_err(|error| error.to_string())?;
+    let comparison = compare_report(store, &report)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert!(comparison.is_clean(), "{comparison:?}");
+    publish(store, "queue-anchor")
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let reader = ClickHouseReader::new(store.clone());
+    let memory_reader = MemoryReader::new(memory);
+    // A scope as-of five days after the data: it must not move any age.
+    let as_of = UtcMillis::from_unix_millis(horizon.unix_millis() + 5 * 24 * 60 * minutes(1));
+    let wide = QueryScope::operator_wide(as_of);
+    let ch = reader.operator_queues(&wide).await.map_err(map)?;
+    let mem = memory_reader.operator_queues(&wide).await.map_err(map)?;
+    assert_eq!(ch, mem, "queue snapshots match for the same seed");
+
+    // The anchor is the registered snapshot at horizon + 60 minutes.
+    assert_eq!(ch.incidents.len(), 1);
+    assert_eq!(ch.incidents[0].object_id, "inc_anchor");
+    assert_eq!(
+        ch.incidents[0].age_seconds,
+        4 * 3_600,
+        "four hours: three before the horizon plus the covered hour after"
+    );
+    assert_eq!(ch.held_fees.len(), 1);
+    assert_eq!(ch.held_fees[0].age_seconds, 30 * 60);
+    assert!(
+        ch.due_decisions.is_empty(),
+        "the window completes after the covered data"
+    );
+    // 2026-09-20T00:00 to 2026-10-15T10:10 is 25 days and 10 hours 10 mins.
+    assert_eq!(ch.stale_accounts.len(), 1);
+    assert_eq!(
+        ch.stale_accounts[0].age_seconds,
+        25 * 86_400 + 10 * 3_600 + 10 * 60
+    );
+    assert_eq!(ch.as_of, as_of.to_rfc3339_millis());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_queue_anchor_parity() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set");
+            return;
+        }
+    };
+    let database = unique_database();
+    let config = ClickHouseConfig {
+        http_url,
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    };
+    let store = match ClickHouseStore::new(config) {
+        Ok(store) => store,
+        Err(error) => panic!("store configuration: {error}"),
+    };
+    println!("queue anchor database: {database}");
+    let result = run_queue_anchor(&store).await;
+    let dropped = store.drop_database().await;
+    match (result, dropped) {
+        (Ok(()), Ok(())) => println!("queue anchor PASS; database {database} dropped"),
+        (Err(error), _) => panic!("queue anchor failed: {error}"),
+        (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
+    }
+}
+
+/// `dedup_rejects` is the raw duplicate rows pending merge: ClickHouse
+/// reports the physical surplus until an `OPTIMIZE ... FINAL`, the memory
+/// store collapses at insert time and always reports a real zero.
+async fn run_duplicate_rows_pending(store: &ClickHouseStore) -> Result<(), String> {
+    let map = |error: apex_analytics::store::StoreError| error.to_string();
+    store.ensure_schema().await.map_err(map)?;
+    let event = fee_computed_known_value();
+    // Merges are held back so the surplus is observable deterministically.
+    store
+        .execute_statement(&format!(
+            "SYSTEM STOP MERGES {}.domain_events",
+            store.database()
+        ))
+        .await
+        .map_err(map)?;
+    store
+        .insert(std::slice::from_ref(&event))
+        .await
+        .map_err(map)?;
+    store
+        .insert(std::slice::from_ref(&event))
+        .await
+        .map_err(map)?;
+
+    let reader = ClickHouseReader::new(store.clone());
+    let wide = QueryScope::operator_wide(time(HORIZON));
+    let pending = reader.data_quality(&wide).await.map_err(map)?;
+    assert_eq!(
+        pending.dedup_rejects,
+        Some(1),
+        "one raw duplicate row is pending a merge"
+    );
+    assert!(
+        pending
+            .unavailable
+            .iter()
+            .all(|reason| !reason.contains("dedup_rejects")),
+        "the count is reported, not excused: {:?}",
+        pending.unavailable
+    );
+
+    // The memory store collapses immediately: a real zero.
+    let memory = MemoryStore::new();
+    memory.ensure_schema().await.map_err(map)?;
+    memory
+        .insert(std::slice::from_ref(&event))
+        .await
+        .map_err(map)?;
+    memory
+        .insert(std::slice::from_ref(&event))
+        .await
+        .map_err(map)?;
+    let memory_reader = MemoryReader::new(memory);
+    let memory_quality = memory_reader.data_quality(&wide).await.map_err(map)?;
+    assert_eq!(memory_quality.dedup_rejects, Some(0));
+
+    // After the forced merge the surplus is gone.
+    store
+        .execute_statement(&format!(
+            "SYSTEM START MERGES {}.domain_events",
+            store.database()
+        ))
+        .await
+        .map_err(map)?;
+    store
+        .execute_statement(&format!(
+            "OPTIMIZE TABLE {}.domain_events FINAL",
+            store.database()
+        ))
+        .await
+        .map_err(map)?;
+    let merged = reader.data_quality(&wide).await.map_err(map)?;
+    assert_eq!(
+        merged.dedup_rejects,
+        Some(0),
+        "OPTIMIZE FINAL collapses the replays"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_clickhouse_duplicate_rows_pending_merge() {
+    let http_url = match std::env::var(CH_ENV) {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            println!("SKIP: {CH_ENV} is not set");
+            return;
+        }
+    };
+    let database = unique_database();
+    let config = ClickHouseConfig {
+        http_url,
+        database: database.clone(),
+        request_timeout_ms: 60_000,
+    };
+    let store = match ClickHouseStore::new(config) {
+        Ok(store) => store,
+        Err(error) => panic!("store configuration: {error}"),
+    };
+    println!("duplicate rows database: {database}");
+    let result = run_duplicate_rows_pending(&store).await;
+    let dropped = store.drop_database().await;
+    match (result, dropped) {
+        (Ok(()), Ok(())) => println!("duplicate rows PASS; database {database} dropped"),
+        (Err(error), _) => panic!("duplicate rows failed: {error}"),
         (Ok(()), Err(error)) => panic!("test database cleanup failed: {error}"),
     }
 }

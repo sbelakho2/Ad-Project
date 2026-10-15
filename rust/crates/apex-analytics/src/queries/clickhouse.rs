@@ -4,12 +4,16 @@
 //! Every statement uses `{name:Type}` bound parameters delivered over the
 //! HTTP `param_*` keys; no scope value is ever interpolated into SQL. An
 //! empty string parameter means "no filter", which keeps one statement shape
-//! per read model. The money read models (`revenue_daily`,
-//! `operator_queues`) read the projection tables the spec names for exactly
-//! this purpose, pinned to the currently PUBLISHED as-of version (staged
-//! rebuilds stay invisible until `projections::publish`); the remaining
-//! models are event-sourced and must stay behind the projection compare
-//! before a switch (see [`crate::projections::enforce_switch`]).
+//! per read model. `revenue_daily` reads the `customer_daily` projection the
+//! spec names for exactly this purpose, pinned to the currently PUBLISHED
+//! as-of version (staged rebuilds stay invisible until
+//! `projections::publish`). `operator_queues` is likewise pinned to the
+//! published snapshot, but recomputes membership and ages from the covered
+//! facts against the horizon that snapshot recorded (`source_event_max`), so
+//! the queues are as of the covered data rather than the wall clock, exactly
+//! like the memory reader. The remaining models are event-sourced and must
+//! stay behind the projection compare before a switch (see
+//! [`crate::projections::enforce_switch`]).
 //!
 //! Event-scoped models fetch the scope's history: bounded by the scope's
 //! day range when one is set, and by the 90-day raw-event TTL otherwise.
@@ -20,8 +24,11 @@
 use async_trait::async_trait;
 
 use crate::envelope::{DomainEvent, EventType};
-use crate::projections::OperatorQueueRow;
-use crate::store::{domain_event_from_row, ClickHouseStore, ReportDayRow, StoreError};
+use crate::projections::compute_operator_queues;
+use crate::store::{
+    domain_event_from_row, AccountRow, ClickHouseStore, ProjectionStore, ReportDayRow, StoreError,
+};
+use crate::timestamp::UtcMillis;
 
 use super::dto::{
     ActivationFunnel, BreakdownDimension, DataQuality, ExperimentEffectiveness,
@@ -218,7 +225,7 @@ impl AnalyticsReader for ClickHouseReader {
              \x20 AND ({{to:String}} = '' OR customer_daily.day <= toDateOrZero({{to:String}}))\n\
              \x20 AND as_of_version = (SELECT max(as_of_version) FROM {database}.projection_versions \
              WHERE projection_name = 'customer_daily' AND published = 1)\n\
-             ORDER BY day, platform, currency"
+             ORDER BY day, platform, currency, publisher_id"
         );
         let rows = self
             .store
@@ -285,7 +292,7 @@ impl AnalyticsReader for ClickHouseReader {
              \x20 AND ({{currency:String}} = '' OR currency = {{currency:String}})\n\
              \x20 AND ({{from:String}} = '' OR report.day >= toDateOrZero({{from:String}}))\n\
              \x20 AND ({{to:String}} = '' OR report.day <= toDateOrZero({{to:String}}))\n\
-             GROUP BY dimension_value, currency ORDER BY revenue_micros DESC, dimension_value"
+             GROUP BY dimension_value, currency ORDER BY revenue_micros DESC, dimension_value, currency"
         );
         let rows = self
             .store
@@ -391,56 +398,67 @@ impl AnalyticsReader for ClickHouseReader {
 
     async fn operator_queues(&self, scope: &QueryScope) -> Result<OperatorQueues, StoreError> {
         let database = self.store.database();
-        // The queues are a rebuilt snapshot; read the latest PUBLISHED
-        // as-of version (a staged rebuild stays invisible until publish).
+        // The queues are a rebuilt snapshot and describe the covered data:
+        // ages and membership are computed against the horizon the published
+        // snapshot recorded (`source_event_max`), never the wall clock. A
+        // read before the first publish returns empty queues, exactly the
+        // state of the empty published projection.
+        let version_rows = self
+            .store
+            .fetch_rows(
+                &format!(
+                    "SELECT toString(source_event_max) AS source_event_max \
+                     FROM {database}.projection_versions \
+                     WHERE projection_name = 'operator_queues' AND published = 1 \
+                     ORDER BY as_of_version DESC LIMIT 1"
+                ),
+                &[],
+            )
+            .await?;
+        let Some(version_row) = version_rows.first() else {
+            return Ok(model::group_operator_queues(scope.as_of, Vec::new()));
+        };
+        let anchor = version_row
+            .get("source_event_max")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            // ClickHouse renders DateTime64 as `YYYY-MM-DD hh:mm:ss.fff`,
+            // which `parse_rfc3339` reads as UTC.
+            .and_then(|value| UtcMillis::parse_rfc3339(value).ok())
+            .unwrap_or(scope.as_of);
+        // Recompute membership and ages from the stored facts against the
+        // covered-data anchor: the identical pure computation the memory
+        // reader runs over its facts, so both readers answer identically.
         let select = format!(
-            "SELECT queue, object_id, publisher_id, severity, age_seconds, owner, next_action \
-             FROM {database}.operator_queues\n\
-             WHERE as_of_version = (SELECT max(as_of_version) FROM {database}.projection_versions \
-             WHERE projection_name = 'operator_queues' AND published = 1)\n\
-             \x20 AND ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
-             ORDER BY queue, age_seconds DESC, object_id"
+            "SELECT * FROM {database}.domain_events FINAL\n\
+             WHERE ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
+             ORDER BY occurred_at_utc, source, event_id"
         );
         let rows = self
             .store
-            .fetch_rows(&select, &Self::parameters(scope))
+            .fetch_rows(&select, &[("publisher", scope.publisher_id.as_str())])
             .await?;
-        let mut queues = OperatorQueues {
-            as_of: scope.as_of.to_rfc3339_millis(),
-            incidents: Vec::new(),
-            due_decisions: Vec::new(),
-            stale_accounts: Vec::new(),
-            overdue_jobs: Vec::new(),
-            held_fees: Vec::new(),
-        };
-        for row in &rows {
-            let text = |key: &str| {
-                row.get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            };
-            let queue_row = OperatorQueueRow {
-                queue: text("queue").unwrap_or_default(),
-                object_id: text("object_id").unwrap_or_default(),
-                publisher_id: text("publisher_id").unwrap_or_default(),
-                severity: text("severity").unwrap_or_default(),
-                age_seconds: row
-                    .get("age_seconds")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                owner: text("owner"),
-                next_action: text("next_action").unwrap_or_default(),
-            };
-            match queue_row.queue.as_str() {
-                "incidents" => queues.incidents.push(queue_row),
-                "due_decisions" => queues.due_decisions.push(queue_row),
-                "stale_accounts" => queues.stale_accounts.push(queue_row),
-                "overdue_jobs" => queues.overdue_jobs.push(queue_row),
-                "held_fees" => queues.held_fees.push(queue_row),
-                _ => {}
-            }
-        }
-        Ok(queues)
+        let events: Vec<DomainEvent> = rows
+            .iter()
+            .map(domain_event_from_row)
+            .collect::<Result<_, _>>()?;
+        // Only the covered data counts: facts past the snapshot's horizon
+        // are not part of the published queues.
+        let events: Vec<DomainEvent> = events
+            .into_iter()
+            .filter(|event| event.occurred_at_utc <= anchor)
+            .collect();
+        let accounts: Vec<AccountRow> = self
+            .store
+            .load_accounts()
+            .await?
+            .into_iter()
+            .filter(|account| {
+                scope.publisher_id.is_empty() || account.publisher_id == scope.publisher_id
+            })
+            .collect();
+        let rows = compute_operator_queues(&events, &accounts, anchor);
+        Ok(model::group_operator_queues(scope.as_of, rows))
     }
 
     async fn ingestion_health(

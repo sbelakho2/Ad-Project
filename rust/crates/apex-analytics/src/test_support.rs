@@ -309,7 +309,7 @@ pub(crate) fn known_value_report_days() -> Vec<ReportDayRow> {
             country: Some(if day <= 6 { "DE" } else { "GB" }.into()),
             ad_unit_id: Some("rw_de_01".into()),
             format: Some("rewarded".into()),
-            source_digest: Some(format!("{:064x}", day)),
+            source_digest: Some(format!("{day:064x}")),
         })
         .collect()
 }

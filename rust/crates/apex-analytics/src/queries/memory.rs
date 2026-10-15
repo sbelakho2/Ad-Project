@@ -26,31 +26,6 @@ impl MemoryReader {
     pub fn new(store: MemoryStore) -> Self {
         Self { store }
     }
-
-    fn queues_from_rows(
-        as_of: &crate::timestamp::UtcMillis,
-        rows: Vec<crate::projections::OperatorQueueRow>,
-    ) -> OperatorQueues {
-        let mut queues = OperatorQueues {
-            as_of: as_of.to_rfc3339_millis(),
-            incidents: Vec::new(),
-            due_decisions: Vec::new(),
-            stale_accounts: Vec::new(),
-            overdue_jobs: Vec::new(),
-            held_fees: Vec::new(),
-        };
-        for row in rows {
-            match row.queue.as_str() {
-                "incidents" => queues.incidents.push(row),
-                "due_decisions" => queues.due_decisions.push(row),
-                "stale_accounts" => queues.stale_accounts.push(row),
-                "overdue_jobs" => queues.overdue_jobs.push(row),
-                "held_fees" => queues.held_fees.push(row),
-                _ => {}
-            }
-        }
-        queues
-    }
 }
 
 #[async_trait]
@@ -91,8 +66,10 @@ impl AnalyticsReader for MemoryReader {
 
     async fn data_quality(&self, scope: &QueryScope) -> Result<DataQuality, StoreError> {
         let days = self.store.load_report_days().await?;
-        let (_, duplicates) = self.store.insert_stats();
-        Ok(model::data_quality(scope, &days, Some(duplicates)))
+        // The memory store collapses replays immediately, so at read time
+        // there are never raw duplicate rows pending a merge; the field is
+        // a real zero here, not a guess.
+        Ok(model::data_quality(scope, &days, Some(0)))
     }
 
     async fn object_timeline(
@@ -114,10 +91,13 @@ impl AnalyticsReader for MemoryReader {
         // The queues are operator-scoped rows; like the ClickHouse projection
         // they honor the publisher filter but not the platform filter.
         let publisher = scope.publisher_id.clone();
-        let events: Vec<crate::envelope::DomainEvent> = self
-            .store
-            .load_events()
-            .await?
+        let stored = self.store.load_events().await?;
+        // Ages and membership are as of the covered data, not the wall
+        // clock: the anchor is the newest occurrence among the stored events,
+        // the same horizon the ClickHouse snapshot records as
+        // `source_event_max`.
+        let anchor = model::covered_data_anchor(&stored, scope.as_of);
+        let events: Vec<crate::envelope::DomainEvent> = stored
             .into_iter()
             .filter(|event| {
                 publisher.is_empty() || event.publisher_id.as_deref() == Some(publisher.as_str())
@@ -130,8 +110,8 @@ impl AnalyticsReader for MemoryReader {
             .into_iter()
             .filter(|account| publisher.is_empty() || account.publisher_id == publisher)
             .collect::<Vec<_>>();
-        let rows = compute_operator_queues(&events, &accounts, scope.as_of);
-        Ok(Self::queues_from_rows(&scope.as_of, rows))
+        let rows = compute_operator_queues(&events, &accounts, anchor);
+        Ok(model::group_operator_queues(scope.as_of, rows))
     }
 
     async fn ingestion_health(
@@ -986,5 +966,251 @@ mod tests {
         let reader = MemoryReader::new(store);
         let rows = reader.fee_rows(&scope()).await.expect("fees");
         assert_eq!(rows.len(), 1, "a replay is one fact");
+        // The memory store collapses replays at insert time, so the raw
+        // duplicate count pending a merge is a real zero.
+        let quality = reader.data_quality(&scope()).await.expect("quality");
+        assert_eq!(quality.dedup_rejects, Some(0));
+    }
+
+    fn report_day(
+        publisher: &str,
+        platform: &str,
+        day: &str,
+        currency: &str,
+        revenue: i64,
+        country: Option<&str>,
+    ) -> ReportDayRow {
+        ReportDayRow {
+            publisher_id: publisher.into(),
+            platform: platform.into(),
+            platform_account_id: "acct_1".into(),
+            day: day.into(),
+            finality: "final".into(),
+            revenue_micros: Some(revenue),
+            impressions: Some(10),
+            currency: Some(currency.into()),
+            country: country.map(str::to_string),
+            ad_unit_id: None,
+            format: None,
+            source_digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn per_dimension_report_rows_reach_the_daily_total() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        // Same publisher, platform, account and day, split by country: both
+        // rows are separate source facts (the schema key includes country,
+        // ad unit and format) and their amounts must both survive.
+        let de = report_day(
+            "northstar",
+            "applovin_max",
+            "2026-10-01",
+            "USD",
+            1_000_000,
+            Some("DE"),
+        );
+        let gb = report_day(
+            "northstar",
+            "applovin_max",
+            "2026-10-01",
+            "USD",
+            2_000_000,
+            Some("GB"),
+        );
+        store.insert_report_days(&[de, gb]).await.expect("days");
+        let reader = MemoryReader::new(store);
+        let daily = reader.revenue_daily(&scope()).await.expect("daily");
+        assert_eq!(daily.len(), 1);
+        assert_eq!(
+            daily[0].revenue.micros, 3_000_000,
+            "the per-country rows both reach the total, like the projection"
+        );
+        assert_eq!(daily[0].source_days, 2);
+    }
+
+    #[tokio::test]
+    async fn operator_wide_revenue_daily_keeps_one_row_per_publisher() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        store
+            .insert_report_days(&[
+                report_day("apub", "applovin_max", "2026-10-01", "USD", 1_000_000, None),
+                report_day("bpub", "applovin_max", "2026-10-01", "USD", 2_000_000, None),
+            ])
+            .await
+            .expect("days");
+        let reader = MemoryReader::new(store);
+        // The `customer_daily` projection yields one row per publisher; an
+        // operator-wide read must keep that shape instead of summing the two
+        // publishers into one row.
+        let wide = reader
+            .revenue_daily(&QueryScope::operator_wide(occurred()))
+            .await
+            .expect("wide");
+        assert_eq!(wide.len(), 2, "one row per publisher, never merged");
+        let amounts: Vec<i64> = wide.iter().map(|row| row.revenue.micros).collect();
+        assert_eq!(amounts, vec![1_000_000, 2_000_000]);
+        // A tenant scope still narrows to that publisher's single row.
+        let scoped = reader
+            .revenue_daily(&QueryScope::new("bpub", occurred()))
+            .await
+            .expect("scoped");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].revenue.micros, 2_000_000);
+    }
+
+    #[tokio::test]
+    async fn revenue_breakdown_orders_by_revenue_desc_then_key_ascending() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        // Alphabetical order would be [alpha, zeta]; the shared order is
+        // revenue descending, which is the reverse.
+        store
+            .insert_report_days(&[
+                report_day("northstar", "zeta", "2026-10-01", "USD", 2_000_000, None),
+                report_day("northstar", "alpha", "2026-10-01", "USD", 1_000_000, None),
+            ])
+            .await
+            .expect("days");
+        let reader = MemoryReader::new(store);
+        let rows = reader
+            .revenue_breakdown(&scope(), BreakdownDimension::Platform)
+            .await
+            .expect("breakdown");
+        let order: Vec<(&str, i64)> = rows
+            .iter()
+            .map(|row| (row.dimension_value.as_str(), row.revenue.micros))
+            .collect();
+        assert_eq!(order, vec![("zeta", 2_000_000), ("alpha", 1_000_000)]);
+        // Equal revenues fall back to the key ascending.
+        assert!(rows[0].share_bp.unwrap_or(0) > rows[1].share_bp.unwrap_or(0));
+    }
+
+    #[tokio::test]
+    async fn fee_fold_keeps_the_newer_computed_row_regardless_of_insertion_order() {
+        let fee_at = |event_id: &str, offset_ms: i64, source_amount: i64, proof: char| {
+            let at = UtcMillis::from_unix_millis(occurred().unix_millis() + offset_ms);
+            valid_event_builder(EventType::FeeComputed)
+                .with_event_id(event_id)
+                .with_occurred_at(at)
+                .with_received_at(at)
+                .with_payload(EventPayload {
+                    change_id: Some("ch_order".into()),
+                    period: Some("2026-10".into()),
+                    currency: Some("USD".into()),
+                    source_amount_micros: Some(source_amount),
+                    bound_bp: Some(300),
+                    rate_bp: Some(2_000),
+                    active_days: Some(30),
+                    proof_hashes: Some(vec![proof.to_string().repeat(64)]),
+                    ..EventPayload::default()
+                })
+                .build()
+                .expect("fee order event")
+        };
+        // The harness probe: a stale computed row (51,500.00 at T) and a
+        // newer one (1,000.00 at T+1h) for the same change. The ClickHouse
+        // fold, fed events in occurrence order, keeps the newer row; memory
+        // must fold identically whichever order the rows were inserted in.
+        let stale = fee_at("fee_order_z", 0, 51_500_000_000, 'd');
+        let newer = fee_at("fee_order_a", 3_600_000, 1_000_000_000, 'a');
+        for order in [
+            [stale.clone(), newer.clone()],
+            [newer.clone(), stale.clone()],
+        ] {
+            let store = MemoryStore::new();
+            store.ensure_schema().await.expect("schema");
+            store.insert(&order).await.expect("insert");
+            let reader = MemoryReader::new(store);
+            let rows = reader.fee_rows(&scope()).await.expect("fees");
+            let row = rows
+                .iter()
+                .find(|row| row.change_id == "ch_order")
+                .expect("folded row");
+            assert_eq!(
+                row.source_amount.as_ref().map(|money| money.micros),
+                Some(1_000_000_000),
+                "the newer computed row must win regardless of insertion order"
+            );
+            assert_eq!(row.proof_refs, vec!["a".repeat(64)]);
+            let detail = reader
+                .fee_detail(&scope(), "ch_order")
+                .await
+                .expect("detail read")
+                .expect("detail");
+            assert_eq!(detail.eligible_revenue.micros, 1_000_000_000);
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_queue_ages_anchor_at_the_covered_data_horizon() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        let horizon = occurred();
+        let three_hours_ms = 3 * 60 * 60 * 1_000;
+        let incident_at = UtcMillis::from_unix_millis(horizon.unix_millis() - three_hours_ms);
+        let incident = valid_event_builder(EventType::IncidentChanged)
+            .with_event_id("anchor_incident")
+            .with_occurred_at(incident_at)
+            .with_received_at(incident_at)
+            .with_outcome("critical")
+            .with_payload(EventPayload {
+                incident_id: Some("inc_anchor".into()),
+                owner: Some("maya".into()),
+                impact: Some("anchor fixture".into()),
+                state: Some("open".into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("incident");
+        // The registered window completes one day AFTER the covered data:
+        // it must not appear in the read even when the requested as-of is a
+        // day later, because the queues describe the covered data only.
+        let registered = valid_event_builder(EventType::ExperimentRegistered)
+            .with_event_id("anchor_registered")
+            .with_payload(EventPayload {
+                experiment_id: Some("exp_anchor".into()),
+                source_digest: Some("c".repeat(64)),
+                registered_metric: Some("revenue_per_user".into()),
+                window_days: Some(14),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("registered");
+        let started = valid_event_builder(EventType::ExperimentStarted)
+            .with_event_id("anchor_started")
+            .with_occurred_at(days_ago(13))
+            .with_received_at(days_ago(13))
+            .with_payload(EventPayload {
+                experiment_id: Some("exp_anchor".into()),
+                state: Some("running".into()),
+                ..EventPayload::default()
+            })
+            .build()
+            .expect("started");
+        store
+            .insert(&[incident, registered, started])
+            .await
+            .expect("events");
+        let reader = MemoryReader::new(store);
+
+        let as_of = UtcMillis::from_unix_millis(horizon.unix_millis() + MILLIS_PER_DAY);
+        let queues = reader
+            .operator_queues(&QueryScope::operator_wide(as_of))
+            .await
+            .expect("queues");
+        assert_eq!(queues.incidents.len(), 1);
+        assert_eq!(queues.incidents[0].object_id, "inc_anchor");
+        assert_eq!(
+            queues.incidents[0].age_seconds, 10_800,
+            "the incident is three hours old at the covered-data horizon, not 27 at the wall clock"
+        );
+        assert!(
+            queues.due_decisions.is_empty(),
+            "the window completes after the covered data and is not queued"
+        );
+        assert_eq!(queues.as_of, as_of.to_rfc3339_millis());
     }
 }

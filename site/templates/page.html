@@ -9,7 +9,7 @@
         {% if page.extra.eyebrow %}<p class="eyebrow">{{ page.extra.eyebrow }}</p>{% endif %}
         <h1>{{ page.extra.h1 | default(value=page.title) }}</h1>
         {% if page.extra.lede %}<p class="lede">{{ page.extra.lede }}</p>{% endif %}
-        {% if page.extra.cta %}<p><a class="button" href="{{ page.extra.cta_url | default(value='/free-audit/') }}">{{ page.extra.cta }}</a></p>{% endif %}
+        {% if page.extra.cta %}{% set cta_href = page.extra.cta_url | default(value="/free-audit/") %}<p><a class="button" href="{{ cta_href | safe }}">{{ page.extra.cta }}</a></p>{% endif %}
         {% if page.extra.note %}<p class="hero-note">{{ page.extra.note }}</p>{% endif %}
       </div>
       {% if page.extra.panels %}

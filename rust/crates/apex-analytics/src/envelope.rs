@@ -630,13 +630,16 @@ pub struct EventPayload {
     /// Experiment or lifecycle state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    /// Decision outcome (`keep`, `rollback`, `void`, `extend`, `pending`).
+    /// Decision outcome; the closed vocabulary is
+    /// [`DECISION_VOCABULARY`] (`keep`, `rollback`, `void`, `extend`,
+    /// `pending`), case-normalized to lower case and stored that way.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
     /// Point estimate in basis points.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point_estimate_bp: Option<i64>,
-    /// Billable decision bound in basis points.
+    /// Billable decision bound in basis points; a bound of -100 percent or
+    /// lower has no reproducible basis and is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision_bound_bp: Option<i64>,
     /// Guardrail or guard type.
@@ -1193,7 +1196,7 @@ pub enum ForbiddenClass {
     Empty,
     /// The value is longer than the envelope allows.
     TooLong,
-    /// The value carries a control character.
+    /// The value carries a control or zero-width format character.
     Control,
     /// The value looks like a credential (bearer token, key assignment, JWT).
     Credential,
@@ -1223,6 +1226,15 @@ impl std::fmt::Display for ForbiddenClass {
     }
 }
 
+/// Invisible zero-width format characters that `char::is_control` (Unicode
+/// general category Cc) does not cover but that must never enter a stored
+/// label: once present they cannot be seen or reviewed. U+200B..U+200D
+/// (zero width space, zero width non-joiner, zero width joiner), U+2060
+/// (word joiner) and U+FEFF (zero width no-break space) are refused.
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
 /// Check one string value against the spec's data-minimization rules:
 /// no credentials, no token-looking blobs, no complete query strings.
 ///
@@ -1237,7 +1249,10 @@ pub fn check_string_value(value: &str) -> Result<(), ForbiddenClass> {
     if value.len() > MAX_STRING_BYTES {
         return Err(ForbiddenClass::TooLong);
     }
-    if value.chars().any(|c| c.is_control()) {
+    if value
+        .chars()
+        .any(|c| c.is_control() || is_invisible_format_char(c))
+    {
         return Err(ForbiddenClass::Control);
     }
     let lower = value.to_lowercase();
@@ -1318,6 +1333,11 @@ fn valid_period(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The exact experiment decision vocabulary (spec page 75). Stored decision
+/// labels are case-normalized to lower case first; anything outside this
+/// closed set is refused.
+pub const DECISION_VOCABULARY: [&str; 5] = ["keep", "rollback", "void", "extend", "pending"];
+
 impl DomainEvent {
     /// Start building an event of `event_type` from `source`.
     pub fn builder(event_type: EventType, source: EventSource) -> DomainEventBuilder {
@@ -1343,26 +1363,39 @@ impl DomainEvent {
     }
 
     /// Treat empty strings as absent everywhere (missing is `None`, and an
-    /// empty label is a missing label). List fields keep their shape: an
-    /// empty `missing_inputs` list is a real statement.
+    /// empty label is a missing label). Surrounding whitespace is not data:
+    /// every string value is stored trimmed, and a whitespace-only value
+    /// counts as absent, so it can never satisfy a required field. The
+    /// `decision` vocabulary is lower-case in the catalog, so the decision
+    /// label is case-normalized here and then validated against the exact
+    /// vocabulary. List fields keep their shape: an empty `missing_inputs`
+    /// list is a real statement.
     fn normalize_empty_strings(&mut self) {
-        fn empty_to_none(value: &mut Option<String>) {
-            if value.as_deref() == Some("") {
+        fn blank_to_none(value: &mut Option<String>) {
+            let Some(current) = value.take() else {
+                return;
+            };
+            let trimmed = current.trim();
+            if trimmed.is_empty() {
                 *value = None;
+            } else if trimmed.len() == current.len() {
+                *value = Some(current);
+            } else {
+                *value = Some(trimmed.to_string());
             }
         }
-        empty_to_none(&mut self.publisher_id);
-        empty_to_none(&mut self.platform);
-        empty_to_none(&mut self.object_type);
-        empty_to_none(&mut self.object_id);
-        empty_to_none(&mut self.correlation_id);
-        empty_to_none(&mut self.causation_id);
-        empty_to_none(&mut self.outcome);
-        empty_to_none(&mut self.reason_code);
+        blank_to_none(&mut self.publisher_id);
+        blank_to_none(&mut self.platform);
+        blank_to_none(&mut self.object_type);
+        blank_to_none(&mut self.object_id);
+        blank_to_none(&mut self.correlation_id);
+        blank_to_none(&mut self.causation_id);
+        blank_to_none(&mut self.outcome);
+        blank_to_none(&mut self.reason_code);
         let payload = &mut self.payload;
         macro_rules! clear {
             ($($field:ident),+ $(,)?) => {
-                $(empty_to_none(&mut payload.$field);)+
+                $(blank_to_none(&mut payload.$field);)+
             };
         }
         clear!(
@@ -1421,6 +1454,12 @@ impl DomainEvent {
             authorization,
             result,
         );
+        // The catalog spells the decision vocabulary in lower case; a
+        // producer's `Keep` is the same decision and must be stored and
+        // validated as `keep`.
+        if let Some(decision) = self.payload.decision.take() {
+            self.payload.decision = Some(decision.to_lowercase());
+        }
     }
 
     /// A deterministic identity derived from the event content. Producers
@@ -1492,6 +1531,14 @@ impl DomainEvent {
         if let Some(bound_bp) = self.payload.bound_bp {
             if bound_bp <= -10_000 {
                 return Err(invalid("bound_bp", "bound of -100 percent or lower"));
+            }
+        }
+        if let Some(bound_bp) = self.payload.decision_bound_bp {
+            if bound_bp <= -10_000 {
+                return Err(invalid(
+                    "decision_bound_bp",
+                    "bound of -100 percent or lower",
+                ));
             }
         }
         if let Some(currency) = &self.payload.currency {
@@ -1791,7 +1838,21 @@ impl DomainEvent {
                 require_platform!();
                 need(&payload.experiment_id, "experiment_id")?;
                 need(&payload.decision, "decision")?;
-                if payload.decision.as_deref() == Some("keep") {
+                let decision = payload.decision.as_deref().unwrap_or("");
+                if !DECISION_VOCABULARY.contains(&decision) {
+                    return Err(ValidationError::InvalidValue {
+                        event_type,
+                        field: "decision".to_string(),
+                        reason: format!(
+                            "'{decision}' is outside the decision vocabulary ({})",
+                            DECISION_VOCABULARY.join(", ")
+                        ),
+                    });
+                }
+                // The bound rule applies to the normalized value: a `Keep`
+                // decision (however it was cased) is billable only with a
+                // point estimate and a billable lower bound.
+                if decision == "keep" {
                     if payload.point_estimate_bp.is_none() {
                         return Err(missing("point_estimate_bp"));
                     }
@@ -2694,5 +2755,189 @@ mod tests {
             .build()
             .expect_err("zero version");
         assert!(matches!(error, ValidationError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn whitespace_only_required_strings_are_refused_and_values_are_stored_trimmed() {
+        // route_template: whitespace-only is missing, exactly like "".
+        let mut payload = payload_for(EventType::PublicPageRequested);
+        payload.route_template = Some("   ".into());
+        let error = builder_for(EventType::PublicPageRequested)
+            .with_payload(payload)
+            .build()
+            .expect_err("whitespace-only route template");
+        assert!(matches!(
+            error,
+            ValidationError::MissingField {
+                field: "route_template",
+                ..
+            }
+        ));
+
+        // change_id: the same rule.
+        let mut payload = payload_for(EventType::FeeComputed);
+        payload.change_id = Some("\t ".into());
+        let error = builder_for(EventType::FeeComputed)
+            .with_payload(payload)
+            .build()
+            .expect_err("whitespace-only change id");
+        assert!(matches!(
+            error,
+            ValidationError::MissingField {
+                field: "change_id",
+                ..
+            }
+        ));
+
+        // owner: the same rule.
+        let mut payload = payload_for(EventType::AccountStageChanged);
+        payload.owner = Some("  ".into());
+        let error = builder_for(EventType::AccountStageChanged)
+            .with_payload(payload)
+            .build()
+            .expect_err("whitespace-only owner");
+        assert!(matches!(
+            error,
+            ValidationError::MissingField { field: "owner", .. }
+        ));
+
+        // The envelope scope field follows the same rule.
+        let error = DomainEvent::builder(EventType::FeeComputed, EventSource::Finance)
+            .with_occurred_at(occurred())
+            .with_received_at(occurred())
+            .with_environment("production")
+            .with_service_version("v")
+            .with_platform("applovin_max")
+            .with_publisher_id("   ")
+            .with_payload(payload_for(EventType::FeeComputed))
+            .build()
+            .expect_err("whitespace-only publisher");
+        assert!(matches!(
+            error,
+            ValidationError::MissingField {
+                field: "publisher_id",
+                ..
+            }
+        ));
+
+        // A padded value passes and is stored trimmed.
+        let mut payload = payload_for(EventType::PublicPageRequested);
+        payload.route_template = Some("  /pricing  ".into());
+        let event = builder_for(EventType::PublicPageRequested)
+            .with_payload(payload)
+            .build()
+            .expect("padded values are stored trimmed");
+        assert_eq!(event.payload.route_template.as_deref(), Some("/pricing"));
+        assert_eq!(event.payload.bot_class.as_deref(), Some("unclassified"));
+    }
+
+    #[test]
+    fn zero_width_format_characters_are_refused() {
+        for invisible in ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'] {
+            let value = format!("/pricing{invisible}");
+            assert_eq!(
+                check_string_value(&value),
+                Err(ForbiddenClass::Control),
+                "U+{:04X} must be refused",
+                invisible as u32
+            );
+        }
+        let mut payload = payload_for(EventType::PublicPageRequested);
+        payload.route_template = Some("\u{200B}".into());
+        let error = builder_for(EventType::PublicPageRequested)
+            .with_payload(payload)
+            .build()
+            .expect_err("zero-width route template");
+        assert!(matches!(
+            error,
+            ValidationError::ForbiddenValue {
+                reason: "control character",
+                ..
+            }
+        ));
+        // Ordinary values still pass.
+        assert!(check_string_value("/pricing").is_ok());
+    }
+
+    #[test]
+    fn experiment_decisions_are_normalized_and_vocabulary_bound() {
+        // Case is normalized before validation and storage: `Keep` is the
+        // same decision as `keep`.
+        let mut payload = payload_for(EventType::ExperimentDecided);
+        payload.decision = Some("Keep".into());
+        let event = builder_for(EventType::ExperimentDecided)
+            .with_payload(payload)
+            .build()
+            .expect("Keep is keep");
+        assert_eq!(event.payload.decision.as_deref(), Some("keep"));
+        assert!(event
+            .payload
+            .to_json_string()
+            .contains("\"decision\":\"keep\""));
+
+        let mut payload = payload_for(EventType::ExperimentDecided);
+        payload.decision = Some(" RoLLbAcK ".into());
+        let event = builder_for(EventType::ExperimentDecided)
+            .with_payload(payload)
+            .build()
+            .expect("mixed case is normalized");
+        assert_eq!(event.payload.decision.as_deref(), Some("rollback"));
+
+        // The bound rule applies to the normalized value: a capitalized
+        // Keep without its billable bound is refused.
+        let mut payload = payload_for(EventType::ExperimentDecided);
+        payload.decision = Some("Keep".into());
+        payload.decision_bound_bp = None;
+        let error = builder_for(EventType::ExperimentDecided)
+            .with_payload(payload)
+            .build()
+            .expect_err("Keep needs its billable bound");
+        assert!(matches!(
+            error,
+            ValidationError::MissingField {
+                field: "decision_bound_bp",
+                ..
+            }
+        ));
+
+        // An out-of-band bound is refused too, capitalized or not.
+        let mut payload = payload_for(EventType::ExperimentDecided);
+        payload.decision = Some("Keep".into());
+        payload.decision_bound_bp = Some(-10_000);
+        let error = builder_for(EventType::ExperimentDecided)
+            .with_payload(payload)
+            .build()
+            .expect_err("out-of-band decision bound");
+        assert!(matches!(
+            error,
+            ValidationError::InvalidValue { field, .. } if field == "decision_bound_bp"
+        ));
+
+        // The vocabulary is closed.
+        let mut payload = payload_for(EventType::ExperimentDecided);
+        payload.decision = Some("banana".into());
+        let error = builder_for(EventType::ExperimentDecided)
+            .with_payload(payload)
+            .build()
+            .expect_err("banana is not a decision");
+        assert!(matches!(
+            error,
+            ValidationError::InvalidValue { field, .. } if field == "decision"
+        ));
+
+        // Every vocabulary value builds; only keep carries the bound rule.
+        for decision in DECISION_VOCABULARY {
+            let mut payload = payload_for(EventType::ExperimentDecided);
+            payload.decision = Some(decision.to_string());
+            if decision != "keep" {
+                payload.point_estimate_bp = None;
+                payload.decision_bound_bp = None;
+            }
+            let event = builder_for(EventType::ExperimentDecided)
+                .with_payload(payload)
+                .build()
+                .unwrap_or_else(|error| panic!("{decision} must build: {error}"));
+            assert_eq!(event.payload.decision.as_deref(), Some(decision));
+        }
     }
 }

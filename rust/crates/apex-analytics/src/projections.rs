@@ -822,8 +822,10 @@ pub fn rebuild_sql(
              FROM {db}.accounts FINAL\n\
              GROUP BY cohort_month, publisher_id, stage"
         ),
-        ProjectionName::OperatorQueues => format!(
-            "INSERT INTO {db}.operator_queues\n\
+        ProjectionName::OperatorQueues => {
+            let stale_days = STALE_ACCOUNT_DAYS;
+            format!(
+                "INSERT INTO {db}.operator_queues\n\
              SELECT 'incidents' AS queue,\n\
              \x20   incident_id AS object_id,\n\
              \x20   publisher_id,\n\
@@ -896,8 +898,8 @@ pub fn rebuild_sql(
              \x20     AND release.change_id = e.change_id AND release.period = e.period\n\
              \x20     AND release.occurred_at_utc >= e.occurred_at_utc\n\
              \x20 )",
-            stale_days = STALE_ACCOUNT_DAYS
-        ),
+            )
+        }
     };
     Ok(sql)
 }

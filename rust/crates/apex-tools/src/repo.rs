@@ -75,34 +75,9 @@ impl Repo {
     /// walker: skipped dirs by name, symlinks included as entries.
     pub fn walk(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.walk_into(&self.root, "", &mut out);
+        rec_walk(&self.root, "", &mut out);
         out.sort();
         out
-    }
-
-    fn walk_into(&self, dir: &Path, rel: &str, out: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let child_rel = if rel.is_empty() {
-                name.clone()
-            } else {
-                format!("{rel}/{name}")
-            };
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                if SKIP_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
-                self.walk_into(&entry.path(), &child_rel, out);
-            } else {
-                // Regular files and symlinks (symlink targets are not followed
-                // here; the entry itself is part of the repo).
-                out.push(child_rel);
-            }
-        }
     }
 
     /// Ask git for the tracked-file list with modes (`git ls-files -s`).
@@ -136,6 +111,31 @@ impl Repo {
         rec_markdown(&self.root, "", &skip_extra, &mut out);
         out.sort();
         out
+    }
+}
+
+fn rec_walk(dir: &Path, rel: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let child_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            rec_walk(&entry.path(), &child_rel, out);
+        } else {
+            // Regular files and symlinks (symlink targets are not followed
+            // here; the entry itself is part of the repo).
+            out.push(child_rel);
+        }
     }
 }
 

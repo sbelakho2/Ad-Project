@@ -1363,6 +1363,19 @@ fn kept_changes(ledger: &dyn LedgerLog) -> Vec<(String, apex_lift::billing::Kept
         });
         if let (Some((pre_hash, rate_bp)), Some((at_unix_ms, result_hash, lambda))) = (pre, result)
         {
+            // An out-of-band rate can never bill: the invoice's arithmetic
+            // re-verification refuses it, so the fee preview must not present
+            // it either. Skip loudly instead of diverging from the invoice.
+            if !(apex_core::money::MIN_LIFT_RATE_BP..=apex_core::money::MAX_LIFT_RATE_BP)
+                .contains(&rate_bp)
+            {
+                eprintln!(
+                    "apex-runner: keeping change {name} out of the fee preview: rate {rate_bp} bp is outside [{}, {}] and the invoice would refuse it",
+                    apex_core::money::MIN_LIFT_RATE_BP,
+                    apex_core::money::MAX_LIFT_RATE_BP
+                );
+                continue;
+            }
             out.push((
                 spec.ad_unit_id.clone(),
                 apex_lift::billing::KeptChange {
@@ -2368,6 +2381,100 @@ mod tests {
             })
             .count();
         assert_eq!(billing, 1);
+    }
+
+    #[tokio::test]
+    async fn an_out_of_band_rate_never_reaches_the_fee_preview() {
+        use apex_core::{ExperimentMetric, PlatformId};
+        use apex_lift::records::LiftRecord;
+
+        // A hand-built ledger: one experiment with an out-of-band
+        // pre-registered rate and a kept result. The invoice would refuse
+        // this rate, so the preview path must skip it.
+        let mut tampered = ledger();
+        tampered
+            .append(LedgerRecord::ExperimentStarted {
+                seq: 0,
+                at_unix_ms: NOW,
+                platform: PlatformId::AppLovinMax,
+                experiment_id: "exp_ob".into(),
+                spec: apex_core::ExperimentSpec {
+                    name: "exp_ob".into(),
+                    ad_unit_id: "u1".into(),
+                    metric: ExperimentMetric::Ecpm,
+                    variants: 2,
+                    change_description: "rewarded floor".into(),
+                    test_group_allocation: 25,
+                },
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            })
+            .expect("append started");
+        let prereg = LiftRecord::PreRegistration {
+            experiment_id: "exp_ob".into(),
+            scope: "u1/ee".into(),
+            before_value: serde_json::json!(2_500_000),
+            after_value: serde_json::json!(2_700_000),
+            split: 0.25,
+            metric: "ecpm".into(),
+            burn_in_days: 3,
+            window_days: 14,
+            looks: 1,
+            extension_allowed: false,
+            guardrail_thresholds: serde_json::json!({}),
+            code_version_hash: "deadbeef".into(),
+            rate_bp: 3_000,
+        };
+        let payload = prereg.canonical_json().expect("canonical json");
+        let sha = prereg.sha256_hex().expect("sha");
+        tampered
+            .append(LedgerRecord::lift_record(NOW, &sha, &payload))
+            .expect("append prereg");
+        let result = LiftRecord::Result {
+            experiment_id: "exp_ob".into(),
+            daily_log_ratios: vec![0.1, 0.2],
+            mean_log: 0.15,
+            lower_90: 0.05,
+            lower_99: 0.02,
+            bootstrap_lower: 0.01,
+            decision: "keep".into(),
+            lambda: 1.2,
+        };
+        let payload = result.canonical_json().expect("canonical json");
+        let sha = result.sha256_hex().expect("sha");
+        tampered
+            .append(LedgerRecord::lift_record(NOW + 1, &sha, &payload))
+            .expect("append result");
+
+        assert!(
+            kept_changes(&tampered).is_empty(),
+            "an out-of-band rate is excluded from the preview set"
+        );
+
+        // The same scenario with an in-band rate stays included.
+        let mut in_band = ledger();
+        for record in tampered.records() {
+            match record {
+                LedgerRecord::LiftRecord {
+                    payload,
+                    payload_sha256,
+                    ..
+                } if payload.contains("preRegistration") => {
+                    let fixed = payload.replace("3000", "2000");
+                    in_band
+                        .append(LedgerRecord::lift_record(NOW, payload_sha256, &fixed))
+                        .expect("append fixed prereg");
+                }
+                other => {
+                    in_band.append(other.clone()).expect("append clone");
+                }
+            }
+        }
+        assert_eq!(
+            kept_changes(&in_band).len(),
+            1,
+            "the in-band equivalent stays included"
+        );
     }
 
     #[tokio::test]

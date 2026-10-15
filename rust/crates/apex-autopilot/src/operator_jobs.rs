@@ -228,7 +228,7 @@ pub async fn consume_operator_jobs(
         job.state_history.push(StateChange {
             state: JobState::Running.as_str().to_string(),
             at_ms: now_unix_ms,
-            note: format!("claimed by the {} runner pass", publisher),
+            note: format!("claimed by the {publisher} runner pass"),
         });
         write_job(&path, &job)?;
 

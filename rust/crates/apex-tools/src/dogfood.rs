@@ -325,7 +325,7 @@ pub fn stub_ban(repo: &Repo) -> Result<(), String> {
             bad.join("\n  - ")
         ));
     }
-    println!("stub-ban PASS: no scaffolding markers in {:?}", roots);
+    println!("stub-ban PASS: no scaffolding markers in {roots:?}");
     Ok(())
 }
 

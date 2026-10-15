@@ -13,8 +13,11 @@
 //!   `duplicates_observed` on the HTTP outcome is `None` ("unknown"); the
 //!   `data_quality` read model counts physical duplicate rows instead.
 //! - [`MemoryStore`] deduplicates immediately by `(source, event_id)`: a
-//!   replay with an older or equal `received_at_utc` is dropped and counted,
-//!   a newer received time replaces the row. Tests pin both behaviours.
+//!   replay with a strictly older `received_at_utc` is dropped and counted,
+//!   while an equal or newer received time replaces the row. The equal case
+//!   mirrors the server: `ReplacingMergeTree(version)` keeps the LAST
+//!   inserted row on an equal version, so the last insert wins on both
+//!   backends. Tests pin both behaviours.
 //!
 //! Projections are STAGED: [`ProjectionStore::write_projection`] records an
 //! unpublished version, readers ([`ProjectionStore::load_projection`],
@@ -114,8 +117,12 @@ fn observed_sorting_keys(rows: &[serde_json::Value]) -> Vec<(String, String)> {
 pub struct InsertOutcome {
     /// Rows (events or source rows) sent to the store.
     pub inserted: u64,
-    /// Duplicate rows recognized at insert time. `None` means the store
-    /// removes duplicates at merge time and cannot know (ClickHouse).
+    /// Rows recognized as replays at insert time: for events a strictly
+    /// older `received_at_utc` replay of the `(source, event_id)` key, which
+    /// is dropped. An equal or newer replay replaces the stored row (the
+    /// last insert wins, like the server) and is not counted here. `None`
+    /// means the store removes duplicates at merge time and cannot know
+    /// (ClickHouse).
     pub duplicates_observed: Option<u64>,
 }
 
@@ -705,11 +712,25 @@ struct MemoryState {
     events: BTreeMap<(String, String), DomainEvent>,
     event_inserts: u64,
     event_duplicates: u64,
-    report_days: BTreeMap<(String, String, String, String), ReportDayRow>,
+    report_days: BTreeMap<ReportDayKey, ReportDayRow>,
     accounts: BTreeMap<(String, String), AccountRow>,
     request_logs: Vec<RequestLogRow>,
     projections: BTreeMap<&'static str, BTreeMap<u64, ProjectionSnapshot>>,
 }
+
+/// The report-day dedup key, mirroring the `report_days` sorting key of the
+/// schema exactly: `(publisher_id, platform, platform_account_id, day,
+/// country, ad_unit_id, format)`. Rows that differ only in a breakdown
+/// dimension are separate source facts and must never collapse into one.
+type ReportDayKey = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// The newest PUBLISHED snapshot of a projection, if any.
 fn published_snapshot<'a>(state: &'a MemoryState, name: &str) -> Option<&'a ProjectionSnapshot> {
@@ -725,10 +746,10 @@ fn published_snapshot<'a>(state: &'a MemoryState, name: &str) -> Option<&'a Proj
 /// An in-memory store implementing the same contract as ClickHouse.
 ///
 /// Dedup semantics are immediate and exact: `(source, event_id)` is the key;
-/// replay with an equal or older `received_at_utc` is dropped and counted; a
-/// newer received time replaces the stored row. This mirrors
-/// `ReplacingMergeTree(version)` with `version = received_at_utc` collapsed to
-/// its fixed point.
+/// a replay with a strictly older `received_at_utc` is dropped and counted,
+/// while an equal or newer received time replaces the stored row (the last
+/// insert wins on equal versions, exactly like `ReplacingMergeTree(version)`
+/// with `version = received_at_utc` collapsed to its fixed point).
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
     state: Arc<Mutex<MemoryState>>,
@@ -783,7 +804,7 @@ impl EventStore for MemoryStore {
             for event in events {
                 let key = (event.source.as_str().to_string(), event.event_id.clone());
                 match state.events.get(&key) {
-                    Some(existing) if existing.received_at_utc >= event.received_at_utc => {
+                    Some(existing) if existing.received_at_utc > event.received_at_utc => {
                         duplicates += 1;
                     }
                     _ => {
@@ -812,6 +833,9 @@ impl EventStore for MemoryStore {
                     row.platform.clone(),
                     row.platform_account_id.clone(),
                     row.day.clone(),
+                    row.country.clone(),
+                    row.ad_unit_id.clone(),
+                    row.format.clone(),
                 );
                 if state.report_days.contains_key(&key) {
                     duplicates += 1;
@@ -919,8 +943,13 @@ impl ProjectionStore for ClickHouseStore {
         let rows = self
             .fetch_rows(
                 &format!(
+                    // `first_seen` and `stage_updated` are day fields in the
+                    // `AccountRow` contract; `toDate` keeps the read shape
+                    // identical to what the memory store stores ("YYYY-MM-DD")
+                    // instead of leaking the stored DateTime64 rendering.
                     "SELECT publisher_id, account_id, stage, owner, platforms, \
-                     toString(first_seen) AS first_seen, toString(stage_updated) AS stage_updated \
+                     toString(toDate(first_seen)) AS first_seen, \
+                     toString(toDate(stage_updated)) AS stage_updated \
                      FROM {database}.accounts FINAL ORDER BY publisher_id, account_id"
                 ),
                 &[],
@@ -1243,6 +1272,19 @@ impl ProjectionStore for ClickHouseStore {
     }
 }
 
+/// Chronological order of events as both readers feed them to the read
+/// models: occurrence time, then producing boundary, then identity. The
+/// server orders by the stored `source` string, so the comparison uses
+/// [`EventSource::as_str`] rather than the enum's declaration order; the two
+/// readers must see the identical order or a tie between two facts could
+/// resolve differently per backend.
+pub(crate) fn chronological_order(left: &DomainEvent, right: &DomainEvent) -> std::cmp::Ordering {
+    left.occurred_at_utc
+        .cmp(&right.occurred_at_utc)
+        .then_with(|| left.source.as_str().cmp(right.source.as_str()))
+        .then_with(|| left.event_id.cmp(&right.event_id))
+}
+
 /// Rebuild a [`DomainEvent`] from a `domain_events` row (FINAL-read shape).
 pub(crate) fn domain_event_from_row(row: &serde_json::Value) -> Result<DomainEvent, StoreError> {
     use crate::envelope::{EventSource, EventType};
@@ -1299,7 +1341,12 @@ impl ProjectionStore for MemoryStore {
             if !state.schema_ready {
                 return Err(StoreError::SchemaNotReady);
             }
-            Ok(state.events.values().cloned().collect())
+            let mut events: Vec<DomainEvent> = state.events.values().cloned().collect();
+            // The ClickHouse reader reads `ORDER BY occurred_at_utc, source,
+            // event_id`; the fold-based read models must see the identical
+            // order so ties between two facts resolve the same way.
+            events.sort_by(chronological_order);
+            Ok(events)
         })
     }
 
@@ -1467,7 +1514,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use crate::envelope::EventType;
+    use crate::envelope::{EventSource, EventType};
     use crate::test_support::{valid_event, valid_event_builder};
 
     #[test]
@@ -1872,15 +1919,17 @@ mod tests {
         assert_eq!(outcome.inserted, 1);
         assert_eq!(outcome.duplicates_observed, Some(0));
 
-        // Replay of the identical event deduplicates: one row remains.
+        // A replay with an EQUAL received time is not a duplicate: the last
+        // insert wins, exactly like ReplacingMergeTree with an equal
+        // version, so the replay replaces the stored row.
         let replay = store
             .insert(std::slice::from_ref(&event))
             .await
             .expect("replay");
-        assert_eq!(replay.duplicates_observed, Some(1));
+        assert_eq!(replay.duplicates_observed, Some(0));
         let events = store.load_events().await.expect("load");
         assert_eq!(events.len(), 1);
-        assert_eq!(store.insert_stats(), (2, 1));
+        assert_eq!(store.insert_stats(), (2, 0));
 
         // A corrected re-emit with a newer received time wins.
         let mut corrected = event.clone();
@@ -1953,5 +2002,130 @@ mod tests {
             .await
             .expect("account");
         assert_eq!(store.load_accounts().await.expect("load").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_store_replay_with_an_equal_received_time_keeps_the_last_row() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        let first = valid_event(EventType::ReportPullCompleted);
+        let outcome = store
+            .insert(std::slice::from_ref(&first))
+            .await
+            .expect("first");
+        assert_eq!(outcome.duplicates_observed, Some(0));
+
+        // ReplacingMergeTree keeps the LAST inserted row when the version
+        // (received time) is equal; the memory store must not drop the new
+        // row, so the LAST content is what every reader sees.
+        let mut last = first.clone();
+        last.reason_code = Some("last-insert-wins".into());
+        let outcome = store
+            .insert(std::slice::from_ref(&last))
+            .await
+            .expect("equal received replay");
+        assert_eq!(outcome.duplicates_observed, Some(0));
+        let events = store.load_events().await.expect("load");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reason_code.as_deref(), Some("last-insert-wins"));
+
+        // A strictly older replay is still dropped and counted.
+        let mut older = first;
+        older.received_at_utc =
+            UtcMillis::from_unix_millis(older.received_at_utc.unix_millis() - 1);
+        older.reason_code = Some("stale".into());
+        let outcome = store.insert(&[older]).await.expect("older replay");
+        assert_eq!(outcome.duplicates_observed, Some(1));
+        let events = store.load_events().await.expect("load");
+        assert_eq!(events[0].reason_code.as_deref(), Some("last-insert-wins"));
+    }
+
+    #[tokio::test]
+    async fn memory_store_load_events_orders_chronologically() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        let base = valid_event(EventType::JobRun);
+        let at = |offset_ms: i64| {
+            UtcMillis::from_unix_millis(base.occurred_at_utc.unix_millis() + offset_ms)
+        };
+        let later = DomainEvent {
+            event_id: "z_later".into(),
+            source: EventSource::AccessLog,
+            occurred_at_utc: at(60_000),
+            received_at_utc: at(60_000),
+            ..base.clone()
+        };
+        let same_m = DomainEvent {
+            event_id: "m_same".into(),
+            ..base.clone()
+        };
+        let same_n = DomainEvent {
+            event_id: "n_same".into(),
+            ..base.clone()
+        };
+        // `finance` sorts before `worker`, so this event must come first even
+        // though it shares the occurrence time of the later-inserted pair.
+        let same_finance = DomainEvent {
+            event_id: "a_same".into(),
+            source: EventSource::Finance,
+            ..base.clone()
+        };
+        // Deliberately out of order: identity order would be a, m, n, z.
+        store
+            .insert(&[later, same_n, same_finance, same_m])
+            .await
+            .expect("insert");
+        let events = store.load_events().await.expect("load");
+        let ids: Vec<&str> = events.iter().map(|event| event.event_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a_same", "m_same", "n_same", "z_later"],
+            "chronological order (occurred, source, event_id) like the server read"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_day_rows_with_distinct_breakdown_dimensions_are_kept() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        let base = ReportDayRow {
+            publisher_id: "northstar".into(),
+            platform: "applovin_max".into(),
+            platform_account_id: "max_acct_1".into(),
+            day: "2026-10-01".into(),
+            finality: "final".into(),
+            revenue_micros: Some(1_000_000),
+            impressions: Some(100),
+            currency: Some("USD".into()),
+            country: Some("DE".into()),
+            ad_unit_id: Some("rw_1".into()),
+            format: Some("rewarded".into()),
+            source_digest: Some("d".repeat(64)),
+        };
+        let gb = ReportDayRow {
+            country: Some("GB".into()),
+            revenue_micros: Some(2_000_000),
+            ..base.clone()
+        };
+        let outcome = store
+            .insert_report_days(&[base.clone(), gb])
+            .await
+            .expect("insert");
+        assert_eq!(outcome.duplicates_observed, Some(0));
+        // The dedup key mirrors the `report_days` sorting key, which includes
+        // country, ad unit and format: both rows are separate facts.
+        assert_eq!(store.report_day_count(), 2);
+        let rows = store.load_report_days().await.expect("load");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.country.as_deref() == Some("DE")));
+        assert!(rows.iter().any(|row| row.country.as_deref() == Some("GB")));
+
+        // Only the identical full key is a replay duplicate.
+        let outcome = store
+            .insert_report_days(std::slice::from_ref(&base))
+            .await
+            .expect("replay");
+        assert_eq!(outcome.duplicates_observed, Some(1));
+        assert_eq!(store.report_day_count(), 2);
     }
 }

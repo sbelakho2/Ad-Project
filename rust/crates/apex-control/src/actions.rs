@@ -173,8 +173,12 @@ fn job_kind(capability: Capability) -> Option<JobKind> {
 }
 
 /// The bounded correlation id for one submission.
-fn correlation_id(capability: Capability) -> String {
-    format!("ctl-{}-{}", capability.as_str(), &random_hex_32()[..12])
+pub(crate) fn correlation_id() -> String {
+    // The correlation id doubles as the analytics event id (prefixed in
+    // events.rs), so it must stay a short hex-dominant token: identifiers
+    // that read like long non-hex words are refused by the envelope's
+    // token-like guard (a 40+ char word would drop every action event).
+    format!("ctl-{}", &random_hex_32()[..12])
 }
 
 /// The engine entry point. The role, `session_csrf` and
@@ -223,7 +227,7 @@ pub async fn submit(
     }
     // 3. Capability check, deny by default.
     if crate::capabilities::check(role, capability) == CapabilityCheck::Denied {
-        let correlation = correlation_id(capability);
+        let correlation = correlation_id();
         let entry = journal_entry(
             state,
             actor,
@@ -257,7 +261,7 @@ pub async fn submit(
     }
     // 4. Recent authentication for sensitive capabilities.
     if capability.requires_step_up() && !session_recent_auth {
-        let correlation = correlation_id(capability);
+        let correlation = correlation_id();
         let entry = journal_entry(
             state,
             actor,
@@ -328,7 +332,7 @@ pub async fn submit(
     if let crate::versions::VersionCheck::Stale { reason } =
         state.versions.check(&object_key, &token, &current_state)
     {
-        let correlation = correlation_id(capability);
+        let correlation = correlation_id();
         let entry = journal_entry(
             state,
             actor,
@@ -350,7 +354,7 @@ pub async fn submit(
     // 8. Execute: a durable job for the runner, or a recorded governance
     // decision. The control plane never performs the platform operation.
     let now_ms = state.now_ms();
-    let correlation = correlation_id(capability);
+    let correlation = correlation_id();
     let result_id = format!("res_{}", &random_hex_32()[..12]);
     let mut job_id = None;
     let note;
@@ -407,7 +411,7 @@ pub async fn submit(
                     state: ActionState::Failed,
                     operation_id: None,
                     confirming_read: safe_return(&request.return_path),
-                    note: format!("the durable job could not be written: {}", error),
+                    note: format!("the durable job could not be written: {error}"),
                 };
             }
         }

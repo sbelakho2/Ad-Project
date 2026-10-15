@@ -952,6 +952,53 @@ fn basis_invoices_pro_rate_and_round_to_the_cent() {
 }
 
 #[test]
+fn round_to_cent_near_i64_max_never_wraps() {
+    // The cent rounding adds half a minor unit before dividing. A fee within
+    // half a cent of i64::MAX must not overflow that add (debug panic) nor
+    // wrap negative (release): it saturates to the cent-exact value.
+    assert_eq!(
+        crate::invoice::round_to_cent(i64::MAX),
+        9_223_372_036_854_770_000
+    );
+    assert_eq!(
+        crate::invoice::round_to_cent(i64::MAX - 4_999),
+        9_223_372_036_854_770_000
+    );
+}
+
+#[test]
+fn basis_with_saturating_log_share_is_refused_never_wrapped() {
+    // `log_share` is deserialized from the signed ledger payload and is not
+    // range checked; a huge finite value saturates verify_basis's f64->i64
+    // cast to i64::MAX. The cent rounding must refuse that record rather
+    // than wrap the fee negative -- a wrapped fee equal to `wrapped` below
+    // would otherwise pass the re-derivation equality check.
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 0,
+        end_unix_ms: 1_000_000_000_000,
+    };
+    let wrapped = (i64::MAX.wrapping_add(5_000) / 10_000) * 10_000;
+    assert!(wrapped < 0, "the wrap this test pins is negative");
+    let record = BillingBasisRecord {
+        seq: 7,
+        at_unix_ms: 500,
+        change_id: "exp-1".into(),
+        scope_revenue: i64::MAX,
+        incremental: i64::MAX,
+        log_share: 1e300,
+        rate_bp: 2_000,
+        fee_micros: wrapped,
+        billed_days: 0,
+        month_days: 0,
+    };
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
+        Err(BillingError::TamperedProof { .. })
+    ));
+}
+
+#[test]
 fn collection_events_flatten_and_key_correctly() {
     let item = pinned_item();
     let event = crate::collection::CollectionEvent::from_item(&item, 42);

@@ -213,6 +213,45 @@ mod tests {
         assert_eq!(events[0].payload.result.as_deref(), Some("requested"));
     }
 
+    #[tokio::test]
+    async fn production_shaped_action_ids_are_never_refused_as_tokens() {
+        use apex_analytics::{EventStore, MemoryStore, ProjectionStore};
+        let store = Arc::new(MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let emitter = EventEmitter {
+            client: AnalyticsClient::new(store.clone(), "production", "test"),
+        };
+        // The longest capability name previously produced a 40+ character
+        // non-hex word that the envelope's token-like guard refused, dropping
+        // every operator action event.
+        for capability in crate::capabilities::Capability::ALL {
+            let correlation = crate::actions::correlation_id();
+            assert!(
+                correlation.len() < 40,
+                "{correlation:?} stays below the token-like word length"
+            );
+            emitter
+                .emit_action(
+                    "maya",
+                    capability.as_str(),
+                    "acct_1",
+                    "requested",
+                    &correlation,
+                )
+                .await;
+        }
+        let events = store.load_events().await.expect("load");
+        assert_eq!(
+            events.len(),
+            crate::capabilities::Capability::ALL.len(),
+            "every production-shaped action id emits a stored event"
+        );
+        for event in &events {
+            assert_eq!(event.event_type, EventType::OperatorAction);
+            assert!(event.event_id.starts_with("control-ctl-"));
+        }
+    }
+
     #[test]
     fn the_emitter_stamps_the_configured_environment_not_a_constant() {
         let config = clickhouse_config();

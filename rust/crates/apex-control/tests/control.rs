@@ -519,7 +519,7 @@ async fn every_role_times_every_capability_is_permitted_or_denied_with_exact_cop
                 role_index as u128 * 1_000 + capability_index as u128,
                 capability_index as u128 + 1
             );
-            let key = format!("{:0<32}", key).chars().take(32).collect::<String>();
+            let key = format!("{key:0<32}").chars().take(32).collect::<String>();
             let form = form_for(&harness.state, &signed, capability, &target, &key).await;
             let (status, _, _, html) = post(
                 &app,

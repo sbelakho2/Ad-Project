@@ -9,15 +9,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-apex-core = { path = "../apex-core" }
-apex-audit = { path = "../apex-audit" }
-apex-proof = { path = "../apex-proof" }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 regex = "1"
-sha2 = "0.10"
-hex = "0.4"
 
 [[bin]]
 name = "apex-tools"

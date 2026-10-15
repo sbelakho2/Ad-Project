@@ -120,6 +120,11 @@ impl std::fmt::Display for BreakdownDimension {
 }
 
 /// One day of platform revenue for one publisher.
+///
+/// The DTO deliberately carries no publisher identity, but a row is still
+/// per publisher: under an operator-wide scope the same `(day, platform,
+/// currency)` appears once per publisher, exactly as the `customer_daily`
+/// projection stores it, and totals are never merged across publishers.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RevenueDailyRow {
     /// Reporting day `YYYY-MM-DD`.
@@ -359,8 +364,12 @@ pub struct DataQuality {
     pub missing_days: Option<u64>,
     /// Provisional source rows.
     pub provisional_days: u64,
-    /// Physical duplicate event rows the dedup key rejected; `None` when the
-    /// backend cannot know.
+    /// Raw duplicate event rows pending merge: stored rows beyond one per
+    /// `(source, event_id)` key that no merge has collapsed yet. The memory
+    /// store collapses replays at insert time, so it reports a real zero;
+    /// ClickHouse reports the physical surplus until a merge (or an
+    /// `OPTIMIZE ... FINAL`) collapses it; `None` means the backend cannot
+    /// report the count at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup_rejects: Option<u64>,
     /// Source rows that carry no amount or no currency: they cannot enter a
@@ -399,9 +408,15 @@ pub struct ObjectTimelineEntry {
 }
 
 /// The five operator queues.
+///
+/// The queues are as of the covered data: membership and ages are measured
+/// against the covered-data horizon (the newest source event time the
+/// snapshot covers), never against the wall clock or the requested as-of
+/// time.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OperatorQueues {
-    /// As-of time of the snapshot.
+    /// As-of time of the read. The covered-data horizon the queue ages are
+    /// measured from may be earlier; it is the snapshot's `source_event_max`.
     pub as_of: String,
     /// Unresolved incidents.
     pub incidents: Vec<OperatorQueueRow>,

@@ -181,10 +181,7 @@ pub fn content_guard_adversarial(repo: &Repo) -> Result<(), String> {
     for (text, expected) in CONTENT_GUARD_CASES {
         let got = scan_text_forbidden(text)?;
         if got != *expected {
-            failures.push(format!(
-                "scanText({:?}) -> {got}, expected {expected}",
-                text
-            ));
+            failures.push(format!("scanText({text:?}) -> {got}, expected {expected}"));
         }
     }
     // The matrix alone would pass no matter what the site says; scan the
@@ -649,7 +646,7 @@ mod tests {
         )];
         let bad = docs_reference_violations(&md, &scripts, &targets, true).unwrap();
         assert_eq!(bad.len(), 1);
-        assert!(bad[0].contains("make target 'deploy'"), "{:?}", bad);
+        assert!(bad[0].contains("make target 'deploy'"), "{bad:?}");
     }
 
     #[test]
