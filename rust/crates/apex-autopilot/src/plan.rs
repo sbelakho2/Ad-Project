@@ -303,7 +303,26 @@ pub async fn run_cycle(
             rate_bp: policy.rate_bp,
             thresholds: policy.thresholds.clone(),
         };
-        if !pre_registration_exists(ledger, &spec.name) {
+        // A pre-registration already on the ledger with no change record for
+        // this key means a prior attempt may have started the experiment
+        // before its bookkeeping was written. Refuse to start a second one;
+        // the operator investigates. A resolved attempt (a change record
+        // exists, whether live or rolled back) does not block a retry.
+        let prior_change_exists = ledger.records().iter().any(|record| {
+            matches!(
+                record,
+                LedgerRecord::ChangeApplied { idempotency_key, .. } if idempotency_key == &key
+            )
+        });
+        if pre_registration_exists(ledger, &spec.name) && !prior_change_exists {
+            skipped_this_cycle += 1;
+            outcomes.push(ActionOutcome::Skipped {
+                reason: "experiment_in_flight".into(),
+            });
+            continue;
+        }
+
+        {
             let signed = apex_lift::emit::pre_registration(&prereg)
                 .map_err(|error| PlanError::Validation(format!("pre-registration: {error}")))?;
             let payload = signed

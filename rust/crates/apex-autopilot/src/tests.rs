@@ -741,6 +741,56 @@ async fn pre_registration_is_signed_before_the_platform_call() {
 }
 
 #[tokio::test]
+async fn a_retry_does_not_start_a_second_experiment() {
+    // The first attempt signs the pre-registration, then the start fails with
+    // no change record. A retry must not start a second experiment on the same
+    // name; it is refused as in flight until an operator resolves it.
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
+    let error = || {
+        Err(PlatformError::Http {
+            platform: PlatformId::AppLovinMax,
+            operation: "createExperiment".into(),
+            status: 503,
+        })
+    };
+    ops.script_start(vec![error(), error()]);
+    let mut l = ledger();
+    run_cycle(
+        &ops,
+        &mut l,
+        &settle_policy(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("first");
+    let second = run_cycle(
+        &ops,
+        &mut l,
+        &settle_policy(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW + 1,
+    )
+    .await
+    .expect("second");
+    assert_eq!(
+        second.outcomes,
+        vec![ActionOutcome::Skipped {
+            reason: "experiment_in_flight".into(),
+        }]
+    );
+    let starts = ops
+        .call_log()
+        .iter()
+        .filter(|entry| entry.starts_with("start:"))
+        .count();
+    assert_eq!(starts, 1, "the retry must not start a second experiment");
+}
+
+#[tokio::test]
 async fn apply_path_start_failure_rolls_back_exactly_once() {
     // The adapter applied the change to the live unit; a failed start must
     // undo it and record the rollback against the change.

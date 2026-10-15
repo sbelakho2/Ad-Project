@@ -181,7 +181,9 @@ impl Runner {
             return Vec::new();
         }
         match self.ops.current_settings(&experiment.ad_unit_id).await {
-            Ok(current) if current != experiment.expected_settings => {
+            // Compare canonical JSON, not raw strings: two encodings of the
+            // same settings are not a publisher edit and must not void a test.
+            Ok(current) if !same_settings(&current, &experiment.expected_settings) => {
                 vec![experiment.ad_unit_id.clone()]
             }
             _ => Vec::new(),
@@ -454,6 +456,18 @@ fn kept_changes(ledger: &dyn LedgerLog) -> Vec<(String, apex_lift::billing::Kept
 
 fn parse_lift_record(payload: &str) -> Option<apex_lift::records::LiftRecord> {
     serde_json::from_str(payload).ok()
+}
+
+/// Whether two settings encodings describe the same value, comparing parsed
+/// JSON when both parse (so key order or spacing never reads as an edit).
+fn same_settings(a: &str, b: &str) -> bool {
+    match (
+        serde_json::from_str::<serde_json::Value>(a),
+        serde_json::from_str::<serde_json::Value>(b),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 fn status_label(outcome: &SettleOutcome) -> String {
@@ -860,6 +874,58 @@ mod tests {
             alerts.alerts().as_slice(),
             [Alert::PullFailure { .. }]
         ));
+    }
+
+    #[tokio::test]
+    async fn the_same_settings_in_a_different_encoding_do_not_void() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        // The same floors, keys in a different order: not a publisher edit.
+        ops.put_current_settings("u1", r#"[{"floorEcpm":1,"country":"ee"}]"#);
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: r#"[{"country":"ee","floorEcpm":1}]"#.into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(
+            report.outcomes,
+            vec![("exp-1".to_string(), "kept".to_string())],
+            "a re-ordered encoding must not read as an edit"
+        );
+    }
+
+    #[test]
+    fn same_settings_compares_parsed_json_then_falls_back_to_strings() {
+        assert!(same_settings("[1, 2]", "[1,2]"));
+        assert!(!same_settings("[1, 2]", "[1, 3]"));
+        assert!(same_settings("not json", "not json"));
+        assert!(!same_settings("not json", "other"));
     }
 
     #[tokio::test]
