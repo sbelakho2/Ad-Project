@@ -22,6 +22,7 @@
 pub mod adyen;
 pub mod errors;
 pub mod invoice;
+pub mod subscription;
 pub mod webhook;
 
 pub use adyen::{
@@ -31,6 +32,7 @@ pub use adyen::{
     MICROS_PER_MINOR_UNIT,
 };
 pub use errors::BillingError;
+pub use subscription::MonitoringPlan;
 pub use webhook::verify_adyen_webhook;
 
 #[cfg(test)]

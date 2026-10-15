@@ -149,6 +149,12 @@
       "claim": "Every test is pre-registered and signed before it starts.",
       "anchor": "rust/crates/apex-lift/src/records.rs",
       "test": "canonical_json_is_stable_and_hashes_are_pinned (rust/crates/apex-lift/src/records.rs)"
+    },
+    {
+      "id": "monitoring-plan",
+      "claim": "Continuous monitoring is an optional flat monthly plan billed as its own invoice line.",
+      "anchor": "rust/crates/apex-billing/src/subscription.rs",
+      "test": "the_standard_plan_is_a_flat_monthly_fee (rust/crates/apex-billing/src/subscription.rs)"
     }
   ]
 }
