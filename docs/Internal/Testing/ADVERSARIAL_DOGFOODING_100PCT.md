@@ -512,7 +512,7 @@ Three independent verifier waves found critical and major defects in the Rust pr
 | 1 | canonical-byte injection: attacker-added record fields and re-encoded signature bytes passed the structural checks | `injected_unknown_fields_are_rejected`; `hex_case_and_whitespace_edits_are_rejected` | `9f1a944` |
 | 1 | audit NITs A5-A9: zero-floor semantics, the overflow story in unavailable-eCPM reasons, digest sensitivity, and a tautological assertion | pinned regressions in `apex-audit/src/tests.rs` | `28ec482` |
 | 2 | partial-charge reporting: a mixed sub-cent invoice was charged item by item before the error surfaced | `mixed_sub_cent_invoice_is_refused_before_any_request` | `1666051` |
-| 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `stripe_item_body_is_pinned_form_encoded` | `1666051` |
+| 2 | falsified form encoding: billing claimed form encoding while sending JSON, and the encoder was dead | `adyen_item_body_is_pinned_form_encoded` | `1666051` |
 | 3 | verify and re-read time of check: the ledger could be swapped between verification and the second read | `ledger_read_path_is_pinned_to_a_single_read` | `3def08a` |
 | 3 | ignored Adyen tolerance: the webhook route used state tolerance in place of the configured client policy | `webhook_client_tolerance_beats_a_wider_state_tolerance`; `webhook_client_tolerance_beats_a_narrower_state_tolerance` | `3def08a` |
 

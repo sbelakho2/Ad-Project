@@ -265,7 +265,7 @@ COMMIT;
 
 ### 8. Invoices & Payment Events (7 years)
 
-**Tables:** `invoices`, `payments`, `stripe_webhook_events`, `transaction_log`, `financial_documents`
+**Tables:** `invoices`, `payments`, `adyen_webhook_events`, `transaction_log`, `financial_documents`
 
 **Retention:** 7 years (legal requirement)
 
@@ -283,7 +283,7 @@ COMMIT;
 
 ### 9. Webhook Events (30 days)
 
-**Table:** `stripe_webhook_events`
+**Table:** `adyen_webhook_events`
 
 **Retention:** 30 days from receipt
 

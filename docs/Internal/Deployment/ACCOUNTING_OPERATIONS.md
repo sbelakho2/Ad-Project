@@ -188,7 +188,7 @@ curl https://api.adyen.com/v1/balance_transactions \
   -u "sk_live_...:" \
   -d "created[gte]=$(date -v-1m +%s)" \
   -d "limit=100" \
-  -d "type=stripe_fee"
+  -d "type=adyen_fee"
 ```
 
 ```sql
@@ -538,7 +538,7 @@ curl -X POST https://yourdomain.com/api/webhooks/adyen \
    - Check firewall rules
 
 2. **Signature verification failing:**
-   - Verify STRIPE_WEBHOOK_SECRET in .env
+   - Verify APEX_ADYEN_HMAC_KEY in .env
    - Check Adyen dashboard for correct secret
    - Ensure raw body is passed to webhook handler
 

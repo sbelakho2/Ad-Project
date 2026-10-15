@@ -123,8 +123,8 @@ Add Infisical token to GitHub Secrets and update workflows:
 - `ENABLE_SELF_EVOLVING_AI` - Toggle self-evolving AI (true/false)
 
 **Payment Providers (4)**
-- `STRIPE_SECRET_KEY` - Adyen secret key
-- `STRIPE_WEBHOOK_SECRET` - Adyen webhook signing secret
+- `APEX_ADYEN_API_KEY` - Adyen secret key
+- `APEX_ADYEN_HMAC_KEY` - Adyen webhook signing secret
 - `PAYPAL_CLIENT_ID` - PayPal client ID
 - `PAYPAL_SECRET` - PayPal secret
 
@@ -291,7 +291,7 @@ jobs:
 | Secret | Rotation Frequency | Owner |
 |--------|-------------------|-------|
 | JWT_SECRET | Every 90 days | DevOps Lead |
-| STRIPE_SECRET_KEY | Every 180 days | Finance Lead |
+| APEX_ADYEN_API_KEY | Every 180 days | Finance Lead |
 | OPENAI_API_KEY | Every 90 days | AI/ML Lead |
 | DATABASE_URL | On breach only | Database Admin |
 | MAILCHIMP_API_KEY | Every 180 days | Marketing Lead |

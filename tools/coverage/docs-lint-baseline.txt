@@ -108,7 +108,7 @@
 4 docs/Internal/Contracts/placements.md
 26 docs/Internal/DOCUMENTATION_AUDIT_REPORT.md
 34 docs/Internal/Deployment/ACCOUNTING_IMPLEMENTATION_STATUS.md
-25 docs/Internal/Deployment/ACCOUNTING_OPERATIONS.md
+23 docs/Internal/Deployment/ACCOUNTING_OPERATIONS.md
 1 docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md
 72 docs/Internal/Deployment/API_KEYS_AND_INTEGRATIONS_GUIDE.md
 2 docs/Internal/Deployment/AdapterRebuildPlan.md
@@ -123,7 +123,7 @@
 34 docs/Internal/Deployment/DEPLOYMENT_STATUS.md
 23 docs/Internal/Deployment/DOCS_DRIFT_CHECKLIST.md
 53 docs/Internal/Deployment/ESTONIAN_E_SYSTEMS.md
-43 docs/Internal/Deployment/FIRST_CUSTOMER_INTEGRATION_CHECKLIST.md
+42 docs/Internal/Deployment/FIRST_CUSTOMER_INTEGRATION_CHECKLIST.md
 105 docs/Internal/Deployment/HETZNER_PRODUCTION_CHECKLIST.md
 22 docs/Internal/Deployment/IMPLEMENTATION_CHECKLIST.md
 50 docs/Internal/Deployment/IMPLEMENTATION_SUMMARY.md
@@ -229,7 +229,6 @@
 1 docs/Internal/QA/ios-network-failures-2025-12-07/README.md
 8 docs/Internal/QA/networked-sandbox-runbook-2025-12-06.md
 1 docs/Internal/QA/sandbox-2025-12-05/README.md
-1 docs/Internal/QA/stripe-dry-run/README.md
 2 docs/Internal/QA/tvos-network-failures-2025-12-07/README.md
 3 docs/Internal/QA/tvos-sandbox/2025-12-07/README.md
 0 docs/Internal/QA/tvos-sandbox/2025-12-07/video-notes.md
@@ -420,4 +419,4 @@
 0 site/content/proof.md
 0 site/content/security.md
 0 site/static/rerun-kit/README.md
-TOTAL 7691
+TOTAL 7687

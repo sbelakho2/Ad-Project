@@ -328,7 +328,7 @@ const validated = ReferralCodeSchema.parse(input);
 **Critical Secrets to Protect:**
 
 - `DATABASE_URL` (PostgreSQL connection string)
-- `STRIPE_API_KEY` (payment processing)
+- `APEX_ADYEN_API_KEY` (payment processing)
 - `OPENAI_API_KEY` (AI features)
 - `JWT_SECRET` (authentication)
 - SMTP credentials (local Postfix - no external API key needed)
@@ -479,7 +479,7 @@ async validateCountry(customerId: string, claimedCountry: string): Promise<boole
   const ipCountry = await geoipLookup(customerIp);
   
   // 2. Payment method country
-  const paymentCountry = await getStripeCustomerCountry(customerId);
+  const paymentCountry = await getAdyenCustomerCountry(customerId);
   
   // 3. Phone number country code
   const phoneCountry = await getPhoneCountryCode(customerId);
@@ -891,7 +891,7 @@ const options = {
   resetTimeout: 30000,
 };
 
-const breaker = new CircuitBreaker(stripeAPI.charges.create, options);
+const breaker = new CircuitBreaker(adyenAPI.charges.create, options);
 
 breaker.on('open', () => {
   logger.error('Circuit breaker opened for Adyen API');

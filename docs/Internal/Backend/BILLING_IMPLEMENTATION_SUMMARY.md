@@ -120,8 +120,8 @@ Successfully implemented complete billing platform infrastructure covering:
   - Line item breakdown
   - Subtotal, tax, and total calculations
   - Payment terms and due date
-- **createStripeInvoice()** - Creates invoice in Adyen with line items
-- **syncInvoiceFromStripe()** - Syncs Adyen invoice to local database
+- **createAdyenInvoice()** - Creates invoice in Adyen with line items
+- **syncInvoiceFromAdyen()** - Syncs Adyen invoice to local database
 
 ### Reconciliation Service Implementation
 ✅ **ReconciliationService** (`backend/src/services/reconciliationService.ts`)
@@ -139,7 +139,7 @@ Successfully implemented complete billing platform infrastructure covering:
 ✅ **Webhook Routes** (`backend/src/routes/webhooks.routes.ts`)
 - **Raw Body Parsing** - Uses `express.raw()` middleware BEFORE `express.json()` in `src/index.ts` to provide raw body buffer for signature verification (fix applied 2025-12-12, commit `89945f5`)
 - **Signature Verification** - `adyen.webhooks.constructEvent()` prevents unauthorized events
-- **Idempotency** - Deduplication via `stripe_webhook_events` table
+- **Idempotency** - Deduplication via `adyen_webhook_events` table
 - **Production Testing (2025-12-12):** All 12 event types tested and returning 200 OK
 
 **Event Handlers:**
@@ -167,9 +167,9 @@ Successfully implemented complete billing platform infrastructure covering:
 - **usage_alerts** - Threshold notifications for usage limits
 - **events** - Async event processing queue
 
-✅ **Migration 018** (`backend/migrations/018_stripe_webhook_events.sql`)
-- **stripe_webhook_events** - Webhook event deduplication with unique constraint on event ID
-- Indexes on: stripe_event_id, processed, created_at
+✅ **Migration 018** (`backend/migrations/018_adyen_webhook_events.sql`)
+- **adyen_webhook_events** - Webhook event deduplication with unique constraint on event ID
+- Indexes on: adyen_event_id, processed, created_at
 
 **Status:** 100% Complete
 
@@ -226,7 +226,7 @@ Successfully implemented complete billing platform infrastructure covering:
 
 ### Payment Processing
 - Adyen SDK v2025-10-29.clover API integration
-- Webhook signature verification via `STRIPE_WEBHOOK_SECRET`
+- Webhook signature verification via `APEX_ADYEN_HMAC_KEY`
 - Idempotency at multiple layers: HTTP headers, webhook events, reconciliation
 
 ### Database
@@ -244,7 +244,7 @@ Successfully implemented complete billing platform infrastructure covering:
 
 ### Monitoring & Observability
 - All operations logged to `billing_audit` table
-- Webhook events tracked in `stripe_webhook_events`
+- Webhook events tracked in `adyen_webhook_events`
 - Prometheus metrics instrumentation (existing infrastructure)
 - Structured logging via Winston
 
@@ -261,8 +261,8 @@ FRAUD_DETECTION_ENABLED=true
 AB_TESTING_ENABLED=false
 
 # Adyen
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+APEX_ADYEN_API_KEY=sk_test_...
+APEX_ADYEN_HMAC_KEY=whsec_...
 
 # Database
 DATABASE_URL=postgresql://user:pass@localhost:5432/apexmediation
@@ -349,7 +349,7 @@ NEXT_PUBLIC_USE_MOCK_API=false
 - Feature flags cached per request lifecycle
 
 ### Database Optimization
-- Indexes on: customer_id, status, created_at, stripe_event_id
+- Indexes on: customer_id, status, created_at, adyen_event_id
 - Pagination limits: 1-100 invoices per page
 - Conditional queries avoid full table scans
 

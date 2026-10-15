@@ -218,7 +218,7 @@ The following items block production launch:
 
 0. **Adyen Webhook Integration** ✅ (2025-12-12 15:06 UTC):
    - Fixed raw body parsing for webhook signature verification (commit 89945f5)
-   - Configured `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` on droplet
+   - Configured `APEX_ADYEN_API_KEY` and `APEX_ADYEN_HMAC_KEY` on droplet
    - Tested 12 event types via Adyen CLI: ALL returning 200
    - Events tested: `invoice.paid`, `invoice.payment_succeeded`, `customer.subscription.created`, `checkout.session.completed`, `charge.succeeded`, `payment_intent.succeeded`, and more
    - **Result:** ✅ PASSED - Adyen billing integration complete

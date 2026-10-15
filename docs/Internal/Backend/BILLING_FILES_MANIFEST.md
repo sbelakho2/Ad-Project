@@ -47,8 +47,8 @@
 - `backend/migrations/017_billing_audit_and_idempotency.sql` (150 lines)
   - Tables: billing_audit, billing_idempotency, usage_alerts, events
 
-- `backend/migrations/018_stripe_webhook_events.sql` (15 lines)
-  - Table: stripe_webhook_events
+- `backend/migrations/018_adyen_webhook_events.sql` (15 lines)
+  - Table: adyen_webhook_events
 
 ### Modified Files
 
@@ -172,7 +172,7 @@
 | File | Lines | Purpose |
 |------|-------|---------|
 | `017_billing_audit_and_idempotency.sql` | 150 | Audit tables |
-| `018_stripe_webhook_events.sql` | 15 | Webhook tracking |
+| `018_adyen_webhook_events.sql` | 15 | Webhook tracking |
 
 ---
 
@@ -222,8 +222,8 @@
 - **Frontend:** None (uses existing axios, Next.js, React, lucide-react)
 
 ### Database Schema Changes
-- **New Tables:** 5 (billing_audit, billing_idempotency, usage_alerts, events, stripe_webhook_events)
-- **Modified Tables:** 1 (users - added stripe_customer_id, api_key, role columns if missing)
+- **New Tables:** 5 (billing_audit, billing_idempotency, usage_alerts, events, adyen_webhook_events)
+- **Modified Tables:** 1 (users - added adyen_customer_id, api_key, role columns if missing)
 
 ---
 
@@ -255,7 +255,7 @@
 ### Database Indexes
 - `billing_audit` (customer_id, event_type, created_at)
 - `billing_idempotency` (idempotency_key PRIMARY KEY)
-- `stripe_webhook_events` (stripe_event_id UNIQUE, processed, created_at)
+- `adyen_webhook_events` (adyen_event_id UNIQUE, processed, created_at)
 - `usage_alerts` (customer_id, created_at)
 - `events` (processed, created_at)
 

@@ -97,7 +97,7 @@ Successfully applied 7 migrations creating **30+ new tables**:
 ### 3. ✅ Environment Configuration
 Updated `backend/.env` with:
 - `OPENAI_API_KEY` placeholder (user needs to add real key)
-- `STRIPE_SECRET_KEY` placeholder (user needs to add test key)
+- `APEX_ADYEN_API_KEY` placeholder (user needs to add test key)
 - Comprehensive documentation of required API keys
 
 ### 4. ✅ TypeScript Compilation
@@ -224,7 +224,7 @@ ENABLE_GROWTH_AI_ANALYTICS=false
 ENABLE_SELF_EVOLVING_AI=false
 
 # Get from: https://dashboard.adyen.com/test/apikeys (or live keys)
-STRIPE_SECRET_KEY=sk_test_YOUR_REAL_KEY_HERE
+APEX_ADYEN_API_KEY=sk_test_YOUR_REAL_KEY_HERE
 ```
 
 > 💰 **Cost control policy:** Leave all AI automation flags `false` in development and staging. Only enable the specific automation needed in production after validating budget impact and setting spend monitors with OpenAI usage dashboards.

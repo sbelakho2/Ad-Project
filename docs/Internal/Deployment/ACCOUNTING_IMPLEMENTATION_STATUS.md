@@ -279,8 +279,8 @@ ESTONIAN_COMPANY_CODE=16736399
 ESTONIAN_VAT_NUMBER=EE102736890
 S3_ACCOUNTING_BUCKET=rivalapexmediation-accounting
 AWS_REGION=eu-north-1  # Stockholm (closest to Estonia)
-STRIPE_SECRET_KEY=sk_live_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+APEX_ADYEN_API_KEY=sk_live_...
+APEX_ADYEN_HMAC_KEY=whsec_...
 ECB_API_URL=https://api.exchangerate.host
 ```
 
@@ -323,11 +323,11 @@ router.post('/webhooks/adyen', async (req, res) => {
     const event = adyen.webhooks.constructEvent(
       req.body,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET
+      process.env.APEX_ADYEN_HMAC_KEY
     );
     
     const reconciliationService = new PaymentReconciliationService(pool);
-    await reconciliationService.handleStripeWebhook(event);
+    await reconciliationService.handleAdyenWebhook(event);
     
     res.json({ received: true });
   } catch (error) {
@@ -344,7 +344,7 @@ const testPayment = {
   customerId: 'cus_test123',
   amount: 125000, // $1,250 platform fee (Growth tier @ $50k revenue)
   currency: 'USD',
-  stripeChargeId: 'ch_test123',
+  adyenChargeId: 'ch_test123',
   status: 'succeeded',
 };
 

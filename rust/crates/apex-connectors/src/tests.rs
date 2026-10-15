@@ -889,7 +889,7 @@ fn http_request_debug_redacts_credentials() {
             ),
             (
                 "Idempotency-Key".to_string(),
-                "stripe-item:pub-1:secret-exp:2023-11".to_string(),
+                "adyen-item:pub-1:secret-exp:2023-11".to_string(),
             ),
             ("Accept".to_string(), "application/json".to_string()),
             ("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string()),

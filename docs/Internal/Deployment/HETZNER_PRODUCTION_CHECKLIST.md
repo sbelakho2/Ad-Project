@@ -368,12 +368,12 @@ Optional Adyen connectivity check (read-only, no secrets printed):
 ```bash
 ./scripts/ops/hetzner_ssh.sh app -- "set -euo pipefail; cd /opt/adproject/backend; \
   node -e \"require('dotenv').config({ path: '/opt/adproject/.env' }); \
-    const key=process.env.STRIPE_SECRET_KEY||''; \
+    const key=process.env.APEX_ADYEN_API_KEY||''; \
     const mode=key.startsWith('sk_live_')?'live':(key.startsWith('sk_test_')?'test':(key.length?'unknown':'missing')); \
-    console.log('stripe_key_mode='+mode); \
+    console.log('adyen_key_mode='+mode); \
     if (key.length===0) process.exit(0); \
     const Adyen=require('adyen'); \
-    (async()=>{ const adyen=new Adyen(key,{apiVersion:'2023-10-16'}); const acct=await adyen.accounts.retrieve(); console.log('stripe_ok=true'); console.log('stripe_account_id='+acct.id); })().catch(e=>{ console.log('stripe_ok=false'); console.log('stripe_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
+    (async()=>{ const adyen=new Adyen(key,{apiVersion:'2023-10-16'}); const acct=await adyen.accounts.retrieve(); console.log('adyen_ok=true'); console.log('adyen_account_id='+acct.id); })().catch(e=>{ console.log('adyen_ok=false'); console.log('adyen_error='+(e&&e.message?e.message:String(e))); process.exitCode=2; });\""
 ```
 
 If you suspect billing is misconfigured, check backend logs for Adyen config errors (no secrets printed):

@@ -4570,7 +4570,7 @@
     "index": 376
   },
   {
-    "path": "docs/Internal/Operations/STRIPE_KEYS_ROTATION.md",
+    "path": "docs/Internal/Operations/ADYEN_KEYS_ROTATION.md",
     "risk": "Ensure secret storage instructions align with Infisical doc.",
     "top_level": "docs",
     "fix_id": "FIX-10",

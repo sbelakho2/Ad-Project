@@ -18,8 +18,8 @@
 ### Environment Variables
 - [ ] Backend `.env` configured:
   - [ ] `BILLING_ENABLED=true`
-  - [ ] `STRIPE_SECRET_KEY=sk_live_...` (production key)
-  - [ ] `STRIPE_WEBHOOK_SECRET=whsec_...`
+  - [ ] `APEX_ADYEN_API_KEY=sk_live_...` (production key)
+  - [ ] `APEX_ADYEN_HMAC_KEY=whsec_...`
   - [ ] `DATABASE_URL` points to production
 - [ ] Console `.env.local` configured:
   - [ ] `NEXT_PUBLIC_BILLING_ENABLED=true`
@@ -48,7 +48,7 @@ cd /home/aaron/IdeaProjects/apex-mediation-platform
 
 # Verify tables created
 psql $DATABASE_URL -c "\dt billing_*"
-psql $DATABASE_URL -c "\dt stripe_webhook_events"
+psql $DATABASE_URL -c "\dt adyen_webhook_events"
 ```
 - [ ] Migrations executed successfully
 - [ ] Tables created with correct schema
@@ -68,7 +68,7 @@ psql $DATABASE_URL -c "\dt stripe_webhook_events"
    - [ ] `charge.refunded`
    - [ ] `customer.subscription.updated`
    - [ ] `customer.subscription.deleted`
-3. [ ] Copy webhook signing secret to `STRIPE_WEBHOOK_SECRET`
+3. [ ] Copy webhook signing secret to `APEX_ADYEN_HMAC_KEY`
 4. [ ] Test webhook delivery with "Send test webhook"
 
 ### Step 3: Backend Deployment
@@ -128,7 +128,7 @@ curl -H "Cookie: auth_token=..." https://yourdomain.com/api/v1/billing/invoices
 # Send test webhook from Adyen Dashboard
 ```
 - [ ] Webhook received successfully
-- [ ] Event logged to `stripe_webhook_events` table
+- [ ] Event logged to `adyen_webhook_events` table
 - [ ] Signature verification passes
 - [ ] Duplicate events rejected
 
@@ -197,7 +197,7 @@ curl -X POST \
 tail -f backend/logs/error.log | grep billing
 
 # Watch for webhook events
-psql $DATABASE_URL -c "SELECT * FROM stripe_webhook_events ORDER BY created_at DESC LIMIT 10;"
+psql $DATABASE_URL -c "SELECT * FROM adyen_webhook_events ORDER BY created_at DESC LIMIT 10;"
 
 # Check audit trail
 psql $DATABASE_URL -c "SELECT * FROM billing_audit WHERE event_type='error' ORDER BY created_at DESC LIMIT 10;"
@@ -226,7 +226,7 @@ pm2 restart apexmediation-console
 #### Option 2: Database Rollback
 ```sql
 -- Drop new tables (CAUTION: Data loss!)
-DROP TABLE IF EXISTS stripe_webhook_events CASCADE;
+DROP TABLE IF EXISTS adyen_webhook_events CASCADE;
 DROP TABLE IF EXISTS events CASCADE;
 DROP TABLE IF EXISTS usage_alerts CASCADE;
 DROP TABLE IF EXISTS billing_idempotency CASCADE;

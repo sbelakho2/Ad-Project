@@ -171,7 +171,7 @@ LIMIT 10;
 ```typescript
 // In Node.js console
 import { usageMeteringService } from './services/billing/UsageMeteringService';
-await usageMeteringService.syncUsageToStripe();
+await usageMeteringService.syncUsageToAdyen();
 ```
 
 ---
@@ -441,7 +441,7 @@ import { usageMeteringService } from './services/billing/UsageMeteringService';
 import { dunningManagementService } from './services/billing/DunningManagementService';
 
 // Sync usage to Adyen
-await usageMeteringService.syncUsageToStripe();
+await usageMeteringService.syncUsageToAdyen();
 
 // Process dunning retries
 await dunningManagementService.processDunningRetries();
@@ -573,7 +573,7 @@ kubectl logs -f deployment/apexmediation-cron
 **Manual sync:**
 ```typescript
 import { usageMeteringService } from './services/billing/UsageMeteringService';
-await usageMeteringService.syncUsageToStripe();
+await usageMeteringService.syncUsageToAdyen();
 ```
 
 **Common causes:**
@@ -721,7 +721,7 @@ ORDER BY attempt_number;
 Before going live:
 
 - [ ] SMTP configured for ApexMail (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`)
-- [ ] Adyen API key configured (`STRIPE_SECRET_KEY`)
+- [ ] Adyen API key configured (`APEX_ADYEN_API_KEY`)
 - [ ] ClickHouse database created and accessible
 - [ ] Database migrations run (`008_sales_automation.sql`)
 - [ ] Cron jobs deployed and running

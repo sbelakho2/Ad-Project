@@ -64,9 +64,9 @@ Complete step-by-step instructions for obtaining and configuring all required AP
 
 #### Environment Variables:
 ```bash
-STRIPE_SECRET_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-STRIPE_PUBLISHABLE_KEY=pk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-STRIPE_WEBHOOK_SECRET=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_MERCHANT_ACCOUNT=pk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_HMAC_KEY=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 #### Documentation:
@@ -537,7 +537,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXX
    - Go to `Settings` → `Secrets and variables` → `Actions`
    - Click "New repository secret"
    - Add secrets for:
-     - `STRIPE_SECRET_KEY`
+     - `APEX_ADYEN_API_KEY`
      - `PAYPAL_CLIENT_ID`
      - `AWS_ACCESS_KEY_ID`
      - `SLACK_WEBHOOK_URL`
@@ -599,8 +599,8 @@ RATE_LIMIT_MAX_REQUESTS=100
 LOG_LEVEL=info
 
 # Payment Providers
-STRIPE_SECRET_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
-STRIPE_WEBHOOK_SECRET=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_HMAC_KEY=whsec_XXXXXXXXXXXXXXXXXXXXXXXX
 PAYPAL_CLIENT_ID=ARPvB_xxxxxxxxxxxxxxxxxxxxxxxx
 PAYPAL_CLIENT_SECRET=EMcfH_xxxxxxxxxxxxxxxxxxxxxxxx
 PAYPAL_MODE=live
@@ -647,7 +647,7 @@ NEXT_PUBLIC_ENABLE_BLOG=true
 # Server-side only (no NEXT_PUBLIC prefix)
 API_SECRET_KEY=your_secret_key
 SENDGRID_API_KEY=SG.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-STRIPE_SECRET_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+APEX_ADYEN_API_KEY=sk_live_XXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 ### 3. Go Services Environment Files
@@ -695,7 +695,7 @@ curl -X POST https://api.apexmediation.ee/v1/publishers/123/adyen-account \
 # Expected response:
 # {
 #   "success": true,
-#   "stripeAccountId": "acct_1234567890"
+#   "adyenAccountId": "acct_1234567890"
 # }
 ```
 
@@ -742,7 +742,7 @@ curl -X POST https://api.sendgrid.com/v3/mail/send \
 
 ```bash
 # Backend
-printenv | grep -E "STRIPE|PAYPAL|SENDGRID|JWT|DATABASE|REDIS"
+printenv | grep -E "ADYEN|PAYPAL|SENDGRID|JWT|DATABASE|REDIS"
 
 # Website (in .env.local)
 grep NEXT_PUBLIC website/.env.local

@@ -156,7 +156,7 @@ CREATE TABLE payments (
   id UUID PRIMARY KEY,
   customer_id UUID REFERENCES customers(id),
   invoice_id UUID REFERENCES invoices(id),
-  stripe_payment_id TEXT,
+  adyen_payment_id TEXT,
   paddle_payment_id TEXT,
   amount_cents INTEGER NOT NULL,
   currency TEXT NOT NULL,
@@ -187,14 +187,14 @@ import Adyen from 'adyen';
 import { PaddleWebhook } from '@paddle/paddle-node-sdk';
 
 export class PaymentReconciliationService {
-  async handleStripeWebhook(event: Adyen.Event) {
+  async handleAdyenWebhook(event: Adyen.Event) {
     switch (event.type) {
       case 'invoice.paid':
         await this.recordPayment({
           customerId: event.data.object.customer as string,
           amount: event.data.object.amount_paid,
           currency: event.data.object.currency,
-          stripePaymentId: event.data.object.payment_intent as string,
+          adyenPaymentId: event.data.object.payment_intent as string,
         });
         break;
       // ... other events
@@ -690,7 +690,7 @@ export class RevenueMeteringService {
 // backend/services/billing/DunningService.ts
 export class DunningService {
   async handlePaymentFailed(invoice: Adyen.Invoice) {
-    const customer = await db.customers.findByStripeId(invoice.customer as string);
+    const customer = await db.customers.findByAdyenId(invoice.customer as string);
 
     // Update failed payment count
     await db.customers.update(customer.id, {
@@ -721,7 +721,7 @@ export class DunningService {
     
     // Attempt to charge via Adyen
     const paymentIntent = await this.adyen.paymentIntents.create({
-      customer: customer.stripeCustomerId,
+      customer: customer.adyenCustomerId,
       amount: customer.outstandingBalanceCents,
       currency: 'eur',
       payment_method: customer.defaultPaymentMethod,

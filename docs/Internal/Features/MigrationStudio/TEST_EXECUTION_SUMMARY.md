@@ -245,7 +245,7 @@ cd console && npm run lint
 ✅ 015_referral_and_multiplier_systems.sql
 ✅ 016_comprehensive_transaction_logging.sql
 ✅ 017_billing_audit_and_idempotency.sql
-✅ 018_stripe_webhook_events.sql
+✅ 018_adyen_webhook_events.sql
 ✅ 019_migration_studio.sql ← NEW
 ✅ 020_migration_imports_guardrails.sql ← NEW
 ✅ 021_migration_shadow_mirroring.sql ← NEW

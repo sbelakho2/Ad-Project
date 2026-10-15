@@ -890,7 +890,7 @@ References
 - [ ] `DATABASE_URL` (Managed Postgres, SSL enforced).
 - [ ] `REDIS_URL` (`redis://:password@127.0.0.1:6379/0`).
 - [ ] Object storage (S3-compatible): `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_ENDPOINT`, `S3_BUCKET`.
-- [ ] `STRIPE_SECRET_KEY`.
+- [ ] `APEX_ADYEN_API_KEY`.
 - [ ] `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (ApexMail SMTP config).
 - [ ] `SENTRY_DSN`.
 - [ ] `STATUS_PAGE_TOKEN` (if applicable).
@@ -934,7 +934,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 15 2 * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/aggregateUsage.js >> /var/log/apex/cron-usage.log 2>&1
 
 # Hourly — Adyen sync
-5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/stripeSync.js >> /var/log/apex/cron-adyen.log 2>&1
+5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/adyenSync.js >> /var/log/apex/cron-adyen.log 2>&1
 
 # Every 5 min — email queue
 */5 * * * * root docker compose -f /opt/apex/infrastructure/docker-compose.prod.yml exec -T backend node dist/scripts/drainEmailQueue.js >> /var/log/apex/cron-email.log 2>&1

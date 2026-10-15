@@ -92,7 +92,7 @@
 - [ ] **Environment Variables:** All 25+ variables set correctly
   ```bash
   kubectl get secret backend-secrets -n production -o yaml
-  # Verify: DATABASE_URL, OPENAI_API_KEY, STRIPE_SECRET_KEY, etc.
+  # Verify: DATABASE_URL, OPENAI_API_KEY, APEX_ADYEN_API_KEY, etc.
   ```
 - [ ] **Resource Limits:** CPU/Memory requests and limits defined
 - [ ] **Health Checks:** `/health` endpoint returns 200
@@ -218,7 +218,7 @@
 - [ ] **Prometheus Exporters:** Enabled on all services
 - [ ] **Custom Metrics:** Business metrics instrumented
   - `customers_created_total`
-  - `stripe_revenue_cents`
+  - `revenue_cents`
   - `sdk_crashes_total`
   - `openai_monthly_spend_dollars`
 - [ ] **Service Mesh:** Istio metrics flowing to Prometheus
