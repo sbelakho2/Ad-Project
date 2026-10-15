@@ -98,6 +98,7 @@ name = "apex-autopilot"
 version = "0.1.0"
 dependencies = [
  "apex-audit",
+ "apex-connectors",
  "apex-core",
  "apex-lift",
  "apex-proof",
