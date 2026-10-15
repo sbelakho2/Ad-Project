@@ -1,6 +1,6 @@
 //! The clock boundary.
 //!
-//! Timestamps enter the API in exactly one place (Stripe signature freshness),
+//! Timestamps enter the API in exactly one place (job and lead timestamps),
 //! so the clock is injected rather than read inline: tests pin a
 //! [`FixedClock`] and production uses [`SystemClock`].
 

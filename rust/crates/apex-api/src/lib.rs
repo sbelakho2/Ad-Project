@@ -3,7 +3,7 @@
 //! One Axum 0.8 router serves two audiences:
 //!
 //! - a JSON API (`/healthz`, `/v1/audit/{platform}`, `/v1/ledger/{publisher}`,
-//!   `/v1/cycle/{publisher}`, `/v1/stripe/webhook`) for machines, and
+//!   `/v1/cycle/{publisher}`, `/v1/adyen/webhook`) for machines, and
 //! - a server-rendered HTML console (`/`, `/console/audit`, `/console/ledger`)
 //!   that is fully functional with plain GET forms and **zero JavaScript**, so
 //!   it works from any terminal browser or `curl` and adds no script surface

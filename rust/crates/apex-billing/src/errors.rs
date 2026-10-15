@@ -39,19 +39,19 @@ pub enum BillingError {
     #[error("invoice line seq {seq}: fee is not an exact cent amount (fee_micros % 10_000 != 0)")]
     SubCentAmount { seq: u64 },
 
-    #[error("stripe authentication failed (HTTP {status})")]
+    #[error("upstream authentication failed (HTTP {status})")]
     Auth { status: u16 },
 
-    #[error("stripe request failed (HTTP {status})")]
+    #[error("upstream request failed (HTTP {status})")]
     Http { status: u16 },
 
-    #[error("stripe returned a malformed payload: {detail}")]
+    #[error("upstream returned a malformed payload: {detail}")]
     Schema { detail: String },
 
-    #[error("stripe transport failure: {detail}")]
+    #[error("upstream transport failure: {detail}")]
     Network { detail: String },
 
-    /// A transport-level failure with no Stripe-specific classification.
+    /// A transport-level failure with no upstream-specific classification.
     #[error("transport error: {detail}")]
     Transport { detail: String },
 
@@ -59,10 +59,10 @@ pub enum BillingError {
     /// are deterministic, so the caller resumes the same invoice safely; the
     /// `cause` names why the run stopped (Display of the underlying error).
     #[error(
-        "stripe partial failure: {completed} item(s) created, seq {failed_seq} failed: {cause}",
+        "partial collection: {completed} item(s) created, seq {failed_seq} failed: {cause}",
         completed = .completed.len()
     )]
-    StripePartial {
+    PartialCollection {
         completed: Vec<String>,
         failed_seq: u64,
         cause: String,
