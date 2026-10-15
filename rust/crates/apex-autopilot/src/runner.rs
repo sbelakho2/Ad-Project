@@ -92,12 +92,14 @@ impl Runner {
                 .map_err(PlanError::Ledger)?;
             report.pulled += 1;
 
+            let settings_changed = self.settings_changed(&experiment).await;
             let outcome = settle_experiment(
                 self.ops.as_ref(),
                 ledger,
                 &experiment.experiment_id,
                 experiment.change_seq,
                 self.fill_format,
+                &settings_changed,
                 now_unix_ms,
             )
             .await?;
@@ -116,6 +118,21 @@ impl Runner {
     /// The policy this runner applies (exposed so callers can pin it in logs).
     pub fn policy(&self) -> &AutopilotPolicy {
         &self.policy
+    }
+
+    /// The scopes whose current settings differ from what the test
+    /// pre-registered. An adapter that cannot read settings is skipped, not
+    /// treated as an edit: a failure to look never voids a test.
+    async fn settings_changed(&self, experiment: &RunningExperiment) -> Vec<String> {
+        if experiment.expected_settings.trim().is_empty() {
+            return Vec::new();
+        }
+        match self.ops.current_settings(&experiment.ad_unit_id).await {
+            Ok(current) if current != experiment.expected_settings => {
+                vec![experiment.ad_unit_id.clone()]
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -330,6 +347,10 @@ fn status_label(outcome: &SettleOutcome) -> String {
 pub struct RunningExperiment {
     pub experiment_id: String,
     pub change_seq: u64,
+    pub ad_unit_id: String,
+    /// The scope's value as pre-registered; the check flags a publisher edit
+    /// when the scope's current settings differ.
+    pub expected_settings: String,
 }
 
 /// Experiments that have started but have no terminal record yet. A settled
@@ -358,21 +379,46 @@ fn running_experiments(ledger: &dyn LedgerLog) -> Vec<RunningExperiment> {
         .iter()
         .filter_map(|record| match record {
             LedgerRecord::ExperimentStarted {
-                seq, experiment_id, ..
+                seq,
+                experiment_id,
+                spec,
+                ..
             } => {
                 let change_seq = change_before(&records, *seq)?;
                 if settled.contains(experiment_id) || rolled_back.contains(&change_seq) {
-                    None
-                } else {
-                    Some(RunningExperiment {
-                        experiment_id: experiment_id.clone(),
-                        change_seq,
-                    })
+                    return None;
                 }
+                let expected_settings = pre_registration_before_value(&records, &spec.name);
+                Some(RunningExperiment {
+                    experiment_id: experiment_id.clone(),
+                    change_seq,
+                    ad_unit_id: spec.ad_unit_id.clone(),
+                    expected_settings,
+                })
             }
             _ => None,
         })
         .collect()
+}
+
+/// The pre-registered `beforeValue` for `experiment_name`, from the signed
+/// pre-registration record. Empty when the registration is not on the ledger.
+fn pre_registration_before_value(records: &[&LedgerRecord], experiment_name: &str) -> String {
+    for record in records {
+        let LedgerRecord::LiftRecord { payload, .. } = record else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<apex_lift::records::LiftRecord>(payload) else {
+            continue;
+        };
+        let Ok(prereg) = apex_lift::decision::PreRegistration::from_record(&parsed) else {
+            continue;
+        };
+        if prereg.experiment_id == experiment_name {
+            return prereg.before_value;
+        }
+    }
+    String::new()
 }
 
 /// The nearest `changeApplied` record before `started_seq`.
@@ -499,6 +545,55 @@ mod tests {
             })
             .count();
         assert_eq!(pulls, 1);
+    }
+
+    #[tokio::test]
+    async fn a_publisher_edit_voids_the_test() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        // The scope's settings no longer match the pre-registered value.
+        ops.put_current_settings("u1", "[{\"country\":\"ee\",\"floorEcpm\":9}]");
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "[{\"country\":\"ee\",\"floorEcpm\":1}]".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(
+            report.outcomes,
+            vec![("exp-1".to_string(), "voided".to_string())]
+        );
+        let deprecated = ops
+            .call_log()
+            .iter()
+            .filter(|entry| entry.starts_with("deprecate:"))
+            .count();
+        assert_eq!(deprecated, 1, "a publisher edit deprecates the test");
     }
 
     #[tokio::test]

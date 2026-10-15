@@ -121,6 +121,7 @@ pub async fn settle_experiment(
     experiment_id: &str,
     change_seq: u64,
     fill_format: FillFormat,
+    settings_changed: &[String],
     now_unix_ms: i64,
 ) -> Result<SettleOutcome, PlanError> {
     let result = ops
@@ -212,7 +213,7 @@ pub async fn settle_experiment(
         &window.days,
         &arm_counts,
         fill_format,
-        &[],
+        settings_changed,
         0,
         &incidents,
     );

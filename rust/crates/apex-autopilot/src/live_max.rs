@@ -178,6 +178,15 @@ impl PlatformOps for MaxPlatformOps {
         self.reporting.ad_unit_revenue(ad_unit_id, start, end).await
     }
 
+    async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
+        let unit = self.management.get_ad_unit(ad_unit_id).await?;
+        let mut floors = unit.country_floors.unwrap_or_default();
+        floors.sort_by(|a, b| a.country.cmp(&b.country));
+        serde_json::to_string(&floors).map_err(|error| {
+            self.schema("getAdUnit", format!("floors are not serializable: {error}"))
+        })
+    }
+
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
         self.management.promote_experiment(experiment_id).await
     }

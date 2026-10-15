@@ -78,6 +78,16 @@ pub trait PlatformOps: Send + Sync {
         )))
     }
 
+    /// The scope's current settings, canonically encoded, so the runner can
+    /// detect a publisher edit during a test. An adapter that cannot read the
+    /// scope refuses; the runner then skips the edit check rather than voiding
+    /// on a failure to look.
+    async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "current_settings is not supported by this adapter for {ad_unit_id}"
+        )))
+    }
+
     /// Apply the change to all users and end the test: the kept outcome.
     async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError>;
 
@@ -111,6 +121,7 @@ pub struct RecordingOps {
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
+    current_settings: Mutex<std::collections::HashMap<String, String>>,
     log: Mutex<Vec<String>>,
 }
 
@@ -191,6 +202,15 @@ impl RecordingOps {
     pub fn put_scope_revenue(&self, ad_unit_id: &str, micros: apex_core::Micros) -> &Self {
         if let Ok(mut map) = self.scope_revenues.lock() {
             map.insert(ad_unit_id.to_string(), micros);
+        }
+        self
+    }
+
+    /// Script the scope's current settings, so the runner's publisher-edit
+    /// check has something to compare against.
+    pub fn put_current_settings(&self, ad_unit_id: &str, settings: &str) -> &Self {
+        if let Ok(mut map) = self.current_settings.lock() {
+            map.insert(ad_unit_id.to_string(), settings.to_string());
         }
         self
     }
@@ -289,6 +309,22 @@ impl PlatformOps for RecordingOps {
             Err(_) => Err(PlatformError::Network {
                 platform: apex_core::PlatformId::Admob,
                 operation: "scopeRevenue".into(),
+                detail: "lock poisoned".into(),
+            }),
+        }
+    }
+
+    async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
+        push_log(&self.log, format!("current_settings:{ad_unit_id}"));
+        match self.current_settings.lock() {
+            Ok(map) => map.get(ad_unit_id).cloned().ok_or(PlatformError::Schema {
+                platform: apex_core::PlatformId::Admob,
+                operation: "currentSettings".into(),
+                detail: format!("no scripted settings for {ad_unit_id}"),
+            }),
+            Err(_) => Err(PlatformError::Network {
+                platform: apex_core::PlatformId::Admob,
+                operation: "currentSettings".into(),
                 detail: "lock poisoned".into(),
             }),
         }

@@ -231,6 +231,7 @@ async fn settle(
         experiment_id,
         change_seq,
         FillFormat::Rewarded,
+        &[],
         at,
     )
     .await
