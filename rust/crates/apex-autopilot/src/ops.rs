@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use apex_core::{ExperimentResult, ExperimentSpec, PlatformError};
+use apex_proof::ChangeKind;
 use async_trait::async_trait;
 
 use crate::model::Action;
@@ -18,13 +19,43 @@ pub struct ExperimentDays {
     pub test: Vec<apex_lift::window::ArmDay>,
 }
 
+/// Everything an adapter needs to start the platform-native experiment that
+/// carries the proposed change in its **test arm only**. The deterministic
+/// `experiment_id` is the pre-registered name the ledger already pins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExperimentRequest {
+    /// Deterministic, pre-registered experiment id (the platform-native name).
+    pub experiment_id: String,
+    /// The platform experiment configuration.
+    pub spec: ExperimentSpec,
+    /// The single change the test arm must carry. The control arm and the
+    /// live ad unit are left untouched.
+    pub change: ChangeKind,
+    /// The setting's value as read immediately before the call; the ledger
+    /// already pins it in the pre-registration.
+    pub prev_value: String,
+}
+
 #[async_trait]
 pub trait PlatformOps: Send + Sync {
     /// Verify-live gate: may the autopilot write through this operation?
     async fn writable(&self, operation: &str) -> bool;
-    async fn apply(&self, action: &Action, idempotency_key: &str) -> Result<(), PlatformError>;
-    async fn start_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError>;
+
+    /// Start the platform-native experiment whose **test arm** carries
+    /// `request.change`; the live ad unit is never mutated on this path.
+    /// Returns the platform experiment id.
+    async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError>;
+
+    /// Whether [`start_experiment`](Self::start_experiment) carried the change
+    /// in a test arm (true: the live unit is untouched, so a failed start has
+    /// nothing to roll back) or applied it to the unit first (false).
+    fn change_in_test_arm(&self) -> bool {
+        false
+    }
+
+    /// Read the experiment's own configuration/state (not its lift).
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError>;
+
     /// Daily reporting pulls for the lift engine; adapters without reporting
     /// access refuse, and the settle path then fails closed.
     async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
@@ -32,7 +63,21 @@ pub trait PlatformOps: Send + Sync {
             "experiment_days is not supported by this adapter for {experiment_id}"
         )))
     }
+
+    /// Apply the change to all users and end the test: the kept outcome.
+    async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError>;
+
+    /// Revert to the control configuration and end the test: the rollback and
+    /// void outcome.
+    async fn deprecate_experiment(&self, experiment_id: &str) -> Result<(), PlatformError>;
+
+    /// Apply the change directly to the live unit. Only adapters that cannot
+    /// express a test-arm change, that is when `change_in_test_arm` is false.
+    async fn apply(&self, action: &Action, idempotency_key: &str) -> Result<(), PlatformError>;
+
+    /// Undo a directly-applied change.
     async fn rollback(&self, action: &Action) -> Result<(), PlatformError>;
+
     /// Recorded call log (for the write adapters this is the audit trail the
     /// console shows; tests assert exact call sequences on it).
     fn call_log(&self) -> Vec<String>;
@@ -43,8 +88,11 @@ pub trait PlatformOps: Send + Sync {
 #[derive(Debug, Default)]
 pub struct RecordingOps {
     writable: Mutex<std::collections::HashMap<String, bool>>,
+    change_in_test_arm: Mutex<bool>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     start_script: Mutex<VecDeque<Result<String, PlatformError>>>,
+    promote_script: Mutex<VecDeque<Result<(), PlatformError>>>,
+    deprecate_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     rollback_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
@@ -64,6 +112,16 @@ impl RecordingOps {
         self
     }
 
+    /// Mark this adapter as carrying the change in the experiment's test arm
+    /// (the MAX path): no separate apply, and a failed start rolls nothing
+    /// back because the live unit was never touched.
+    pub fn set_change_in_test_arm(&self, value: bool) -> &Self {
+        if let Ok(mut flag) = self.change_in_test_arm.lock() {
+            *flag = value;
+        }
+        self
+    }
+
     pub fn script_apply(&self, results: Vec<Result<(), PlatformError>>) -> &Self {
         if let Ok(mut q) = self.apply_script.lock() {
             *q = results.into();
@@ -73,6 +131,20 @@ impl RecordingOps {
 
     pub fn script_start(&self, results: Vec<Result<String, PlatformError>>) -> &Self {
         if let Ok(mut q) = self.start_script.lock() {
+            *q = results.into();
+        }
+        self
+    }
+
+    pub fn script_promote(&self, results: Vec<Result<(), PlatformError>>) -> &Self {
+        if let Ok(mut q) = self.promote_script.lock() {
+            *q = results.into();
+        }
+        self
+    }
+
+    pub fn script_deprecate(&self, results: Vec<Result<(), PlatformError>>) -> &Self {
+        if let Ok(mut q) = self.deprecate_script.lock() {
             *q = results.into();
         }
         self
@@ -128,17 +200,16 @@ impl PlatformOps for RecordingOps {
             .unwrap_or(true)
     }
 
-    async fn apply(&self, action: &Action, idempotency_key: &str) -> Result<(), PlatformError> {
-        push_log(
-            &self.log,
-            format!("apply:{}:{idempotency_key}", key_of(action)),
-        );
-        pop_or_default(&self.apply_script, Ok(()))
+    async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError> {
+        push_log(&self.log, format!("start:{}", request.experiment_id));
+        pop_or_default(&self.start_script, Ok(request.experiment_id.clone()))
     }
 
-    async fn start_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
-        push_log(&self.log, format!("start:{}", spec.name));
-        pop_or_default(&self.start_script, Ok("exp-default".to_string()))
+    fn change_in_test_arm(&self) -> bool {
+        self.change_in_test_arm
+            .lock()
+            .map(|flag| *flag)
+            .unwrap_or(false)
     }
 
     async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
@@ -177,6 +248,24 @@ impl PlatformOps for RecordingOps {
                 detail: "lock poisoned".into(),
             }),
         }
+    }
+
+    async fn promote_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
+        push_log(&self.log, format!("promote:{experiment_id}"));
+        pop_or_default(&self.promote_script, Ok(()))
+    }
+
+    async fn deprecate_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
+        push_log(&self.log, format!("deprecate:{experiment_id}"));
+        pop_or_default(&self.deprecate_script, Ok(()))
+    }
+
+    async fn apply(&self, action: &Action, idempotency_key: &str) -> Result<(), PlatformError> {
+        push_log(
+            &self.log,
+            format!("apply:{}:{idempotency_key}", key_of(action)),
+        );
+        pop_or_default(&self.apply_script, Ok(()))
     }
 
     async fn rollback(&self, action: &Action) -> Result<(), PlatformError> {
@@ -226,7 +315,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use apex_core::{ExperimentResult, ExperimentSpec};
+    use apex_core::ExperimentResult;
 
     /// An adapter with no reporting access: the default method must refuse.
     struct BareOps;
@@ -236,14 +325,23 @@ mod tests {
         async fn writable(&self, _operation: &str) -> bool {
             false
         }
-        async fn apply(&self, _action: &Action, _key: &str) -> Result<(), PlatformError> {
-            Ok(())
-        }
-        async fn start_experiment(&self, _spec: &ExperimentSpec) -> Result<String, PlatformError> {
+        async fn start_experiment(
+            &self,
+            _request: &ExperimentRequest,
+        ) -> Result<String, PlatformError> {
             Ok(String::new())
         }
         async fn experiment(&self, _id: &str) -> Result<ExperimentResult, PlatformError> {
             Err(PlatformError::Validation("none".into()))
+        }
+        async fn promote_experiment(&self, _id: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        async fn deprecate_experiment(&self, _id: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        async fn apply(&self, _action: &Action, _key: &str) -> Result<(), PlatformError> {
+            Ok(())
         }
         async fn rollback(&self, _action: &Action) -> Result<(), PlatformError> {
             Ok(())

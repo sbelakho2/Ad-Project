@@ -3,11 +3,7 @@
 //! every call, and the ledger is the real proof-crate InMemoryLedger.
 
 use apex_audit::{run as run_audit, Severity, Snapshot};
-use apex_core::{
-    ExperimentMetric, ExperimentResult, ExperimentSpec, ExperimentState, ExperimentVariantResult,
-    PlatformError, PlatformId,
-};
-use apex_lift::decision::{GuardrailThresholds, Metric, PreRegistration};
+use apex_core::{ExperimentResult, ExperimentState, PlatformError, PlatformId};
 use apex_lift::guardrails::FillFormat;
 use apex_lift::window::ArmDay;
 use apex_proof::{ChangeKind, InMemoryLedger, Keypair, LedgerRecord};
@@ -108,31 +104,6 @@ fn proposal(action: Action) -> Proposal {
     }
 }
 
-fn variant(id: &str, revenue: i64, impressions: u64) -> ExperimentVariantResult {
-    let ecpm = apex_core::ecpm_micros(revenue, impressions).unwrap_or(0);
-    ExperimentVariantResult {
-        variant_id: id.into(),
-        impressions,
-        revenue,
-        ecpm,
-    }
-}
-
-fn finished_experiment(
-    results: Vec<ExperimentVariantResult>,
-    winner: Option<&str>,
-    confidence_bp: Option<i32>,
-) -> ExperimentResult {
-    ExperimentResult {
-        experiment_id: "exp-1".into(),
-        state: ExperimentState::Completed,
-        results,
-        lift_percent_bp: None,
-        confidence: confidence_bp,
-        winner_variant_id: winner.map(str::to_string),
-    }
-}
-
 fn seed_change(ledger: &mut InMemoryLedger, at: i64, key: &str) -> u64 {
     ledger
         .append(LedgerRecord::change_applied(
@@ -157,21 +128,14 @@ fn seed_change(ledger: &mut InMemoryLedger, at: i64, key: &str) -> u64 {
 /// seven analyzed days: ten pulls per arm.
 const WINDOW_PULL_DAYS: usize = 10;
 
-fn prereg() -> PreRegistration {
-    PreRegistration {
-        experiment_id: "exp-1".into(),
-        scope: "u1".into(),
-        change_description: "raise the value after the audit found a stale baseline".into(),
-        before_value: "{\"cpm\":1.0}".into(),
-        test_share: 0.25,
-        metric: Metric::RevenuePerUser,
-        burn_in_days: 3,
+/// A seven-day window with no interim look and no extension, so the day
+/// fixtures in this file line up exactly with the decision the engine makes.
+fn settle_policy() -> AutopilotPolicy {
+    AutopilotPolicy {
         window_days: 7,
         interim_look: false,
         extension_allowed: false,
-        code_version_hash: "sha256:autopilot-test".into(),
-        rate_bp: 2000,
-        thresholds: GuardrailThresholds::default(),
+        ..AutopilotPolicy::conservative()
     }
 }
 
@@ -216,6 +180,44 @@ fn incident_days() -> ExperimentDays {
     ExperimentDays { control, test }
 }
 
+/// A live experiment: the platform has not promoted or deprecated it yet.
+fn running_experiment() -> ExperimentResult {
+    ExperimentResult {
+        experiment_id: "exp-1".into(),
+        state: ExperimentState::Running,
+        results: vec![],
+        lift_percent_bp: None,
+        confidence: None,
+        winner_variant_id: None,
+    }
+}
+
+/// Drive one full cycle so the ledger carries the signed pre-registration and
+/// the experiment-start record the settle path reads back. Returns the
+/// `changeApplied` sequence number.
+async fn start_experiment(
+    ops: &crate::ops::RecordingOps,
+    ledger: &mut InMemoryLedger,
+    at: i64,
+) -> u64 {
+    ops.set_change_in_test_arm(true);
+    ops.script_start(vec![Ok("exp-1".into())]);
+    let outcome = run_cycle(
+        ops,
+        ledger,
+        &settle_policy(),
+        &[],
+        vec![proposal(floor_action())],
+        at,
+    )
+    .await
+    .expect("cycle");
+    match outcome.outcomes.into_iter().next() {
+        Some(ActionOutcome::Applied { change_seq, .. }) => change_seq,
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
 async fn settle(
     ops: &crate::ops::RecordingOps,
     ledger: &mut InMemoryLedger,
@@ -226,10 +228,9 @@ async fn settle(
     settle_experiment(
         ops,
         ledger,
-        &prereg(),
-        FillFormat::Rewarded,
         experiment_id,
         change_seq,
+        FillFormat::Rewarded,
         at,
     )
     .await
@@ -446,13 +447,13 @@ async fn cap_boundary_mid_cycle_skips_the_rest() {
         outcome.outcomes,
         vec![
             ActionOutcome::Applied {
-                change_seq: 0,
-                experiment_id: "exp-default".into(),
+                change_seq: 1,
+                experiment_id: "max-experiment:autopilot-floor-u1-ee-2-5:u1".into(),
                 idempotency_key: "max-floor:u1:EE:2.5".into(),
             },
             ActionOutcome::Applied {
-                change_seq: 2,
-                experiment_id: "exp-default".into(),
+                change_seq: 4,
+                experiment_id: "max-experiment:autopilot-ecpm-g1-u2-1-75:u2".into(),
                 idempotency_key: "admob-ecpm:g1:u2:1.75".into(),
             },
             ActionOutcome::Skipped {
@@ -570,11 +571,14 @@ async fn verify_live_endpoints_refuse_before_apply() {
 // ---------- cycle: apply paths ----------
 
 #[tokio::test]
-async fn apply_failure_leaves_no_ledger_record() {
+async fn apply_failure_leaves_no_change_record() {
+    // An adapter that cannot carry the change in a test arm (LevelPlay/AdMob
+    // here) applies first. The pre-registration is already signed, but a
+    // failed apply must leave no change and start no experiment.
     let ops = crate::ops::RecordingOps::new();
     ops.script_apply(vec![Err(PlatformError::Auth {
-        platform: PlatformId::AppLovinMax,
-        operation: "setCountryFloor".into(),
+        platform: PlatformId::LevelPlay,
+        operation: "updateEntryPrice".into(),
         status: 401,
     })]);
     let mut l = ledger();
@@ -583,13 +587,22 @@ async fn apply_failure_leaves_no_ledger_record() {
         &mut l,
         &AutopilotPolicy::conservative(),
         &[],
-        vec![proposal(floor_action())],
+        vec![proposal(Action::SetWaterfallPrice {
+            ad_unit_id: "u3".into(),
+            entry_id: "e1".into(),
+            price_ecpm: 1_100_000,
+        })],
         NOW,
     )
     .await
     .expect_err("apply fails");
     assert!(matches!(err, PlanError::ApplyFailed { .. }));
-    assert!(l.is_empty(), "no ledger record for a failed apply");
+    assert!(
+        !l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::ChangeApplied { .. })),
+        "no change record for a failed apply"
+    );
     let log = ops.call_log();
     assert!(
         !log.iter().any(|entry| entry.starts_with("start:")),
@@ -598,7 +611,9 @@ async fn apply_failure_leaves_no_ledger_record() {
 }
 
 #[tokio::test]
-async fn successful_apply_records_change_and_experiment() {
+async fn successful_run_records_prereg_change_and_experiment() {
+    // Order is load-bearing: the signed pre-registration precedes the change
+    // and the experiment-start records.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
     let outcome = run_cycle(
@@ -606,32 +621,84 @@ async fn successful_apply_records_change_and_experiment() {
         &mut l,
         &AutopilotPolicy::conservative(),
         &[],
-        vec![proposal(floor_action())],
+        vec![proposal(ecpm_action())],
         NOW,
     )
     .await
     .expect("cycle");
     assert_eq!(outcome.applied, 1);
-    assert_eq!(l.len(), 2);
-    match (l.get(0), l.get(1)) {
+    assert_eq!(l.len(), 3, "pre-registration + change + experiment");
+    assert!(matches!(l.get(0), Some(LedgerRecord::LiftRecord { .. })));
+    match (l.get(1), l.get(2)) {
         (
             Some(LedgerRecord::ChangeApplied {
                 idempotency_key, ..
             }),
             Some(LedgerRecord::ExperimentStarted { experiment_id, .. }),
         ) => {
-            assert_eq!(idempotency_key, "max-floor:u1:EE:2.5");
-            assert_eq!(experiment_id, "exp-default");
+            assert_eq!(idempotency_key, "admob-ecpm:g1:u2:1.75");
+            assert_eq!(experiment_id, "max-experiment:autopilot-ecpm-g1-u2-1-75:u2");
         }
         other => panic!("unexpected ledger shape: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn experiment_start_failure_rolls_back_exactly_once() {
+async fn pre_registration_is_signed_before_the_platform_call() {
+    // The registration is in the ledger even though the platform call fails:
+    // it is written first, and a failed start cannot retract it. The split is
+    // the pre-registered share, never a fixed 50.
     let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
     ops.script_start(vec![Err(PlatformError::Http {
         platform: PlatformId::AppLovinMax,
+        operation: "createExperiment".into(),
+        status: 503,
+    })]);
+    let mut l = ledger();
+    run_cycle(
+        &ops,
+        &mut l,
+        &settle_policy(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+
+    let Some(LedgerRecord::LiftRecord { payload, .. }) = l.get(0) else {
+        panic!("the first ledger record must be the signed pre-registration");
+    };
+    let record: apex_lift::records::LiftRecord = serde_json::from_str(payload).expect("payload");
+    match record {
+        apex_lift::records::LiftRecord::PreRegistration {
+            experiment_id,
+            split,
+            window_days,
+            ..
+        } => {
+            assert_eq!(experiment_id, experiment_name(&floor_action()));
+            assert!((split - 0.25).abs() < 1e-12, "pre-registered split {split}");
+            assert_eq!(window_days, 7);
+        }
+        other => panic!("expected a pre-registration, got {other:?}"),
+    }
+    assert!(
+        !l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::ChangeApplied { .. })),
+        "no change record when the experiment never started"
+    );
+}
+
+#[tokio::test]
+async fn apply_path_start_failure_rolls_back_exactly_once() {
+    // The adapter applied the change to the live unit; a failed start must
+    // undo it and record the rollback against the change.
+    let ops = crate::ops::RecordingOps::new();
+    ops.script_start(vec![Err(PlatformError::Http {
+        platform: PlatformId::Admob,
         operation: "createExperiment".into(),
         status: 503,
     })]);
@@ -641,7 +708,7 @@ async fn experiment_start_failure_rolls_back_exactly_once() {
         &mut l,
         &AutopilotPolicy::conservative(),
         &[],
-        vec![proposal(floor_action())],
+        vec![proposal(ecpm_action())],
         NOW,
     )
     .await
@@ -649,24 +716,24 @@ async fn experiment_start_failure_rolls_back_exactly_once() {
     assert_eq!(
         outcome.outcomes,
         vec![ActionOutcome::RolledBack {
-            change_seq: 0,
+            change_seq: 1,
             reason: "experiment_start_failed".into()
         }]
     );
-    assert_eq!(outcome.applied, 1, "the apply itself was real and recorded");
+    assert_eq!(outcome.applied, 0, "a rolled-back start is not an apply");
     let rollbacks = ops
         .call_log()
         .iter()
         .filter(|entry| entry.starts_with("rollback:"))
         .count();
     assert_eq!(rollbacks, 1);
-    match l.get(1) {
+    match l.get(2) {
         Some(LedgerRecord::RollbackPerformed {
             rolled_back_seq,
             reason,
             ..
         }) => {
-            assert_eq!(*rolled_back_seq, 0);
+            assert_eq!(*rolled_back_seq, 1);
             assert_eq!(reason, "experiment_start_failed");
         }
         other => panic!("expected rollback record, got {other:?}"),
@@ -674,15 +741,67 @@ async fn experiment_start_failure_rolls_back_exactly_once() {
 }
 
 #[tokio::test]
-async fn rollback_failure_surfaces_loudly() {
+async fn test_arm_start_failure_touches_nothing() {
+    // The MAX path carries the change in the experiment's test arm: a failed
+    // start never mutates the live unit, so there is nothing to roll back.
     let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
     ops.script_start(vec![Err(PlatformError::Http {
         platform: PlatformId::AppLovinMax,
         operation: "createExperiment".into(),
         status: 503,
     })]);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle completes");
+    assert_eq!(
+        outcome.outcomes,
+        vec![ActionOutcome::RolledBack {
+            change_seq: 0,
+            reason: "experiment_start_failed".into()
+        }]
+    );
+    let log = ops.call_log();
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("apply:")),
+        "the test-arm path never applies to the live unit"
+    );
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("rollback:")),
+        "nothing was mutated, so nothing is rolled back"
+    );
+    assert!(
+        !l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::ChangeApplied { .. })),
+        "no change record when the experiment never started"
+    );
+    assert!(
+        l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::LiftRecord { .. })),
+        "the signed pre-registration still stands"
+    );
+}
+
+#[tokio::test]
+async fn rollback_failure_surfaces_loudly() {
+    let ops = crate::ops::RecordingOps::new();
+    ops.script_start(vec![Err(PlatformError::Http {
+        platform: PlatformId::Admob,
+        operation: "createExperiment".into(),
+        status: 503,
+    })]);
     ops.script_rollback(vec![Err(PlatformError::Network {
-        platform: PlatformId::AppLovinMax,
+        platform: PlatformId::Admob,
         operation: "rollback".into(),
         detail: "reset".into(),
     })]);
@@ -692,7 +811,7 @@ async fn rollback_failure_surfaces_loudly() {
         &mut l,
         &AutopilotPolicy::conservative(),
         &[],
-        vec![proposal(floor_action())],
+        vec![proposal(ecpm_action())],
         NOW,
     )
     .await
@@ -700,7 +819,13 @@ async fn rollback_failure_surfaces_loudly() {
     assert!(matches!(err, PlanError::RollbackFailed { .. }));
     assert_eq!(
         l.len(),
-        1,
+        2,
+        "pre-registration + change, but no false rollback record"
+    );
+    assert!(
+        !l.records()
+            .iter()
+            .any(|r| matches!(r, LedgerRecord::RollbackPerformed { .. })),
         "no false rollback record when the platform rollback failed"
     );
 }
@@ -880,25 +1005,26 @@ async fn cycles_are_deterministic_for_identical_inputs() {
 
 // ---------- settle ----------
 
+fn stopped_experiment() -> ExperimentResult {
+    ExperimentResult {
+        experiment_id: "exp-1".into(),
+        state: ExperimentState::Stopped,
+        results: vec![],
+        lift_percent_bp: None,
+        confidence: None,
+        winner_variant_id: None,
+    }
+}
+
 #[tokio::test]
-async fn settle_refuses_a_running_experiment() {
+async fn settle_refuses_an_experiment_that_already_ended() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        ExperimentResult {
-            experiment_id: "exp-1".into(),
-            state: ExperimentState::Running,
-            results: vec![],
-            lift_percent_bp: None,
-            confidence: None,
-            winner_variant_id: None,
-        },
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", stopped_experiment());
     let err = settle(&ops, &mut l, "exp-1", seq, NOW)
         .await
-        .expect_err("running");
+        .expect_err("already ended");
     assert!(matches!(err, PlanError::PolicyViolation { .. }));
 }
 
@@ -906,8 +1032,8 @@ async fn settle_refuses_a_running_experiment() {
 async fn settle_refuses_a_change_sequence_that_is_not_in_the_ledger() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    seed_change(&mut l, NOW, "k1");
-    ops.put_experiment("exp-1", finished_experiment(vec![], None, Some(9_900)));
+    start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     let err = settle(&ops, &mut l, "exp-1", 999, NOW)
         .await
         .expect_err("unknown change");
@@ -916,52 +1042,26 @@ async fn settle_refuses_a_change_sequence_that_is_not_in_the_ledger() {
 
 #[tokio::test]
 async fn settle_refuses_a_non_change_sequence() {
+    // Sequence 0 is the signed pre-registration, not a change.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    l.append(LedgerRecord::experiment_started(
-        NOW,
-        PlatformId::Admob,
-        "exp-x",
-        ExperimentSpec {
-            test_group_allocation: 50,
-            name: "n".into(),
-            ad_unit_id: "u1".into(),
-            metric: ExperimentMetric::Ecpm,
-            variants: 2,
-            change_description: "c".into(),
-        },
-    ))
-    .expect("started");
-    ops.put_experiment(
-        "exp-x",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
-    let err = settle(&ops, &mut l, "exp-x", 0, NOW)
+    start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
+    let err = settle(&ops, &mut l, "exp-1", 0, NOW)
         .await
         .expect_err("not a change");
     assert!(matches!(err, PlanError::NoBaseline { .. }));
 }
 
 #[tokio::test]
-async fn settle_keep_records_the_signed_lift_and_never_bills_directly() {
+async fn settle_keep_promotes_and_records_the_signed_lift() {
     // A constant +10% revenue-per-user ratio across the window: point lift
     // 0.10 with zero spread, so the 90% lower bound equals the point estimate
     // and the bootstrap cross-check agrees exactly.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_800),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
 
     let outcome = settle(&ops, &mut l, "exp-1", seq, NOW + 1)
@@ -978,18 +1078,25 @@ async fn settle_keep_records_the_signed_lift_and_never_bills_directly() {
             assert_eq!(experiment_id, "exp-1");
             assert!((lift - 0.1).abs() < 1e-9, "lift {lift}");
             assert!((lambda - 0.1).abs() < 1e-9, "lambda {lambda}");
-            assert_eq!(result_seq, 2);
+            assert_eq!(result_seq, 4);
         }
         other => panic!("expected Kept, got {other:?}"),
     }
-    // changeApplied + experimentObserved + signed liftRecord, and nothing that
-    // bills: the fee is computed monthly by the billing engine, not here.
-    assert_eq!(l.len(), 3, "change + observed + lift record");
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter().filter(|e| e.starts_with("promote:")).count(),
+        1,
+        "a kept change is promoted to all users"
+    );
+    assert_eq!(
+        log.iter().filter(|e| e.starts_with("deprecate:")).count(),
+        0
+    );
     assert!(matches!(
-        l.get(1),
+        l.get(3),
         Some(LedgerRecord::ExperimentObserved { .. })
     ));
-    assert!(matches!(l.get(2), Some(LedgerRecord::LiftRecord { .. })));
+    assert!(matches!(l.get(4), Some(LedgerRecord::LiftRecord { .. })));
     assert!(
         !l.records()
             .iter()
@@ -999,19 +1106,12 @@ async fn settle_keep_records_the_signed_lift_and_never_bills_directly() {
 }
 
 #[tokio::test]
-async fn settle_rolls_back_below_the_point_lift_floor() {
+async fn settle_below_the_point_floor_rolls_back_and_deprecates() {
     // +0.75% point lift is positive but under the 1% keep floor.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_030_000));
 
     let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
@@ -1020,35 +1120,32 @@ async fn settle_rolls_back_below_the_point_lift_floor() {
     let SettleOutcome::RolledBack { rollback_seq, .. } = outcome else {
         panic!("expected RolledBack, got {outcome:?}");
     };
-    assert_eq!(rollback_seq, 1);
-    let rollbacks = ops
-        .call_log()
-        .iter()
-        .filter(|entry| entry.starts_with("rollback:"))
-        .count();
-    assert_eq!(rollbacks, 1);
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter().filter(|e| e.starts_with("deprecate:")).count(),
+        1,
+        "a rollback deprecates the experiment"
+    );
+    assert_eq!(log.iter().filter(|e| e.starts_with("promote:")).count(), 0);
+    assert!(matches!(
+        l.get(rollback_seq as usize),
+        Some(LedgerRecord::RollbackPerformed { .. })
+    ));
     assert!(
         !l.records().iter().any(|r| matches!(
             r,
-            LedgerRecord::BillingProof { .. } | LedgerRecord::LiftRecord { .. }
+            LedgerRecord::BillingProof { .. } | LedgerRecord::ExperimentObserved { .. }
         )),
-        "a rolled-back change never emits a lift record or a billing proof"
+        "a rolled-back change is never observed and never billed"
     );
 }
 
 #[tokio::test]
-async fn settle_rolls_back_zero_lift_without_billing() {
+async fn settle_zero_lift_rolls_back_without_billing() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_000_000));
 
     let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
@@ -1062,19 +1159,12 @@ async fn settle_rolls_back_zero_lift_without_billing() {
 }
 
 #[tokio::test]
-async fn settle_rolls_back_negative_lift() {
+async fn settle_negative_lift_rolls_back() {
     // -10% revenue per user trips the fast-harm guardrail.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 3_600_000));
 
     let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
@@ -1089,18 +1179,11 @@ async fn settle_rolls_back_negative_lift() {
 }
 
 #[tokio::test]
-async fn settle_voids_on_a_platform_incident_and_costs_no_platform_call() {
+async fn settle_voids_on_a_platform_incident_and_deprecates() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", incident_days());
 
     let outcome = settle(&ops, &mut l, "exp-1", seq, NOW)
@@ -1110,12 +1193,17 @@ async fn settle_voids_on_a_platform_incident_and_costs_no_platform_call() {
         matches!(outcome, SettleOutcome::Voided { .. }),
         "got {outcome:?}"
     );
-    let rollbacks = ops
-        .call_log()
-        .iter()
-        .filter(|entry| entry.starts_with("rollback:"))
-        .count();
-    assert_eq!(rollbacks, 0, "a void never touches the platform");
+    let log = ops.call_log();
+    assert_eq!(
+        log.iter().filter(|e| e.starts_with("deprecate:")).count(),
+        1,
+        "a void deprecates the experiment"
+    );
+    assert_eq!(
+        log.iter().filter(|e| e.starts_with("rollback:")).count(),
+        0,
+        "the test-arm path never touches the live unit"
+    );
 }
 
 #[tokio::test]
@@ -1137,14 +1225,7 @@ async fn settle_rejects_a_ledger_platform_mismatch() {
         ))
         .expect("seed")
         .seq();
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    ops.put_experiment("exp-1", running_experiment());
     let err = settle(&ops, &mut l, "exp-1", seq, NOW)
         .await
         .expect_err("platform mismatch");
@@ -1155,7 +1236,7 @@ async fn settle_rejects_a_ledger_platform_mismatch() {
 async fn settle_unknown_experiment_is_an_apply_failure() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
+    let seq = start_experiment(&ops, &mut l, NOW).await;
     let err = settle(&ops, &mut l, "nope", seq, NOW)
         .await
         .expect_err("unknown experiment");
@@ -1167,15 +1248,8 @@ async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
     // Fail closed: an adapter that cannot read reporting must not settle.
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_900),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     let err = settle(&ops, &mut l, "exp-1", seq, NOW)
         .await
         .expect_err("no reporting");
@@ -1183,11 +1257,12 @@ async fn settle_missing_reporting_is_an_apply_failure_not_a_keep() {
     assert!(
         !l.records().iter().any(|r| matches!(
             r,
-            LedgerRecord::ExperimentObserved { .. } | LedgerRecord::LiftRecord { .. }
+            LedgerRecord::ExperimentObserved { .. } | LedgerRecord::RollbackPerformed { .. }
         )),
         "no settlement records when the window could not be built"
     );
 }
+
 // ---------------- verifier-round 2 regressions ----------------
 
 #[tokio::test]
@@ -1196,15 +1271,8 @@ async fn repeated_settlement_is_refused_before_any_side_effect() {
     // ExperimentObserved or a second signed lift record (double billing).
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();
-    let seq = seed_change(&mut l, NOW, "k1");
-    ops.put_experiment(
-        "exp-1",
-        finished_experiment(
-            vec![variant("control", 1_000_000, 1_000)],
-            None,
-            Some(9_800),
-        ),
-    );
+    let seq = start_experiment(&ops, &mut l, NOW).await;
+    ops.put_experiment("exp-1", running_experiment());
     ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
     let first = settle(&ops, &mut l, "exp-1", seq, NOW)
         .await
@@ -1216,13 +1284,16 @@ async fn repeated_settlement_is_refused_before_any_side_effect() {
         .await
         .expect_err("second settle must be refused");
     assert!(matches!(second, PlanError::Validation(_)), "got {second}");
-    assert_eq!(l.len(), len_after_first, "no extra observed/lift records");
-    let lifts = l
+    assert_eq!(l.len(), len_after_first, "no extra observed/result records");
+    let observed = l
         .records()
         .iter()
-        .filter(|r| matches!(r, LedgerRecord::LiftRecord { .. }))
+        .filter(|r| matches!(r, LedgerRecord::ExperimentObserved { .. }))
         .count();
-    assert_eq!(lifts, 1, "exactly one signed lift record per proven lift");
+    assert_eq!(
+        observed, 1,
+        "exactly one observation per settled experiment"
+    );
     let rollbacks = ops
         .call_log()
         .iter()

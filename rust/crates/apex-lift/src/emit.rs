@@ -30,8 +30,9 @@ pub fn pre_registration(prereg: &PreRegistration) -> LiftResult<EmittedRecord> {
     emit(LiftRecord::PreRegistration {
         experiment_id: prereg.experiment_id.clone(),
         scope: prereg.scope.clone(),
-        before_value: serde_json::from_str(&prereg.before_value)
-            .unwrap_or(serde_json::Value::String(prereg.before_value.clone())),
+        // Stored verbatim as a JSON string so the record round-trips byte for
+        // byte: the prior platform value is pinned exactly as it was read.
+        before_value: serde_json::Value::String(prereg.before_value.clone()),
         after_value: serde_json::json!({"change": prereg.change_description}),
         split: prereg.test_share,
         metric: "revenue_per_user".into(),
@@ -338,6 +339,20 @@ mod tests {
             let record = result(&prereg(), &decision, &estimate, vec![0.01], 0.0).expect("record");
             assert_eq!(record.sha256.len(), 64);
         }
+    }
+
+    #[test]
+    fn pre_registration_record_round_trips() {
+        let original = prereg();
+        let emitted = pre_registration(&original).expect("emit");
+        let back = PreRegistration::from_record(&emitted.record).expect("from record");
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn from_record_refuses_non_registration_records() {
+        let pull = data_pull("2026-10-04", &serde_json::json!([])).expect("pull");
+        assert!(PreRegistration::from_record(&pull.record).is_err());
     }
 
     #[test]

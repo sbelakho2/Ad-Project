@@ -3,7 +3,9 @@
 //! extension offered only at the final look. Anything else rolls back or
 //! voids, and only a Keep produces a billable lambda.
 
+use crate::error::{LiftError, LiftResult};
 use crate::guardrails::GuardrailEvent;
+use crate::records::LiftRecord;
 use crate::stats::{bootstrap_lower_bound, estimate, Estimate};
 use crate::window::{AnalysisWindow, WindowProblem};
 
@@ -129,6 +131,81 @@ impl PreRegistration {
             return Err("before_value must carry the prior platform value".into());
         }
         self.thresholds.validate()
+    }
+
+    /// Reconstruct the registration from the signed record that was written
+    /// before the test started. Settlement is driven by this, never by a
+    /// registration rebuilt at settle time: a test can only be judged against
+    /// what was pinned before its first platform call.
+    pub fn from_record(record: &LiftRecord) -> LiftResult<Self> {
+        let LiftRecord::PreRegistration {
+            experiment_id,
+            scope,
+            before_value,
+            after_value,
+            split,
+            metric,
+            burn_in_days,
+            window_days,
+            looks,
+            extension_allowed,
+            guardrail_thresholds,
+            code_version_hash,
+            rate_bp,
+        } = record
+        else {
+            return Err(LiftError::Malformed(
+                "record is not a pre-registration".into(),
+            ));
+        };
+        if metric != "revenue_per_user" {
+            return Err(LiftError::Malformed(format!(
+                "unknown pre-registered metric '{metric}'"
+            )));
+        }
+        let change_description = after_value
+            .get("change")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                LiftError::Malformed("pre-registration after_value lost its change".into())
+            })?;
+        let before_value = match before_value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        let f64_field = |name: &str| -> LiftResult<f64> {
+            guardrail_thresholds
+                .get(name)
+                .and_then(|value| value.as_f64())
+                .ok_or_else(|| {
+                    LiftError::Malformed(format!(
+                        "guardrail threshold '{name}' missing or non-numeric"
+                    ))
+                })
+        };
+        let thresholds = GuardrailThresholds {
+            harm_point: f64_field("harmPoint")?,
+            fill_rewarded: f64_field("fillRewarded")?,
+            fill_banner: f64_field("fillBanner")?,
+            split_chi_square: f64_field("splitChiSquare")?,
+        };
+        let prereg = PreRegistration {
+            experiment_id: experiment_id.clone(),
+            scope: scope.clone(),
+            change_description: change_description.to_string(),
+            before_value,
+            test_share: *split,
+            metric: Metric::RevenuePerUser,
+            burn_in_days: *burn_in_days,
+            window_days: *window_days as usize,
+            interim_look: *looks >= 2,
+            extension_allowed: *extension_allowed,
+            code_version_hash: code_version_hash.clone(),
+            rate_bp: *rate_bp,
+            thresholds,
+        };
+        prereg.validate().map_err(LiftError::Malformed)?;
+        Ok(prereg)
     }
 }
 

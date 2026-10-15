@@ -25,6 +25,11 @@
 //! estimate, never bill without a full final window, fail closed on bad data,
 //! and let the user-experience guardrails outrank revenue.
 
+/// The analysis-code version that runs the decision. It is pinned into every
+/// pre-registration so a publisher can reproduce the exact code that judged
+/// the test.
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod billing;
 pub mod calibration;
 pub mod candidates;

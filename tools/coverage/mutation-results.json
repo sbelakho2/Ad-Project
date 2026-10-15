@@ -1,6 +1,6 @@
 {
   "__comment": "Sample-based mutation smoke for the load-bearing logic: apex-core (money, validation) and apex-lift (decision, stats, billing, window). Phase 3: the mutant set and the floor ratchet upward together; a survived mutant must be investigated, not silently dropped from the sample.",
-  "generatedAt": "2026-10-14T23:53:18Z",
+  "generatedAt": "2026-10-15T00:18:54Z",
   "target": "apex-core and apex-lift: money, validation, decision, stats, billing, window",
   "mutants": [
     { "description": "min lift rate 1500 -> 1400", "status": "killed" },

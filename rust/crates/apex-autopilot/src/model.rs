@@ -83,8 +83,23 @@ pub struct AutopilotPolicy {
     pub min_point_lift: f64,
     /// Guardrail thresholds, tightenable from the spec defaults.
     pub thresholds: apex_lift::decision::GuardrailThresholds,
+    /// The contracted fee rate in basis points, 1500..=2000 (15%..=20%).
+    #[serde(default = "default_rate_bp")]
+    pub rate_bp: u16,
+    /// Hash of the analysis code that will judge the test. Pinned into every
+    /// pre-registration; defaults to the running engine version.
+    #[serde(default = "default_code_version_hash")]
+    pub code_version_hash: String,
     /// Refuse every write while any Critical audit result exists.
     pub blackout_on_critical_findings: bool,
+}
+
+fn default_rate_bp() -> u16 {
+    2_000
+}
+
+fn default_code_version_hash() -> String {
+    format!("apex-lift-{}", apex_lift::ENGINE_VERSION)
 }
 
 impl AutopilotPolicy {
@@ -100,7 +115,20 @@ impl AutopilotPolicy {
             test_share: 0.25,
             min_point_lift: 0.01,
             thresholds: Default::default(),
+            rate_bp: 2_000,
+            code_version_hash: default_code_version_hash(),
             blackout_on_critical_findings: true,
+        }
+    }
+
+    /// The MAX `test_group_allocation` the pre-registered share maps to.
+    /// MAX accepts only its documented set (5, 10, 25, 50); the engine's three
+    /// shares map cleanly onto 10, 25 and 50.
+    pub fn max_allocation(&self) -> u8 {
+        match self.test_share {
+            share if share >= 0.5 => 50,
+            share if share >= 0.25 => 25,
+            _ => 10,
         }
     }
 }
