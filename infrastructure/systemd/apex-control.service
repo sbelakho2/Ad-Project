@@ -13,7 +13,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
 # /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
-ReadWritePaths=/var/lib/apex/.apex/control /var/lib/node_exporter/textfile
+# .apex/analytics holds the control plane's analytics spool file.
+ReadWritePaths=/var/lib/apex/.apex/control /var/lib/apex/.apex/analytics /var/lib/node_exporter/textfile
 
 [Install]
 WantedBy=multi-user.target

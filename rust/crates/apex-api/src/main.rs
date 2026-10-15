@@ -272,6 +272,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(error) = client.ensure_schema().await {
             eprintln!("apex-api: analytics schema setup failed: {error}");
         }
+        // Re-deliver batches spooled during an earlier outage before new
+        // traffic starts producing more.
+        let _ = state.analytics.replay_spool().await;
     }
 
     // With `APEX_METRICS_TEXTFILE` set, a background task exports the

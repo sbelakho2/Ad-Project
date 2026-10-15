@@ -90,6 +90,10 @@ Current deployment layout for the no-SDK autopilot product:
   `APEX_ANALYTICS_SPOOL`), and the next runner start replays the spool before
   running, so events survive a store outage; the store's `(source, event_id)`
   dedup absorbs the replay. `apex-ingest` keeps its own separate spool.
+  `apex-api` and `apex-control` use the same contract with their own default
+  spool files (`spool-apex-api.jsonl` and `spool-apex-control.jsonl` under
+  `.apex/analytics/`), each replaying at boot; their units'
+  `ReadWritePaths` cover the state directory those files live in.
   `APEX_SCHEDULED_AT_MS` is the expected timer fire time in unix milliseconds
   for the schedule-lag histogram; the runner records lag only when this
   variable or the `--scheduled-at` flag is supplied, because systemd's

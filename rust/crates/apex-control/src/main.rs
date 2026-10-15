@@ -71,6 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "apex-control: no analytics store configured (APEX_CLICKHOUSE_HTTP/APEX_CLICKHOUSE_DB); the action journal remains the durable record"
         );
+    } else if let Some(emitter) = &state.emitter {
+        // Re-deliver batches spooled during an earlier outage before new
+        // actions append more.
+        let _ = emitter.replay_spool().await;
     }
     // With `APEX_METRICS_TEXTFILE` set, a background task exports the
     // registry to that file every 15 seconds; the graceful shutdown below

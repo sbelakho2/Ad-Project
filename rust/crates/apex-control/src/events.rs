@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use apex_analytics::{
     AnalyticsClient, ClickHouseConfig, ClickHouseStore, DomainEvent, EventSource, EventType,
+    SpoolSink,
 };
 
 use crate::redact::redact_text;
@@ -28,7 +29,15 @@ use crate::redact::redact_text;
 #[derive(Debug, Clone)]
 pub struct EventEmitter {
     client: AnalyticsClient,
+    /// Spooled delivery: a store outage appends the batch here and boot
+    /// replays it, so operator-action analytics survive an outage.
+    spool: Option<Arc<SpoolSink<AnalyticsClient>>>,
 }
+
+/// Env override for the delivery spool path (default below).
+pub const SPOOL_ENV: &str = "APEX_ANALYTICS_SPOOL";
+/// Failed deliveries append here; boot replays the file.
+pub const DEFAULT_SPOOL_PATH: &str = ".apex/analytics/spool-apex-control.jsonl";
 
 /// Map the deployment chip from [`crate::config`] (`PRODUCTION`, `TEST`,
 /// `STAGING`, or a bounded deployment label) to the analytics environment
@@ -71,7 +80,40 @@ impl EventEmitter {
             analytics_environment(environment),
             service_version,
         );
-        Ok(Some(Self { client }))
+        let spool_path = std::env::var(SPOOL_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_SPOOL_PATH.to_string());
+        let spool = Arc::new(SpoolSink::new(client.clone(), spool_path));
+        Ok(Some(Self {
+            client,
+            spool: Some(spool),
+        }))
+    }
+
+    /// Re-deliver batches spooled during an earlier outage; returns the
+    /// number of events replayed. Failures keep them spooled.
+    pub async fn replay_spool(&self) -> usize {
+        let Some(spool) = &self.spool else {
+            return 0;
+        };
+        match spool.replay_spool().await {
+            Ok(outcome) => {
+                if outcome.replayed > 0 || outcome.corrupt > 0 {
+                    tracing::warn!(
+                        replayed = outcome.replayed,
+                        corrupt = outcome.corrupt,
+                        remaining = outcome.remaining,
+                        "analytics spool replay"
+                    );
+                }
+                outcome.replayed
+            }
+            Err(error) => {
+                tracing::warn!(%error, "analytics spool replay failed; batches stay spooled");
+                0
+            }
+        }
     }
 
     /// Emit one operator action event. Redaction runs here, immediately
@@ -126,7 +168,11 @@ impl EventEmitter {
             .build();
         match event {
             Ok(event) => {
-                if let Err(error) = self.client.emit(&event).await {
+                let sink: &dyn apex_analytics::EventSink = match &self.spool {
+                    Some(spool) => spool.as_ref(),
+                    None => &self.client,
+                };
+                if let Err(error) = sink.emit(std::slice::from_ref(&event)).await {
                     // The journal stays the durable record; a failed emission
                     // is logged with its bounded reason and never blocks the
                     // operator action.
@@ -195,6 +241,7 @@ mod tests {
         store.ensure_schema().await.expect("schema");
         let emitter = EventEmitter {
             client: AnalyticsClient::new(store.clone(), analytics_environment("TEST"), "test"),
+            spool: None,
         };
         emitter
             .emit_action(
@@ -214,12 +261,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_delivery_spools_the_action_and_replay_delivers_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-spool-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let spool_path = dir.join("spool.jsonl");
+        let failing_client = AnalyticsClient::new(
+            Arc::new(
+                ClickHouseStore::new(apex_analytics::ClickHouseConfig {
+                    http_url: "http://127.0.0.1:9".to_string(),
+                    database: "unreachable".to_string(),
+                    request_timeout_ms: 200,
+                })
+                .expect("config"),
+            ),
+            "production",
+            "apex-control-test",
+        );
+        let failing_spool = Arc::new(SpoolSink::new(failing_client.clone(), spool_path.clone()));
+        let failing = EventEmitter {
+            client: failing_client,
+            spool: Some(failing_spool),
+        };
+        failing
+            .emit_action(
+                "sam",
+                "fleet_pause_scheduling",
+                "fleet",
+                "confirmed",
+                "ctl-deadbeef0001",
+            )
+            .await;
+        // Poll briefly: the append's own await has completed, but a
+        // synchronous read can still observe the just-created file as empty
+        // on APFS while the VFS settles; converge instead of racing it.
+        let mut spooled = String::new();
+        for _ in 0..100 {
+            spooled = std::fs::read_to_string(&spool_path).unwrap_or_default();
+            if spooled.lines().count() >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(spooled.lines().count(), 1, "the failed action is spooled");
+
+        use apex_analytics::{EventStore, MemoryStore, ProjectionStore};
+        let store = Arc::new(MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let working_client = AnalyticsClient::new(store.clone(), "production", "apex-control-test");
+        let working = EventEmitter {
+            client: working_client.clone(),
+            spool: Some(Arc::new(SpoolSink::new(working_client, spool_path.clone()))),
+        };
+        assert_eq!(working.replay_spool().await, 1, "one event re-delivered");
+        let events = store.load_events().await.expect("stored");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, EventType::OperatorAction);
+        let after = std::fs::read_to_string(&spool_path).unwrap_or_default();
+        assert!(after.trim().is_empty(), "spool drained: {after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn production_shaped_action_ids_are_never_refused_as_tokens() {
         use apex_analytics::{EventStore, MemoryStore, ProjectionStore};
         let store = Arc::new(MemoryStore::new());
         store.ensure_schema().await.expect("schema");
         let emitter = EventEmitter {
             client: AnalyticsClient::new(store.clone(), "production", "test"),
+            spool: None,
         };
         // The longest capability name previously produced a 40+ character
         // non-hex word that the envelope's token-like guard refused, dropping

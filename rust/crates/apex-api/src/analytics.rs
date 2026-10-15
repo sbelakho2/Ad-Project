@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use apex_analytics::{
     AnalyticsClient, AnalyticsReader, ClickHouseConfig, ClickHouseReader, ClickHouseStore,
-    DomainEvent, EventPayload, EventSource, EventType, UtcMillis,
+    DomainEvent, EventPayload, EventSink, EventSource, EventType, SpoolSink, UtcMillis,
 };
 
 /// Deployment label stamped on every emitted event.
@@ -43,12 +43,19 @@ pub const CONSOLE_QUERY_TIMEOUT_MS: u64 = 5_000;
 pub const NOT_CONFIGURED_REASON: &str = "the analytics store is not configured in this deployment";
 /// The reason the console shows when a configured store did not answer.
 pub const UNREACHABLE_REASON: &str = "the analytics store did not answer";
+/// Env override for the delivery spool path (default below).
+pub const SPOOL_ENV: &str = "APEX_ANALYTICS_SPOOL";
+/// Failed deliveries append here; boot replays the file.
+pub const DEFAULT_SPOOL_PATH: &str = ".apex/analytics/spool-apex-api.jsonl";
 
 /// The reader plus emitter of this deployment.
 #[derive(Debug, Clone)]
 pub struct AnalyticsAccess {
     reader: Option<Arc<dyn AnalyticsReader>>,
     client: Option<AnalyticsClient>,
+    /// The spooling sink: failed deliveries append here and boot replays it,
+    /// so a ClickHouse outage never silently drops console events.
+    spool: Option<Arc<SpoolSink<AnalyticsClient>>>,
     disabled_reason: Option<String>,
 }
 
@@ -59,6 +66,7 @@ impl AnalyticsAccess {
         Self {
             reader: None,
             client: None,
+            spool: None,
             disabled_reason: Some(reason.into()),
         }
     }
@@ -104,19 +112,67 @@ impl AnalyticsAccess {
             environment,
             format!("apex-api-{}", env!("CARGO_PKG_VERSION")),
         );
+        let spool_path = lookup(SPOOL_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_SPOOL_PATH.to_string());
+        let spool = Arc::new(SpoolSink::new(client.clone(), spool_path));
         Self {
             reader: Some(reader),
             client: Some(client),
+            spool: Some(spool),
             disabled_reason: None,
         }
     }
 
-    /// An enabled access over an explicit reader and client (tests).
+    /// An enabled access over an explicit reader and client (tests): events
+    /// are delivered directly with no spool.
     pub fn enabled(reader: Arc<dyn AnalyticsReader>, client: AnalyticsClient) -> Self {
         Self {
             reader: Some(reader),
             client: Some(client),
+            spool: None,
             disabled_reason: None,
+        }
+    }
+
+    /// An enabled access with a spooled sink (tests and boot wiring).
+    pub fn enabled_spooled(
+        reader: Arc<dyn AnalyticsReader>,
+        client: AnalyticsClient,
+        spool_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let spool = Arc::new(SpoolSink::new(client.clone(), spool_path.into()));
+        Self {
+            reader: Some(reader),
+            client: Some(client),
+            spool: Some(spool),
+            disabled_reason: None,
+        }
+    }
+
+    /// Re-deliver spooled batches left by an earlier outage. Returns the
+    /// number of batches sent; failures keep them spooled. No-op when the
+    /// sink or the spool is absent.
+    pub async fn replay_spool(&self) -> usize {
+        let Some(spool) = &self.spool else {
+            return 0;
+        };
+        match spool.replay_spool().await {
+            Ok(outcome) => {
+                if outcome.replayed > 0 || outcome.corrupt > 0 {
+                    tracing::warn!(
+                        replayed = outcome.replayed,
+                        corrupt = outcome.corrupt,
+                        remaining = outcome.remaining,
+                        "analytics spool replay"
+                    );
+                }
+                outcome.replayed
+            }
+            Err(error) => {
+                tracing::warn!(%error, "analytics spool replay failed; batches stay spooled");
+                0
+            }
         }
     }
 
@@ -159,7 +215,14 @@ impl AnalyticsAccess {
             );
             return;
         };
-        match client.emit(&event).await {
+        // Deliver through the spooling sink when one exists: a store outage
+        // appends the batch to the spool (replayed at the next boot) instead
+        // of dropping the event.
+        let sink: &dyn EventSink = match &self.spool {
+            Some(spool) => spool.as_ref(),
+            None => client,
+        };
+        match sink.emit(std::slice::from_ref(&event)).await {
             Ok(outcome) => {
                 tracing::debug!(event_type, delivered = outcome.delivered, "analytics event");
             }
@@ -708,6 +771,66 @@ mod tests {
         let client = AnalyticsClient::new(store.clone(), "production", "apex-api-test");
         let reader: Arc<dyn AnalyticsReader> = Arc::new(MemoryReader::new((*store).clone()));
         (AnalyticsAccess::enabled(reader, client), store)
+    }
+
+    #[tokio::test]
+    async fn a_failed_delivery_spools_the_event_and_replay_delivers_it() {
+        // A store that cannot answer: the event must land in the spool, and
+        // a later replay through a working store must deliver it.
+        let spool_dir = std::env::temp_dir().join(format!(
+            "apex-api-spool-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&spool_dir).expect("dir");
+        let spool_path = spool_dir.join("spool.jsonl");
+        let failing_client = AnalyticsClient::new(
+            Arc::new(
+                ClickHouseStore::new(ClickHouseConfig {
+                    http_url: "http://127.0.0.1:9".to_string(),
+                    database: "unreachable".to_string(),
+                    request_timeout_ms: 200,
+                })
+                .expect("config"),
+            ),
+            "production",
+            "apex-api-test",
+        );
+        let reader: Arc<dyn AnalyticsReader> = Arc::new(MemoryReader::new(MemoryStore::new()));
+        let failing = AnalyticsAccess::enabled_spooled(reader, failing_client, spool_path.clone());
+        failing
+            .emit_ledger_verified(0, "northstar", 3, "apex-proof-0.1.0", 1)
+            .await;
+        // Converge on the append (see the control emitter test): a
+        // synchronous read can briefly observe the new file as empty.
+        let mut spooled = String::new();
+        for _ in 0..100 {
+            spooled = std::fs::read_to_string(&spool_path).unwrap_or_default();
+            if spooled.lines().count() >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(spooled.lines().count(), 1, "the failed event is spooled");
+
+        let store = Arc::new(MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let working_client = AnalyticsClient::new(store.clone(), "production", "apex-api-test");
+        let reader: Arc<dyn AnalyticsReader> = Arc::new(MemoryReader::new((*store).clone()));
+        let working = AnalyticsAccess::enabled_spooled(reader, working_client, spool_path.clone());
+        assert_eq!(working.replay_spool().await, 1, "one event re-delivered");
+        let events = store.load_events().await.expect("stored");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "ledger_verified");
+        let after = std::fs::read_to_string(&spool_path).unwrap_or_default();
+        assert!(
+            after.trim().is_empty(),
+            "delivered events leave no spool lines: {after:?}"
+        );
+        let _ = std::fs::remove_dir_all(&spool_dir);
     }
 
     #[tokio::test]

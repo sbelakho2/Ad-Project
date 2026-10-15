@@ -412,7 +412,7 @@
 2 rust/crates/apex-control/src/config.rs
 0 rust/crates/apex-control/src/copy.rs
 0 rust/crates/apex-control/src/data.rs
-0 rust/crates/apex-control/src/events.rs
+1 rust/crates/apex-control/src/events.rs
 0 rust/crates/apex-control/src/favicon.rs
 1 rust/crates/apex-control/src/fixture_render.rs
 1 rust/crates/apex-control/src/fixtures.rs
@@ -569,4 +569,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 7962
+TOTAL 7963

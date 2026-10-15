@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 User=apex
+# The analytics spool and other relative defaults live under the state root.
+WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/api.env
 ExecStart=/usr/local/bin/apex-api
 Restart=on-failure
