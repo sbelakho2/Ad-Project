@@ -520,6 +520,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("apex_api_uptime_seconds"), "{text}");
+        assert!(text.contains("apex_build_info{version="), "{text}");
+        assert!(text.contains("apex_api_requests_in_flight"), "{text}");
     }
 
     #[tokio::test]

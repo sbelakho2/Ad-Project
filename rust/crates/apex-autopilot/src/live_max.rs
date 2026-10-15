@@ -150,6 +150,14 @@ impl PlatformOps for MaxPlatformOps {
             .await
     }
 
+    async fn start_null_experiment(
+        &self,
+        spec: &apex_core::ExperimentSpec,
+    ) -> Result<String, PlatformError> {
+        // No floor change: both arms carry the live unit's configuration.
+        self.management.create_experiment(spec, None).await
+    }
+
     fn change_in_test_arm(&self) -> bool {
         true
     }

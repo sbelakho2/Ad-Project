@@ -252,6 +252,77 @@ impl Runner {
     }
 }
 
+impl Runner {
+    /// Start an A/A (null) experiment and record it: the same configuration on
+    /// both arms, so the split and pipeline can be checked before any real
+    /// change rides on them. Returns the platform experiment id.
+    pub async fn start_aa(
+        &self,
+        ledger: &mut dyn LedgerLog,
+        platform: apex_core::PlatformId,
+        spec: &apex_core::ExperimentSpec,
+        now_unix_ms: i64,
+    ) -> Result<String, PlanError> {
+        let experiment_id = self
+            .ops
+            .start_null_experiment(spec)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?;
+        ledger
+            .append(LedgerRecord::experiment_started(
+                now_unix_ms,
+                platform,
+                &experiment_id,
+                spec.clone(),
+            ))
+            .map_err(PlanError::Ledger)?;
+        Ok(experiment_id)
+    }
+
+    /// Evaluate a completed A/A run: the daily log ratios of the two arms,
+    /// judged by the engine's calibration rule at the planned split.
+    pub async fn aa_conclusion(
+        &self,
+        experiment_id: &str,
+        planned_split: f64,
+    ) -> Result<apex_lift::calibration::AaConclusion, PlanError> {
+        let days = self
+            .ops
+            .experiment_days(experiment_id)
+            .await
+            .map_err(|source| PlanError::ApplyFailed { source })?;
+        let ratios = aa_ratios(&days.control, &days.test, planned_split);
+        Ok(apex_lift::calibration::evaluate_aa(&ratios, planned_split))
+    }
+}
+
+/// The daily log ratios between the two arms, using the same arm-value rule as
+/// the analysis window: per-user when users are reported, otherwise revenue
+/// divided by the arm's allocated share.
+fn aa_ratios(
+    control: &[apex_lift::window::ArmDay],
+    test: &[apex_lift::window::ArmDay],
+    planned_split: f64,
+) -> Vec<f64> {
+    let split = planned_split.clamp(0.01, 0.99);
+    let value = |day: &apex_lift::window::ArmDay, share: f64| -> Option<f64> {
+        match day.users {
+            Some(users) if users > 0 => Some(day.revenue as f64 / users as f64),
+            Some(_) => None,
+            None => Some(day.revenue as f64 / share),
+        }
+    };
+    control
+        .iter()
+        .zip(test.iter())
+        .filter_map(|(c, t)| {
+            let control = value(c, 1.0 - split)?;
+            let test = value(t, split)?;
+            (control > 0.0 && test > 0.0).then(|| (test / control).ln())
+        })
+        .collect()
+}
+
 /// A kept change whose month-6 (or 30%-eCPM-move) re-check is due.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecheckDue {
@@ -647,6 +718,59 @@ mod tests {
             .filter(|entry| entry.starts_with("deprecate:"))
             .count();
         assert_eq!(deprecated, 1, "a publisher edit deprecates the test");
+    }
+
+    #[tokio::test]
+    async fn an_aa_run_starts_and_is_recorded() {
+        let ops = Arc::new(RecordingOps::new());
+        let mut l = ledger();
+        let spec = apex_core::ExperimentSpec {
+            name: "apex-aa-u1".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "A/A calibration".into(),
+            test_group_allocation: 50,
+        };
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let id = runner
+            .start_aa(&mut l, apex_core::PlatformId::AppLovinMax, &spec, NOW)
+            .await
+            .expect("aa");
+        assert_eq!(id, "apex-aa-u1");
+        assert!(
+            l.records().iter().any(|r| matches!(
+                r,
+                LedgerRecord::ExperimentStarted { experiment_id, .. } if experiment_id == "apex-aa-u1"
+            )),
+            "the A/A start is recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_aa_run_is_audit_only() {
+        use apex_lift::calibration::AaConclusion;
+        let ops = Arc::new(RecordingOps::new());
+        ops.put_experiment_days(
+            "apex-aa-u1",
+            ExperimentDays {
+                control: (0..3)
+                    .map(|i| arm_day(&format!("2026-10-0{}", i + 1), 1_000_000))
+                    .collect(),
+                test: (0..3)
+                    .map(|i| arm_day(&format!("2026-10-0{}", i + 1), 1_000_000))
+                    .collect(),
+            },
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let conclusion = runner
+            .aa_conclusion("apex-aa-u1", 0.5)
+            .await
+            .expect("conclusion");
+        assert!(
+            matches!(conclusion, AaConclusion::AuditOnly { .. }),
+            "{conclusion:?}"
+        );
     }
 
     #[tokio::test]

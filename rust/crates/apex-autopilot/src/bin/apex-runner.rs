@@ -30,7 +30,7 @@ use apex_proof::{Keypair, Ledger};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).ok_or(
-        "usage: apex-runner <daily|monthly|recheck> [--month YYYY-MM] [--start YYYY-MM-DD] [--days N]",
+        "usage: apex-runner <daily|monthly|recheck|aa> [--month YYYY-MM] [--start YYYY-MM-DD] [--days N] [--unit U] [--name N]",
     )?;
 
     let ledger_path = required("APEX_RUNNER_LEDGER")?;
@@ -109,6 +109,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 report.fees.len(),
                 report.fees
             );
+        }
+        "aa" => {
+            let unit = flag(&args, "--unit").ok_or("aa requires --unit")?;
+            let name = flag(&args, "--name").unwrap_or_else(|| format!("apex-aa-{unit}"));
+            let spec = apex_core::ExperimentSpec {
+                name,
+                ad_unit_id: unit,
+                metric: apex_core::ExperimentMetric::Revenue,
+                variants: 2,
+                change_description: "A/A calibration".into(),
+                test_group_allocation: 50,
+            };
+            let mut ledger = ledger;
+            let id = runner
+                .start_aa(
+                    &mut ledger,
+                    apex_core::PlatformId::AppLovinMax,
+                    &spec,
+                    now_unix_ms,
+                )
+                .await
+                .map_err(|e| format!("aa: {e}"))?;
+            println!("aa: started {id}");
         }
         "recheck" => {
             let due = runner.due_rechecks(&ledger, now_unix_ms);

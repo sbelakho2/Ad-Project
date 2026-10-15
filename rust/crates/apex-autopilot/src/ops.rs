@@ -46,6 +46,17 @@ pub trait PlatformOps: Send + Sync {
     /// Returns the platform experiment id.
     async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError>;
 
+    /// Start a null (A/A) experiment: the same configuration on both arms, no
+    /// change under test. Used to calibrate whether the split and the pipeline
+    /// are honest before any real change rides on them. The default adapter
+    /// cannot, and refuses.
+    async fn start_null_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
+        Err(PlatformError::Validation(format!(
+            "start_null_experiment is not supported by this adapter for {}",
+            spec.name
+        )))
+    }
+
     /// Whether [`start_experiment`](Self::start_experiment) carried the change
     /// in a test arm (true: the live unit is untouched, so a failed start has
     /// nothing to roll back) or applied it to the unit first (false).
@@ -246,6 +257,11 @@ impl PlatformOps for RecordingOps {
     async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError> {
         push_log(&self.log, format!("start:{}", request.experiment_id));
         pop_or_default(&self.start_script, Ok(request.experiment_id.clone()))
+    }
+
+    async fn start_null_experiment(&self, spec: &ExperimentSpec) -> Result<String, PlatformError> {
+        push_log(&self.log, format!("start_aa:{}", spec.name));
+        pop_or_default(&self.start_script, Ok(spec.name.clone()))
     }
 
     fn change_in_test_arm(&self) -> bool {

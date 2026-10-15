@@ -15,13 +15,14 @@ use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 
-/// Process lifetime request counters.
+/// Process lifetime request counters plus the in-flight gauge.
 #[derive(Debug)]
 pub struct Metrics {
     started: Instant,
     ok: AtomicU64,
     client_error: AtomicU64,
     server_error: AtomicU64,
+    in_flight: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -31,6 +32,7 @@ impl Default for Metrics {
             ok: AtomicU64::new(0),
             client_error: AtomicU64::new(0),
             server_error: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
         }
     }
 }
@@ -57,13 +59,21 @@ impl Metrics {
         let ok = self.ok.load(Ordering::Relaxed);
         let client_error = self.client_error.load(Ordering::Relaxed);
         let server_error = self.server_error.load(Ordering::Relaxed);
+        let in_flight = self.in_flight.load(Ordering::Relaxed);
         let uptime = self.started.elapsed().as_secs();
+        let version = env!("CARGO_PKG_VERSION");
         format!(
-            "# HELP apex_api_requests_total Total HTTP requests by status class.\n\
+            "# HELP apex_build_info Build info as labels; value is always 1.\n\
+             # TYPE apex_build_info gauge\n\
+             apex_build_info{{version=\"{version}\"}} 1\n\
+             # HELP apex_api_requests_total Total HTTP requests by status class.\n\
              # TYPE apex_api_requests_total counter\n\
              apex_api_requests_total{{status=\"2xx\"}} {ok}\n\
              apex_api_requests_total{{status=\"4xx\"}} {client_error}\n\
              apex_api_requests_total{{status=\"5xx\"}} {server_error}\n\
+             # HELP apex_api_requests_in_flight Requests currently being served.\n\
+             # TYPE apex_api_requests_in_flight gauge\n\
+             apex_api_requests_in_flight {in_flight}\n\
              # HELP apex_api_uptime_seconds Seconds since process start.\n\
              # TYPE apex_api_uptime_seconds gauge\n\
              apex_api_uptime_seconds {uptime}\n"
@@ -77,7 +87,9 @@ pub async fn track_requests(
     request: Request,
     next: Next,
 ) -> Response {
+    state.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
     let response = next.run(request).await;
+    state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
     state.metrics.observe(response.status());
     response
 }
