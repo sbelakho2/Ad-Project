@@ -48,5 +48,5 @@ Operational handbook for the Billing subsystem: usage metering, invoicing, dunni
 
 ## References
 - API docs: docs/Backend/BILLING_API.md
-- Keys rotation: docs/Internal/Operations/STRIPE_KEYS_ROTATION.md
+- Keys rotation: docs/Internal/Operations/ADYEN_KEYS_ROTATION.md
 - PCI scope: docs/Internal/Security/PCI_SCOPE.md

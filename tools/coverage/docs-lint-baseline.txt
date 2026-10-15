@@ -109,7 +109,7 @@
 26 docs/Internal/DOCUMENTATION_AUDIT_REPORT.md
 34 docs/Internal/Deployment/ACCOUNTING_IMPLEMENTATION_STATUS.md
 25 docs/Internal/Deployment/ACCOUNTING_OPERATIONS.md
-5 docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md
+1 docs/Internal/Deployment/ADYEN_COLLECTION_RUNBOOK.md
 72 docs/Internal/Deployment/API_KEYS_AND_INTEGRATIONS_GUIDE.md
 2 docs/Internal/Deployment/AdapterRebuildPlan.md
 37 docs/Internal/Deployment/BACKEND_ENVIRONMENT.md
@@ -118,7 +118,7 @@
 50 docs/Internal/Deployment/CI_CD_COMPLETION_REPORT.md
 71 docs/Internal/Deployment/CI_CD_GUIDE.md
 28 docs/Internal/Deployment/CI_CD_MONITORING_PLAN.md
-8 docs/Internal/Deployment/CONSOLE_ENVIRONMENT.md
+9 docs/Internal/Deployment/CONSOLE_ENVIRONMENT.md
 62 docs/Internal/Deployment/DEPLOYMENT_COMPLETION_REPORT.md
 34 docs/Internal/Deployment/DEPLOYMENT_STATUS.md
 23 docs/Internal/Deployment/DOCS_DRIFT_CHECKLIST.md
@@ -206,12 +206,12 @@
 0 docs/Internal/Monitoring/evidence/2025-12-07/alertmanager-rules.yml
 0 docs/Internal/Monitoring/evidence/2025-12-07/ready-alerts.md
 0 docs/Internal/Observability/log-redaction-2025-12-07.md
+1 docs/Internal/Operations/ADYEN_KEYS_ROTATION.md
 11 docs/Internal/Operations/BILLING_PLAYBOOK.md
 11 docs/Internal/Operations/CONTROL_PLANE_GUIDE.md
 0 docs/Internal/Operations/DR_BILLING.md
 5 docs/Internal/Operations/ON_CALL_RUNBOOK.md
 0 docs/Internal/Operations/SECRET_ROTATION_AND_KEY_BACKUP.md
-0 docs/Internal/Operations/STRIPE_KEYS_ROTATION.md
 17 docs/Internal/Operations/TRANSPARENCY_KEY_ROTATION.md
 14 docs/Internal/Project_History/AD_PROJECT_CAPABILITY_AUDIT.md
 15 docs/Internal/Project_History/COMPETITIVE_GAP_ANALYSIS.md
@@ -297,6 +297,7 @@
 0 rust/crates/apex-api/benches/api_latency.rs
 0 rust/crates/apex-api/src/bin/render-fixtures.rs
 0 rust/crates/apex-api/src/clock.rs
+0 rust/crates/apex-api/src/config.rs
 0 rust/crates/apex-api/src/cycle.rs
 0 rust/crates/apex-api/src/error.rs
 0 rust/crates/apex-api/src/html.rs
@@ -328,6 +329,7 @@
 0 rust/crates/apex-autopilot/src/alerts.rs
 0 rust/crates/apex-autopilot/src/bin/apex-runner.rs
 0 rust/crates/apex-autopilot/src/calendar.rs
+0 rust/crates/apex-autopilot/src/cli.rs
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/lib.rs
 0 rust/crates/apex-autopilot/src/live_max.rs
@@ -418,4 +420,4 @@
 0 site/content/proof.md
 0 site/content/security.md
 0 site/static/rerun-kit/README.md
-TOTAL 7693
+TOTAL 7691

@@ -630,7 +630,7 @@ The following checklist mirrors the TODO list maintained in `DEVELOPMENT_TODO_CH
 
 - `docs/Internal/Operations/BILLING_PLAYBOOK.md` — **Type:** Doc. **Summary:** Billing operations playbook covering flows, failure modes, RACI. **Dependencies:** Billing team/process. **Risks/TODOs:** Provide live runbook link for on-call use. **Evidence:** Reviewed file.
 - `docs/Internal/Operations/DR_BILLING.md` — **Type:** Doc. **Summary:** Disaster recovery plan for billing. **Dependencies:** Infra/DB backups. **Risks/TODOs:** Expand “Objectives” into actionable steps. **Evidence:** Reviewed doc.
-- `docs/Internal/Operations/STRIPE_KEYS_ROTATION.md` — **Type:** Doc. **Summary:** Runbook for rotating Adyen keys. **Dependencies:** Adyen account. **Risks/TODOs:** Ensure secret storage instructions align with Infisical doc. **Evidence:** Reviewed file.
+- `docs/Internal/Operations/ADYEN_KEYS_ROTATION.md` — **Type:** Doc. **Summary:** Runbook for rotating Adyen keys. **Dependencies:** Adyen account. **Risks/TODOs:** Ensure secret storage instructions align with Infisical doc. **Evidence:** Reviewed file.
 - `docs/Internal/Operations/TRANSPARENCY_KEY_ROTATION.md` — **Type:** Doc. **Summary:** Key rotation guide for transparency signer. **Dependencies:** Transparency service. **Risks/TODOs:** Add automation script references. **Evidence:** Reviewed doc.
 
 ##### Internal/Sales/
