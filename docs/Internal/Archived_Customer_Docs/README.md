@@ -1,3 +1,6 @@
+These customer documents describe the retired sdk product and are kept for history.
+The current publisher guides live in [docs/Guides](../../Guides/01-free-audit.md).
+
 # Customer Documentation Structure
 
 _Last updated: 2025-11-18 16:40 UTC_

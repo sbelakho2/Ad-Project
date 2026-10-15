@@ -2,8 +2,10 @@
 name = "apex-core"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
-publish.workspace = true
+license = "Apache-2.0"
+publish = true
+description = "Money, platform and validation primitives for the Apex Lift Engine."
+repository = "https://github.com/sbelakho2/Ad-Project"
 
 [lints]
 workspace = true
