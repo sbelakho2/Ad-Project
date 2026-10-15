@@ -326,9 +326,11 @@
 0 rust/crates/apex-audit/src/testkit.rs
 0 rust/crates/apex-audit/src/tests.rs
 0 rust/crates/apex-autopilot/src/alerts.rs
+1 rust/crates/apex-autopilot/src/audit_job.rs
 0 rust/crates/apex-autopilot/src/bin/apex-runner.rs
 0 rust/crates/apex-autopilot/src/calendar.rs
 0 rust/crates/apex-autopilot/src/cli.rs
+0 rust/crates/apex-autopilot/src/cycle.rs
 0 rust/crates/apex-autopilot/src/keys.rs
 0 rust/crates/apex-autopilot/src/lib.rs
 0 rust/crates/apex-autopilot/src/live_max.rs
@@ -340,6 +342,7 @@
 0 rust/crates/apex-autopilot/src/settle.rs
 0 rust/crates/apex-autopilot/src/tests.rs
 0 rust/crates/apex-billing/src/adyen.rs
+0 rust/crates/apex-billing/src/collection.rs
 0 rust/crates/apex-billing/src/errors.rs
 0 rust/crates/apex-billing/src/invoice.rs
 0 rust/crates/apex-billing/src/lib.rs
@@ -411,6 +414,9 @@
 0 rust/crates/apex-tools/src/policy.rs
 0 rust/crates/apex-tools/src/repo.rs
 0 rust/crates/apex-tools/src/util.rs
+0 rust/crates/apex-ui/src/escape.rs
+0 rust/crates/apex-ui/src/lib.rs
+0 rust/crates/apex-ui/src/tokens.rs
 0 site/README.md
 0 site/content/_index.md
 0 site/content/for-publishers.md
@@ -419,4 +425,4 @@
 0 site/content/proof.md
 0 site/content/security.md
 0 site/static/rerun-kit/README.md
-TOTAL 7687
+TOTAL 7688
