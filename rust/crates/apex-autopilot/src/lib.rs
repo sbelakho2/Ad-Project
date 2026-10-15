@@ -26,6 +26,7 @@ pub mod live_max;
 pub mod model;
 pub mod ops;
 pub mod plan;
+pub mod proposals;
 pub mod runner;
 pub mod settle;
 
@@ -36,6 +37,7 @@ pub use model::{
 };
 pub use ops::{PlatformOps, RecordingOps};
 pub use plan::run_cycle;
+pub use proposals::floor_proposals;
 pub use runner::{DailyReport, MonthlyReport, Runner};
 pub use settle::settle_experiment;
 
