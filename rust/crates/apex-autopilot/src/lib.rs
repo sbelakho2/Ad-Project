@@ -20,6 +20,7 @@
 )]
 
 pub mod alerts;
+pub mod audit_job;
 pub mod calendar;
 pub mod cli;
 pub mod cycle;
@@ -33,6 +34,7 @@ pub mod runner;
 pub mod settle;
 
 pub use alerts::{Alert, AlertSink, FileAlertSink, NoopAlertSink, RecordingAlertSink};
+pub use audit_job::{max_account_snapshot, write_snapshot};
 pub use cycle::CycleJobReport;
 pub use keys::{experiment_name, idempotency_key, platform_of};
 pub use model::{

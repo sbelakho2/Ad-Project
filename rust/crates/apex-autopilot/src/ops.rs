@@ -465,6 +465,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_ops_every_method_is_reachable() {
+        assert!(!BareOps.writable("op").await);
+        assert!(BareOps.experiment("x").await.is_err());
+        assert!(BareOps.promote_experiment("x").await.is_ok());
+        assert!(BareOps.deprecate_experiment("x").await.is_ok());
+        let action = Action::RemoveWaterfallEntry {
+            ad_unit_id: "u".into(),
+            entry_id: "e".into(),
+        };
+        assert!(BareOps.apply(&action, "k").await.is_ok());
+        assert!(BareOps.rollback(&action).await.is_ok());
+        assert!(BareOps.call_log().is_empty());
+        assert!(BareOps
+            .start_experiment(&ExperimentRequest {
+                experiment_id: "e".into(),
+                spec: ExperimentSpec {
+                    name: "e".into(),
+                    ad_unit_id: "u".into(),
+                    metric: apex_core::ExperimentMetric::Revenue,
+                    variants: 2,
+                    change_description: "c".into(),
+                    test_group_allocation: 50,
+                },
+                change: apex_proof::ChangeKind::CountryFloorSet {
+                    country: "EE".into(),
+                    floor_ecpm: 1,
+                },
+                prev_value: "{}".into(),
+            })
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
     async fn default_capabilities_refuse_instead_of_guessing() {
         // The trait defaults must fail closed: a bare adapter cannot read a
         // scope's revenue, read its settings, or start an A/A run.

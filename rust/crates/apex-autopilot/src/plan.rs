@@ -66,6 +66,13 @@ fn change_kind_of(action: &Action) -> ChangeKind {
 /// Bound the action's own values before any side effect: the step cap bounds
 /// the caller's estimate, and this bounds the actual write.
 fn validate_action_values(action: &Action) -> Result<(), PlanError> {
+    // Every action must name a real ad unit; a blank scope would mint an
+    // idempotency key and a platform path that address nothing.
+    if action.ad_unit_id().trim().is_empty() {
+        return Err(PlanError::Validation(
+            "the action must name an ad unit".into(),
+        ));
+    }
     match action {
         Action::SetCountryFloor {
             country,
@@ -98,7 +105,13 @@ fn validate_action_values(action: &Action) -> Result<(), PlanError> {
             apex_core::validate_ecpm(*price_ecpm)
                 .map_err(|e| PlanError::Validation(e.to_string()))?;
         }
-        Action::RemoveWaterfallEntry { .. } => {}
+        Action::RemoveWaterfallEntry { entry_id, .. } => {
+            if entry_id.trim().is_empty() {
+                return Err(PlanError::Validation(
+                    "entryId is required to remove a waterfall entry".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }

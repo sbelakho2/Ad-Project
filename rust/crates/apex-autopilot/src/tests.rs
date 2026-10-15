@@ -645,6 +645,44 @@ async fn successful_run_records_prereg_change_and_experiment() {
 }
 
 #[tokio::test]
+async fn every_action_shape_validates_its_values() {
+    // Each action's value bounds are checked before any platform call.
+    let cases = [
+        Action::SetWaterfallPrice {
+            ad_unit_id: "u".into(),
+            entry_id: "e".into(),
+            price_ecpm: 0,
+        },
+        Action::CreateWaterfallEntry {
+            ad_unit_id: "u".into(),
+            network: " ".into(),
+            instance_name: "i".into(),
+            price_ecpm: 1_000_000,
+        },
+        Action::RemoveWaterfallEntry {
+            ad_unit_id: " ".into(),
+            entry_id: "e".into(),
+        },
+    ];
+    for action in cases {
+        let ops = crate::ops::RecordingOps::new();
+        let mut l = ledger();
+        let err = run_cycle(
+            &ops,
+            &mut l,
+            &AutopilotPolicy::conservative(),
+            &[],
+            vec![proposal(action.clone())],
+            NOW,
+        )
+        .await
+        .expect_err("invalid action");
+        assert!(matches!(err, PlanError::Validation(_)), "{action:?}: {err}");
+        assert!(l.is_empty(), "no ledger write for an invalid action");
+    }
+}
+
+#[tokio::test]
 async fn approval_mode_holds_proposals_without_writing() {
     let ops = crate::ops::RecordingOps::new();
     let mut l = ledger();

@@ -274,6 +274,11 @@ impl Runner {
         &self.policy
     }
 
+    /// The publisher this runner bills.
+    pub fn publisher_id(&self) -> &str {
+        &self.publisher_id
+    }
+
     /// The bucket model this runner learns into, when configured.
     pub fn runner_priors(&self) -> Option<&apex_lift::priors::LiftPriors> {
         self.priors.as_ref()
@@ -420,6 +425,27 @@ impl Runner {
                     billed_days: fee.billed_days,
                     month_days: fee.month_days,
                 });
+            }
+            // Term-ended changes stop billing: record the term end so the
+            // billing-change pipeline is complete, not just skipped.
+            for (change_id, stop) in &run.skipped {
+                if matches!(stop, apex_lift::billing::BillingStop::TermEnd) {
+                    let record =
+                        apex_lift::emit::billing_change(change_id, &month_end, "termEnded", 0.0)
+                            .map_err(|error| {
+                                PlanError::Validation(format!("billing change: {error}"))
+                            })?;
+                    let payload = record.record.canonical_json().map_err(|error| {
+                        PlanError::Validation(format!("billing change: {error}"))
+                    })?;
+                    ledger
+                        .append(LedgerRecord::lift_record(
+                            accrual_at,
+                            &record.sha256,
+                            &payload,
+                        ))
+                        .map_err(PlanError::Ledger)?;
+                }
             }
             report.billed_scopes += 1;
         }
@@ -1665,6 +1691,20 @@ mod tests {
         assert!(due[0].months_since_keep >= 6);
     }
 
+    #[tokio::test]
+    async fn with_priors_accepts_owned_and_borrowed_paths() {
+        let ops = Arc::new(RecordingOps::new());
+        let owned = Runner::new(ops.clone(), policy(), FillFormat::Rewarded).with_priors(
+            apex_lift::priors::LiftPriors::default(),
+            String::from("/tmp/apex-priors-owned.json"),
+        );
+        let borrowed_path = std::path::PathBuf::from("/tmp/apex-priors-borrowed.json");
+        let borrowed = Runner::new(ops, policy(), FillFormat::Rewarded)
+            .with_priors(apex_lift::priors::LiftPriors::default(), &borrowed_path);
+        assert!(owned.runner_priors().is_some());
+        assert!(borrowed.runner_priors().is_some());
+    }
+
     #[test]
     fn change_bucket_is_none_for_non_floor_changes() {
         let mut l = ledger();
@@ -1728,6 +1768,20 @@ mod tests {
         assert!(null.deprecate_experiment("x").await.is_ok());
         assert!(null.call_log().is_empty());
         assert!(!null.change_in_test_arm());
+        assert!(null.scope_revenue("u", "a", "b").await.is_err());
+        assert!(null.experiment_days("x").await.is_err());
+        assert!(null.current_settings("u").await.is_err());
+        assert!(null
+            .start_null_experiment(&apex_core::ExperimentSpec {
+                name: "e".into(),
+                ad_unit_id: "u".into(),
+                metric: apex_core::ExperimentMetric::Revenue,
+                variants: 2,
+                change_description: "c".into(),
+                test_group_allocation: 50,
+            })
+            .await
+            .is_err());
         let _ = &mut l;
     }
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Apex runner — refresh the account audit snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+EnvironmentFile=/etc/apex/runner.env
+# Runs before the cycle so the cycle proposes from a fresh snapshot.
+ExecStart=/usr/local/bin/apex-runner audit
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex

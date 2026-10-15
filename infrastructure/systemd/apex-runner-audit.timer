@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the Apex account snapshot nightly, before the write cycle
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
