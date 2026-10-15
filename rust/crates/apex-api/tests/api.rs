@@ -750,15 +750,24 @@ async fn ledger_symlink_escaping_the_root_is_refused() {
     assert_eq!(response.status, 404, "{}", response.body);
     assert_eq!(response.json()["error"], "not_found");
 
+    // The console exchange authorizes against the allow-list, mints the
+    // session, and the session's read answers 404 for the symlink.
+    let exchange = send(
+        &app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER}&token={LEDGER_TOKEN}"),
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, 303);
     let response = send(
         &app,
-        get(&format!(
-            "/console/ledger?publisher={PUBLISHER}&token={LEDGER_TOKEN}"
-        )),
+        get_with_cookie("/console/ledger", &open_ledger_session(&app).await),
     )
     .await;
     assert_eq!(response.status, 404);
-    assert!(response.body.contains("no ledger exists"));
+    assert!(response.body.contains("No ledger is available."));
 }
 
 #[tokio::test]

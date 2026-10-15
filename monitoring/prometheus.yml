@@ -12,7 +12,25 @@ alerting:
         - targets: ['alertmanager:9093']
 
 scrape_configs:
+  # apex-api exposes its hand-rolled counters (apex_api_requests_total,
+  # apex_api_requests_in_flight, uptime, build) plus the bounded
+  # apex-metrics render (apex_http_requests_total / _duration_seconds /
+  # _in_flight with service="apex-api") on GET /metrics.
   - job_name: apex-api
     metrics_path: /metrics
     static_configs:
       - targets: ['host.docker.internal:8787']
+  # Everything else arrives through node_exporter's textfile collector:
+  # apex-control is textfile-only (APEX_METRICS_TEXTFILE, service=
+  # "apex-control"), apex-api exports the same textfile alongside /metrics,
+  # and apex-runner writes its bounded job/connector/domain series there.
+  # APEX_METRICS_TEXTFILE names the output file, not a directory: each
+  # process writes its own file in the collector directory on the host (for
+  # example /var/lib/node_exporter/textfile/apex-api.prom,
+  # .../apex-control.prom and .../apex-runner.prom), and node_exporter's
+  # --collector.textfile.directory is that containing directory. Textfile
+  # series keep their last value between writes: a series going quiet means
+  # no write happened, not a zero.
+  - job_name: node
+    static_configs:
+      - targets: ['host.docker.internal:9100']

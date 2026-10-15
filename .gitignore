@@ -217,5 +217,8 @@ site/chrome/
 # Kilo agent state (sessions, local tooling)
 .kilo/
 
+# ClickHouse dev server state (analytics data, logs, temp files)
+.apex/
+
 # Audit and design-spec PDFs are working inputs, not repo content.
 *.pdf

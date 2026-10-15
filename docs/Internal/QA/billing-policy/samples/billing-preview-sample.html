@@ -1,42 +1,32 @@
 <!DOCTYPE html>
+<!--
+  Thin pointer sample. The copy below is reproduced verbatim from the
+  apex-notify template catalog (rust/crates/apex-notify/src/template.rs,
+  fee_preview), which implements the frozen copy of the design document
+  section 06 pages 93 to 95. There is no other generator: the sample exists
+  so reviewers can read the copy without running the runner.
+-->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Heads-up: November 2025 Apex fee auto-charges on Nov 30, 2025</title>
-    <style>
-      body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f5f6fb; }
-      .email-preview { max-width: 640px; margin: 0 auto; background: #ffffff; padding: 32px; border-radius: 12px; box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
-      h1, h2 { font-weight: 600; }
-      p, li { font-size: 15px; line-height: 1.6; color: #0f172a; }
-      ul { padding-left: 20px; }
-      a { color: #00295A; }
-    </style>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Your October Apex fee preview</title>
   </head>
-  <body>
-    <div class="email-preview">
-      
-        <h1>November 2025 billing preview</h1>
-        <p>Hi there,</p>
-        <p>We will auto-charge <strong>EUR 4,800.00</strong> on <strong>Nov 30, 2025</strong> using Visa •••• 4242.</p>
-        <p>If everything looks correct, no action is required.</p>
-
-        <h2>Before we charge</h2>
-        <ul>
-          <li>Review the full invoice breakdown (apps, tiers, adjustments) at the link below.</li>
-          <li>Need to switch payment rails? Adyen cards & wallets work globally, ACH covers US accounts, and SEPA Direct Debit covers the EU/EEA.</li>
-          <li>Prefer a Wise wire this month? Reply to this email so we can note finance approval before the charge date.</li>
-        </ul>
-
-        <p>
-          <a href="https://console.apexmediation.ee/billing/invoices/2025-11" style="background: #00295A; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block; margin-right: 8px;">View invoice preview</a>
-          <a href="https://console.apexmediation.ee/billing/payment-method" style="border: 1px solid #00295A; color: #00295A; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Update payment method</a>
-        </p>
-
-        <p>If you do nothing, Adyen will charge the saved method automatically on Nov 30, 2025 and email you a receipt.</p>
-
-        <p>Best regards,<br>
-        ApexMediation Billing</p>
-      
-    </div>
+  <body style="margin:0;padding:0;background:#f5f6f1;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#182c31;">
+            <tr><td style="padding:32px 32px 8px;font-size:20px;font-weight:700;">Apex</td></tr>
+            <tr><td style="padding:0 32px 8px;font-size:24px;font-weight:700;line-height:32px;">Your October Apex fee preview</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Your draft lift fee for October is USD 300.00 before tax. Monitoring is not selected for this period.</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Open the calculation to review the eligible revenue, billable lift, agreed rate and proof references. The page also shows the invoice and collection dates when they are confirmed.</td></tr>
+            <tr><td style="padding:16px 32px;"><a href="https://console.apexmediation.ee/console/billing" style="display:inline-block;background:#2849d8;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:700;">Review fee calculation</a></td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">If something looks wrong, contact us with the draft reference before the invoice is issued.</td></tr>
+            <tr><td style="padding:16px 32px 32px;color:#536568;font-size:13px;line-height:20px;">Apex / Billing<br />Reference: DF-104</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

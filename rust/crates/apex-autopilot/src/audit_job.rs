@@ -1,6 +1,8 @@
 //! The audit job: build the AppLovin MAX account snapshot the write cycle
 //! consumes, from the same keys the runner already holds. The snapshot is the
-//! audit's input and the cycle's input, so one refresh serves both.
+//! audit's input and the cycle's input, so one refresh serves both. A failed
+//! refresh is recorded as the durable `audit_failed` event, not just an error
+//! line: the audit lifecycle must be complete in analytics.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -48,6 +50,59 @@ pub async fn max_account_snapshot(
     let management = MaxClient::new(api_key, management_base, transport.clone())?;
     let fetcher = AppAdsTxtFetcher::new(transport);
     max_snapshot(&management, &fetcher, &context, now_unix_ms).await
+}
+
+/// Build the snapshot for the audit job and record the refresh outcome: a
+/// failure emits the bounded `audit_failed` event (the snapshot refresh error
+/// path) before the error is returned, so the audit's durable history is
+/// complete. The event is emitted only when an emitter is attached.
+#[allow(clippy::too_many_arguments)]
+pub async fn audited_snapshot(
+    api_key: &str,
+    report_key: Option<&str>,
+    management_base: &str,
+    reporting_base: &str,
+    transport: Arc<dyn Transport>,
+    developer_site: &str,
+    expected_networks: Vec<String>,
+    events: Option<&crate::events::RunnerEvents>,
+    rule_version: &str,
+    now_unix_ms: i64,
+) -> Result<Snapshot, PlatformError> {
+    match max_account_snapshot(
+        api_key,
+        report_key,
+        management_base,
+        reporting_base,
+        transport,
+        developer_site,
+        expected_networks,
+        now_unix_ms,
+    )
+    .await
+    {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            if let Some(events) = events {
+                events
+                    .audit_failed(rule_version, snapshot_error_class(&error), now_unix_ms)
+                    .await;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The bounded error class of a snapshot refresh failure, with the same
+/// classes the runner's pull events use.
+fn snapshot_error_class(source: &PlatformError) -> &'static str {
+    match source {
+        PlatformError::Auth { .. } => "auth_refusal",
+        PlatformError::RateLimited { .. } => "rate_limit",
+        PlatformError::Schema { .. } => "schema_failure",
+        PlatformError::Network { .. } | PlatformError::Http { .. } => "transport_failure",
+        PlatformError::Validation(_) => "validation_failure",
+    }
 }
 
 /// Write a snapshot atomically (temp file then rename) so a reader never sees
@@ -126,6 +181,67 @@ mod tests {
         assert_eq!(snapshot.ad_units.len(), 1);
         assert_eq!(snapshot.country_revenue.len(), 1);
         assert_eq!(snapshot.country_revenue[0].revenue_30d, 12_500_000);
+    }
+
+    #[tokio::test]
+    async fn a_failed_snapshot_refresh_emits_audit_failed() {
+        use apex_analytics::store::{EventStore as _, ProjectionStore as _};
+        use apex_analytics::{AnalyticsClient, MemoryStore};
+
+        let store = Arc::new(MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let events = crate::events::RunnerEvents::new(
+            Arc::new(AnalyticsClient::new(
+                store.clone(),
+                "dev",
+                "apex-runner-test",
+            )),
+            "northstar",
+        )
+        .with_environment("dev");
+        let fake = Arc::new(Fake::default());
+        // The management call is refused: the refresh fails and the failure
+        // is a durable `audit_failed` fact, not only an stderr line.
+        fake.push(500, "boom");
+        let error = audited_snapshot(
+            "key",
+            None,
+            "https://o.example.test/mediation/v1",
+            "https://r.example.test",
+            fake.clone(),
+            "studio.example.com",
+            vec![],
+            Some(&events),
+            "v0.1.0",
+            1_800_000_000_000,
+        )
+        .await
+        .expect_err("refused");
+        assert!(!error.to_string().is_empty());
+        let stored = store.load_events().await.expect("events");
+        assert_eq!(stored.len(), 1, "one audit_failed event landed");
+        assert_eq!(stored[0].event_type.as_str(), "audit_failed");
+        assert_eq!(stored[0].publisher_id.as_deref(), Some("northstar"));
+        assert_eq!(stored[0].payload.rule_version.as_deref(), Some("v0.1.0"));
+        assert!(stored[0].payload.error_class.is_some());
+
+        // Without an emitter the failure is still returned typed.
+        let fake = Arc::new(Fake::default());
+        fake.push(500, "boom");
+        assert!(audited_snapshot(
+            "key",
+            None,
+            "https://o.example.test/mediation/v1",
+            "https://r.example.test",
+            fake,
+            "studio.example.com",
+            vec![],
+            None,
+            "v0.1.0",
+            1_800_000_000_000,
+        )
+        .await
+        .is_err());
     }
 
     #[test]

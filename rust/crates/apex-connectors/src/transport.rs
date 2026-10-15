@@ -663,3 +663,255 @@ mod unit_tests {
         assert!(transport.request(request).await.is_err());
     }
 }
+
+/// Records `apex_connector_requests_total` / `apex_connector_duration_seconds`
+/// for every transport attempt when a registry is injected; a `None` registry
+/// makes it a pure pass-through (no-op).
+///
+/// Place the metered wrapper **inside** the retry decorator so each attempt is
+/// its own observation: "External call duration, with retries represented
+/// separately" (page 111). The request's own `platform` and `operation` are
+/// the labels; an operation outside the declared vocabulary is not metered
+/// (bounded labels are the contract, not a suggestion).
+pub struct MeteredTransport {
+    inner: std::sync::Arc<dyn Transport>,
+    registry: Option<std::sync::Arc<apex_metrics::Registry>>,
+}
+
+impl std::fmt::Debug for MeteredTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeteredTransport")
+            .field("metered", &self.registry.is_some())
+            .finish()
+    }
+}
+
+impl MeteredTransport {
+    /// Wrap `inner`; `None` makes the wrapper a no-op.
+    pub fn new(
+        inner: std::sync::Arc<dyn Transport>,
+        registry: Option<std::sync::Arc<apex_metrics::Registry>>,
+    ) -> Self {
+        Self { inner, registry }
+    }
+
+    fn record(
+        &self,
+        platform: PlatformId,
+        operation: &str,
+        outcome: &Result<HttpResponse, TransportError>,
+        elapsed: std::time::Duration,
+    ) {
+        let Some(registry) = &self.registry else {
+            return;
+        };
+        let Some(operation_label) = apex_metrics::vocab::ConnectorOperation::parse(operation)
+        else {
+            return;
+        };
+        let platform_label = platform.as_str();
+        let outcome_class = outcome_class(outcome);
+        let _ = registry.increment(
+            &apex_metrics::catalog::CONNECTOR_REQUESTS_TOTAL,
+            &[
+                ("platform", platform_label),
+                ("operation", operation_label.as_str()),
+                ("outcome_class", outcome_class.as_str()),
+            ],
+        );
+        let _ = registry.observe(
+            &apex_metrics::catalog::CONNECTOR_DURATION_SECONDS,
+            &[
+                ("platform", platform_label),
+                ("operation", operation_label.as_str()),
+            ],
+            elapsed.as_secs_f64(),
+        );
+    }
+}
+
+/// The bounded outcome class of one attempt. Non-2xx statuses are classified
+/// by auth / rate-limit / transport; schema failures are only observable at
+/// the parse boundary (the clients count them).
+fn outcome_class(
+    outcome: &Result<HttpResponse, TransportError>,
+) -> apex_metrics::vocab::OutcomeClass {
+    use apex_metrics::vocab::OutcomeClass;
+    match outcome {
+        Ok(response) if (200..300).contains(&response.status) => OutcomeClass::Success,
+        Ok(response) if response.status == 401 || response.status == 403 => {
+            OutcomeClass::AuthRefusal
+        }
+        Ok(response) if response.status == 429 => OutcomeClass::RateLimit,
+        Ok(_) => OutcomeClass::TransportFailure,
+        Err(TransportError::Platform(PlatformError::Auth { .. })) => OutcomeClass::AuthRefusal,
+        Err(TransportError::Platform(PlatformError::RateLimited { .. })) => OutcomeClass::RateLimit,
+        Err(TransportError::Platform(PlatformError::Schema { .. })) => OutcomeClass::SchemaFailure,
+        Err(_) => OutcomeClass::TransportFailure,
+    }
+}
+
+#[async_trait]
+impl Transport for MeteredTransport {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let platform = req.platform;
+        let operation = req.operation.clone();
+        let started = std::time::Instant::now();
+        let outcome = self.inner.request(req).await;
+        self.record(platform, &operation, &outcome, started.elapsed());
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod metered_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct Scripted {
+        status: u16,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl Transport for Scripted {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(HttpResponse {
+                status: self.status,
+                headers: vec![],
+                body: vec![],
+            })
+        }
+    }
+
+    fn request(platform: PlatformId, operation: &str) -> HttpRequest {
+        HttpRequest {
+            platform,
+            operation: operation.to_string(),
+            method: HttpMethod::Get,
+            url: "https://example.test/x".to_string(),
+            headers: vec![],
+            body: None,
+            timeout_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn outcome_classes_are_bounded() {
+        use apex_core::PlatformError;
+        assert_eq!(
+            outcome_class(&Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![]
+            })),
+            apex_metrics::vocab::OutcomeClass::Success
+        );
+        assert_eq!(
+            outcome_class(&Ok(HttpResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![]
+            })),
+            apex_metrics::vocab::OutcomeClass::AuthRefusal
+        );
+        assert_eq!(
+            outcome_class(&Ok(HttpResponse {
+                status: 429,
+                headers: vec![],
+                body: vec![]
+            })),
+            apex_metrics::vocab::OutcomeClass::RateLimit
+        );
+        assert_eq!(
+            outcome_class(&Ok(HttpResponse {
+                status: 500,
+                headers: vec![],
+                body: vec![]
+            })),
+            apex_metrics::vocab::OutcomeClass::TransportFailure
+        );
+        assert_eq!(
+            outcome_class(&Err(TransportError::Platform(PlatformError::Schema {
+                platform: PlatformId::AppLovinMax,
+                operation: "op".into(),
+                detail: "x".into(),
+            }))),
+            apex_metrics::vocab::OutcomeClass::SchemaFailure
+        );
+        assert_eq!(
+            outcome_class(&Err(TransportError::Network("down".into()))),
+            apex_metrics::vocab::OutcomeClass::TransportFailure
+        );
+    }
+
+    #[tokio::test]
+    async fn a_none_registry_is_a_pass_through() {
+        let inner = Arc::new(Scripted {
+            status: 200,
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let metered = MeteredTransport::new(inner.clone(), None);
+        let response = metered
+            .request(request(PlatformId::AppLovinMax, "maxReport"))
+            .await
+            .expect("ok");
+        assert_eq!(response.status, 200);
+        assert_eq!(inner.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(format!("{metered:?}").contains("metered"));
+    }
+
+    #[tokio::test]
+    async fn attempts_are_metered_apart_from_retries() {
+        let registry = Arc::new(apex_metrics::Registry::new());
+        let inner = Arc::new(Scripted {
+            status: 401,
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        // Retry outside, meter inside: every attempt is one observation.
+        let metered = Arc::new(MeteredTransport::new(inner, Some(registry.clone())));
+        let retry = RetryTransport::new(metered, 2, Arc::new(RecordingSleeper::default()));
+        let error = retry
+            .request(request(PlatformId::AppLovinMax, "maxReport"))
+            .await
+            .expect_err("auth is fail-fast");
+        assert!(matches!(error, TransportError::Platform(_)));
+        let count = registry
+            .counter_value(
+                &apex_metrics::catalog::CONNECTOR_REQUESTS_TOTAL,
+                &[
+                    ("platform", "applovin_max"),
+                    ("operation", "maxReport"),
+                    ("outcome_class", "auth_refusal"),
+                ],
+            )
+            .expect("metric");
+        assert_eq!(count, 1, "fail-fast auth is one attempt");
+        assert!(registry
+            .family_snapshot("apex_connector_duration_seconds")
+            .is_some());
+        // An undeclared operation is refused by the bounded vocabulary and
+        // never mints a series.
+        let metered = MeteredTransport::new(
+            Arc::new(Scripted {
+                status: 200,
+                calls: std::sync::atomic::AtomicU32::new(0),
+            }),
+            Some(registry.clone()),
+        );
+        metered
+            .request(request(PlatformId::AppLovinMax, "userSuppliedThing"))
+            .await
+            .expect("ok");
+        let total: u64 = registry
+            .family_snapshot("apex_connector_requests_total")
+            .expect("family")
+            .series
+            .iter()
+            .map(|series| series.counter.unwrap_or(0))
+            .sum();
+        assert_eq!(total, 1, "no series for the undeclared operation");
+    }
+}

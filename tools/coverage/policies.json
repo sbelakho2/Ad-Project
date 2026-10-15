@@ -85,6 +85,41 @@
    ]
   },
   {
+   "id": "apex-ui",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-ui/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-analytics",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-analytics/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-control",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-control/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-metrics",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-metrics/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-notify",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-notify/**/*.rs"
+   ]
+  },
+  {
    "id": "docs",
    "kind": "docs",
    "include": [
@@ -114,7 +149,8 @@
     "infrastructure/hetzner/*.service",
     "docs/**/evidence/**/*.{yml,yaml}",
     "infrastructure/**/grafana/**/*.json",
-    "**/*.{service,timer}"
+    "**/*.{service,timer}",
+    "infrastructure/**/*.xml"
    ]
   },
   {
@@ -134,7 +170,8 @@
     "rust/Cargo.lock",
     "tools/coverage/*",
     "**/*.toml",
-    ".github/required-checks.json"
+    ".github/required-checks.json",
+    "tools/brand/**"
    ]
   }
  ],
@@ -270,6 +307,10 @@
   {
    "code": "FUTURE_SURFACE",
    "glob": "future/**"
+  },
+  {
+   "glob": ".apex/**",
+   "code": "DATA_ARTIFACT"
   }
  ],
  "exclusionCodes": [

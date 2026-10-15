@@ -1,0 +1,318 @@
+//! Ingestion `/control/ingestion` (page 59): freshness before volume, four
+//! clocks, per-account retry.
+
+use apex_analytics::queries::{FreshnessStatus, IngestionHealthRow};
+use apex_ui::components::{data_table, notice, Cell, EmptyState};
+use apex_ui::escape::html_escape;
+use apex_ui::status::StatusKind;
+
+use crate::copy;
+use crate::fixtures::CoverageRow;
+
+use super::{action_form, document, header, kpis, ActionFormSpec, PageMeta};
+
+/// One retry-read form pre-filled by the route (CSRF, stale-state token and
+/// idempotency key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRetryForm {
+    /// Form fields.
+    pub spec: ActionFormSpec,
+}
+
+/// The ingestion page data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestionData {
+    /// Freshness rows per source.
+    pub health: Result<Vec<IngestionHealthRow>, String>,
+    /// The per-day coverage matrix (fixture dataset; the live read model
+    /// does not expose per-day verdicts yet).
+    pub coverage: Result<Vec<CoverageRow>, String>,
+    /// Retry forms per account the actor may act on.
+    pub retry_forms: Vec<AccountRetryForm>,
+}
+
+/// Render the ingestion page.
+pub fn render(meta: &PageMeta, data: &IngestionData) -> String {
+    let mut body = header(meta, "Ingestion");
+    match &data.health {
+        Err(reason) => {
+            body.push_str(&notice(
+                StatusKind::Unavailable,
+                copy::TELEMETRY_ABSENT,
+                &format!("The ingestion freshness read is not available: {reason}"),
+                Some((copy::TELEMETRY_ABSENT_ACTION, "/control/system")),
+            ));
+        }
+        Ok(rows) => {
+            body.push_str(&render_platform_readiness(rows));
+            let stale = rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::Stale)
+                .count();
+            let missing = rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::MissingData)
+                .count();
+            if stale > 0 || missing > 0 {
+                body.push_str(&notice(
+                    StatusKind::Attention,
+                    copy::DELAYED_INGESTION,
+                    &format!(
+                        "{stale} stale source(s) and {missing} missing-data source(s) in the current rows."
+                    ),
+                    Some((copy::DELAYED_INGESTION_ACTION, "#freshness-rows")),
+                ));
+            }
+            body.push_str(&render_freshness_rows(meta, rows, &data.retry_forms));
+        }
+    }
+    body.push_str(&render_coverage(&data.coverage));
+    body.push_str(&format!(
+        "<p class=\"table-note\">{}</p>",
+        html_escape(copy::FOUR_CLOCKS)
+    ));
+    body.push_str(&format!(
+        "<p class=\"table-note\">{}</p>",
+        html_escape(
+            "Retry reads carry a backoff: one request per idempotency key creates one job, a duplicate submit reuses it."
+        )
+    ));
+    document(meta, "Ingestion", &["Ingestion"], &body)
+}
+
+fn render_platform_readiness(rows: &[IngestionHealthRow]) -> String {
+    let mut platforms: Vec<String> = rows.iter().map(|row| row.platform.clone()).collect();
+    platforms.sort();
+    platforms.dedup();
+    let cells: Vec<Vec<Cell>> = platforms
+        .iter()
+        .map(|platform| {
+            let platform_rows: Vec<&IngestionHealthRow> = rows
+                .iter()
+                .filter(|row| &row.platform == platform)
+                .collect();
+            let fresh = platform_rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::Fresh)
+                .count();
+            let stale = platform_rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::Stale)
+                .count();
+            let missing = platform_rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::MissingData)
+                .count();
+            vec![
+                Cell::Text(platform.clone()),
+                Cell::Num(format!("{fresh} / {}", platform_rows.len())),
+                Cell::Muted(apex_ui::format::or_not_available(
+                    "the read model does not carry pull latency",
+                )),
+                Cell::Text(format!("{stale} stale, {missing} missing data")),
+                Cell::Text(if stale + missing == 0 {
+                    "No action".to_string()
+                } else {
+                    format!("Inspect {} account(s)", stale + missing)
+                }),
+            ]
+        })
+        .collect();
+    data_table(
+        Some("Platform readiness: final-day coverage"),
+        &[
+            "Platform",
+            "Final-day coverage",
+            "Pull p95",
+            "Auth and limits",
+            "Next action",
+        ],
+        &cells,
+        None,
+        Some("Expected schedules are platform-specific."),
+    )
+}
+
+fn render_freshness_rows(
+    meta: &PageMeta,
+    rows: &[IngestionHealthRow],
+    retry_forms: &[AccountRetryForm],
+) -> String {
+    let stale = rows
+        .iter()
+        .filter(|row| row.status == FreshnessStatus::Stale)
+        .count();
+    let mut out =
+        String::from("<h2 class=\"section-heading\" id=\"freshness-rows\">Freshness rows</h2>");
+    out.push_str(&kpis(&[
+        (
+            "Stale sources",
+            &stale.to_string(),
+            "Last final day > expected",
+            Some("/control/ingestion"),
+        ),
+        (
+            "Missing data",
+            &rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::MissingData)
+                .count()
+                .to_string(),
+            "No finalized day recorded",
+            None,
+        ),
+        (
+            "Fresh sources",
+            &rows
+                .iter()
+                .filter(|row| row.status == FreshnessStatus::Fresh)
+                .count()
+                .to_string(),
+            "Final day inside the expected window",
+            None,
+        ),
+    ]));
+    let cells: Vec<Vec<Cell>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                Cell::Mono(format!("{}:{}", row.platform, row.platform_account_id)),
+                Cell::Text(row.publisher_id.clone()),
+                Cell::Text(
+                    row.last_final_day
+                        .clone()
+                        .unwrap_or_else(|| "None recorded".to_string()),
+                ),
+                Cell::Num(
+                    row.freshness_days
+                        .map(|days| format!("{days}d"))
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                Cell::Status(row.status.as_str().to_string(), freshness_kind(row.status)),
+            ]
+        })
+        .collect();
+    out.push_str(&data_table(
+        Some("One row per source account"),
+        &[
+            "Source account",
+            "Publisher",
+            "Last final day",
+            "Age",
+            "Status",
+        ],
+        &cells,
+        Some(EmptyState {
+            reason: "No ingestion sources are recorded.".to_string(),
+            action: None,
+        }),
+        Some(&format!(
+            "{} source row(s) / as of {}",
+            rows.len(),
+            meta.as_of_display()
+        )),
+    ));
+    for retry in retry_forms {
+        out.push_str(&format!(
+            "<div class=\"panel\"><h3 class=\"panel-heading\">Retry read: {}</h3>{}</div>",
+            html_escape(&retry.spec.target),
+            action_form(&retry.spec)
+        ));
+    }
+    out
+}
+
+fn freshness_kind(status: FreshnessStatus) -> StatusKind {
+    match status {
+        FreshnessStatus::Fresh => StatusKind::Verified,
+        FreshnessStatus::Stale => StatusKind::Attention,
+        FreshnessStatus::MissingData => StatusKind::Failure,
+    }
+}
+
+fn render_coverage(coverage: &Result<Vec<CoverageRow>, String>) -> String {
+    match coverage {
+        Err(reason) => format!(
+            "<section class=\"panel\"><h2 class=\"panel-heading\">Coverage matrix</h2>{}</section>",
+            notice(
+                StatusKind::Unavailable,
+                copy::TELEMETRY_ABSENT,
+                &format!("Per-day coverage is not available: {reason}"),
+                None,
+            )
+        ),
+        Ok(rows) if rows.is_empty() => format!(
+            "<section class=\"panel\"><h2 class=\"panel-heading\">Coverage matrix</h2>{}</section>",
+            notice(
+                StatusKind::Neutral,
+                "No coverage rows are recorded for this window.",
+                "The matrix fills as finalized report days arrive.",
+                None,
+            )
+        ),
+        Ok(rows) => {
+            let day_count = rows.iter().map(|row| row.verdicts.len()).max().unwrap_or(0);
+            let mut headers: Vec<String> =
+                vec!["Platform / account".to_string(), "Publisher".to_string()];
+            for index in 0..day_count {
+                let day = rows
+                    .iter()
+                    .find_map(|row| row.expected_days.get(index).cloned())
+                    .unwrap_or_else(|| format!("Day {}", index + 1));
+                headers.push(day);
+            }
+            headers.push("Latest pull".to_string());
+            headers.push("Latest final".to_string());
+            let header_refs: Vec<&str> = headers.iter().map(String::as_str).collect();
+            let cells: Vec<Vec<Cell>> = rows
+                .iter()
+                .map(|row| {
+                    let mut cells = vec![
+                        Cell::Mono(format!("{}:{}", row.platform, row.platform_account_id)),
+                        Cell::Text(row.publisher_id.clone()),
+                    ];
+                    for index in 0..day_count {
+                        let verdict = row
+                            .verdicts
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| "Not expected".to_string());
+                        cells.push(Cell::Status(verdict.clone(), verdict_kind(&verdict)));
+                    }
+                    cells.push(Cell::Text(
+                        row.last_pull
+                            .clone()
+                            .unwrap_or_else(|| "None recorded".to_string()),
+                    ));
+                    cells.push(Cell::Text(
+                        row.last_final_display
+                            .clone()
+                            .unwrap_or_else(|| "None recorded".to_string()),
+                    ));
+                    cells
+                })
+                .collect();
+            format!(
+                "<section class=\"panel\"><h2 class=\"panel-heading\">Coverage matrix</h2>{}</section>",
+                data_table(
+                    Some("Final, Provisional, Missing or Not expected per day"),
+                    &header_refs,
+                    &cells,
+                    None,
+                    Some("The matrix never averages days together."),
+                )
+            )
+        }
+    }
+}
+
+fn verdict_kind(verdict: &str) -> StatusKind {
+    match verdict {
+        "Final" => StatusKind::Verified,
+        "Final (empty)" => StatusKind::Verified,
+        "Provisional" => StatusKind::Attention,
+        "Missing" => StatusKind::Failure,
+        "Not expected" => StatusKind::Unavailable,
+        _ => StatusKind::Neutral,
+    }
+}

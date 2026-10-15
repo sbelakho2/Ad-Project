@@ -31,10 +31,20 @@ matrix:
       PKG: apex-tools
     - CRATE: apex-lift
       PKG: apex-lift
+    - CRATE: apex-ui
+      PKG: apex-ui
+    - CRATE: apex-analytics
+      PKG: apex-analytics
+    - CRATE: apex-metrics
+      PKG: apex-metrics
+    - CRATE: apex-notify
+      PKG: apex-notify
+    - CRATE: apex-control
+      PKG: apex-control
 
 steps:
   apex-rs-crate:
-    image: rust:1.87-bookworm
+    image: rust:1.88-bookworm
     commands:
       - rustup component add llvm-tools-preview clippy rustfmt
       - cargo install cargo-llvm-cov --locked

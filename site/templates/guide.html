@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block head %}{{ m::head(title=page.title, description=page.description, url=current_url, image=config.base_url ~ "/" ~ page.extra.og_image) }}{% endblock head %}
+{% block content %}
+{% set guides = get_section(path="guides/_index.md") %}
+<article class="guide">
+  <div class="wrap guide-layout">
+    <details class="guide-contents">
+      <summary>Contents</summary>
+      <nav aria-label="Guides">
+        <ul>
+          {%- for item in guides.pages %}
+          <li{% if item.permalink == current_url %} class="current"{% endif %}><a href="{{ item.permalink }}">{{ item.extra.h1 }}</a></li>
+          {%- endfor %}
+        </ul>
+      </nav>
+    </details>
+    <aside class="guide-nav">
+      <nav aria-label="Guides">
+        <ul>
+          {%- for item in guides.pages %}
+          <li{% if item.permalink == current_url %} class="current"{% endif %}><a href="{{ item.permalink }}">{{ item.extra.h1 }}</a></li>
+          {%- endfor %}
+        </ul>
+      </nav>
+    </aside>
+    <div class="reading">
+      <p class="article-chrome"><span class="chip chip-muted">Current product</span> <span>Updated 15 October 2026</span> <span>Supported version: {{ config.extra.supported_version }}</span></p>
+      <h1>{{ page.extra.h1 }}</h1>
+      <p class="lede">{{ page.extra.lede }}</p>
+      {{ page.content | safe }}
+      <nav class="guide-pager" aria-label="Guide navigation">
+        {%- if page.extra.prev %}
+        <a class="pager-prev" href="{{ page.extra.prev.url }}">Previous: {{ page.extra.prev.title }}</a>
+        {%- endif %}
+        {%- if page.extra.next %}
+        <a class="pager-next" href="{{ page.extra.next.url }}">Next: {{ page.extra.next.title }}</a>
+        {%- endif %}
+      </nav>
+      <p class="guide-help">Need help? <a href="/support/">Contact support.</a></p>
+    </div>
+  </div>
+</article>
+{% endblock content %}

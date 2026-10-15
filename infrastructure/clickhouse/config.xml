@@ -1,0 +1,66 @@
+<!--
+  Apex local development ClickHouse server.
+
+  This is a single-node, localhost-only, passwordless configuration for local
+  development and integration tests. It is NOT a production configuration;
+  production uses infrastructure/clickhouse/docker-compose.yml with real
+  credentials supplied by the deployment environment.
+
+  Start it from the repository root so every relative path below resolves
+  under .apex/clickhouse/:
+
+      make clickhouse-dev
+
+  That target runs the server with the config-file flag pointed at this
+  file. Stop the server with `make clickhouse-stop` (graceful SYSTEM
+  SHUTDOWN over the native protocol).
+
+  The `default` user has no password and both network interfaces bind to the
+  loopback addresses only. Local development posture: never expose this
+  configuration on a shared or reachable network.
+-->
+<clickhouse>
+    <!-- Bind only to loopback (IPv4 and IPv6). -->
+    <listen_host>127.0.0.1</listen_host>
+    <listen_host>::1</listen_host>
+
+    <!-- HTTP interface: used by curl, integration tests and the application. -->
+    <http_port>8123</http_port>
+    <!-- Native TCP protocol: used by `clickhouse client` and native drivers. -->
+    <tcp_port>9000</tcp_port>
+
+    <!-- All server state lives under .apex/clickhouse/ (repo root relative,
+         gitignored). Data survives restarts; delete the directory to reset. -->
+    <path>.apex/clickhouse/data/</path>
+    <tmp_path>.apex/clickhouse/tmp/</tmp_path>
+    <user_files_path>.apex/clickhouse/user_files/</user_files_path>
+    <!-- SQL access-control objects (roles, row policies, quotas). -->
+    <access_control_path>.apex/clickhouse/access/</access_control_path>
+    <format_schema_path>.apex/clickhouse/format_schemas/</format_schema_path>
+
+    <!-- Laptop-friendly memory envelope: 2 GiB for the whole server. -->
+    <max_server_memory_usage>2147483648</max_server_memory_usage>
+    <!-- Primary-index (mark) cache: 512 MiB is plenty for dev workloads. -->
+    <mark_cache_size>536870912</mark_cache_size>
+
+    <max_concurrent_queries>64</max_concurrent_queries>
+    <max_connections>512</max_connections>
+
+    <!-- Server log. Rotated at 50 MiB, three files kept. -->
+    <logger>
+        <level>information</level>
+        <log>.apex/clickhouse/clickhouse.log</log>
+        <errorlog>.apex/clickhouse/clickhouse.err.log</errorlog>
+        <size>50M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- Defaults applied to connections that do not name a profile or
+         database; the `default` database is created on first start. -->
+    <default_profile>default</default_profile>
+    <default_database>default</default_database>
+
+    <!-- Single passwordless `default` user, loopback networks only. See
+         users.xml next to this file for the credential story. -->
+    <users_config>infrastructure/clickhouse/users.xml</users_config>
+</clickhouse>

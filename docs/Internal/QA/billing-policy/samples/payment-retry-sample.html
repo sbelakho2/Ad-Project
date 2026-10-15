@@ -1,39 +1,31 @@
 <!DOCTYPE html>
+<!--
+  Thin pointer sample. The copy below is reproduced verbatim from the
+  apex-notify template catalog (rust/crates/apex-notify/src/template.rs,
+  payment_retry), which implements the frozen copy of the design document
+  section 06 pages 93 to 95. The template refuses to render without a real
+  scheduled retry date, so a retry date is shown only when one exists.
+-->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Payment retry 2 of 3</title>
-    <style>
-      body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f5f6fb; }
-      .email-preview { max-width: 640px; margin: 0 auto; background: #ffffff; padding: 32px; border-radius: 12px; box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
-      h1, h2 { font-weight: 600; }
-      p, li { font-size: 15px; line-height: 1.6; color: #0f172a; }
-      ul { padding-left: 20px; }
-      a { color: #00295A; }
-    </style>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>An Apex payment retry is scheduled</title>
   </head>
-  <body>
-    <div class="email-preview">
-      
-        <h1>Payment Retry Attempt 2</h1>
-        <p>Hi there,</p>
-        <p>Adyen couldn't auto-charge Visa •••• 4242 yet. Adyen will try again on <strong>Dec 4, 2025</strong>.</p>
-        
-        <p><strong>Attempts remaining:</strong> 1</p>
-        
-        
-          <p style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
-            <strong>⚠️ Final Reminder:</strong> This is your last chance to update your payment method before your service is suspended.
-          </p>
-        
-        
-        <p><a href="https://console.apexmediation.ee/billing" style="background: #cc0000; color: white; padding: 10px 20px; text-decoration: none; display: inline-block; border-radius: 5px;">Update payment method now</a></p>
-        
-        <p>If you need us to switch the charge to ACH, SEPA, or a Wise wire for this cycle, reply to this email.</p>
-        
-        <p>Best regards,<br>
-        ApexMediation Team</p>
-      
-    </div>
+  <body style="margin:0;padding:0;background:#f5f6f1;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#182c31;">
+            <tr><td style="padding:32px 32px 8px;font-size:20px;font-weight:700;">Apex</td></tr>
+            <tr><td style="padding:0 32px 8px;font-size:24px;font-weight:700;line-height:32px;">An Apex payment retry is scheduled</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Invoice INV-2026-104 has an unpaid balance of USD 300.00. A retry is scheduled for 20 October 2026 using your authorized saved payment method.</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Review the invoice or update the method before that date. If you have already arranged a different payment, contact us with the invoice reference.</td></tr>
+            <tr><td style="padding:16px 32px;"><a href="https://console.apexmediation.ee/console/billing/invoices" style="display:inline-block;background:#2849d8;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:700;">Review invoice</a></td></tr>
+            <tr><td style="padding:16px 32px 32px;color:#536568;font-size:13px;line-height:20px;">Apex / Billing<br />Reference: INV-2026-104</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

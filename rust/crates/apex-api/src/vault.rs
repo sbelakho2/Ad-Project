@@ -78,7 +78,7 @@ impl Vault {
 }
 
 /// Evidence record the console can surface without revealing the secret.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct VaultEntryMeta {
     pub ciphertext_len: usize,
     pub scheme: &'static str,

@@ -1,18 +1,65 @@
-# Edge for the current product. Set APEX_DOMAIN and SITE_DOMAIN in the
-# environment; the defaults are placeholders for local validation only.
+# Edge for the current product. Set APEX_DOMAIN (API host), SITE_DOMAIN
+# (marketing host) and CONTROL_DOMAIN (operator host) in the environment; the
+# defaults are placeholders for local validation only.
 #
 # The API never serves a publisher's ledger unauthenticated: `/v1/ledger/*`
 # and `/console/ledger` require that publisher's bearer token, and the routes
 # answer 503 when no token is configured. The edge only reverse-proxies the
-# loopback-bound API, so nothing is reachable without a token.
+# loopback-bound services, so nothing is reachable without a token. The
+# operator control plane has its own origin (CONTROL_DOMAIN) and no marketing
+# or API route reaches it.
+#
+# One origin routing table:
+# - the marketing host serves the static Zola site for GET pages, and proxies
+#   only three path families to apex-api: POST /free-audit (the request form),
+#   /audit-requested/* (the confirmation pages) and /console* (the publisher
+#   console). Everything else, including GET /free-audit, stays static.
+# - the API host proxies its whole origin to apex-api.
+# - the operator host proxies its whole origin to apex-control alone.
+
+{$SITE_DOMAIN:www.apexmediation.ee} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# The marketing JSON access log `apex-ingest` reads: the parser keeps the
+	# route template, status, referrer host, allow-listed query keys and the
+	# campaign code only, never a query value. The raw file keeps the standard
+	# Caddy fields it must read (uri with query string, headers); at-rest
+	# handling is documented in infrastructure/README.md.
+	log {
+		output file {$APEX_ACCESS_LOG:/var/log/caddy/apex-access.json}
+		format json
+	}
+
+	# The free-audit request form POSTs to apex-api; GET /free-audit (form or
+	# trailing slash) stays on the static site.
+	@audit_submission {
+		method POST
+		path /free-audit
+	}
+	reverse_proxy @audit_submission 127.0.0.1:8787
+
+	# The confirmation pages after a stored audit request.
+	@audit_requested path /audit-requested/*
+	reverse_proxy @audit_requested 127.0.0.1:8787
+
+	# The publisher console (`/console` is the change log, `/console/*` the
+	# console pages and mutations).
+	@console path /console /console/*
+	reverse_proxy @console 127.0.0.1:8787
+
+	root * /srv/site/public
+	file_server
+}
+
 {$APEX_DOMAIN:api.apexmediation.ee} {
 	encode gzip
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	reverse_proxy 127.0.0.1:8787
 }
 
-{$SITE_DOMAIN:www.apexmediation.ee} {
+{$CONTROL_DOMAIN:control.apexmediation.ee} {
 	encode gzip
-	root * /srv/site/public
-	file_server
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy 127.0.0.1:8790
 }

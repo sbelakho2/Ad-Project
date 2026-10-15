@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="description" content="Social card template for the Apex Open Graph images.">
+<link rel="canonical" href="https://apexmediation.ee/og/template.html">
+<title>Apex social card template</title>
+<!-- Social card template (1200x630). tools/brand/render-og.sh rewrites the font URLs
+     to file:// and replaces the h1 line with the route title, then captures each
+     card to site/static/og/<route>.png with headless Chromium. -->
+<style>
+@font-face {
+  font-family: "Manrope";
+  font-weight: 800;
+  font-style: normal;
+  src: url("../fonts/manrope-800.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-style: normal;
+  src: url("../fonts/ibm-plex-mono-400.woff2") format("woff2");
+}
+html, body {
+  margin: 0;
+  padding: 0;
+}
+.card {
+  position: relative;
+  width: 1200px;
+  height: 630px;
+  background: #f5f6f1;
+  overflow: hidden;
+}
+.band {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 400px;
+  height: 630px;
+  background: #e2f2a6;
+}
+.lockup {
+  position: absolute;
+  left: 496px;
+  top: 96px;
+  color: #182c31;
+}
+.og-title {
+  position: absolute;
+  left: 496px;
+  top: 200px;
+  width: 608px;
+  margin: 0;
+  font-family: "Manrope";
+  font-weight: 800;
+  font-size: 64px;
+  line-height: 68px;
+  letter-spacing: -0.035em;
+  color: #182c31;
+}
+.rule {
+  position: absolute;
+  left: 496px;
+  top: 480px;
+  width: 72px;
+  height: 2px;
+  background: #182c31;
+}
+.domain {
+  position: absolute;
+  left: 496px;
+  top: 506px;
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-size: 28px;
+  line-height: 28px;
+  color: #536568;
+}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="band"></div>
+<svg class="lockup" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="176" height="56" viewBox="0 0 176 56" fill="currentColor">
+<path d="M0 32 L8 32 L8 12 L0 16 Z"/>
+<path d="M14 32 L22 32 L22 0 L14 4 Z"/>
+<path d="M6 23 L16 23 L16 17 L6 17 Z"/>
+<text x="30" y="32" font-family="Manrope" font-weight="800" font-size="44" letter-spacing="-0.02em">Apex</text>
+</svg>
+<h1 class="og-title">Improve the mediation you already run.</h1>
+<div class="rule"></div>
+<p class="domain">apexmediation.ee</p>
+</div>
+</body>
+</html>

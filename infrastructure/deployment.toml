@@ -7,6 +7,21 @@ listen = "127.0.0.1:8787"
 env_file = "/etc/apex/api.env"
 unit = "infrastructure/systemd/apex-api.service"
 
+[control]
+service = "apex-control"
+listen = "127.0.0.1:8790"
+env_file = "/etc/apex/control.env"
+unit = "infrastructure/systemd/apex-control.service"
+
+[ingest]
+service = "apex-ingest"
+schedule = "hourly"
+access_log = "/var/log/caddy/apex-access.json"
+spool = ".apex/analytics-spool/apex-ingest.jsonl"
+env_file = "/etc/apex/ingest.env"
+unit = "infrastructure/systemd/apex-ingest.service"
+timer = "infrastructure/systemd/apex-ingest.timer"
+
 [site]
 build = "zola build"
 root = "/srv/site/public"
@@ -17,3 +32,12 @@ config = "infrastructure/caddy/Caddyfile"
 [monitoring]
 prometheus = "monitoring/prometheus.yml"
 alertmanager_template = "monitoring/alertmanager.yml"
+
+[clickhouse]
+service = "clickhouse-server"
+purpose = "analytics and event store (replaces the historical Postgres analytics tables)"
+listen_http = "127.0.0.1:8123"
+listen_tcp = "127.0.0.1:9000"
+data = ".apex/clickhouse"
+dev_config = "infrastructure/clickhouse/config.xml"
+compose = "infrastructure/clickhouse/docker-compose.yml"

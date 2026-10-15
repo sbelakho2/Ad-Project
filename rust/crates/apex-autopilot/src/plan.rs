@@ -116,6 +116,14 @@ fn validate_action_values(action: &Action) -> Result<(), PlanError> {
     Ok(())
 }
 
+/// The registered metric's stable name, as the `experiment_registered`
+/// payload records it. The mapping is total over the engine's metric set.
+fn registered_metric(metric: &apex_lift::decision::Metric) -> &'static str {
+    match metric {
+        apex_lift::decision::Metric::RevenuePerUser => "revenue_per_user",
+    }
+}
+
 /// True when the same change (equal idempotency key and equal payload)
 /// is already in the ledger; a rerun must never re-apply it, and a rerun with
 /// a different value under a colliding key must never be mistaken for it.
@@ -188,6 +196,22 @@ pub async fn run_cycle(
     policy: &AutopilotPolicy,
     findings: &[Finding],
     proposals: Vec<Proposal>,
+    now_unix_ms: i64,
+) -> Result<CycleOutcome, PlanError> {
+    run_cycle_observed(ops, ledger, policy, findings, proposals, None, now_unix_ms).await
+}
+
+/// Run one write cycle with the analytics emitter attached: the
+/// pre-registration step emits `experiment_registered` and the confirmed
+/// platform start emits `experiment_started`, each at its own sub-step so a
+/// registered-but-unstarted attempt still leaves the registration fact.
+pub async fn run_cycle_observed(
+    ops: &dyn PlatformOps,
+    ledger: &mut dyn LedgerLog,
+    policy: &AutopilotPolicy,
+    findings: &[Finding],
+    proposals: Vec<Proposal>,
+    events: Option<&crate::events::RunnerEvents>,
     now_unix_ms: i64,
 ) -> Result<CycleOutcome, PlanError> {
     if policy.blackout_on_critical_findings {
@@ -335,7 +359,7 @@ pub async fn run_cycle(
             continue;
         }
 
-        {
+        let source_digest = {
             let signed = apex_lift::emit::pre_registration(&prereg)
                 .map_err(|error| PlanError::Validation(format!("pre-registration: {error}")))?;
             let payload = signed
@@ -349,6 +373,22 @@ pub async fn run_cycle(
                     &payload,
                 ))
                 .map_err(PlanError::Ledger)?;
+            signed.sha256.clone()
+        };
+        // Step 1's registration is complete; the event lands before the
+        // platform start so a registered-but-unstarted attempt stays visible.
+        if let Some(events) = events {
+            let registered_window_days = u32::try_from(prereg.window_days)
+                .map_err(|_| PlanError::Validation("registered window is out of range".into()))?;
+            events
+                .experiment_registered(
+                    &spec.name,
+                    &source_digest,
+                    registered_metric(&prereg.metric),
+                    registered_window_days,
+                    now_unix_ms,
+                )
+                .await;
         }
         let prereg_seq = pre_registration_seq(ledger, &spec.name);
 
@@ -400,6 +440,13 @@ pub async fn run_cycle(
                         spec,
                     ))
                     .map_err(PlanError::Ledger)?;
+                // The platform start is confirmed (the adapter returned the
+                // running experiment): record the lifecycle fact.
+                if let Some(events) = events {
+                    events
+                        .experiment_started(&experiment_id, "running", now_unix_ms)
+                        .await;
+                }
                 applied_today += 1;
                 applied_this_cycle += 1;
                 outcomes.push(ActionOutcome::Applied {

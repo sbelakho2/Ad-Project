@@ -1,55 +1,43 @@
 {
   "platform": "admob",
-  "fetchedAtUnixMs": 1700000000000,
+  "fetchedAtUnixMs": 1791965400000,
   "adUnits": [
     {
-      "platformUnitId": "u1",
-      "name": "Interstitial group A",
-      "format": "interstitial",
+      "platformUnitId": "rw_de_01",
+      "name": "Rewarded / Germany",
+      "format": "rewarded",
       "enabled": true,
       "countryFloors": [
-        { "country": "EE", "floorEcpm": 2500000 }
+        { "country": "DE", "floorEcpm": 4000000 },
+        { "country": "US", "floorEcpm": 2000000 }
+      ]
+    },
+    {
+      "platformUnitId": "bn_fr_01",
+      "name": "Banner / France",
+      "format": "banner",
+      "enabled": true,
+      "countryFloors": [
+        { "country": "FR", "floorEcpm": 2500000 }
       ]
     }
   ],
-  "waterfall": [
-    {
-      "entryId": "e1",
-      "adUnitId": "u1",
-      "network": "mintegral",
-      "instanceName": "MTG_1",
-      "position": 1,
-      "priceEcpm": 750000
-    }
-  ],
-  "mediationGroups": [
-    {
-      "mediationGroupId": "g1",
-      "name": "Interstitial group",
-      "format": "interstitial",
-      "mappings": [
-        { "adUnitId": "u1", "network": "admob", "ecpm": 2000000 },
-        { "adUnitId": "u2", "network": "facebook", "ecpm": 1000000 }
-      ]
-    }
-  ],
-  "bidderAccounts": [
-    { "network": "mintegral", "hasApexManagedAccount": true, "enabledInPlatform": false },
-    { "network": "facebook", "hasApexManagedAccount": true, "enabledInPlatform": true }
-  ],
+  "waterfall": [],
+  "mediationGroups": [],
+  "bidderAccounts": [],
   "countryRevenue": [
-    { "country": "EE", "adUnitId": "u1", "revenue30d": 0, "impressions30d": 150000 },
-    { "country": "DE", "adUnitId": "u1", "revenue30d": 4200000, "impressions30d": 90000 },
-    { "country": "US", "adUnitId": "u1", "revenue30d": 9800000, "impressions30d": 120000 }
+    { "country": "DE", "adUnitId": "rw_de_01", "revenue30d": 0, "impressions30d": 120000 },
+    { "country": "US", "adUnitId": "rw_de_01", "revenue30d": 350000000, "impressions30d": 100000 },
+    { "country": "FR", "adUnitId": "bn_fr_01", "revenue30d": 0, "impressions30d": 40000 }
   ],
   "appAdsTxt": {
     "present": true,
     "lines": [
-      "admob.com, pub-1234567890123456, DIRECT",
+      "admob.com, pub-northstar, DIRECT",
       "not-a-valid-line"
     ],
     "expectedNetworks": ["admob.com", "mintegral.com"]
   },
-  "platformTotals30d": { "revenue30d": 14500000, "impressions30d": 360000 },
-  "mediationTotals30d": { "revenue30d": 13900000, "impressions30d": 360000 }
+  "platformTotals30d": { "revenue30d": 356000000, "impressions30d": 260000 },
+  "mediationTotals30d": { "revenue30d": 348000000, "impressions30d": 260000 }
 }

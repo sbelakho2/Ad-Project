@@ -1,0 +1,29 @@
+# Production-shaped ClickHouse deployment for the analytics/event store.
+#
+# Local development does NOT use this file: `make clickhouse-dev` runs the
+# native server with infrastructure/clickhouse/config.xml. This compose file
+# is the container shape used for shared deployments and CI service
+# containers.
+#
+# Posture:
+# - Ports publish on 127.0.0.1 only; a reverse proxy terminates TLS. Override
+#   the host ports with APEX_CLICKHOUSE_HTTP_PORT and APEX_CLICKHOUSE_TCP_PORT.
+# - Data lives in the named volume `clickhouse_data`.
+# - The image keeps the passwordless `default` user (localhost-only publish):
+#   a local-dev default that real deployments must replace by setting
+#   CLICKHOUSE_USER and CLICKHOUSE_PASSWORD in the deployment environment
+#   (never in this file, never in git).
+# - Settings overrides: mount an XML file or directory into
+#   /etc/clickhouse-server/config.d/ (the image merges every file there), for
+#   example: ./config.d:/etc/clickhouse-server/config.d:ro
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:${APEX_CLICKHOUSE_HTTP_PORT:-8123}:8123'
+      - '127.0.0.1:${APEX_CLICKHOUSE_TCP_PORT:-9000}:9000'
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+volumes:
+  clickhouse_data:

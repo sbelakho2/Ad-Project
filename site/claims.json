@@ -2,159 +2,135 @@
   "claims": [
     {
       "id": "no-sdk",
-      "claim": "No SDK in your app.",
+      "claim": "No SDK. No app release. No obligation.",
       "anchor": "rust/crates/apex-connectors/src/lib.rs",
       "test": "endpoint_metas_are_pinned (rust/crates/apex-connectors/src/tests.rs)"
     },
     {
-      "id": "max-management-api",
-      "claim": "On AppLovin MAX, Apex reads and writes through MAX's own management API.",
-      "anchor": "rust/crates/apex-connectors/src/max.rs",
-      "test": "update_floors_sends_the_full_grouped_list (rust/crates/apex-connectors/src/max.rs)"
-    },
-    {
-      "id": "levelplay-management-api",
-      "claim": "On LevelPlay, price changes go through the instances of LevelPlay's mediation management API.",
-      "anchor": "rust/crates/apex-connectors/src/levelplay.rs",
-      "test": "lp_price_update_pins_body_and_key (rust/crates/apex-connectors/src/tests.rs)"
-    },
-    {
-      "id": "admob-management-api",
-      "claim": "On AdMob, mediation group updates are read-modify-write replacements through AdMob's API.",
-      "anchor": "rust/crates/apex-connectors/src/admob.rs",
-      "test": "admob_update_mapping_is_read_modify_write_full_list (rust/crates/apex-connectors/src/tests.rs)"
-    },
-    {
       "id": "platform-native-ab-proof",
-      "claim": "Every gain is proven by the platform's own built-in A/B experiment.",
-      "anchor": "rust/crates/apex-autopilot/src/settle.rs",
-      "test": "settle_keep_promotes_and_records_the_signed_lift (rust/crates/apex-autopilot/src/tests.rs)"
+      "claim": "For a supported action, Apex creates a platform-native experiment with a control and a test configuration.",
+      "anchor": "rust/crates/apex-autopilot/src/live_max.rs",
+      "test": "start_experiment_reads_floors_and_folds_the_change_into_the_test_arm (rust/crates/apex-autopilot/src/live_max.rs)"
     },
     {
       "id": "lift-fee-band",
-      "claim": "Our fee is 15% to 20% of the lift the platform itself measured.",
+      "claim": "Lift fees are 15% to 20% of qualifying incremental revenue.",
       "anchor": "rust/crates/apex-core/src/money.rs",
       "test": "fee_rate_bounds_are_typed_errors"
     },
     {
       "id": "no-lift-no-fee",
-      "claim": "If the platform's own experiment shows no lift, the change is rolled back and no fee applies.",
+      "claim": "A failed test is stopped without a lift fee.",
       "anchor": "rust/crates/apex-core/src/money.rs",
       "test": "fee_only_on_proven_positive_lift"
     },
     {
       "id": "signed-change-log",
-      "claim": "Every applied change and rollback is appended to a signed, hash-chained ledger.",
+      "claim": "The signed change log records relevant changes, experiment events, decisions and billing proofs.",
       "anchor": "rust/crates/apex-proof/src/ledger.rs",
       "test": "every_single_byte_flip_is_rejected (rust/crates/apex-proof/src/tests.rs)"
     },
     {
       "id": "automatic-rollback",
-      "claim": "If a change fails to clear the keep threshold, Apex automatically rolls it back.",
+      "claim": "Keep or stop it under rules set before the test begins.",
       "anchor": "rust/crates/apex-autopilot/src/settle.rs",
       "test": "settle_below_the_point_floor_rolls_back_and_deprecates (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
-      "id": "zero-lift-rollback-no-billing",
-      "claim": "A zero-lift outcome triggers a rollback without creating a billable proof.",
-      "anchor": "rust/crates/apex-autopilot/src/settle.rs",
-      "test": "settle_zero_lift_rolls_back_without_billing (rust/crates/apex-autopilot/src/tests.rs)"
-    },
-    {
       "id": "free-audit-read-only",
-      "claim": "The audit runs read-only: it never mutates your platform settings, and the deployment holds no write credentials.",
+      "claim": "Nothing is changed during the audit.",
       "anchor": "rust/crates/apex-api/src/cycle.rs",
       "test": "defaults_are_read_only_without_adyen_and_with_the_system_clock (rust/crates/apex-api/src/state.rs)"
     },
     {
       "id": "audit-stale-floors",
-      "claim": "The audit flags stale floors \u2014 a country floor set above that country's recent eCPM is throttling demand.",
+      "claim": "A stale-floor finding identifies a floor and the reporting behind it.",
       "anchor": "rust/crates/apex-audit/src/rules/stale_floor.rs",
       "test": "critical_at_exact_100k_boundary"
     },
     {
       "id": "audit-disabled-bidders",
-      "claim": "The audit finds bidders enabled at the network but disabled in your waterfall.",
+      "claim": "A missing-floor or disabled-bidder finding identifies the relevant setting.",
       "anchor": "rust/crates/apex-audit/src/rules/disabled_bidder.rs",
       "test": "critical_when_network_is_in_the_waterfall"
     },
     {
       "id": "audit-missing-country-floors",
-      "claim": "The audit finds countries with real revenue and no configured floor.",
+      "claim": "The audit checks stale floors, disabled bidders, missing country floors, reporting gaps and app-ads.txt issues.",
       "anchor": "rust/crates/apex-audit/src/rules/missing_floor.rs",
       "test": "golden_recovery_worked_example"
     },
     {
       "id": "audit-reporting-gap",
-      "claim": "The audit measures the gap between network-reported revenue and mediation-reported revenue.",
+      "claim": "A reporting gap compares matched source totals.",
       "anchor": "rust/crates/apex-audit/src/rules/reporting_gap.rs",
       "test": "gap_is_symmetric"
     },
     {
       "id": "audit-app-ads-txt",
-      "claim": "The audit validates app-ads.txt and reports malformed lines by line number.",
+      "claim": "An app-ads.txt finding identifies the file, line or expected seller that needs review.",
       "anchor": "rust/crates/apex-audit/src/rules/app_ads_txt.rs",
       "test": "malformed_lines_report_sorted_line_numbers"
     },
     {
       "id": "sandbox-confirmed-writes",
-      "claim": "A write path must be confirmed against the platform's live sandbox before the autopilot may write through it.",
+      "claim": "Write access is enabled only for verified operations in the deployment.",
       "anchor": "rust/crates/apex-core/src/endpoint.rs",
       "test": "writes_blocked_until_documented"
     },
     {
       "id": "verify-live-write-refusal",
-      "claim": "The autopilot refuses to apply changes through endpoints that are not sandbox-confirmed.",
+      "claim": "We confirm that scope before enabling writes.",
       "anchor": "rust/crates/apex-autopilot/src/plan.rs",
       "test": "verify_live_endpoints_refuse_before_apply (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "critical-finding-blackout",
-      "claim": "A critical audit result blackouts every write until it is resolved.",
+      "claim": "Approval settings and critical findings can block a change.",
       "anchor": "rust/crates/apex-autopilot/src/plan.rs",
       "test": "critical_findings_blackout_every_write (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "encrypted-credentials",
-      "claim": "Publisher network credentials are stored encrypted with AES-256-GCM.",
+      "claim": "Stored platform credentials are encrypted with AES-256-GCM.",
       "anchor": "rust/crates/apex-api/src/vault.rs",
       "test": "vault_roundtrip_and_tamper_detection"
     },
     {
       "id": "invoice-reverified-from-ledger",
-      "claim": "Every invoice line is re-derived from the signed ledger proof before it is billed.",
+      "claim": "The calculation uses a conservative positive lift bound and a signed record of the result.",
       "anchor": "rust/crates/apex-billing/src/invoice.rs",
       "test": "invoice_never_trusts_the_stored_fee (rust/crates/apex-billing/src/tests.rs)"
     },
     {
       "id": "lift-lower-bound",
-      "claim": "You are billed on the lower bound of the lift, never the point estimate.",
+      "claim": "The fee uses the conservative positive lift bound recorded with that result.",
       "anchor": "rust/crates/apex-lift/src/decision.rs",
       "test": "a_clean_positive_test_is_kept_on_the_lower_bound (rust/crates/apex-lift/src/decision.rs)"
     },
     {
       "id": "lift-no-lift-no-fee",
-      "claim": "No lift proven, no fee.",
+      "claim": "No qualifying lift means no lift fee.",
       "anchor": "rust/crates/apex-lift/src/records.rs",
       "test": "a_flat_test_rolls_back_with_no_fee (rust/crates/apex-lift/src/decision.rs)"
     },
     {
       "id": "lift-guardrails",
-      "claim": "User experience outranks revenue: the test stops when fill drops, whatever the revenue says.",
+      "claim": "A guardrail can stop or invalidate the test.",
       "anchor": "rust/crates/apex-lift/src/guardrails.rs",
-      "test": "fill_guardrails_need_two_consecutive_days (rust/crates/apex-lift/src/guardrails.rs)"
+      "test": "fill_guardrails_need_two_consecutive_days"
     },
     {
       "id": "lift-signed-pre-registration",
-      "claim": "Every test is pre-registered and signed before it starts.",
+      "claim": "The registered scope and settings remain fixed during the test.",
       "anchor": "rust/crates/apex-lift/src/records.rs",
       "test": "canonical_json_is_stable_and_hashes_are_pinned (rust/crates/apex-lift/src/records.rs)"
     },
     {
       "id": "monitoring-plan",
-      "claim": "Continuous monitoring is an optional flat plan at $500 per month, which you can start and stop month to month.",
+      "claim": "Optional monitoring is a separate $500 monthly plan.",
       "anchor": "rust/crates/apex-billing/src/subscription.rs",
-      "test": "the_standard_plan_is_a_flat_monthly_fee (rust/crates/apex-billing/src/subscription.rs)"
+      "test": "the_standard_plan_is_a_flat_monthly_fee"
     }
   ]
 }

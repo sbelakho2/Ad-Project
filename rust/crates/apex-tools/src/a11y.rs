@@ -314,7 +314,7 @@ pub fn collect_pages(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     Ok(pages)
 }
 
-pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>) -> Result<(), String> {
+pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>, min_pages: usize) -> Result<(), String> {
     let argument = dir_arg.unwrap_or("rust/target/ui-fixtures");
     let dir = if Path::new(argument).is_absolute() {
         std::path::PathBuf::from(argument)
@@ -328,9 +328,9 @@ pub fn console_a11y(repo: &Repo, dir_arg: Option<&str>) -> Result<(), String> {
         ));
     }
     let pages = collect_pages(&dir)?;
-    if pages.len() < MIN_PAGES {
+    if pages.len() < min_pages {
         return Err(format!(
-            "console-a11y: expected at least {MIN_PAGES} rendered pages, found {}",
+            "console-a11y: expected at least {min_pages} rendered pages, found {}",
             pages.len()
         ));
     }

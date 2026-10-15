@@ -15,6 +15,9 @@ apex-audit = { path = "../apex-audit" }
 apex-proof = { path = "../apex-proof" }
 apex-connectors = { path = "../apex-connectors" }
 apex-billing = { path = "../apex-billing" }
+apex-metrics = { path = "../apex-metrics" }
+apex-notify = { path = "../apex-notify" }
+apex-analytics = { path = "../apex-analytics" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

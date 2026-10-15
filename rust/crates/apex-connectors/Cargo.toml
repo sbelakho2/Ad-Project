@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 apex-core.workspace = true
 apex-audit = { path = "../apex-audit" }
+apex-metrics = { path = "../apex-metrics" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

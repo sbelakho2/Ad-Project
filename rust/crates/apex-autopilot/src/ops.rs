@@ -131,6 +131,7 @@ pub struct RecordingOps {
     rollback_script: Mutex<VecDeque<Result<(), PlatformError>>>,
     experiments: Mutex<std::collections::HashMap<String, ExperimentResult>>,
     days: Mutex<std::collections::HashMap<String, ExperimentDays>>,
+    days_script: Mutex<VecDeque<Result<ExperimentDays, PlatformError>>>,
     scope_revenues: Mutex<std::collections::HashMap<String, apex_core::Micros>>,
     current_settings: Mutex<std::collections::HashMap<String, String>>,
     log: Mutex<Vec<String>>,
@@ -197,6 +198,18 @@ impl RecordingOps {
     pub fn put_experiment(&self, id: &str, result: ExperimentResult) -> &Self {
         if let Ok(mut map) = self.experiments.lock() {
             map.insert(id.to_string(), result);
+        }
+        self
+    }
+
+    /// Script daily reporting pulls in call order (failures included); the
+    /// scripted queue is consumed before the stored days are consulted.
+    pub fn script_experiment_days(
+        &self,
+        results: Vec<Result<ExperimentDays, PlatformError>>,
+    ) -> &Self {
+        if let Ok(mut q) = self.days_script.lock() {
+            *q = results.into();
         }
         self
     }
@@ -292,6 +305,11 @@ impl PlatformOps for RecordingOps {
 
     async fn experiment_days(&self, experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
         push_log(&self.log, format!("days:{experiment_id}"));
+        if let Ok(mut script) = self.days_script.lock() {
+            if let Some(result) = script.pop_front() {
+                return result;
+            }
+        }
         match self.days.lock() {
             Ok(map) => map
                 .get(experiment_id)

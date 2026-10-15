@@ -1,34 +1,70 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ config.default_language }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}{{ config.title }}{% endblock title %}</title>
-{% block meta %}<meta name="description" content="{{ config.description }}">{% endblock meta %}
-<link rel="canonical" href="{{ current_url | default(value=config.base_url) }}">
-<!-- Relative asset URLs: the site deploys at a domain root; relative paths keep
-     audits (and offline previews) free of DNS-dependent absolute requests. -->
+{% block head %}<title>{{ config.title }}</title>
+<meta name="description" content="{{ config.description }}">
+<link rel="canonical" href="{{ current_url | default(value=config.base_url) | safe }}">{% endblock head %}
 <link rel="stylesheet" href="/style.css">
-<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="icon" href="/favicon.ico">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="site-header">
-  <p class="brand"><a href="{{ config.base_url | safe }}">Apex</a></p>
-  <nav aria-label="Primary">
-    <ul>
-      {%- for item in config.extra.nav %}
-      <li><a href="{{ get_url(path=item.path) }}">{{ item.name }}</a></li>
-      {%- endfor %}
-    </ul>
-  </nav>
+  <div class="wrap header-inner">
+    <a class="brand" href="/">
+      <svg class="brand-mark" viewBox="0 0 22 32" aria-hidden="true" focusable="false" fill="currentColor"><path d="M0 32 L8 32 L8 12 L0 16 Z"/><path d="M14 32 L22 32 L22 0 L14 4 Z"/><path d="M6 23 L16 23 L16 17 L6 17 Z"/></svg>
+      <span class="brand-name">Apex</span>
+    </a>
+    <details class="menu">
+      <summary>Menu</summary>
+      <nav aria-label="Menu">
+        <ul>
+          {%- for item in config.extra.header_nav %}
+          <li><a href="{{ item.path }}">{{ item.name }}</a></li>
+          {%- endfor %}
+        </ul>
+      </nav>
+    </details>
+    <nav class="site-nav" aria-label="Primary">
+      <ul>
+        {%- for item in config.extra.header_nav %}
+        <li><a href="{{ item.path }}">{{ item.name }}</a></li>
+        {%- endfor %}
+      </ul>
+    </nav>
+    <a class="button header-cta" href="/free-audit/">Get a free audit</a>
+  </div>
 </header>
 <main id="main">
 {% block content %}{% endblock content %}
 </main>
 <footer class="site-footer">
-  <p>{{ config.extra.footer_text }}</p>
-  <p>Contact: <a href="mailto:{{ config.extra.contact_email }}">{{ config.extra.contact_email }}</a></p>
+  <div class="wrap footer-inner">
+    <div class="footer-brand">
+      <p class="footer-name">Apex</p>
+      <p class="footer-descriptor">{{ config.extra.descriptor }}</p>
+    </div>
+    <nav class="footer-nav" aria-label="Product">
+      <ul>
+        {%- for item in config.extra.footer_product %}
+        <li><a href="{{ item.path }}">{{ item.name }}</a></li>
+        {%- endfor %}
+      </ul>
+    </nav>
+    <nav class="footer-nav" aria-label="Resources">
+      <ul>
+        {%- for item in config.extra.footer_resources %}
+        <li><a href="{{ item.path }}">{{ item.name }}</a></li>
+        {%- endfor %}
+      </ul>
+    </nav>
+    <div class="footer-meta">
+      <p><a href="mailto:{{ config.extra.contact_email }}">{{ config.extra.contact_email }}</a></p>
+      <p class="footer-line">{{ config.extra.serving_line }}</p>
+    </div>
+  </div>
 </footer>
 </body>
 </html>

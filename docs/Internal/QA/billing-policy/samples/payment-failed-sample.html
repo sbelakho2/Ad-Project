@@ -1,48 +1,32 @@
 <!DOCTYPE html>
+<!--
+  Thin pointer sample. The copy below is reproduced verbatim from the
+  apex-notify template catalog (rust/crates/apex-notify/src/template.rs,
+  payment_failed), which implements the frozen copy of the design document
+  section 06 pages 93 to 95. The message states no payment is confirmed and
+  shows a retry date only when one is actually scheduled.
+-->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>⚠️ Payment failed - action required</title>
-    <style>
-      body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f5f6fb; }
-      .email-preview { max-width: 640px; margin: 0 auto; background: #ffffff; padding: 32px; border-radius: 12px; box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
-      h1, h2 { font-weight: 600; }
-      p, li { font-size: 15px; line-height: 1.6; color: #0f172a; }
-      ul { padding-left: 20px; }
-      a { color: #00295A; }
-    </style>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Payment needs attention for invoice INV-2026-104</title>
   </head>
-  <body>
-    <div class="email-preview">
-      
-        <h1>Payment Failed</h1>
-        <p>Hi there,</p>
-        <p>We attempted to auto-charge <strong>EUR 4,800.00</strong> using Visa •••• 4242, but Adyen declined the payment.</p>
-        
-        <p>We'll automatically retry on <strong>Dec 2, 2025</strong>.</p>
-        
-        <h2>Fix it now</h2>
-        <p><a href="https://console.apexmediation.ee/billing/pay/in_test_failed" style="background: #cc0000; color: white; padding: 10px 20px; text-decoration: none; display: inline-block; border-radius: 5px;">Update payment method</a></p>
-        
-        <h2>What happens next?</h2>
-        <ul>
-          <li>Your stored Adyen method (cards & wallets globally, ACH in the US, SEPA in the EU) will be retried automatically.</li>
-          <li>If all retries fail, we pause mediation on day 7 until the balance clears. Wise wire instructions are available on request.</li>
-        </ul>
-        
-        <p><strong>Common reasons for payment failure:</strong></p>
-        <ul>
-          <li>Insufficient funds</li>
-          <li>Expired card</li>
-          <li>Incorrect billing address</li>
-          <li>Bank declined the charge</li>
-        </ul>
-        
-        <p>Need help or prefer a manual wire this cycle? Reply to this email or contact <a href="mailto:support@apexmediation.ee">support@apexmediation.ee</a></p>
-        
-        <p>Best regards,<br>
-        ApexMediation Team</p>
-      
-    </div>
+  <body style="margin:0;padding:0;background:#f5f6f1;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:8px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#182c31;">
+            <tr><td style="padding:32px 32px 8px;font-size:20px;font-weight:700;">Apex</td></tr>
+            <tr><td style="padding:0 32px 8px;font-size:24px;font-weight:700;line-height:32px;">Payment needs attention for invoice INV-2026-104</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">We could not collect USD 300.00 for this invoice. No payment is confirmed.</td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Open the invoice to review the payment status and available next steps. We will show a retry date only when it is scheduled.</td></tr>
+            <tr><td style="padding:16px 32px;"><a href="https://console.apexmediation.ee/console/billing/invoices" style="display:inline-block;background:#2849d8;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:700;">Review payment</a></td></tr>
+            <tr><td style="padding:8px 32px;font-size:16px;line-height:26px;">Do not email card or bank credentials. Contact us if the invoice or amount needs explaining.</td></tr>
+            <tr><td style="padding:16px 32px 32px;color:#536568;font-size:13px;line-height:20px;">Apex / Billing<br />Reference: INV-2026-104</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>

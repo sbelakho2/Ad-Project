@@ -312,6 +312,7 @@ pub async fn settle_experiment(
                 .map_err(|source| PlanError::ApplyFailed { source })?;
             return Ok(SettleOutcome::Voided {
                 reason: reason.clone(),
+                guardrails: guardrails.clone(),
             });
         }
         Decision::Rollback { reason } => {
@@ -332,6 +333,7 @@ pub async fn settle_experiment(
                 lift: estimate.as_ref().map(|e| e.lift).unwrap_or(0.0),
                 reason: reason.clone(),
                 rollback_seq: rollback.seq(),
+                guardrails: guardrails.clone(),
                 daily_log_ratios: ratios,
             });
         }

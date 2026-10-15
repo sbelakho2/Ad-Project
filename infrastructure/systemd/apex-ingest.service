@@ -1,0 +1,15 @@
+[Unit]
+Description=Apex analytics ingest (Caddy access log to ClickHouse)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/ingest.env
+ExecStart=/usr/local/bin/apex-ingest /var/log/caddy/apex-access.json --spool /var/lib/apex/.apex/analytics-spool/apex-ingest.jsonl
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex/.apex/analytics-spool

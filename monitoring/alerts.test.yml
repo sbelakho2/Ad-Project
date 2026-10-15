@@ -44,3 +44,223 @@ tests:
       - eval_time: 15m
         alertname: ApexApiServerErrorRateHigh
         exp_alerts: []
+
+  # --- bounded HTTP series (apex-api via /metrics, apex-control via textfile)
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_http_requests_total{service="apex-api",route_template="/console/audit",method="GET",status_class="2xx"}'
+        values: '0+30x25'
+      - series: 'apex_http_requests_total{service="apex-api",route_template="/console/audit",method="GET",status_class="5xx"}'
+        values: '0+4x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexHttpServerErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: apex-api
+              route_template: /console/audit
+            exp_annotations:
+              summary: apex HTTP 5xx rate above 5 percent
+              description: A service route class stayed above a 5 percent server error ratio with at least three errors a minute for ten minutes.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_http_requests_total{service="apex-control",route_template="/control/system",method="GET",status_class="2xx"}'
+        values: '0+30x25'
+      - series: 'apex_http_requests_total{service="apex-control",route_template="/control/system",method="GET",status_class="5xx"}'
+        values: '0+1x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexHttpServerErrorRateHigh
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-api",route_template="/",method="GET",le="1"}'
+        values: '0+54x20'
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-api",route_template="/",method="GET",le="2.5"}'
+        values: '0+57.6x20'
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-api",route_template="/",method="GET",le="+Inf"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexHttpLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: apex-api
+              route_template: /
+            exp_annotations:
+              summary: apex HTTP p95 latency above one second
+              description: The five-minute p95 response time stayed above one second for ten minutes.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-control",route_template="/control",method="GET",le="0.1"}'
+        values: '0+54x20'
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-control",route_template="/control",method="GET",le="0.25"}'
+        values: '0+60x20'
+      - series: 'apex_http_request_duration_seconds_bucket{service="apex-control",route_template="/control",method="GET",le="+Inf"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexHttpLatencyHigh
+        exp_alerts: []
+
+  # --- jobs
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_job_schedule_lag_seconds_count{job_type="daily",platform="applovin_max"}'
+        values: '0+1x25'
+      - series: 'apex_job_schedule_lag_seconds_bucket{job_type="daily",platform="applovin_max",le="3600"}'
+        values: '0+0x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexJobScheduleLagLate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job_type: daily
+            exp_annotations:
+              summary: an Apex job started more than an hour late
+              description: A recorded job start was more than one hour behind its expected schedule within the last six hours; check the timers and the runner log.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_job_schedule_lag_seconds_count{job_type="daily",platform="applovin_max"}'
+        values: '0+1x25'
+      - series: 'apex_job_schedule_lag_seconds_bucket{job_type="daily",platform="applovin_max",le="3600"}'
+        values: '0+1x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexJobScheduleLagLate
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_report_accounts{platform="applovin_max",readiness_class="stale"}'
+        values: '0x5 3x75'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ApexReportAccountsStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              platform: applovin_max
+            exp_annotations:
+              summary: Apex reporting accounts are stale
+              description: A platform's accounts stayed in the stale readiness class for an hour; review the reporting state in the console.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_report_accounts{platform="applovin_max",readiness_class="stale"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ApexReportAccountsStale
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_restore_operations_total{platform="applovin_max",operation="restore",outcome="failed"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ApexRestoreFailures
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              platform: applovin_max
+              operation: restore
+              outcome: failed
+            exp_annotations:
+              summary: an Apex restore operation failed
+              description: A platform restore or reconcile operation reported a failure in the last six hours.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_ledger_verifications_total{result="invalid_chain",verifier_version="v0.1.0"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ApexLedgerVerificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              result: invalid_chain
+              verifier_version: v0.1.0
+            exp_annotations:
+              summary: Apex ledger verification did not pass
+              description: A ledger verification returned a non-verified result in the last six hours; serve nothing from that ledger until it verifies again.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_notification_attempts_total{channel="email",template_class="payment_failed",outcome="failed"}'
+        values: '0x5 1x30'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ApexNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              channel: email
+              template_class: payment_failed
+              outcome: failed
+            exp_annotations:
+              summary: an Apex notification delivery failed
+              description: A transactional notification attempt failed in the last six hours; check the channel credentials and the notification log.
+
+  # --- connectors
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_connector_requests_total{platform="applovin_max",operation="listAdUnits",outcome_class="auth_refusal"}'
+        values: '0+2x90'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ApexConnectorAuthRefusals
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              platform: applovin_max
+            exp_annotations:
+              summary: platform auth refusals keep happening
+              description: A connector kept receiving auth refusals at more than one a minute for fifteen minutes; check the stored credentials on the connections page.
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_connector_duration_seconds_bucket{platform="applovin_max",operation="listAdUnits",le="10"}'
+        values: '0+54x20'
+      - series: 'apex_connector_duration_seconds_bucket{platform="applovin_max",operation="listAdUnits",le="30"}'
+        values: '0+57.6x20'
+      - series: 'apex_connector_duration_seconds_bucket{platform="applovin_max",operation="listAdUnits",le="+Inf"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexConnectorLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              platform: applovin_max
+            exp_annotations:
+              summary: platform calls are slow
+              description: The ten-minute p95 external platform call duration stayed above ten seconds for ten minutes.
+
+  # --- operator actions
+
+  - interval: 1m
+    input_series:
+      - series: 'apex_operator_actions_total{capability_class="finance",action_class="collection_retry",outcome="denied"}'
+        values: '0+1x25'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ApexOperatorActionsDeniedSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: operator action denials spiked
+              description: More than ten operator actions were denied in fifteen minutes; this is a security signal, check the action journal and the operator sessions.

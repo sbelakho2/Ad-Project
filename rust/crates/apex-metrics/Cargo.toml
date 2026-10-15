@@ -1,0 +1,19 @@
+[package]
+name = "apex-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intentionally dependency-free: the bounded registry, the Prometheus text
+# renderer and the textfile writer are std-only so every binary in the
+# workspace can depend on them without dragging in a runtime.
+
+[dev-dependencies]
+# Only tests use a runtime: the in-flight guard's cancellation cleanup is
+# proven by aborting a real task.
+tokio = { version = "1", features = ["rt", "macros"] }

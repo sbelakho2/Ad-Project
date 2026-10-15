@@ -1,7 +1,60 @@
 groups:
   - name: apex-api
     rules:
+      # The hand-rolled counters the design keeps during the metrics
+      # migration (page 111: "Keep existing counters during migration").
       - record: apex:request_rate5m
         expr: sum(rate(apex_api_requests_total[5m]))
       - record: apex:error_ratio5m
         expr: sum(rate(apex_api_requests_total{status="5xx"}[5m])) / clamp_min(sum(rate(apex_api_requests_total[5m])), 0.000001)
+
+  - name: apex-http
+    rules:
+      # The bounded service series: apex-api and apex-control both emit
+      # apex_http_requests_total{service, route_template, method, status_class}
+      # and apex_http_request_duration_seconds{service, route_template, method}.
+      # Route templates are registry-bounded, so the series count stays finite.
+      - record: apex:http_server_error_ratio5m
+        expr: sum by (service, route_template) (rate(apex_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum by (service, route_template) (rate(apex_http_requests_total[5m])), 0.000001)
+      - record: apex:http_latency_p95_5m
+        expr: histogram_quantile(0.95, sum by (le, service, route_template) (rate(apex_http_request_duration_seconds_bucket[5m])))
+
+  - name: apex-jobs
+    rules:
+      # The schedule-lag histogram is the runner's overdue signal: the count
+      # of observations with a lag above one hour in the last six hours.
+      - record: apex:job_schedule_lag_over_1h_runs_6h
+        expr: (sum by (job_type) (increase(apex_job_schedule_lag_seconds_count[6h])) - sum by (job_type) (increase(apex_job_schedule_lag_seconds_bucket{le="3600"}[6h])))
+      - record: apex:job_runs_rate30m
+        expr: sum by (job_type, outcome) (rate(apex_job_runs_total[30m]))
+
+  - name: apex-connectors
+    rules:
+      # p95 of external platform calls; retries are separate attempts.
+      - record: apex:connector_latency_p95_10m
+        expr: histogram_quantile(0.95, sum by (le, platform) (rate(apex_connector_duration_seconds_bucket[10m])))
+      - record: apex:connector_auth_refusal_rate30m
+        expr: sum by (platform) (rate(apex_connector_requests_total{outcome_class="auth_refusal"}[30m]))
+      - record: apex:connector_requests_rate30m
+        expr: sum by (platform, operation, outcome_class) (rate(apex_connector_requests_total[30m]))
+
+  - name: apex-domain
+    rules:
+      # The runner textfile's domain counters, as rates for dashboards and
+      # follow-up rules; labels stay the bounded vocabularies of the catalog.
+      - record: apex:audit_runs_rate30m
+        expr: sum by (platform, rule_version, outcome) (rate(apex_audit_runs_total[30m]))
+      - record: apex:experiment_decisions_rate30m
+        expr: sum by (platform, decision, reason_class) (rate(apex_experiment_decisions_total[30m]))
+      - record: apex:guardrail_events_rate30m
+        expr: sum by (platform, guardrail, action) (rate(apex_guardrail_events_total[30m]))
+      - record: apex:restore_operations_rate30m
+        expr: sum by (platform, operation, outcome) (rate(apex_restore_operations_total[30m]))
+      - record: apex:ledger_verifications_rate30m
+        expr: sum by (result, verifier_version) (rate(apex_ledger_verifications_total[30m]))
+      - record: apex:payment_events_rate30m
+        expr: sum by (provider, event_class, result) (rate(apex_payment_events_total[30m]))
+      - record: apex:notification_attempts_rate30m
+        expr: sum by (channel, template_class, outcome) (rate(apex_notification_attempts_total[30m]))
+      - record: apex:operator_actions_rate30m
+        expr: sum by (capability_class, action_class, outcome) (rate(apex_operator_actions_total[30m]))

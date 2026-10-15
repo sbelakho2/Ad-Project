@@ -1,59 +1,66 @@
 +++
-title = "Pricing: a share of proven lift, nothing else"
-description = "Apex charges 15% to 20% of the lift the platform's own A/B test measured. No measured lift, no fee. Worked example, comparison, and who this is for."
+title = "Apex pricing | Fees tied to qualifying gains"
+description = "Free read-only audit. Lift fees of 15% to 20%, with a clear term and calculation. Optional monitoring is $500 per month."
+template = "page.html"
+
+[extra]
+h1 = "A share of qualifying gains."
+eyebrow = "Lift fee"
+lede = "The audit is free. If you continue, your agreed lift-fee rate is 15% to 20% of qualifying incremental revenue. The exact rate appears in your order."
+og_image = "og/pricing.png"
+
+[[extra.panels]]
+title = "Lift fee"
+lead = "15-20%"
+lines = [
+  "of qualifying incremental revenue.",
+  "Up to 12 months for a kept change.",
+  "No qualifying lift means no lift fee.",
+]
+
+[[extra.panels]]
+title = "Optional monitoring"
+lead = "$500 / month"
+lines = [
+  "Daily measurement, guardrail monitoring and customer-impact alerts.",
+  "A separate plan, billed month to month.",
+]
 +++
 
-## The rule
+## What the fee uses
 
-Our fee is 15% to 20% of the lift the platform itself measured. The rate is agreed in a fixed range when you sign, and the exact percentage inside that range is stated in your order. When the platform's experiment shows no lift, the change comes out and no fee applies.
+A positive point estimate alone is not enough. A kept change must pass the registered decision rule. The fee uses the conservative positive lift bound recorded with that result. You can inspect the inputs and reproduce the calculation.
 
-No lift, no fee is not a slogan; it is enforced by the billing path. Before anything is billed, each invoice line is re-derived from the signed ledger proof. The billed amount is recomputed from the platform-measured lift and the agreed rate, and an invoice that cannot re-derive every line from signed proof is refused rather than estimated. A zero-lift outcome triggers a rollback without creating a billable proof, so there is nothing to invoice in the first place.
+## How long it lasts
 
-You are billed on the lower bound of the lift, never the point estimate. No lift proven, no fee. Every test is pre-registered and signed before it starts. User experience outranks revenue: the test stops when fill drops, whatever the revenue says.
+A qualifying kept change can be billed for up to 12 months from its keep date. If you override the setting, billing for that change stops and the active period is prorated. A qualifying recheck can reduce the billed lift; it cannot raise it. Your order describes the applicable recheck schedule.
 
-There is no required subscription, no seat fee, no platform fee and no minimum commitment. Continuous monitoring is an optional flat plan at $500 per month, which you can start and stop month to month. It covers the daily measurement pass, guardrail monitoring and customer-impact alerts across your whole account, whether or not a change is under test. It is billed as its own invoice line, through the same proof-checked, VAT-applied, Adyen-collected path as a lift fee. The free read-only audit carries no obligation to continue.
+## Optional monitoring
+
+$500 per month, optional.
+
+Daily measurement passes, guardrail monitoring and customer-impact alerts. This is a separate monthly plan and can carry a fee even when there is no billable lift. It is never added automatically.
 
 ## Worked example
 
-An app earning **$50,000 per month**. After Apex applies a change through the platform's own management API and the platform's own A/B experiment finishes, the variant shows a **+5% lift**:
+Example, not a forecast.
 
-| Line | Amount |
-| --- | --- |
-| Measured lift, as reported by the platform | +5% |
-| Extra monthly revenue | +$2,500 |
-| Apex fee at the 20% end of the band | $500 |
-| Apex fee at the 15% end of the band | $375 |
-| Fee if the experiment shows 0% | $0, change rolled back |
+<ul class="facts-list">
+  <li>Eligible revenue for the month: $51,500.</li>
+  <li>One kept change, billable lift bound: 3%.</li>
+  <li>Attributed incremental revenue: $1,500.</li>
+  <li>Lift fee at 20%: $300.</li>
+  <li>Lift fee at 15%: $225.</li>
+</ul>
 
-That is the whole model. The number that decides the fee is not ours, it is the one printed by the experiment tool inside your MAX, LevelPlay or AdMob account. If the experiment result is 2%, you pay 15–20% of 2% of your baseline; if it is below your keep threshold, we roll the change back and bill nothing.
+For one active change, attributed increment is monthly scope revenue multiplied by 1 - 1 / (1 + billable lift). Multiple active changes are combined before their contribution is allocated.
 
-Lift is measured on your app's actual traffic during the experiment window, so seasonal traffic, new user mixes and general market movement are already inside the control group. The experiment's control arm pays the same traffic, at the same time, on the same platform — that is what makes the percent trustworthy.
+## Your invoice
 
-## Who pricing fits
+Each fee line identifies the change, billing period, eligible revenue, billable bound, agreed rate and proof references. Tax, monitoring and credits appear separately. Nothing is billed as a lift fee for a test that was not kept with qualifying evidence.
 
-Apex is built for apps earning roughly **$10k to $300k per month** on MAX, LevelPlay or AdMob, run without a full-time ad-ops person. In that range, a single-digit revenue improvement is worth real money every month, but it is not worth a full-time hire or a six-figure agency retainer. The thresholds for keeping a change are yours to configure; a conservative publisher can demand a higher measured lift before anything becomes billable.
+## Begin with the free audit.
 
-## How this compares
+Understand the findings before choosing a paid service.
 
-| Approach | What it is | Weakness for a $10k–$300k/month app |
-| --- | --- | --- |
-| Built-in platform tools | The dashboards, floors and experiment tools you already have in MAX, LevelPlay or AdMob | Manual and per-platform: someone still has to watch floors, design experiments, read results and roll back failures; nothing audits across your whole account continuously |
-| AI ad-ops services | External services that analyze or manage your monetization | Many require an SDK or a mediation change; gains are typically reported in the vendor's own dashboard rather than the platform's built-in experiment |
-| SDK-based layers | Monetization code installed into the app | Require an app release, a new binary and a rebuild cycle; the layer sits in the ad request path, so its bugs are your revenue risk |
-| Consultants and agencies | People who log into your dashboards and make changes | Retainers are paid whether or not revenue moves; changes are manual, infrequent and rarely attached to a per-change experiment with documented rollback |
-
-Apex's difference is structural: no code in the app, no new ad path, no Apex-side measurement. The work happens through the platform's own management API, the proof happens in the platform's own experiment, and the fee happens only on the result.
-
-## What we do not charge for
-
-- The read-only audit: free, before any contract, no obligation.
-
-- Rollbacks: a failed change costs you nothing and is never billed.
-
-- Access to the change log: the signed ledger is yours to verify at any time, at no cost.
-
-## What Apex does not do
-
-Apex serves no ads and ships no SDK. No new mediation layer. No partnerships needed with your networks. Nothing flows through Apex — not ad requests, not bids, not user data. Apex touches only the management APIs of the platform you already use, and the fee only exists when those platforms' own numbers say your revenue went up.
-
-Questions about the band, the thresholds or the worked example: write to [hello@apexmediation.ee](mailto:hello@apexmediation.ee).
+<a class="button" href="/free-audit/">Request the free audit</a>

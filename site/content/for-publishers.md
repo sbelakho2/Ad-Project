@@ -1,64 +1,50 @@
 +++
-title = "For publishers: what working with Apex looks like"
-description = "Who Apex is for, what access it needs, how the free audit runs, and what the first ninety days of the autopilot actually change."
+title = "Apex for publishers | A practical ad-ops service"
+description = "A free read-only mediation audit for app teams with limited ad-ops capacity. See the fit, access required and next steps."
+template = "page.html"
+
+[extra]
+h1 = "For studios where ad ops is one job among many."
+lede = "Apex is a practical fit for portfolios earning roughly $10,000 to $300,000 a month from ads on MAX, LevelPlay or AdMob."
+cta = "Request the free audit"
+og_image = "og/for-publishers.png"
+
+[[extra.panels]]
+title = "A useful starting point"
+rows = [
+  { label = "Your platform", value = "MAX, LevelPlay or AdMob" },
+  { label = "Your time", value = "Limited capacity for routine review" },
+  { label = "Your first step", value = "An audit with evidence" },
+]
 +++
 
-## Who this is for
+## When the audit helps
 
-Apex fits apps earning roughly **$10k to $300k per month** on AppLovin MAX, LevelPlay or AdMob, where nobody has advertising operations as a full-time job. The pattern is the same at almost every studio in that range. An engineer or a founder checks the mediation dashboard when something looks wrong. Floors were configured once and revisited rarely, and experiments exist in the platform but almost never get run to a decision.
+You have a working mediation setup, but little time to revisit country floors, inspect bidder settings or reconcile reports. Start with an audit rather than a migration project.
 
-If that is your situation, the leaks this site describes are probably already in your account. The free audit tells you which ones, with numbers.
+## What you receive
 
-## What the free audit needs
+A findings report with the affected scope, severity, source data and a clear explanation. Where a recovery model is supported, the estimate is labeled. Where data is missing, the report explains the limit.
 
-Read access to your platform reporting and configuration — nothing more. The audit only reads: it makes no change to your platform settings and runs from a deployment with no write credentials. No SDK, no app release, no contract. You receive a findings report where every finding has a severity, an evidence trail, and an estimated monthly recovery, or an explicit statement that the data cannot support an estimate.
+## What your team does
 
-## What applying changes needs
-
-When you decide to act on findings, Apex needs credentials that can write through the platform's own management API. That step is gated:
-
-- Writes only happen on paths confirmed against the platform's live sandbox.
-
-- Writes only happen while the audit has no unresolved critical findings.
-
-- Every write runs as a platform-native A/B experiment with a control group, and every write has a rollback.
-
-You can revoke write credentials at any time; the audit and your exported ledger keep working without them. Network credentials from publishers are kept encrypted under AES-256-GCM.
-
-## What the first ninety days typically look like
-
-1. **Week 0 — audit.** You get the findings report. Nothing changes in your account.
-
-2. **Weeks 1–2 — first changes.** Apex proposes a short list of changes ranked by expected value and blast radius. Each one is applied through the management API and immediately enters a platform-native experiment.
-
-3. **Weeks 3–8 — the loop.** Experiments finish, results settle: clears the threshold, it stays; misses it, it rolls back automatically and the rollback is recorded. The findings list is re-audited continuously as the account changes.
-
-4. **Month 3 — the ledger.** You have a signed history of every change, every rollback, and the platform's own measured result behind each one. You also have your first invoice lines, each re-derived from that history.
-
-## What stays yours
-
-- Your platform accounts, your apps, your traffic. Apex never intermediates ad serving.
-
-- The ledger, exportable and verifiable offline.
-
-- The decision to stop: roll back everything, revoke credentials, and keep the audit evidence.
+Share the platform and portfolio details needed to arrange the audit. Provide access through the agreed secure process. Review the findings and decide whether to consider supported changes. Your team keeps control of the account.
 
 ## Common questions
 
-**Do I need to switch mediation?** No switch is needed. Apex works on top of the mediation you already run: MAX, LevelPlay or AdMob.
+<dl class="faq">
+  <dt>Do we need an app release?</dt>
+  <dd>The current Apex service adds no SDK to your app.</dd>
+  <dt>Do we have to change mediation?</dt>
+  <dd>The audit works with your existing supported platform.</dd>
+  <dt>How soon can a test finish?</dt>
+  <dd>That depends on the registered window, traffic and complete platform reporting. An incomplete or invalid test does not become a billable success.</dd>
+  <dt>Can we stop after the audit?</dt>
+  <dd>Yes. The audit does not oblige you to buy a paid service.</dd>
+</dl>
 
-**Do I need a partnership or a network deal?** No partnerships are needed. Apex uses the management APIs your accounts already expose.
+## Tell us what you run.
 
-**What happens to a change that loses?** It is rolled back automatically through the same management API and recorded in the ledger as a rollback. There is no fee for a change that did not produce measured lift.
+We will confirm the audit scope and next steps.
 
-**How do I know the lift is real?** You don't take our word for it: every gain is proven by the platform's own built-in A/B experiment, visible in your own account, and billed only from those results.
-
-**How do I start?** Leave your contact and portfolio below, or write to [hello@apexmediation.ee](mailto:hello@apexmediation.ee). You get an audit timeline and a first findings report before anyone discusses a contract.
-
-{{< lead-form >}}
-
-The form posts to our lead endpoint and we reply by email. Nothing else is stored.
-
-## The fine print worth reading twice
-
-Apex is an optimization layer for accounts you control. It does not guarantee revenue outcomes; it guarantees the method: platform-native changes, platform-native proof, signed records, automatic rollback, and fees that exist only where the platform's own numbers show measured lift. That guarantee is inspectable in the ledger, not just stated here.
+<a class="button" href="/free-audit/">Request the free audit</a>

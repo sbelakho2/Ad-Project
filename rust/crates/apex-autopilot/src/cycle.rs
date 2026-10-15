@@ -12,7 +12,7 @@ use std::path::Path;
 use apex_audit::Snapshot;
 use apex_proof::LedgerLog;
 
-use crate::model::Action;
+use crate::model::{Action, ActionOutcome};
 use crate::runner::Runner;
 
 /// What one cycle job did.
@@ -51,18 +51,66 @@ pub async fn run(
     if proposals.is_empty() {
         return Ok(report);
     }
-    let outcome = crate::plan::run_cycle(
+    let outcome = crate::plan::run_cycle_observed(
         runner.platform_ops(),
         ledger,
         runner.policy(),
         &[],
-        proposals,
+        proposals.clone(),
+        runner.events().map(AsRef::as_ref),
         now_unix_ms,
     )
     .await?;
     report.applied = outcome.applied;
     report.skipped = outcome.skipped;
     report.awaiting_approval = outcome.awaiting_approval;
+
+    // A proposal held for approval is a durable fact and a customer message:
+    // `proposal_created` lands in analytics and the approval request goes to
+    // the authorized contacts. The message states it does not grant approval.
+    let snapshot = apex_audit::snapshot_digest(&snapshot);
+    let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
+    for outcome in &outcome.outcomes {
+        let ActionOutcome::AwaitingApproval { idempotency_key } = outcome else {
+            continue;
+        };
+        let proposal = proposals.iter().find(|proposal| {
+            crate::keys::idempotency_key(&proposal.action)
+                .ok()
+                .as_deref()
+                == Some(idempotency_key.as_str())
+        });
+        let (test_label, country) = proposal
+            .map(|proposal| crate::notify::proposal_label(&proposal.action))
+            .unwrap_or_else(|| ("Change".to_string(), "all countries".to_string()));
+        let proposal_id = crate::notify::proposal_id_for(idempotency_key);
+        let change_hash = proposal
+            .and_then(|proposal| serde_json::to_string(&proposal.action).ok())
+            .map(|json| crate::notify::change_hash(&json))
+            .unwrap_or_else(|| crate::notify::change_hash(idempotency_key));
+        if let Some(events) = runner.events() {
+            events
+                .proposal_created(
+                    &proposal_id,
+                    &snapshot,
+                    &change_hash,
+                    &policy_version,
+                    now_unix_ms,
+                )
+                .await;
+        }
+        if let (Some(notify), false) = (runner.notify(), runner.publisher_id().is_empty()) {
+            notify
+                .approval_requested(
+                    runner.publisher_id(),
+                    &proposal_id,
+                    &test_label,
+                    &country,
+                    now_unix_ms,
+                )
+                .await;
+        }
+    }
     Ok(report)
 }
 
@@ -231,5 +279,119 @@ mod tests {
             floor_ecpm: 1,
         });
         assert_eq!(label, "floor:u1:EE");
+    }
+
+    #[tokio::test]
+    async fn a_cycle_emits_the_experiment_lifecycle_events() {
+        use apex_analytics::store::{EventStore as _, ProjectionStore as _};
+
+        let dir = std::env::temp_dir().join(format!("apex-cycle-events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot_path = dir.join("applovin_max.json");
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+
+        let ops = Arc::new(unused_ops().await);
+        let store = Arc::new(apex_analytics::MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let client = apex_analytics::AnalyticsClient::new(store.clone(), "dev", "apex-runner-test");
+        let events = Arc::new(
+            crate::events::RunnerEvents::new(Arc::new(client), "northstar").with_environment("dev"),
+        );
+        let runner = Runner::new(
+            ops,
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_priors(seeded_priors(), dir.join("priors.json"))
+        .with_events(events);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[3u8; 32]));
+
+        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
+            .await
+            .expect("cycle");
+        assert!(report.applied >= 1);
+        let stored = store.load_events().await.expect("events");
+        let types: Vec<&str> = stored
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        let registered = types
+            .iter()
+            .position(|event_type| *event_type == "experiment_registered")
+            .expect("experiment_registered landed");
+        let started = types
+            .iter()
+            .position(|event_type| *event_type == "experiment_started")
+            .expect("experiment_started landed");
+        assert!(
+            registered < started,
+            "the registration precedes the confirmed start: {types:?}"
+        );
+        assert!(stored
+            .iter()
+            .all(|event| event.publisher_id.as_deref() == Some("northstar")));
+        let registration = &stored[registered];
+        assert_eq!(
+            registration.payload.registered_metric.as_deref(),
+            Some("revenue_per_user")
+        );
+        assert_eq!(registration.payload.window_days, Some(14));
+        assert!(registration.payload.source_digest.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_refused_platform_start_still_emits_the_registration() {
+        use apex_analytics::store::{EventStore as _, ProjectionStore as _};
+
+        let dir = std::env::temp_dir().join(format!("apex-cycle-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot_path = dir.join("s.json");
+        std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot()).unwrap()).unwrap();
+
+        let ops = Arc::new(unused_ops().await);
+        // Every platform start is refused.
+        ops.script_start(
+            (0..10)
+                .map(|_| Err(apex_core::PlatformError::Validation("refused".into())))
+                .collect(),
+        );
+        let store = Arc::new(apex_analytics::MemoryStore::new());
+        store.ensure_schema().await.expect("schema");
+        let client = apex_analytics::AnalyticsClient::new(store.clone(), "dev", "apex-runner-test");
+        let events = Arc::new(
+            crate::events::RunnerEvents::new(Arc::new(client), "northstar").with_environment("dev"),
+        );
+        let runner = Runner::new(
+            ops,
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_priors(seeded_priors(), dir.join("priors.json"))
+        .with_events(events);
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[4u8; 32]));
+
+        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
+            .await
+            .expect("cycle");
+        assert!(report.applied == 0);
+        let types: Vec<String> = store
+            .load_events()
+            .await
+            .expect("events")
+            .into_iter()
+            .map(|event| event.event_type.as_str().to_string())
+            .collect();
+        assert!(
+            types.contains(&"experiment_registered".to_string()),
+            "the registration is a fact even when the start is refused: {types:?}"
+        );
+        assert!(
+            !types.contains(&"experiment_started".to_string()),
+            "a refused start is never reported as started"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

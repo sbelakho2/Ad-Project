@@ -1,59 +1,89 @@
 {
-  "__comment": "Suite registry: every code file must be claimed by exactly one suite. 'covers' are glob patterns relative to the repo root; every suite runs through cargo test in the apex-rs-coverage lane.",
-  "suites": [
-    {
-      "id": "apex-core-unit",
-      "covers": [
-        "rust/crates/apex-core/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-connectors-unit",
-      "covers": [
-        "rust/crates/apex-connectors/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-audit-unit",
-      "covers": [
-        "rust/crates/apex-audit/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-autopilot-unit",
-      "covers": [
-        "rust/crates/apex-autopilot/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-proof-unit",
-      "covers": [
-        "rust/crates/apex-proof/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-billing-unit",
-      "covers": [
-        "rust/crates/apex-billing/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-api-tests",
-      "covers": [
-        "rust/crates/apex-api/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-tools-unit",
-      "covers": [
-        "rust/crates/apex-tools/**/*.rs"
-      ]
-    },
-    {
-      "id": "apex-lift-tests",
-      "covers": [
-        "rust/crates/apex-lift/**"
-      ]
-    }
-  ]
+ "__comment": "Suite registry: every code file must be claimed by exactly one suite. 'covers' are glob patterns relative to the repo root; every suite runs through cargo test in the apex-rs-coverage lane.",
+ "suites": [
+  {
+   "id": "apex-core-unit",
+   "covers": [
+    "rust/crates/apex-core/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-connectors-unit",
+   "covers": [
+    "rust/crates/apex-connectors/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-audit-unit",
+   "covers": [
+    "rust/crates/apex-audit/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-autopilot-unit",
+   "covers": [
+    "rust/crates/apex-autopilot/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-proof-unit",
+   "covers": [
+    "rust/crates/apex-proof/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-billing-unit",
+   "covers": [
+    "rust/crates/apex-billing/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-api-tests",
+   "covers": [
+    "rust/crates/apex-api/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-tools-unit",
+   "covers": [
+    "rust/crates/apex-tools/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-lift-tests",
+   "covers": [
+    "rust/crates/apex-lift/**"
+   ]
+  },
+  {
+   "id": "apex-ui-unit",
+   "covers": [
+    "rust/crates/apex-ui/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-analytics-unit",
+   "covers": [
+    "rust/crates/apex-analytics/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-control-unit",
+   "covers": [
+    "rust/crates/apex-control/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-metrics-unit",
+   "covers": [
+    "rust/crates/apex-metrics/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-notify-unit",
+   "covers": [
+    "rust/crates/apex-notify/**/*.rs"
+   ]
+  }
+ ]
 }

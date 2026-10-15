@@ -9,12 +9,15 @@
 //!   `<root>/<publisher>.jsonl`);
 //! - `APEX_LEDGER_KEYS` — comma-separated `publisher=<64-hex-ed25519-pubkey>`
 //!   allow-list of onboarded publishers;
-//! - `APEX_CREDENTIAL_ROOT`, `APEX_VAULT_KEY_HEX` and `APEX_LIVE_AUDIT_TOKEN`
-//!   — when all three are set, the live read-only audit is enabled over
-//!   vault-encrypted `<root>/<publisher>.blob` account files, and
-//!   `POST /v1/audit/{platform}` requires `Authorization: Bearer <token>` and
-//!   runs on the publisher's own platform keys; without them that route
-//!   answers `503 live_audit_not_configured`;
+//! - `APEX_CREDENTIAL_ROOT` and `APEX_VAULT_KEY_HEX` — when both are set, the
+//!   live read-only audit path is enabled over vault-encrypted
+//!   `<root>/<publisher>.blob` account files: the console connection pages
+//!   store and validate credentials against this vault, and (with
+//!   `APEX_LIVE_AUDIT_TOKEN` also set) `POST /v1/audit/{platform}` requires
+//!   `Authorization: Bearer <token>` and runs on the publisher's own platform
+//!   keys. Without the token the JSON route stays disabled while connection
+//!   validation still works; without the vault the console connection pages
+//!   answer the not-configured panel;
 //! - `APEX_ADYEN_HMAC_KEY` (and optionally `APEX_ADYEN_API_KEY`,
 //!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
 //!   client) — the webhook verifies each `notificationItems` item's
@@ -24,10 +27,45 @@
 //!   without it no ledger is readable over HTTP (the routes answer
 //!   `503 ledger_auth_not_configured`);
 //! - `APEX_COLLECTION_FILE` — the append-only collection log the Adyen
-//!   webhook records accepted events into (replay-protected). Without it the
+//!   webhook records accepted events into (replay-protected); the console
+//!   billing pages read the same file for payment facts. Without it the
 //!   webhook answers `503 collection_store_not_configured`;
-//! - `APEX_LEADS_FILE` — the append-only lead log for `POST /v1/leads`;
-//!   `APEX_MAIL_WEBHOOK` optionally forwards each lead to ApexMail.
+//! - `APEX_LEADS_FILE` — the append-only lead log behind `POST /v1/leads` and
+//!   the free-audit form; `APEX_MAIL_WEBHOOK` optionally forwards each lead to
+//!   ApexMail, and `APEX_LEAD_ID_SALT` salts the stable, personal-data-free
+//!   `req_…` confirmation ids. Without the env salt the file store generates
+//!   32 random bytes once into `<APEX_LEADS_FILE>.salt` (mode 0600) and reuses
+//!   them, so ids stay stable across restarts and per deployment;
+//! - `APEX_CONSOLE_PUBLISHER_NAME` (default `Publisher workspace`) and
+//!   `APEX_CONSOLE_CURRENCY` (default `USD`) — the console's workspace label
+//!   and the currency every micros amount is rendered in;
+//! - `APEX_CONSOLE_PUBLISHER` — the workspace publisher the phase-2 console
+//!   surfaces (connections, proposals, experiments, billing, analytics) read;
+//!   without it those pages answer the not-configured panel;
+//! - `APEX_PROPOSALS_ROOT` — the directory of the runner's proposal files
+//!   (`<id>.json`) and the console's decision records (`<id>.approval.json`);
+//! - `APEX_ALERTS_FILE` — the runner's alert log (`FileAlertSink` JSONL); a
+//!   `failedRollback` alert renders the restore-failed incident state;
+//! - `APEX_POLICY_FILE` — the runner's recorded `AutopilotPolicy` JSON (or
+//!   `{"policy": {...}}`), read-only behind `/console/settings/policy`;
+//! - `APEX_CONSOLE_CONTACT`, `APEX_CONSOLE_TIMEZONE` (default `UTC`) and
+//!   `APEX_RETENTION_MONTHS` — the account facts shown on `/console/settings`;
+//! - `APEX_BILLING_VAT_RATE_BP`, `APEX_MONITORING_FEE_MICROS` and
+//!   `APEX_MONITORING_SINCE` — the recorded VAT rate and monitoring plan the
+//!   billing pages show (unset means "not recorded"/"Not selected", never a
+//!   fabricated zero);
+//! - `APEX_CLICKHOUSE_HTTP` and `APEX_CLICKHOUSE_DB` (plus
+//!   `APEX_ANALYTICS_ENV`, default `production`) — the analytics reader and
+//!   `apex_analytics::AnalyticsClient` sink; when unset the sink logs and
+//!   `/console/analytics` renders the honest not-available state.
+//!
+//! Metrics: `GET /metrics` serves the hand-rolled counters plus the bounded
+//! `apex-metrics` registry render (route-template request series), and when
+//! `APEX_METRICS_TEXTFILE` names a path, a background task exports the
+//! registry to that path atomically every 15 seconds (and once more after
+//! the graceful shutdown signal below), for node_exporter's textfile
+//! collector. The periodic write bounds both the export cost and the file's
+//! staleness; per-request writes would couple latency to disk I/O.
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
@@ -108,17 +146,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Lead capture: append-only JSONL at the path named by `APEX_LEADS_FILE`,
-    // forwarded to `APEX_MAIL_WEBHOOK` (the ApexMail hook) when set.
+    // forwarded to `APEX_MAIL_WEBHOOK` (the ApexMail hook) when set. The
+    // `req_…` confirmation ids are salted with `APEX_LEAD_ID_SALT` when the
+    // deployment names one; without it the store generates a persistent salt
+    // beside the leads file on first use.
     if let Some(path) = env_value("APEX_LEADS_FILE") {
         let transport = Arc::new(
             ReqwestTransport::new()
                 .map_err(|error| format!("lead webhook transport could not be built: {error}"))?,
         );
+        let mut store = apex_api::FileLeadStore::new(path);
+        if let Some(salt) = env_value("APEX_LEAD_ID_SALT") {
+            store = store.with_id_salt(salt);
+        }
         let store: Arc<dyn apex_api::LeadStore> = match env_value("APEX_MAIL_WEBHOOK") {
-            Some(url) => {
-                Arc::new(apex_api::FileLeadStore::new(path).with_mail_webhook(url, transport))
-            }
-            None => Arc::new(apex_api::FileLeadStore::new(path)),
+            Some(url) => Arc::new(store.with_mail_webhook(url, transport)),
+            None => Arc::new(store),
         };
         state = state.with_leads(store);
     }
@@ -143,9 +186,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_value("APEX_VAULT_KEY_HEX"),
         env_value("APEX_LIVE_AUDIT_TOKEN"),
     ) {
-        (Some(root), Some(key_hex), Some(token)) => {
-            let store =
-                VaultedFileAccountStore::with_vault_key_hex(root, &key_hex).map_err(|error| {
+        (Some(root), Some(key_hex), token) => {
+            let live_store =
+                VaultedFileAccountStore::with_vault_key_hex(&root, &key_hex).map_err(|error| {
                     format!("APEX_VAULT_KEY_HEX is not a valid vault key: {error:?}")
                 })?;
             let transport = ReqwestTransport::new()
@@ -157,25 +200,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 2,
                 Arc::new(TokioSleeper),
             ));
-            let auditor = LiveAuditor::new(Arc::new(store), transport, Arc::clone(&state.clock))
-                .with_token(token);
-            state = state.with_live_auditor(Arc::new(auditor));
+            let mut auditor =
+                LiveAuditor::new(Arc::new(live_store), transport, Arc::clone(&state.clock));
+            if let Some(token) = token {
+                auditor = auditor.with_token(token);
+            }
+            let auditor = Arc::new(auditor);
+            // The console connection routes validate submitted credentials
+            // through the same read path; the JSON route keeps its bearer
+            // token gate (`with_live_auditor` is only set when one exists).
+            let connection_store =
+                apex_api::connections::VaultedConnectionStore::with_vault_key_hex(&root, &key_hex)
+                    .map_err(|error| {
+                        format!("APEX_VAULT_KEY_HEX is not a valid vault key: {error:?}")
+                    })?;
+            state = state
+                .with_connection_store(Arc::new(connection_store))
+                .with_connection_validator(Arc::clone(&auditor));
+            let requires_token = env_value("APEX_LIVE_AUDIT_TOKEN").is_some();
+            if requires_token {
+                state = state.with_live_auditor(auditor);
+            }
         }
         (None, None, None) => {}
         _ => {
             return Err(
-                "APEX_CREDENTIAL_ROOT, APEX_VAULT_KEY_HEX and APEX_LIVE_AUDIT_TOKEN must be set together".into(),
+                "APEX_CREDENTIAL_ROOT and APEX_VAULT_KEY_HEX must be set together (APEX_LIVE_AUDIT_TOKEN is optional and enables the JSON live-audit route)".into(),
             );
         }
     }
+
+    // The workspace publisher the phase-2 console surfaces read
+    // (`APEX_CONSOLE_PUBLISHER`), and the proposal files the runner writes
+    // (`APEX_PROPOSALS_ROOT`) plus the runner's alert log
+    // (`APEX_ALERTS_FILE`).
+    if let Some(publisher) = env_value("APEX_CONSOLE_PUBLISHER") {
+        state = state.with_workspace_publisher(publisher);
+    }
+    if let Some(path) = env_value(apex_api::proposals::PROPOSALS_ROOT_ENV) {
+        state =
+            state.with_proposal_store(Arc::new(apex_api::proposals::FileProposalStore::new(path)));
+    }
+    if let Some(path) = env_value(apex_api::experiments::ALERTS_FILE_ENV) {
+        state = state.with_alerts_path(path);
+    }
+    if let Some(path) = env_value("APEX_COLLECTION_FILE") {
+        state = state.with_collection_log_path(path);
+    }
+    if let Some(salt) = env_value("APEX_LEAD_ID_SALT") {
+        state = state.with_lead_id_salt(salt);
+    }
+
+    // The analytics sink and reader share the ClickHouse settings; when they
+    // are unset the sink logs and the console renders the honest
+    // not-available state.
+    state = state.with_analytics(apex_api::AnalyticsAccess::from_env());
+    // Boot creates the schema once (idempotent) so a fresh deployment starts
+    // writing instead of spooling against a missing database. A failure is
+    // logged and left visible; the spool keeps events durable meanwhile.
+    if let Some(client) = state.analytics.client() {
+        if let Err(error) = client.ensure_schema().await {
+            eprintln!("apex-api: analytics schema setup failed: {error}");
+        }
+    }
+
+    // With `APEX_METRICS_TEXTFILE` set, a background task exports the
+    // registry to that file every 15 seconds; the graceful shutdown below
+    // writes the final file before the process exits.
+    let metrics_registry = Arc::clone(&state.metrics_registry);
+    apex_api::metrics::spawn_textfile_exporter(Arc::clone(&metrics_registry));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!(
         "apex-api (read-only mode) listening on http://{bind} (adyen hmac configured: {})",
         state.adyen_hmac_key.is_some() || state.adyen.is_some()
     );
-    axum::serve(listener, router(state)).await?;
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    apex_api::metrics::export_textfile(&metrics_registry);
     Ok(())
+}
+
+/// Resolve when the process is asked to stop (Ctrl-C, or SIGTERM on Unix),
+/// so the final metrics textfile export runs before the process exits.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]

@@ -17,3 +17,95 @@ groups:
         annotations:
           summary: apex-api 5xx rate above 5 percent
           description: The five-minute server error ratio stayed above 5 percent for ten minutes.
+
+  - name: apex-http
+    rules:
+      - alert: ApexHttpServerErrorRateHigh
+        expr: apex:http_server_error_ratio5m > 0.05 and sum by (service, route_template) (rate(apex_http_requests_total{status_class="5xx"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: apex HTTP 5xx rate above 5 percent
+          description: A service route class stayed above a 5 percent server error ratio with at least three errors a minute for ten minutes.
+      - alert: ApexHttpLatencyHigh
+        expr: apex:http_latency_p95_5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: apex HTTP p95 latency above one second
+          description: The five-minute p95 response time stayed above one second for ten minutes.
+
+  - name: apex-jobs
+    rules:
+      - alert: ApexJobScheduleLagLate
+        expr: apex:job_schedule_lag_over_1h_runs_6h > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: an Apex job started more than an hour late
+          description: A recorded job start was more than one hour behind its expected schedule within the last six hours; check the timers and the runner log.
+      - alert: ApexReportAccountsStale
+        expr: max by (platform) (apex_report_accounts{readiness_class="stale"}) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: Apex reporting accounts are stale
+          description: A platform's accounts stayed in the stale readiness class for an hour; review the reporting state in the console.
+      - alert: ApexRestoreFailures
+        expr: increase(apex_restore_operations_total{outcome="failed"}[6h]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: an Apex restore operation failed
+          description: A platform restore or reconcile operation reported a failure in the last six hours.
+      - alert: ApexLedgerVerificationFailures
+        expr: increase(apex_ledger_verifications_total{result!="verified"}[6h]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Apex ledger verification did not pass
+          description: A ledger verification returned a non-verified result in the last six hours; serve nothing from that ledger until it verifies again.
+      - alert: ApexNotificationFailures
+        expr: increase(apex_notification_attempts_total{outcome="failed"}[6h]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: an Apex notification delivery failed
+          description: A transactional notification attempt failed in the last six hours; check the channel credentials and the notification log.
+
+  - name: apex-connectors
+    rules:
+      - alert: ApexConnectorAuthRefusals
+        expr: apex:connector_auth_refusal_rate30m > 0.02
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: platform auth refusals keep happening
+          description: A connector kept receiving auth refusals at more than one a minute for fifteen minutes; check the stored credentials on the connections page.
+      - alert: ApexConnectorLatencyHigh
+        expr: apex:connector_latency_p95_10m > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: platform calls are slow
+          description: The ten-minute p95 external platform call duration stayed above ten seconds for ten minutes.
+
+  - name: apex-operator
+    rules:
+      - alert: ApexOperatorActionsDeniedSpike
+        expr: sum(increase(apex_operator_actions_total{outcome="denied"}[15m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: operator action denials spiked
+          description: More than ten operator actions were denied in fifteen minutes; this is a security signal, check the action journal and the operator sessions.

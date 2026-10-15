@@ -6,6 +6,7 @@
 //! so the webhook path is exercised without a signing dependency.
 
 #![allow(dead_code)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -165,6 +166,78 @@ pub fn post_with_header(uri: &str, name: &str, value: &str, body: &[u8]) -> Requ
         .header(name, value)
         .body(Body::from(body.to_vec()))
         .expect("request")
+}
+
+/// A POST carrying an `application/x-www-form-urlencoded` body.
+pub fn post_form(uri: &str, body: &str) -> Request<Body> {
+    post_with_header(
+        uri,
+        "content-type",
+        "application/x-www-form-urlencoded",
+        body.as_bytes(),
+    )
+}
+
+/// A GET carrying one `Cookie` header.
+pub fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .expect("request")
+}
+
+/// A form POST carrying one `Cookie` header.
+pub fn post_form_with_cookie(uri: &str, body: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+/// The first `Set-Cookie` value of a response, if any.
+pub fn set_cookie(response: &TestResponse) -> Option<String> {
+    response
+        .headers
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Exchange [`LEDGER_TOKEN`] for a session and return the cookie pair
+/// (`name=value`) to send on later requests.
+pub async fn open_ledger_session(app: &Router) -> String {
+    let response = send(
+        app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER}&token={LEDGER_TOKEN}"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::SEE_OTHER,
+        "token exchange: {}",
+        response.body
+    );
+    let cookie = set_cookie(&response).expect("the exchange sets a cookie");
+    cookie
+        .split(';')
+        .next()
+        .expect("cookie pair before the first attribute")
+        .to_string()
+}
+
+/// The CSRF token of the session-end form rendered on a ledger page.
+pub fn extract_csrf(html: &str) -> String {
+    const ANCHOR: &str = "name=\"csrf_token\" value=\"";
+    let start = html.find(ANCHOR).expect("a csrf hidden input") + ANCHOR.len();
+    let end = start + html[start..].find('"').expect("the closing quote");
+    html[start..end].to_string()
 }
 
 /// Deterministic keypair from a seed byte.

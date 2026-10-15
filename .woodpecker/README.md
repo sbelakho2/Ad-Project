@@ -13,13 +13,14 @@ Lanes:
 - `dogfood-audit.yml`: manifest, walker parity, orphan ceiling, floor ratchet
   and sync, assertion presence, stub ban, policy bans, mutation smoke and
   floor, docs links, prose ratchet.
-- `contract-coverage.yml`: monitoring rules and their tests, the edge config,
-  CI reference integrity, pipeline paths, content guard, docs references,
-  stylesheet lint.
+- `contract-coverage.yml`: monitoring rules and their tests, the edge config
+  (validate plus `infrastructure/caddy/contract.sh`), CI reference integrity,
+  pipeline paths, content guard, docs references, stylesheet lint.
 - `site-perf.yml`: Zola build, claims contract, byte budgets, structural
   checks on the built output.
-- `ui-ux.yml`: the rendered console pages checked by the structural
-  accessibility audit.
+- `ui-ux.yml`: the rendered publisher console pages and the rendered
+  operator control-plane pages checked by the structural accessibility
+  audit.
 - `coverage-gate.yml`: the aggregate verdict. It depends on every lane and
   replays the manifest, orphan, ratchet, sync, walker, mutation and pipeline
   inventory invariants before reporting.

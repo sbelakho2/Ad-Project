@@ -1,0 +1,51 @@
+<!--
+  Local development users for the Apex ClickHouse server.
+  Referenced by infrastructure/clickhouse/config.xml via <users_config>.
+
+  Credential story (local development ONLY):
+  - Exactly one user, `default`, with NO password.
+  - Connectable only from 127.0.0.1 and ::1.
+  - SQL-driven access management is disabled (<access_management>0</access_management>),
+    so this user cannot create users or roles through SQL.
+
+  Production deployments do not use this file: see
+  infrastructure/clickhouse/docker-compose.yml and infrastructure/README.md
+  for the deployment story with credentials supplied by the environment.
+-->
+<clickhouse>
+    <profiles>
+        <default>
+            <max_memory_usage>1000000000</max_memory_usage>
+            <load_balancing>random</load_balancing>
+        </default>
+    </profiles>
+
+    <users>
+        <default>
+            <!-- No password set: empty means passwordless. Dev only. -->
+            <password></password>
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>0</access_management>
+        </default>
+    </users>
+
+    <quotas>
+        <default>
+            <!-- No query limits: this quota intentionally constrains nothing
+                 and exists because the `default` user references it. -->
+            <interval>
+                <duration>3600</duration>
+                <queries>0</queries>
+                <errors>0</errors>
+                <result_rows>0</result_rows>
+                <read_rows>0</read_rows>
+                <execution_time>0</execution_time>
+            </interval>
+        </default>
+    </quotas>
+</clickhouse>

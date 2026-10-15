@@ -214,6 +214,11 @@ pub enum SettleOutcome {
         lift: f64,
         reason: String,
         rollback_seq: u64,
+        /// The guardrails that fired and forced the rollback. Not part of
+        /// the serialized settle outcome (the guardrail records live in the
+        /// ledger); carriers keep the in-process value.
+        #[serde(skip)]
+        guardrails: Vec<apex_lift::guardrails::GuardrailEvent>,
         /// The analysis-window log ratios the decision was made on.
         daily_log_ratios: Vec<f64>,
     },
@@ -221,7 +226,14 @@ pub enum SettleOutcome {
     Pending { reason: String },
     /// The test was voided (publisher edit, split mismatch, incident); no
     /// decision, no fee.
-    Voided { reason: String },
+    Voided {
+        reason: String,
+        /// The guardrails that fired and voided the test. Not part of the
+        /// serialized settle outcome (the guardrail records live in the
+        /// ledger).
+        #[serde(skip)]
+        guardrails: Vec<apex_lift::guardrails::GuardrailEvent>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

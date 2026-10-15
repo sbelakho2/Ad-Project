@@ -24,27 +24,41 @@ pub mod audit_job;
 pub mod calendar;
 pub mod cli;
 pub mod cycle;
+pub mod events;
 pub mod keys;
 pub mod live_max;
 pub mod model;
+pub mod notify;
+pub mod operator_jobs;
 pub mod ops;
+pub mod payment_events;
 pub mod plan;
+pub mod projections_job;
 pub mod proposals;
 pub mod runner;
 pub mod settle;
+pub mod telemetry;
+pub mod text;
+pub mod verify;
 
 pub use alerts::{Alert, AlertSink, FileAlertSink, NoopAlertSink, RecordingAlertSink};
-pub use audit_job::{max_account_snapshot, write_snapshot};
+pub use audit_job::{audited_snapshot, max_account_snapshot, write_snapshot};
 pub use cycle::CycleJobReport;
+pub use events::RunnerEvents;
 pub use keys::{experiment_name, idempotency_key, platform_of};
 pub use model::{
     Action, ActionOutcome, AutopilotPolicy, CycleOutcome, PlanError, Proposal, SettleOutcome,
 };
+pub use notify::NotifyPlan;
+pub use operator_jobs::{consume_operator_jobs, OperatorJob, OperatorJobsReport};
 pub use ops::{PlatformOps, RecordingOps};
-pub use plan::run_cycle;
+pub use payment_events::{PaymentLedgerRow, PaymentsReport, ScheduledRetry};
+pub use plan::{run_cycle, run_cycle_observed};
 pub use proposals::floor_proposals;
 pub use runner::{DailyReport, MonthlyReport, Runner};
 pub use settle::settle_experiment;
+pub use telemetry::RunnerTelemetry;
+pub use verify::{FileLedgerVerifier, LedgerCheck, LedgerVerifier};
 
 #[cfg(test)]
 mod tests;

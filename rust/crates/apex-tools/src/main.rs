@@ -157,7 +157,10 @@ fn main() {
         }
         "console-a11y" => {
             let dir = positionals(rest).into_iter().next();
-            a11y::console_a11y(&repo, dir.as_deref())
+            let min_pages = flag(rest, "--min-pages")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(a11y::MIN_PAGES);
+            a11y::console_a11y(&repo, dir.as_deref(), min_pages)
         }
         "docs-lint" => (|| {
             let parsed = docs_lint::parse_args(rest)?;

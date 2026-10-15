@@ -1,17 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Page not found — {{ config.title }}{% endblock title %}
-{% block meta %}<meta name="description" content="That page is not part of the Apex site. Start from the home page or one of the main sections.">{% endblock meta %}
+{% import "macros.html" as m %}
+{% block head %}{{ m::head(title="Page not found | Apex", description="This page is not here. The address may have changed. You can return to the home page or find the audit, pricing and product guides below.", url="", image=config.base_url ~ "/og/home.png") }}{% endblock head %}
 {% block content %}
-<article class="prose">
-<h1>Page not found</h1>
-<p>The address you opened does not match a page on this site. The main pages are listed below; if you followed a link that should have worked, write to <a href="mailto:{{ config.extra.contact_email }}">{{ config.extra.contact_email }}</a>.</p>
-<ul>
-  <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
-  <li><a href="{{ get_url(path='@/how-it-works.md') }}">How Apex works</a></li>
-  <li><a href="{{ get_url(path='@/pricing.md') }}">Pricing</a></li>
-  <li><a href="{{ get_url(path='@/proof.md') }}">Proof</a></li>
-  <li><a href="{{ get_url(path='@/security.md') }}">Security</a></li>
-  <li><a href="{{ get_url(path='@/for-publishers.md') }}">For publishers</a></li>
-</ul>
+<article class="page">
+  <div class="wrap">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>This page is not here.</h1>
+        <p class="lede">The address may have changed. You can return to the home page or find the audit, pricing and product guides below.</p>
+        <p><a class="button" href="/">Go to the home page</a></p>
+      </div>
+    </header>
+    <div class="sections">
+      <nav aria-label="Recovery">
+        <ul class="links">
+          <li><a href="/how-it-works/">How it works</a></li>
+          <li><a href="/pricing/">Pricing</a></li>
+          <li><a href="/guides/">Guides</a></li>
+          <li><a href="/support/">Support</a></li>
+        </ul>
+      </nav>
+    </div>
+  </div>
 </article>
 {% endblock content %}

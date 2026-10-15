@@ -6,10 +6,13 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=apex
+# WorkingDirectory anchors the default analytics spool under the state root;
+# the expected fire time for lag telemetry rides APEX_SCHEDULED_AT_MS.
+WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/runner.env
 # Runs before the daily pass: propose from the account snapshot and start the
 # pre-registered experiments the daily pass will then measure.
 ExecStart=/usr/local/bin/apex-runner cycle
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/apex
+ReadWritePaths=/var/lib/apex /var/lib/node_exporter/textfile

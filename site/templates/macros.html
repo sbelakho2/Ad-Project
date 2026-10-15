@@ -1,0 +1,21 @@
+{#
+  Shared head macro. Tera macros only see their arguments, so every caller
+  passes the page's own title/description and the absolute canonical URL.
+#}
+{% macro head(title, description, url, image) %}
+<title>{{ title }}</title>
+<meta name="description" content="{{ description }}">
+{% if url %}<link rel="canonical" href="{{ url }}">{% endif %}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Apex">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ description }}">
+{% if url %}<meta property="og:url" content="{{ url }}">{% endif %}
+{% if image %}<meta property="og:image" content="{{ image }}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">{% endif %}
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ title }}">
+<meta name="twitter:description" content="{{ description }}">
+{% if image %}<meta name="twitter:image" content="{{ image }}">{% endif %}
+{% endmacro head %}

@@ -1,4 +1,4 @@
-.PHONY: test fmt lint sync-floors dogfood
+.PHONY: test fmt lint sync-floors dogfood clickhouse-dev clickhouse-stop
 
 test:
 	cd rust && cargo test --workspace
@@ -8,6 +8,19 @@ fmt:
 
 lint:
 	cd rust && cargo clippy --workspace --all-targets -- -D warnings
+
+# ClickHouse dev server. Runs in the FOREGROUND: run it in a terminal or a
+# supervisor, not in a build step. Start from the repository root so the
+# config's .apex/clickhouse paths resolve correctly.
+clickhouse-dev:
+	clickhouse server --config-file infrastructure/clickhouse/config.xml
+
+# Graceful stop of the dev server over the native protocol. There is no
+# process-signal fallback: on a shared host a pattern kill could take down
+# another project's server. If the client cannot connect, nothing is stopped
+# and the recipe says so.
+clickhouse-stop:
+	clickhouse client --port 9000 --query "SYSTEM SHUTDOWN" || echo "clickhouse-stop: SYSTEM SHUTDOWN was not delivered. Check the server is down; if it is not (started elsewhere), stop it wherever it runs."
 
 # Mirror coverage-floor.json into floors.txt after a deliberate floor change.
 sync-floors:

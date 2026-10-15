@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 use apex_billing::AdyenClient;
 
+use crate::analytics::AnalyticsAccess;
 use crate::clock::{Clock, SystemClock};
 use crate::cycle::{CycleRunner, LedgerOnlyRunner};
 use crate::error::ApiError;
 use crate::leads::LeadStore;
 use crate::live::{constant_time_eq, LiveAuditor};
+use crate::session::{LedgerSessions, DEFAULT_SESSION_CAPACITY, SESSION_IDLE_MS};
 use crate::sources::{AuditSource, LedgerSource};
 use apex_billing::CollectionStore;
 
@@ -50,8 +52,33 @@ pub struct AppState {
     /// Where accepted Adyen collection events are recorded (replay-protected).
     /// `None` makes the webhook answer `503 collection_store_not_configured`.
     pub collection: Option<Arc<dyn CollectionStore>>,
+    /// In-memory browser sessions for the console change log (`POST
+    /// /console/ledger` mints one; the cookie carries only its opaque id).
+    pub ledger_sessions: Arc<LedgerSessions>,
+    /// The analytics reader and emitter (disabled when unset).
+    pub analytics: AnalyticsAccess,
+    /// The workspace publisher the console surfaces read (`APEX_CONSOLE_PUBLISHER`).
+    pub workspace_publisher: Option<String>,
+    /// The lead-id salt shared by the lead store and the analytics emitter.
+    pub lead_id_salt: Arc<String>,
+    /// The vault-backed connection store (`APEX_CREDENTIAL_ROOT` + vault key).
+    pub connection_store: Option<Arc<crate::connections::VaultedConnectionStore>>,
+    /// The live read path used to validate submitted connections (no bearer
+    /// token: the console never touches the JSON API's authorization).
+    pub connection_validator: Option<Arc<LiveAuditor>>,
+    /// The proposal files the runner writes (`APEX_PROPOSALS_ROOT`).
+    pub proposal_store: Option<Arc<dyn crate::proposals::ProposalStore>>,
+    /// The runner's alert log for incident states (`APEX_ALERTS_FILE`).
+    pub alerts_path: Option<std::path::PathBuf>,
+    /// The Adyen collection log for payment reads (`APEX_COLLECTION_FILE`).
+    pub collection_log_path: Option<std::path::PathBuf>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// The bounded metrics registry (the shared `apex-metrics` registry) the
+    /// request middleware writes and `GET /metrics` renders alongside the
+    /// hand-rolled counters. `AppState::new` creates a fresh one, so every
+    /// test process (and every embedded server) counts its own requests.
+    pub metrics_registry: Arc<apex_metrics::Registry>,
 }
 
 impl AppState {
@@ -74,8 +101,86 @@ impl AppState {
             ledger_tokens: Arc::new(HashMap::new()),
             leads: None,
             collection: None,
+            ledger_sessions: Arc::new(LedgerSessions::new(
+                DEFAULT_SESSION_CAPACITY,
+                SESSION_IDLE_MS,
+            )),
+            analytics: AnalyticsAccess::disabled(crate::analytics::NOT_CONFIGURED_REASON),
+            workspace_publisher: None,
+            lead_id_salt: Arc::new(crate::leads::DEFAULT_LEAD_ID_SALT.to_string()),
+            connection_store: None,
+            connection_validator: None,
+            proposal_store: None,
+            alerts_path: None,
+            collection_log_path: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            metrics_registry: Arc::new(apex_metrics::Registry::new()),
         }
+    }
+
+    /// Attach the analytics access (reader + emitter).
+    #[must_use]
+    pub fn with_analytics(mut self, analytics: AnalyticsAccess) -> Self {
+        self.analytics = analytics;
+        self
+    }
+
+    /// Attach the workspace publisher the console surfaces read.
+    #[must_use]
+    pub fn with_workspace_publisher(mut self, publisher: impl Into<String>) -> Self {
+        let publisher = publisher.into();
+        if !publisher.trim().is_empty() {
+            self.workspace_publisher = Some(publisher);
+        }
+        self
+    }
+
+    /// Attach the lead-id salt shared with the lead store.
+    #[must_use]
+    pub fn with_lead_id_salt(mut self, salt: impl Into<String>) -> Self {
+        let salt = salt.into();
+        if !salt.trim().is_empty() {
+            self.lead_id_salt = Arc::new(salt);
+        }
+        self
+    }
+
+    /// Attach the vault-backed connection store and its validator.
+    #[must_use]
+    pub fn with_connection_store(
+        mut self,
+        store: Arc<crate::connections::VaultedConnectionStore>,
+    ) -> Self {
+        self.connection_store = Some(store);
+        self
+    }
+
+    /// Attach the live read path used to validate connection submissions.
+    #[must_use]
+    pub fn with_connection_validator(mut self, validator: Arc<LiveAuditor>) -> Self {
+        self.connection_validator = Some(validator);
+        self
+    }
+
+    /// Attach the proposal store.
+    #[must_use]
+    pub fn with_proposal_store(mut self, store: Arc<dyn crate::proposals::ProposalStore>) -> Self {
+        self.proposal_store = Some(store);
+        self
+    }
+
+    /// Attach the runner's alert log path.
+    #[must_use]
+    pub fn with_alerts_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.alerts_path = Some(path.into());
+        self
+    }
+
+    /// Attach the collection log path for billing reads.
+    #[must_use]
+    pub fn with_collection_log_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.collection_log_path = Some(path.into());
+        self
     }
 
     /// Attach the lead store.
@@ -89,6 +194,13 @@ impl AppState {
     #[must_use]
     pub fn with_collection(mut self, store: Arc<dyn CollectionStore>) -> Self {
         self.collection = Some(store);
+        self
+    }
+
+    /// Replace the console session store (tests pin small capacities and TTLs).
+    #[must_use]
+    pub fn with_ledger_sessions(mut self, sessions: Arc<LedgerSessions>) -> Self {
+        self.ledger_sessions = sessions;
         self
     }
 

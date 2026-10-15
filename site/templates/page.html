@@ -1,9 +1,41 @@
 {% extends "base.html" %}
-{% block title %}{{ page.title }} — {{ config.title }}{% endblock title %}
-{% block meta %}<meta name="description" content="{{ page.description | default(value=config.description) }}">{% endblock meta %}
+{% import "macros.html" as m %}
+{% block head %}{{ m::head(title=page.title, description=page.description, url=current_url, image=config.base_url ~ "/" ~ page.extra.og_image) }}{% endblock head %}
 {% block content %}
-<article class="prose">
-<h1>{{ page.title }}</h1>
-{{ page.content | safe }}
+<article class="page">
+  <div class="wrap">
+    <header class="hero{% if page.extra.panels %} hero-split{% endif %}">
+      <div class="hero-copy">
+        {% if page.extra.eyebrow %}<p class="eyebrow">{{ page.extra.eyebrow }}</p>{% endif %}
+        <h1>{{ page.extra.h1 | default(value=page.title) }}</h1>
+        {% if page.extra.lede %}<p class="lede">{{ page.extra.lede }}</p>{% endif %}
+        {% if page.extra.cta %}<p><a class="button" href="{{ page.extra.cta_url | default(value='/free-audit/') }}">{{ page.extra.cta }}</a></p>{% endif %}
+        {% if page.extra.note %}<p class="hero-note">{{ page.extra.note }}</p>{% endif %}
+      </div>
+      {% if page.extra.panels %}
+      <aside class="hero-side">
+        {%- for panel in page.extra.panels %}
+        <div class="panel">
+          {% if panel.title %}<p class="panel-title">{{ panel.title }}</p>{% endif %}
+          {% if panel.lead %}<p class="panel-lead">{{ panel.lead }}</p>{% endif %}
+          {% if panel.lines %}<ul class="plain">
+            {%- for line in panel.lines %}
+            <li>{{ line }}</li>
+            {%- endfor %}
+          </ul>{% endif %}
+          {% if panel.rows %}<dl class="facts">
+            {%- for row in panel.rows %}
+            <dt>{{ row.label }}</dt><dd>{{ row.value }}</dd>
+            {%- endfor %}
+          </dl>{% endif %}
+        </div>
+      {%- endfor %}
+      </aside>
+      {% endif %}
+    </header>
+    <div class="sections">
+      {{ page.content | safe }}
+    </div>
+  </div>
 </article>
 {% endblock content %}

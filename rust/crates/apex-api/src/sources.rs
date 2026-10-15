@@ -9,10 +9,14 @@
 //! - [`FileLedgerSource`] reads `<root>/<publisher>.jsonl` through
 //!   [`apex_proof::Ledger::read_verified`], the single read that both verifies
 //!   and returns the records. There is deliberately no second whole-file read:
-//!   records are only ever parsed from bytes that passed verification. A
-//!   verification failure is `422 ledger_unverified` with the 1-based first
-//!   offending line quoted from the verifier; a ledger above
-//!   [`MAX_LEDGER_BYTES`] is refused before any read.
+//!   records are only ever parsed from bytes that passed verification. Records
+//!   that passed verification are kept in a small in-process cache keyed by
+//!   the file's size and modification time, so repeated reads (e.g. the
+//!   overview totals walking every publisher on every request) do not re-run
+//!   the full chain verification until the file changes. A verification
+//!   failure is `422 ledger_unverified` with the 1-based first offending line
+//!   quoted from the verifier; a ledger above [`MAX_LEDGER_BYTES`] is refused
+//!   before any read.
 //!
 //! All filesystem work is synchronous and runs on `tokio`'s blocking pool via
 //! [`tokio::task::spawn_blocking`], so handlers never block a runtime worker.
@@ -36,7 +40,9 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use apex_audit::Snapshot;
 use apex_core::PlatformId;
@@ -52,11 +58,41 @@ pub const PLATFORM_NAMES: [(&str, &str); 3] = [
     ("admob", "AdMob"),
 ];
 
+/// Every accepted spelling of a platform name, as `(spelling, canonical
+/// name)`. `applovin_max` is the canonical file/route name and the one the
+/// console uses; `max` is the spelling the free-audit form stores (see
+/// `crate::leads::PLATFORM_CHOICES`). Both parsing directions derive from this
+/// one table: submitted values normalize through [`canonical_platform_name`]
+/// (to the lead wire spelling in `crate::leads::canonical_platform`, to the
+/// canonical name for [`parse_platform`]), so the two vocabularies cannot
+/// drift apart silently.
+pub const PLATFORM_SPELLINGS: [(&str, &str); 4] = [
+    ("applovin_max", "applovin_max"),
+    ("max", "applovin_max"),
+    ("levelplay", "levelplay"),
+    ("admob", "admob"),
+];
+
 /// Read cap for one ledger file: a ledger larger than this is refused before
 /// any bytes are read, so a hostile or runaway file cannot exhaust memory.
 pub const MAX_LEDGER_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Parse a URL/platform-file name into a [`PlatformId`].
+/// The canonical platform name for any accepted spelling (case-insensitive,
+/// trimmed), or `None` for unknown input. This is the one normalization both
+/// directions of platform parsing share: the lead surfaces canonicalize
+/// submitted values through it, and [`parse_platform`] accepts exactly the
+/// canonical names it returns.
+pub fn canonical_platform_name(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    PLATFORM_SPELLINGS
+        .iter()
+        .find(|(spelling, _)| spelling.eq_ignore_ascii_case(value))
+        .map(|(_, canonical)| *canonical)
+}
+
+/// Parse a URL/platform-file name into a [`PlatformId`]. The accepted set
+/// stays the three canonical names; a submitted spelling (e.g. the lead
+/// form's `max`) normalizes first through [`canonical_platform_name`].
 pub fn parse_platform(name: &str) -> Option<PlatformId> {
     match name {
         "applovin_max" => Some(PlatformId::AppLovinMax),
@@ -132,6 +168,12 @@ pub trait AuditSource: Send + Sync + std::fmt::Debug {
 pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     /// Return the publisher's records after full chain verification.
     async fn records(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError>;
+
+    /// The publishers this source can serve, sorted. The overview totals read
+    /// every one of them; a source that cannot enumerate returns nothing.
+    fn publishers(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Reads `<root>/<platform>.json` as an `apex_audit::Snapshot`.
@@ -244,18 +286,61 @@ impl AuditSource for StaticAuditSource {
     }
 }
 
+/// One verified ledger held in memory: the records and the file identity
+/// (size plus modification time) they were verified at.
+#[derive(Debug, Clone)]
+struct CachedLedger {
+    size: u64,
+    modified: SystemTime,
+    records: Vec<LedgerRecord>,
+}
+
+/// The in-process verified-record cache of [`FileLedgerSource`]. A read is
+/// served from the cache only while the file's size and modification time are
+/// unchanged; a changed file (or one whose mtime cannot be read) goes back
+/// through [`apex_proof::Ledger::read_verified`].
+#[derive(Debug, Default)]
+struct LedgerCache {
+    entries: Mutex<HashMap<PathBuf, CachedLedger>>,
+    verifications: AtomicU64,
+}
+
+impl LedgerCache {
+    fn get(&self, path: &Path, size: u64, modified: SystemTime) -> Option<Vec<LedgerRecord>> {
+        let entries = self.entries.lock().ok()?;
+        entries.get(path).and_then(|cached| {
+            (cached.size == size && cached.modified == modified).then(|| cached.records.clone())
+        })
+    }
+
+    fn put(&self, path: &Path, size: u64, modified: SystemTime, records: &[LedgerRecord]) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(
+                path.to_path_buf(),
+                CachedLedger {
+                    size,
+                    modified,
+                    records: records.to_vec(),
+                },
+            );
+        }
+    }
+}
+
 /// Reads and verifies `<root>/<publisher>.jsonl` against the pinned key.
 ///
 /// The key map is the allow-list of onboarded publishers: an unknown (but
 /// well-formed) publisher is a `404`, never an attempt at some other file.
-/// Records are parsed from the one read that verification accepted, so a file
-/// swapped after an earlier check can never be served from a stale
-/// verification.
+/// Records are parsed from the one read that verification accepted, and that
+/// verification is reused only while the file's size and modification time
+/// are unchanged: any change (including within the mtime granularity of the
+/// filesystem, when accompanied by a size change) re-verifies before serving.
 #[derive(Debug, Clone)]
 pub struct FileLedgerSource {
     keys: Arc<HashMap<String, VerifyingKey>>,
     root: PathBuf,
     canonical_root: PathBuf,
+    cache: Arc<LedgerCache>,
 }
 
 impl FileLedgerSource {
@@ -268,6 +353,7 @@ impl FileLedgerSource {
             keys: Arc::new(keys),
             root,
             canonical_root,
+            cache: Arc::new(LedgerCache::default()),
         }
     }
 
@@ -287,8 +373,8 @@ impl FileLedgerSource {
         }
         let expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
         let path = contained_in(&self.canonical_root, self.path_for(publisher))?;
-        let size = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata.len(),
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
             Err(error) => {
                 return Err(ApiError::Internal(format!(
@@ -297,13 +383,26 @@ impl FileLedgerSource {
                 )));
             }
         };
+        let size = metadata.len();
         ensure_within_cap(size, MAX_LEDGER_BYTES)?;
-        Ledger::read_verified(&path, expected_key).map_err(|error| {
-            match ledger_error_line(&error) {
+        let modified = metadata.modified().ok();
+        if let Some(modified) = modified {
+            if let Some(records) = self.cache.get(&path, size, modified) {
+                return Ok(records);
+            }
+        }
+        self.cache.verifications.fetch_add(1, Ordering::Relaxed);
+        let records =
+            Ledger::read_verified(&path, expected_key).map_err(|error| match ledger_error_line(
+                &error,
+            ) {
                 Some(line) => ApiError::LedgerUnverified { line },
                 None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
-            }
-        })
+            })?;
+        if let Some(modified) = modified {
+            self.cache.put(&path, size, modified, &records);
+        }
+        Ok(records)
     }
 }
 
@@ -315,6 +414,12 @@ impl LedgerSource for FileLedgerSource {
         tokio::task::spawn_blocking(move || source.load(&publisher))
             .await
             .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
+    }
+
+    fn publishers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.keys.keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 
@@ -347,6 +452,12 @@ impl LedgerSource for StaticLedgerSource {
             .cloned()
             .ok_or(ApiError::NotFound)
     }
+
+    fn publishers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.ledgers.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 /// The 1-based line of the first offending record, for every `LedgerError`
@@ -377,6 +488,8 @@ fn ledger_error_line(error: &LedgerError) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use sha2::Digest;
+
     use super::*;
 
     #[test]
@@ -490,19 +603,49 @@ mod tests {
     }
 
     #[test]
-    fn platform_parsing_is_a_closed_set() {
+    fn platform_parsing_is_strict_over_the_canonical_names() {
         assert_eq!(
             parse_platform("applovin_max"),
             Some(PlatformId::AppLovinMax)
         );
         assert_eq!(parse_platform("levelplay"), Some(PlatformId::LevelPlay));
         assert_eq!(parse_platform("admob"), Some(PlatformId::Admob));
-        for unknown in ["", "Admob", "applovin", "max", " meta", "admob "] {
-            assert_eq!(parse_platform(unknown), None, "{unknown:?}");
+        for refused in ["", "Admob", "applovin", "max", " meta", "admob ", "tiktok"] {
+            assert_eq!(parse_platform(refused), None, "{refused:?}");
         }
         // The console labels and platform names stay aligned.
         for (name, _label) in PLATFORM_NAMES {
             assert!(parse_platform(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_platform_vocabulary_feeds_both_parse_directions() {
+        // Every spelling normalizes to the table's canonical name, and every
+        // canonical name parses to a platform id: the free-audit choices and
+        // the shared parser can never drift apart silently.
+        for (spelling, canonical) in PLATFORM_SPELLINGS {
+            assert_eq!(canonical_platform_name(spelling), Some(canonical));
+            assert_eq!(
+                parse_platform(canonical_platform_name(spelling).expect("spelling")),
+                parse_platform(canonical),
+                "{spelling} must normalize into the parseable set"
+            );
+        }
+        assert_eq!(
+            canonical_platform_name("  AppLovin_MAX  "),
+            Some("applovin_max")
+        );
+        assert_eq!(canonical_platform_name("nope"), None);
+        // The lead surfaces' wire values are accepted spellings of this one
+        // vocabulary and map to valid platform ids after normalization.
+        for (wire, _label) in crate::leads::PLATFORM_CHOICES {
+            assert_eq!(crate::leads::canonical_platform(wire), wire);
+            let canonical = canonical_platform_name(wire).expect("lead wire value in vocabulary");
+            assert!(
+                parse_platform(canonical).is_some(),
+                "lead wire value {wire}"
+            );
         }
     }
 
@@ -606,5 +749,63 @@ mod tests {
             ledger.records("known_name").await,
             Err(ApiError::NotFound)
         ));
+    }
+
+    fn lift_draft(payload: &str) -> LedgerRecord {
+        let digest = hex::encode(sha2::Sha256::digest(payload.as_bytes()));
+        LedgerRecord::lift_record(1_792_000_000_000, &digest, payload)
+    }
+
+    #[tokio::test]
+    async fn verified_ledgers_are_cached_until_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("apex-ledger-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("pub1.jsonl");
+        let seed = [5u8; 32];
+        {
+            let mut ledger =
+                apex_proof::Ledger::open(&path, apex_proof::Keypair::from_bytes(&seed))
+                    .expect("open ledger");
+            ledger
+                .append(lift_draft(r#"{"type":"dataPull","day":"2026-10-01"}"#))
+                .expect("append");
+        }
+        let mut keys = HashMap::new();
+        keys.insert(
+            "pub1".to_string(),
+            apex_proof::Keypair::from_bytes(&seed).verifying_key(),
+        );
+        let source = FileLedgerSource::new(&dir, keys);
+
+        // The first read verifies; the second is a cache hit.
+        let first = source.records("pub1").await.expect("first read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(source.cache.verifications.load(Ordering::Relaxed), 1);
+        let second = source.records("pub1").await.expect("second read");
+        assert_eq!(second, first);
+        assert_eq!(
+            source.cache.verifications.load(Ordering::Relaxed),
+            1,
+            "the repeated read is served from the cache"
+        );
+
+        // A modified file (another appended record) re-verifies.
+        {
+            let mut ledger =
+                apex_proof::Ledger::open(&path, apex_proof::Keypair::from_bytes(&seed))
+                    .expect("reopen ledger");
+            ledger
+                .append(lift_draft(r#"{"type":"dataPull","day":"2026-10-02"}"#))
+                .expect("append");
+        }
+        let third = source.records("pub1").await.expect("third read");
+        assert_eq!(third.len(), 2);
+        assert_eq!(
+            source.cache.verifications.load(Ordering::Relaxed),
+            2,
+            "a changed file re-verifies"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

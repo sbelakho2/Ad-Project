@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block head %}{{ m::head(title=section.title, description=section.description, url=current_url, image=config.base_url ~ "/" ~ section.extra.og_image) }}{% endblock head %}
+{% block content %}
+<article class="page">
+  <div class="wrap">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>{{ section.extra.h1 }}</h1>
+        <p class="lede">{{ section.extra.lede }}</p>
+      </div>
+    </header>
+    <div class="sections">
+      {{ section.content | safe }}
+    </div>
+  </div>
+</article>
+{% endblock content %}

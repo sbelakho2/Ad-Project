@@ -1,0 +1,12 @@
+[package]
+name = "apex-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The Apex design system: frozen tokens, components, charts and page shell for every HTML surface."
+
+[lints]
+workspace = true
+
+[dependencies]

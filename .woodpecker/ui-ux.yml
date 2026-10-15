@@ -1,6 +1,7 @@
 # ui-ux: structural accessibility audit of the rendered console pages, all-Rust.
-# apex-api renders its console pages from checked-in fixtures, and apex-tools
-# runs the structural accessibility checks over that output.
+# apex-api renders its console pages from checked-in fixtures and apex-control
+# renders every operator page and state; apex-tools runs the structural
+# accessibility checks over both outputs.
 #
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so a bare `cd` persists across the step; each command below is
@@ -11,13 +12,25 @@ when:
 
 steps:
   render-console-pages:
-    image: rust:1.87-bookworm
+    image: rust:1.88-bookworm
     commands:
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-api --bin render-fixtures -- crates/apex-api/fixtures target/ui-fixtures
 
   console-a11y:
-    image: rust:1.87-bookworm
+    image: rust:1.88-bookworm
     depends_on: [render-console-pages]
     commands:
       - cd "$CI_WORKSPACE"/rust && cargo build --release -p apex-tools
-      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools console-a11y rust/target/ui-fixtures
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools console-a11y rust/target/ui-fixtures --min-pages 58
+
+  render-control-pages:
+    image: rust:1.88-bookworm
+    commands:
+      - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-control --bin render-fixtures -- target/ui-fixtures-control
+
+  console-control-a11y:
+    image: rust:1.88-bookworm
+    depends_on: [render-control-pages]
+    commands:
+      - cd "$CI_WORKSPACE"/rust && cargo build --release -p apex-tools
+      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools console-a11y rust/target/ui-fixtures-control --min-pages 55
