@@ -129,8 +129,12 @@ pub struct FeeLine {
     pub log_share: f64,
     /// Contract rate in basis points.
     pub rate_bp: u16,
-    /// The fee in micros, rounded to the nearest micro.
+    /// The fee in micros, rounded to the nearest micro (before pro-rating).
     pub fee_micros: Micros,
+    /// Whole days the change was billable this month.
+    pub billed_days: u32,
+    /// Days in the month, for the pro-rata re-derivation.
+    pub month_days: u32,
     /// Signed ledger reference of the pre-registration record.
     pub pre_registration_hash: String,
     /// Signed ledger reference of the result record.
@@ -177,6 +181,8 @@ pub fn monthly_fees(scope_revenue: Micros, active: &[KeptChange]) -> LiftResult<
                 log_share: share,
                 rate_bp: change.rate_bp,
                 fee_micros,
+                billed_days: 0,
+                month_days: 0,
                 pre_registration_hash: change.pre_registration_hash.clone(),
                 result_hash: change.result_hash.clone(),
             }

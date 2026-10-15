@@ -57,6 +57,8 @@ pub fn run_month(
     let mut fees = monthly_fees(scope_revenue, &active)?;
     for fee in &mut fees {
         if let Some((_, days)) = active_days.iter().find(|(id, _)| *id == fee.change_id) {
+            fee.billed_days = *days;
+            fee.month_days = month_days;
             if *days < month_days {
                 fee.fee_micros = pro_rate(fee.fee_micros, *days, month_days);
             }

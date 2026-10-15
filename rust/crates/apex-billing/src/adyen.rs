@@ -24,7 +24,6 @@
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::sync::Arc;
 
 use apex_connectors::transport::{HttpBody, HttpMethod, HttpRequest, Transport};
 use apex_core::PlatformId;
@@ -155,7 +154,7 @@ impl AdyenClient {
     /// the same link instead of double billing.
     pub async fn create_payment_link(
         &self,
-        transport: &Arc<dyn Transport>,
+        transport: &dyn Transport,
         item: &InvoiceLineItem,
     ) -> Result<PaymentLinkResponse, BillingError> {
         let body = serde_json::json!({
@@ -596,7 +595,7 @@ pub struct BillingReceipt {
 /// caller composes the retry transport exactly like the connectors do.
 pub async fn create_payment_links(
     client: &AdyenClient,
-    transport: &Arc<dyn Transport>,
+    transport: &dyn Transport,
     invoice: &crate::invoice::Invoice,
 ) -> Result<BillingReceipt, BillingError> {
     let mut links = Vec::new();

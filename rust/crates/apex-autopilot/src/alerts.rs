@@ -77,6 +77,44 @@ impl AlertSink for RecordingAlertSink {
     }
 }
 
+/// Appends each alert as one JSON line, inspectable beside the ledger.
+#[derive(Debug)]
+pub struct FileAlertSink {
+    path: std::path::PathBuf,
+    lock: Mutex<()>,
+}
+
+impl FileAlertSink {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            lock: Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait]
+impl AlertSink for FileAlertSink {
+    async fn emit(&self, alert: Alert) {
+        let Ok(_guard) = self.lock.lock() else {
+            return;
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(line) = serde_json::to_string(&alert) {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                let _ = writeln!(file, "{line}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -100,6 +138,28 @@ mod tests {
         assert_eq!(alerts.len(), 2);
         assert!(matches!(alerts[0], Alert::GuardrailStop { .. }));
         assert!(matches!(alerts[1], Alert::ExpiredToken { .. }));
+    }
+
+    #[tokio::test]
+    async fn the_file_sink_appends_one_json_line_per_alert() {
+        let dir = std::env::temp_dir().join(format!("apex-alerts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("alerts.jsonl");
+        let sink = FileAlertSink::new(&path);
+        sink.emit(Alert::GuardrailStop {
+            experiment_id: "e1".into(),
+            detail: "fast harm".into(),
+        })
+        .await;
+        sink.emit(Alert::ExpiredToken {
+            platform: "applovin_max".into(),
+            detail: "401".into(),
+        })
+        .await;
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(contents.lines().count(), 2);
+        assert!(contents.contains("guardrailStop"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

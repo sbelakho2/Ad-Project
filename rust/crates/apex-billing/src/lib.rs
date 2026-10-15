@@ -20,6 +20,7 @@
 //!   (`BillingError::SubCentAmount`).
 
 pub mod adyen;
+pub mod collection;
 pub mod errors;
 pub mod invoice;
 pub mod subscription;
@@ -31,7 +32,12 @@ pub use adyen::{
     InvoiceLineItem, NotificationItem, PaymentLinkResponse, ADYEN_CURRENCY, MAX_REFERENCE_LEN,
     MICROS_PER_MINOR_UNIT,
 };
+pub use collection::{CollectionEvent, CollectionStore, FileCollectionStore};
 pub use errors::BillingError;
+pub use invoice::{
+    compute_invoice, compute_invoice_from_basis, round_to_cent, BillingBasisRecord, BillingPeriod,
+    BillingProofRecord, Invoice, InvoiceLine,
+};
 pub use subscription::MonitoringPlan;
 pub use webhook::verify_adyen_webhook;
 

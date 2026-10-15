@@ -51,6 +51,11 @@ pub enum ApiError {
     #[error("lead capture is not configured")]
     LeadCaptureNotConfigured,
 
+    /// No collection store is configured: the webhook refuses rather than
+    /// accepting an event it cannot record.
+    #[error("collection store is not configured")]
+    CollectionStoreNotConfigured,
+
     /// An upstream platform refused or failed the call; the detail is logged
     /// but not exposed.
     #[error("platform unavailable: {0}")]
@@ -79,6 +84,7 @@ impl ApiError {
             ApiError::Unauthorized => "unauthorized",
             ApiError::LedgerAuthNotConfigured => "ledger_auth_not_configured",
             ApiError::LeadCaptureNotConfigured => "lead_capture_not_configured",
+            ApiError::CollectionStoreNotConfigured => "collection_store_not_configured",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
             ApiError::InvalidSignature => "invalid_signature",
             ApiError::Internal(_) => "internal",
@@ -94,7 +100,8 @@ impl ApiError {
             ApiError::AdyenWebhookNotConfigured
             | ApiError::LiveAuditNotConfigured
             | ApiError::LedgerAuthNotConfigured
-            | ApiError::LeadCaptureNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::LeadCaptureNotConfigured
+            | ApiError::CollectionStoreNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -120,6 +127,9 @@ impl IntoResponse for ApiError {
             ApiError::LiveAuditNotConfigured => json!({ "error": "live_audit_not_configured" }),
             ApiError::LedgerAuthNotConfigured => json!({ "error": "ledger_auth_not_configured" }),
             ApiError::LeadCaptureNotConfigured => json!({ "error": "lead_capture_not_configured" }),
+            ApiError::CollectionStoreNotConfigured => {
+                json!({ "error": "collection_store_not_configured" })
+            }
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
             ApiError::PlatformUnavailable(detail) => {

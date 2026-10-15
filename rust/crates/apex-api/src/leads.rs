@@ -346,6 +346,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_store_surfaces_io_errors() {
+        // A store whose "path" is a directory cannot open the file: the error
+        // is typed, never a panic.
+        let dir = std::env::temp_dir().join(format!("apex-leads-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = FileLeadStore::new(&dir); // path is a directory
+        let err = store.store(&lead(), 1).await.expect_err("io error");
+        assert!(matches!(err, ApiError::Internal(_)), "{err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn the_store_appends_jsonl_and_forwards_to_the_webhook() {
         let dir = std::env::temp_dir().join(format!("apex-leads-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -18,7 +18,9 @@ use crate::adyen::{
     PaymentLinkResponse, MAX_REFERENCE_LEN,
 };
 use crate::errors::BillingError;
-use crate::invoice::{compute_invoice, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine};
+use crate::invoice::{
+    compute_invoice, BillingBasisRecord, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine,
+};
 use crate::webhook::verify_adyen_webhook;
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
@@ -328,7 +330,7 @@ async fn payment_links_post_one_idempotent_link_per_line() {
         invoice_line(1, "exp-a", 1_250_000),
         invoice_line(2, "exp-b", 2_000_000),
     ]);
-    let receipt = create_payment_links(&client(), &transport, &invoice)
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("links");
     assert_eq!(receipt.links.len(), 2);
@@ -368,7 +370,7 @@ async fn payment_links_post_one_idempotent_link_per_line() {
 async fn zero_invoice_sends_no_request_at_all() {
     let mock = MockTransport::new(vec![]);
     let transport = retried(mock.clone());
-    let receipt = create_payment_links(&client(), &transport, &invoice_with(vec![]))
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice_with(vec![]))
         .await
         .expect("empty");
     assert!(receipt.links.is_empty());
@@ -384,7 +386,7 @@ async fn zero_fee_lines_are_skipped_not_billed() {
         invoice_line(1, "exp-a", 1_000_000),
         invoice_line(2, "exp-zero", 0),
     ]);
-    let receipt = create_payment_links(&client(), &transport, &invoice)
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("mixed");
     assert_eq!(receipt.links.len(), 1);
@@ -397,7 +399,7 @@ async fn sub_cent_fees_refuse_before_any_request() {
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_001)]);
     assert_eq!(
-        create_payment_links(&client(), &transport, &invoice).await,
+        create_payment_links(&client(), transport.as_ref(), &invoice).await,
         Err(BillingError::SubCentAmount { seq: 1 })
     );
     assert!(mock.calls().is_empty());
@@ -410,13 +412,18 @@ async fn unsafe_references_are_refused_before_any_request() {
     let mut line = invoice_line(1, "exp-a", 1_000_000);
     line.experiment_id = "x\r\n".to_string();
     assert!(matches!(
-        create_payment_links(&client(), &transport, &invoice_with(vec![line.clone()])).await,
+        create_payment_links(
+            &client(),
+            transport.as_ref(),
+            &invoice_with(vec![line.clone()])
+        )
+        .await,
         Err(BillingError::UnsafeIdentifier { .. })
     ));
     let mut long = invoice_line(2, "exp-a", 1_000_000);
     long.experiment_id = "e".repeat(MAX_REFERENCE_LEN);
     assert!(matches!(
-        create_payment_links(&client(), &transport, &invoice_with(vec![long])).await,
+        create_payment_links(&client(), transport.as_ref(), &invoice_with(vec![long])).await,
         Err(BillingError::UnsafeIdentifier { .. })
     ));
 }
@@ -427,13 +434,13 @@ async fn auth_and_http_failures_are_typed() {
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_000_000)]);
     assert_eq!(
-        create_payment_links(&client(), &transport, &invoice).await,
+        create_payment_links(&client(), transport.as_ref(), &invoice).await,
         Err(BillingError::Auth { status: 401 })
     );
     let mock = MockTransport::new(vec![Ok(error_response(422))]);
     let transport = retried(mock.clone());
     assert_eq!(
-        create_payment_links(&client(), &transport, &invoice).await,
+        create_payment_links(&client(), transport.as_ref(), &invoice).await,
         Err(BillingError::Http { status: 422 })
     );
 }
@@ -449,7 +456,7 @@ async fn malformed_success_bodies_fail_closed() {
         let transport = retried(mock.clone());
         let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_000_000)]);
         assert!(matches!(
-            create_payment_links(&client(), &transport, &invoice).await,
+            create_payment_links(&client(), transport.as_ref(), &invoice).await,
             Err(BillingError::Malformed(_x))
         ));
     }
@@ -680,7 +687,7 @@ async fn payment_links_bill_the_gross_including_vat() {
     ))]);
     let transport = retried(mock.clone());
     let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]).with_vat(2_000);
-    let receipt = create_payment_links(&client(), &transport, &invoice)
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
         .await
         .expect("links");
     assert_eq!(
@@ -853,4 +860,202 @@ fn the_adyen_client_verifies_and_exposes_its_key() {
     let mut item = pinned_item();
     item.hmac_signature = sign_notification_item(KEY, &item);
     client.verify(&item).expect("verified through the client");
+}
+
+#[test]
+fn basis_invoices_rederive_the_fee_and_refuse_tampering() {
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 0,
+        end_unix_ms: 1_000_000_000_000,
+    };
+    let record = |incremental: i64, log_share: f64, rate_bp: u16, fee: i64| BillingBasisRecord {
+        seq: 7,
+        at_unix_ms: 500,
+        change_id: "exp-1".into(),
+        scope_revenue: 1_000_000_000,
+        incremental,
+        log_share,
+        rate_bp,
+        fee_micros: fee,
+        billed_days: 0,
+        month_days: 0,
+    };
+    // fee = round(0.2 * 90_909_090 * 1.0) = 18_181_818 -> cent-exact 18_180_000.
+    let invoice = crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(90_909_090, 1.0, 2_000, 18_180_000)],
+    )
+    .expect("invoice");
+    assert_eq!(invoice.line_items[0].fee_micros, 18_180_000);
+
+    // A stored fee that does not re-derive is refused.
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis(
+            "pub1",
+            period.clone(),
+            &[record(90_909_090, 1.0, 2_000, 1)]
+        ),
+        Err(BillingError::TamperedProof { .. })
+    ));
+    // Non-positive lift, a rate outside the band and duplicates are refused.
+    assert!(crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(0, 1.0, 2_000, 0)]
+    )
+    .is_err());
+    assert!(crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[record(1, 1.0, 9_999, 0)]
+    )
+    .is_err());
+    assert!(crate::invoice::compute_invoice_from_basis(
+        "pub1",
+        period.clone(),
+        &[
+            record(90_909_090, 1.0, 2_000, 18_180_000),
+            record(90_909_090, 1.0, 2_000, 18_180_000)
+        ]
+    )
+    .is_err());
+}
+
+#[test]
+fn basis_invoices_pro_rate_and_round_to_the_cent() {
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 0,
+        end_unix_ms: 1_000_000_000_000,
+    };
+    // 17 of 30 days: round(18_181_818 * 17/30) = 10_303_031 -> cent 10_300_000.
+    let fee = crate::invoice::round_to_cent((18_181_818.0_f64 * 17.0 / 30.0).round() as i64);
+    let record = BillingBasisRecord {
+        seq: 7,
+        at_unix_ms: 500,
+        change_id: "exp-1".into(),
+        scope_revenue: 1_000_000_000,
+        incremental: 90_909_090,
+        log_share: 1.0,
+        rate_bp: 2_000,
+        fee_micros: fee,
+        billed_days: 17,
+        month_days: 30,
+    };
+    let invoice =
+        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]).expect("invoice");
+    assert_eq!(invoice.line_items[0].fee_micros, 10_300_000);
+    assert_eq!(crate::invoice::round_to_cent(0), 0);
+    assert_eq!(crate::invoice::round_to_cent(-5), -5);
+}
+
+#[test]
+fn collection_events_flatten_and_key_correctly() {
+    let item = pinned_item();
+    let event = crate::collection::CollectionEvent::from_item(&item, 42);
+    assert_eq!(event.at_unix_ms, 42);
+    assert_eq!(event.event_code, "AUTHORISATION");
+    assert_eq!(event.replay_key(), "AUTHORISATION:PSP123");
+}
+
+#[test]
+fn collection_store_refuses_a_corrupt_log() {
+    let dir = std::env::temp_dir().join(format!("apex-coll-corrupt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coll.jsonl");
+    std::fs::write(&path, b"not-json\n").unwrap();
+    assert!(crate::collection::FileCollectionStore::open(&path).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn basis_invoices_refuse_out_of_period_and_missing_change_ids() {
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 1_000,
+        end_unix_ms: 2_000,
+    };
+    let record = BillingBasisRecord {
+        seq: 7,
+        at_unix_ms: 5,
+        change_id: "exp-1".into(),
+        scope_revenue: 1,
+        incremental: 90_909_090,
+        log_share: 1.0,
+        rate_bp: 2_000,
+        fee_micros: 18_180_000,
+        billed_days: 0,
+        month_days: 0,
+    };
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
+        Err(BillingError::OutOfPeriod { seq: 7 })
+    ));
+}
+
+#[test]
+fn a_fresh_collection_store_has_seen_nothing() {
+    let dir = std::env::temp_dir().join(format!("apex-coll-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = crate::collection::FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
+    use crate::collection::CollectionStore;
+    assert!(!store.seen("AUTHORISATION:anything").unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_store_dispatches_through_the_trait_object() {
+    use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
+    let dir = std::env::temp_dir().join(format!("apex-coll-dyn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = FileCollectionStore::open(&dir.join("c.jsonl")).expect("open");
+    let store: &dyn CollectionStore = &store;
+    let event = CollectionEvent {
+        at_unix_ms: 1,
+        event_code: "SALE".into(),
+        psp_reference: "psp-1".into(),
+        merchant_reference: "r".into(),
+        success: "true".into(),
+        amount_value: 1,
+        amount_currency: "USD".into(),
+    };
+    assert!(store.record(&event).unwrap());
+    assert!(!store.record(&event).unwrap());
+    assert!(store.seen(&event.replay_key()).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_store_surfaces_append_and_directory_errors() {
+    use crate::collection::{CollectionEvent, CollectionStore, FileCollectionStore};
+    let dir = std::env::temp_dir().join(format!("apex-coll-io-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Parent is a file, not a directory: opening the store fails, typed.
+    let file_parent = dir.join("not-a-dir");
+    std::fs::write(&file_parent, b"x").unwrap();
+    assert!(FileCollectionStore::open(&file_parent.join("c.jsonl")).is_err());
+
+    // The store opens, then a directory appears where its file should be, so
+    // the append fails with a typed error rather than panicking.
+    let path = dir.join("coll.jsonl");
+    let store = FileCollectionStore::open(&path).expect("open");
+    std::fs::create_dir_all(&path).unwrap();
+    let event = CollectionEvent {
+        at_unix_ms: 1,
+        event_code: "SALE".into(),
+        psp_reference: "psp".into(),
+        merchant_reference: "r".into(),
+        success: "true".into(),
+        amount_value: 1,
+        amount_currency: "USD".into(),
+    };
+    assert!(matches!(
+        store.record(&event),
+        Err(BillingError::Malformed(_))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -153,8 +153,11 @@ pub fn monthly_billing(fee: &crate::billing::FeeLine, month: &str) -> LiftResult
         lambda: fee.lambda,
         factor: fee.factor,
         incremental: fee.incremental,
+        log_share: fee.log_share,
         rate_bp: fee.rate_bp,
         fee_micros: fee.fee_micros,
+        billed_days: fee.billed_days,
+        month_days: fee.month_days,
     }))
 }
 
@@ -179,10 +182,10 @@ pub fn billing_change(
 pub fn apply_decision_to_priors(
     priors: &mut LiftPriors,
     bucket: &Bucket,
-    decision: &Decision,
+    decision: &str,
     daily_log_ratios: &[f64],
 ) {
-    if matches!(decision, Decision::Keep { .. } | Decision::Rollback { .. }) {
+    if matches!(decision, "kept" | "rolled_back") {
         priors.observe_ratios(bucket, daily_log_ratios);
     }
 }
@@ -263,6 +266,8 @@ mod tests {
             log_share: 1.0,
             rate_bp: 2000,
             fee_micros: 3_000,
+            billed_days: 0,
+            month_days: 0,
             pre_registration_hash: "pre".into(),
             result_hash: "res".into(),
         };
@@ -372,27 +377,27 @@ mod tests {
         };
         let mut priors = LiftPriors::default();
         let ratios = [0.03, 0.012, -0.004, 0.026, 0.041, 0.019, 0.008];
-        let rollback = Decision::Rollback {
+        let _rollback = Decision::Rollback {
             reason: "flat".into(),
         };
-        apply_decision_to_priors(&mut priors, &bucket, &rollback, &ratios);
+        apply_decision_to_priors(&mut priors, &bucket, "rolled_back", &ratios);
         assert_eq!(
             priors.total_observations(),
             1,
             "a finished rollback is a usable observation"
         );
-        let keep = Decision::Keep {
+        let _keep = Decision::Keep {
             lambda: 0.01,
             estimate: estimate(),
             used_interim_99: false,
             bootstrap_lower: 0.009,
         };
-        apply_decision_to_priors(&mut priors, &bucket, &keep, &ratios);
+        apply_decision_to_priors(&mut priors, &bucket, "kept", &ratios);
         assert_eq!(priors.total_observations(), 2);
-        let pending = Decision::Pending {
+        let _pending = Decision::Pending {
             reason: "waiting".into(),
         };
-        apply_decision_to_priors(&mut priors, &bucket, &pending, &ratios);
+        apply_decision_to_priors(&mut priors, &bucket, "pending", &ratios);
         assert_eq!(priors.total_observations(), 2, "pending teaches nothing");
     }
 

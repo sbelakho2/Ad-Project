@@ -117,6 +117,14 @@ pub trait AuditSource: Send + Sync + std::fmt::Debug {
     /// Fetch the current snapshot for `platform`, or the typed error that
     /// prevents serving one.
     async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError>;
+
+    /// Persist a freshly built snapshot. The file source writes it beside the
+    /// reads (atomically); a static source refuses.
+    async fn write(&self, platform: PlatformId, _snapshot: &Snapshot) -> Result<(), ApiError> {
+        Err(ApiError::Internal(format!(
+            "snapshot writing is not supported for {platform}"
+        )))
+    }
 }
 
 /// A verified ledger provider (one append-only chain per publisher).
@@ -183,6 +191,23 @@ impl JsonFileAuditSource {
 
 #[async_trait]
 impl AuditSource for JsonFileAuditSource {
+    async fn write(&self, platform: PlatformId, snapshot: &Snapshot) -> Result<(), ApiError> {
+        let path = self.path_for(platform);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| ApiError::Internal(format!("snapshot directory: {error}")))?;
+        }
+        let bytes = serde_json::to_vec_pretty(snapshot)
+            .map_err(|error| ApiError::Internal(format!("snapshot serialization: {error}")))?;
+        // Atomic replace so a reader never sees a half-written snapshot.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)
+            .map_err(|error| ApiError::Internal(format!("snapshot write: {error}")))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|error| ApiError::Internal(format!("snapshot rename: {error}")))?;
+        Ok(())
+    }
+
     async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
         let source = self.clone();
         tokio::task::spawn_blocking(move || source.load(platform))
@@ -375,6 +400,52 @@ mod tests {
         );
         let ledger = FileLedgerSource::new("/tmp/apex-ledgers", keys);
         assert!(ledger.path_for("pub").ends_with("pub.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn the_file_audit_source_writes_and_reads_back_a_snapshot() {
+        use apex_audit::{AppAdsTxt, Snapshot};
+        let dir = std::env::temp_dir().join(format!("apex-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let snapshot = Snapshot {
+            platform: PlatformId::AppLovinMax,
+            fetched_at_unix_ms: 7,
+            ad_units: vec![],
+            waterfall: vec![],
+            mediation_groups: vec![],
+            bidder_accounts: vec![],
+            country_revenue: vec![],
+            app_ads_txt: AppAdsTxt {
+                present: false,
+                lines: vec![],
+                expected_networks: vec![],
+            },
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = JsonFileAuditSource::new(&dir);
+        assert!(
+            source.snapshot(PlatformId::AppLovinMax).await.is_err(),
+            "nothing yet"
+        );
+        source
+            .write(PlatformId::AppLovinMax, &snapshot)
+            .await
+            .expect("write");
+        assert!(source.path_for(PlatformId::AppLovinMax).exists(), "written");
+        let read = source
+            .snapshot(PlatformId::AppLovinMax)
+            .await
+            .expect("read");
+        assert_eq!(read.fetched_at_unix_ms, 7);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ apex-lift = { path = "../apex-lift" }
 apex-audit = { path = "../apex-audit" }
 apex-proof = { path = "../apex-proof" }
 apex-connectors = { path = "../apex-connectors" }
+apex-billing = { path = "../apex-billing" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

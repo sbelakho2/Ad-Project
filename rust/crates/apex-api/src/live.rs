@@ -225,6 +225,17 @@ impl LiveAuditor {
         publisher: &str,
         platform: PlatformId,
     ) -> Result<AuditReport, ApiError> {
+        Ok(self.audit_with_snapshot(publisher, platform).await?.1)
+    }
+
+    /// Run a live audit and return both the platform snapshot and the report,
+    /// so the caller can persist the snapshot for the read path and the write
+    /// cycle to consume.
+    pub async fn audit_with_snapshot(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(apex_audit::Snapshot, AuditReport), ApiError> {
         let account = self.accounts.account(publisher).await?;
         let credentials = account
             .credentials(platform)
@@ -308,7 +319,8 @@ impl LiveAuditor {
                 admob_snapshot(&client, &fetcher, &context, now_unix_ms).await?
             }
         };
-        Ok(apex_audit::run(&snapshot))
+        let report = apex_audit::run(&snapshot);
+        Ok((snapshot, report))
     }
 }
 

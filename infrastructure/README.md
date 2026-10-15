@@ -10,11 +10,18 @@ Current deployment layout for the no-SDK autopilot product:
   the vault key, account root, live-audit token, per-publisher ledger tokens
   (`APEX_LEDGER_TOKENS_FILE`, a JSON object of publisher to token) and Adyen
   settings. Without the ledger tokens file, no ledger is readable over HTTP.
-- `systemd/apex-runner-*.service` and `*.timer`: the scheduled measurement and
-  billing jobs. `apex-runner-daily.timer` runs the daily pull/settle pass at
-  03:30 UTC; `apex-runner-monthly.timer` bills the month just closed at 04:30
-  UTC on the first. Both read `/etc/apex/runner.env` (ledger path, signing
-  key, MAX keys, verified operations, optional policy).
+- `systemd/apex-runner-*.service` and `*.timer`: the scheduled jobs.
+  `apex-runner-cycle.timer` runs the write cycle (propose from the account
+  snapshot and start pre-registered experiments) at 03:00 UTC;
+  `apex-runner-daily.timer` runs the pull/settle pass at 03:30 UTC;
+  `apex-runner-monthly.timer` bills the month just closed and collects through
+  Adyen at 04:30 UTC on the first. All read `/etc/apex/runner.env`:
+  `APEX_RUNNER_LEDGER`, `APEX_RUNNER_PUBLISHER`, `APEX_RUNNER_SIGNING_KEY_HEX`,
+  `APEX_MAX_API_KEY`, `APEX_MAX_REPORT_KEY`, `APEX_RUNNER_WRITABLE`,
+  `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS`, `APEX_RUNNER_SNAPSHOT`,
+  `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`,
+  `APEX_ADYEN_CHECKOUT_BASE`, `APEX_INVOICE_VAT_BP`,
+  `APEX_MONITORING_MONTHLY_MICROS`, `APEX_ALERT_FILE`.
 - `woodpecker/`: the self-hosted CI server and agent.
 
 Build and roll out:

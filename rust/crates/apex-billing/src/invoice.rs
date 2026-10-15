@@ -241,6 +241,143 @@ pub fn compute_invoice(
     })
 }
 
+/// One month's fee basis, flattened from the signed `monthlyBilling` ledger
+/// record. The fee re-derives from these fields alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingBasisRecord {
+    /// The ledger sequence of the signed monthly-billing record.
+    pub seq: u64,
+    pub at_unix_ms: i64,
+    pub change_id: String,
+    /// The pre-registered scope's platform-reported revenue for the month.
+    #[allow(dead_code)]
+    pub scope_revenue: Micros,
+    /// The scope's attributed incremental revenue for the month.
+    pub incremental: Micros,
+    /// This change's log share of the combined factor.
+    pub log_share: f64,
+    pub rate_bp: u16,
+    pub fee_micros: Micros,
+    /// Whole days the change was billable this month.
+    pub billed_days: u32,
+    /// Days in the month, for the pro-rata re-derivation.
+    pub month_days: u32,
+}
+
+/// Build the invoice from the signed monthly-billing records.
+///
+/// Mirrors [`compute_invoice`]'s refusal order, but the fee re-derives from
+/// the lambda-model basis — the exact expression the engine's monthly run
+/// uses, so a re-derived fee and a signed fee cannot drift apart.
+pub fn compute_invoice_from_basis(
+    publisher_id: &str,
+    period: BillingPeriod,
+    records: &[BillingBasisRecord],
+) -> Result<Invoice, BillingError> {
+    let mut seen_seqs: HashSet<u64> = HashSet::with_capacity(records.len());
+    let mut seen_changes: HashSet<&str> = HashSet::with_capacity(records.len());
+    let mut line_items = Vec::with_capacity(records.len());
+
+    for record in records {
+        if record.at_unix_ms < period.start_unix_ms || record.at_unix_ms >= period.end_unix_ms {
+            return Err(BillingError::OutOfPeriod { seq: record.seq });
+        }
+        if record.change_id.is_empty() {
+            return Err(BillingError::TamperedProof {
+                seq: record.seq,
+                reason: "billing basis has no change id".into(),
+            });
+        }
+        let fee_micros = verify_basis(record)?;
+        if !seen_seqs.insert(record.seq) || !seen_changes.insert(record.change_id.as_str()) {
+            return Err(BillingError::Duplicate {
+                seq: record.seq,
+                experiment_id: record.change_id.clone(),
+            });
+        }
+        line_items.push(InvoiceLine {
+            seq: record.seq,
+            experiment_id: record.change_id.clone(),
+            proven_lift: record.incremental,
+            rate_bp: record.rate_bp,
+            fee_micros,
+            vat_micros: 0,
+            gross_micros: fee_micros,
+        });
+    }
+
+    line_items.sort_by_key(|line| line.seq);
+
+    let mut total_micros: Micros = 0;
+    for line in &line_items {
+        total_micros = total_micros
+            .checked_add(line.fee_micros)
+            .ok_or(BillingError::Overflow)?;
+    }
+
+    Ok(Invoice {
+        publisher_id: publisher_id.to_string(),
+        period,
+        line_items,
+        total_micros,
+        vat_rate_bp: 0,
+        vat_micros: 0,
+        gross_micros: total_micros,
+    })
+}
+
+/// Round a fee to a whole minor unit (cent) so the Adyen amount converts
+/// exactly. Positive amounts only.
+pub fn round_to_cent(fee_micros: Micros) -> Micros {
+    if fee_micros <= 0 {
+        return fee_micros;
+    }
+    (fee_micros + crate::adyen::MICROS_PER_MINOR_UNIT / 2) / crate::adyen::MICROS_PER_MINOR_UNIT
+        * crate::adyen::MICROS_PER_MINOR_UNIT
+}
+
+/// The pinned verification order per basis record: attributed lift, rate
+/// band, then the recomputed fee (the exact expression the engine uses).
+fn verify_basis(record: &BillingBasisRecord) -> Result<Micros, BillingError> {
+    if record.incremental <= 0 {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "attributed lift {} micros is not positive (no lift, no fee)",
+                record.incremental
+            ),
+        });
+    }
+    if !(MIN_LIFT_RATE_BP..=MAX_LIFT_RATE_BP).contains(&record.rate_bp) {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "rate {} bp outside [{MIN_LIFT_RATE_BP}, {MAX_LIFT_RATE_BP}]",
+                record.rate_bp
+            ),
+        });
+    }
+    let rate = record.rate_bp as f64 / 10_000.0;
+    let base = (rate * record.incremental as f64 * record.log_share).round() as Micros;
+    let pro_rated = if record.month_days > 0 && record.billed_days < record.month_days {
+        (base as f64 * record.billed_days as f64 / record.month_days as f64).round() as Micros
+    } else {
+        base
+    };
+    let fee_micros = round_to_cent(pro_rated);
+    if fee_micros != record.fee_micros {
+        return Err(BillingError::TamperedProof {
+            seq: record.seq,
+            reason: format!(
+                "stored fee {} micros does not match the re-derived {} micros",
+                record.fee_micros, fee_micros
+            ),
+        });
+    }
+    Ok(fee_micros)
+}
+
 /// The pinned verification order per proof: lift, rate band, then the
 /// recomputed fee. Returns the recomputed fee for the line item.
 fn verify_proof(proof: &BillingProofRecord) -> Result<Micros, BillingError> {

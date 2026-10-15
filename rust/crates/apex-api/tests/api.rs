@@ -452,25 +452,55 @@ async fn webhook_without_configuration_is_503() {
 #[tokio::test]
 async fn webhook_valid_signature_is_200() {
     let temp = TempDir::new("webhook-200");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_collection(store);
     let app = router(state);
     let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
-    assert_eq!(response.json(), json!({"received": true, "items": 1}));
+    assert_eq!(
+        response.json(),
+        json!({"received": true, "items": 1, "new": 1})
+    );
+    // A replay of the same (eventCode, pspReference) is accepted but recorded
+    // once: no new event.
+    let replay = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(replay.status, 200);
+    assert_eq!(replay.json()["new"], 0, "replay is not re-recorded");
+}
+
+#[tokio::test]
+async fn webhook_without_a_collection_store_is_503() {
+    let temp = TempDir::new("webhook-no-coll");
+    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
+    let app = router(state);
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(response.status, 503);
+    assert_eq!(response.json()["error"], "collection_store_not_configured");
 }
 
 #[tokio::test]
 async fn webhook_key_can_come_from_the_adyen_client() {
     let temp = TempDir::new("webhook-client");
-    let state = file_state(temp.path(), pub1_keys()).with_adyen(Arc::new(
-        apex_billing::AdyenClient::new(
-            "AQEyhmfx_test_key",
-            "ApexMerchant",
-            WEBHOOK_HMAC_KEY.to_vec(),
-            "https://checkout-test.adyen.com",
-        )
-        .expect("client"),
-    ));
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen(Arc::new(
+            apex_billing::AdyenClient::new(
+                "AQEyhmfx_test_key",
+                "ApexMerchant",
+                WEBHOOK_HMAC_KEY.to_vec(),
+                "https://checkout-test.adyen.com",
+            )
+            .expect("client"),
+        ))
+        .with_collection(store);
     let app = router(state);
     let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
@@ -544,7 +574,13 @@ async fn unknown_routes_fall_back_to_json_not_found() {
 async fn every_api_success_carries_application_json() {
     let temp = TempDir::new("content-types");
     write_standard_fixture(temp.path());
-    let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_collection(store);
     let app = router(state);
     let requests = [
         get("/healthz"),

@@ -11,7 +11,8 @@ use crate::rng::SplitMix64;
 use crate::stats::estimate;
 
 /// The bucket a test belongs to. No publisher identifiers.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Bucket {
     pub lever: String,
     pub ad_format: String,
@@ -33,7 +34,7 @@ pub const SKEPTICAL_SD: f64 = 0.03;
 /// single degenerate run cannot pin a bucket.
 const MIN_SE: f64 = 1e-3;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct BucketData {
     /// Number of observations.
     n: u64,
@@ -47,6 +48,35 @@ struct BucketData {
 #[derive(Debug, Clone, Default)]
 pub struct LiftPriors {
     buckets: BTreeMap<Bucket, BucketData>,
+}
+
+/// The wire form: a list of bucket/data pairs, because JSON object keys must
+/// be strings and a bucket is a struct.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PriorsWire {
+    buckets: Vec<(Bucket, BucketData)>,
+}
+
+impl serde::Serialize for LiftPriors {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        PriorsWire {
+            buckets: self
+                .buckets
+                .iter()
+                .map(|(bucket, data)| (bucket.clone(), *data))
+                .collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LiftPriors {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = PriorsWire::deserialize(deserializer)?;
+        Ok(Self {
+            buckets: wire.buckets.into_iter().collect(),
+        })
+    }
 }
 
 impl LiftPriors {
@@ -171,6 +201,21 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn priors_round_trip_through_json() {
+        let target = bucket();
+        let mut priors = LiftPriors::default();
+        priors.observe(&target, 0.04, 0.01);
+        let json = serde_json::to_string(&priors).expect("serialize");
+        // A bucket key is a struct, so the wire form lists pairs.
+        assert!(json.contains("\"buckets\""), "{json}");
+        let back: LiftPriors = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.posterior(&target), priors.posterior(&target));
+
+        let empty: LiftPriors = serde_json::from_str("{\"buckets\":[]}").expect("empty");
+        assert_eq!(empty.posterior(&target).mean, 0.0);
+    }
 
     fn bucket() -> Bucket {
         Bucket {

@@ -206,12 +206,16 @@ pub enum SettleOutcome {
         bootstrap_lower: f64,
         /// Ledger sequence of the signed result record.
         result_seq: u64,
+        /// The analysis-window log ratios the decision was made on.
+        daily_log_ratios: Vec<f64>,
     },
     /// The change was rolled back: no fee.
     RolledBack {
         lift: f64,
         reason: String,
         rollback_seq: u64,
+        /// The analysis-window log ratios the decision was made on.
+        daily_log_ratios: Vec<f64>,
     },
     /// The window is not complete; wait.
     Pending { reason: String },
@@ -245,4 +249,50 @@ pub enum PlanError {
 
     #[error("validation: {0}")]
     Validation(String),
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn a_policy_without_the_new_fields_uses_the_defaults() {
+        let json = serde_json::json!({
+            "maxActionsPerDay": 2,
+            "maxStepBp": 2000,
+            "burnInDays": 3,
+            "windowDays": 7,
+            "interimLook": true,
+            "extensionAllowed": true,
+            "testShare": 0.25,
+            "minPointLift": 0.01,
+            "thresholds": {
+                "harmPoint": -0.05,
+                "fillRewarded": -0.05,
+                "fillBanner": -0.05,
+                "splitChiSquare": 10.83
+            },
+            "blackoutOnCriticalFindings": true
+        });
+        let policy: AutopilotPolicy = serde_json::from_value(json).expect("policy");
+        assert_eq!(policy.rate_bp, 2_000, "rateBp default");
+        assert!(policy.code_version_hash.starts_with("apex-lift-"));
+        assert!(
+            !policy.approval_required(1_000),
+            "no onboarding, no approval"
+        );
+    }
+
+    #[test]
+    fn max_allocation_maps_the_pre_registered_share() {
+        let mut policy = AutopilotPolicy::conservative();
+        policy.test_share = 0.5;
+        assert_eq!(policy.max_allocation(), 50);
+        policy.test_share = 0.25;
+        assert_eq!(policy.max_allocation(), 25);
+        policy.test_share = 0.1;
+        assert_eq!(policy.max_allocation(), 10);
+    }
 }

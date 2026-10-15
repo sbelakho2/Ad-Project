@@ -1,23 +1,30 @@
 //! `apex-runner` — the scheduled job entrypoint for one publisher.
 //!
 //! One process serves one publisher's ledger. systemd timers invoke it on a
-//! schedule (`daily`, `monthly`, `recheck`); each command is one idempotent
-//! job over the same durable ledger.
+//! schedule; each command is one idempotent job over the same durable ledger:
 //!
-//! Configuration (environment):
-//! - `APEX_RUNNER_LEDGER` — path to the publisher's ledger file (required);
-//! - `APEX_RUNNER_SIGNING_KEY_HEX` — 64-hex ed25519 seed (required);
-//! - `APEX_MAX_API_KEY`, `APEX_MAX_REPORT_KEY` — the MAX management and
-//!   reporting keys (required);
-//! - `APEX_MAX_MANAGEMENT_BASE`, `APEX_MAX_REPORTING_BASE` — optional bases;
-//! - `APEX_RUNNER_WRITABLE` — comma-separated operations the operator has
-//!   verified (e.g. `setCountryFloor`); empty refuses every write;
-//! - `APEX_RUNNER_POLICY` — optional JSON policy, defaults to conservative.
+//! - `daily` — pull reporting, record the pull, settle complete windows, and
+//!   feed the results back into the bucket model;
+//! - `cycle` — generate proposals from an audit snapshot and the bucket
+//!   model, then run the write loop (gates, pre-registration, experiment);
+//! - `monthly` — bill the month just closed and collect through Adyen;
+//! - `recheck` — list kept changes whose month-6 re-check is due;
+//! - `aa` / `aa-eval` — start and evaluate a null (A/A) calibration run.
+//!
+//! Configuration (environment): `APEX_RUNNER_LEDGER`, `APEX_RUNNER_PUBLISHER`,
+//! `APEX_RUNNER_SIGNING_KEY_HEX`, `APEX_MAX_API_KEY`, `APEX_MAX_REPORT_KEY`,
+//! `APEX_MAX_MANAGEMENT_BASE`, `APEX_MAX_REPORTING_BASE`,
+//! `APEX_RUNNER_WRITABLE`, `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS`,
+//! `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`,
+//! `APEX_ADYEN_HMAC_KEY`, `APEX_ADYEN_CHECKOUT_BASE`, `APEX_INVOICE_VAT_BP`,
+//! `APEX_RUNNER_SNAPSHOT`,
+//! `APEX_MONITORING_MONTHLY_MICROS`, `APEX_ALERT_FILE`.
 
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
 
+use apex_autopilot::alerts::{AlertSink, FileAlertSink};
 use apex_autopilot::live_max::{MaxPlatformOps, SystemWall};
 use apex_autopilot::model::AutopilotPolicy;
 use apex_autopilot::runner::Runner;
@@ -31,12 +38,17 @@ fn cli_required(name: &str) -> Result<String, String> {
     apex_autopilot::cli::required(|key| std::env::var(key).ok(), name)
 }
 
+fn optional(name: &str) -> Option<String> {
+    apex_autopilot::cli::required(|key| std::env::var(key).ok(), name).ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = args.first().map(String::as_str).ok_or(
-        "usage: apex-runner <daily|monthly|recheck|aa> [--month YYYY-MM] [--start YYYY-MM-DD] [--days N] [--unit U] [--name N]",
-    )?;
+    let command = args
+        .first()
+        .map(String::as_str)
+        .ok_or("usage: apex-runner <daily|cycle|monthly|recheck|aa|aa-eval> [flags]")?;
 
     let ledger_path = cli_required("APEX_RUNNER_LEDGER")?;
     let keypair = Keypair::from_bytes(&apex_autopilot::cli::parse_seed(&cli_required(
@@ -56,18 +68,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    let ops = MaxPlatformOps::new(
+    let ops: Arc<dyn apex_autopilot::ops::PlatformOps> = Arc::new(MaxPlatformOps::new(
         &cli_required("APEX_MAX_API_KEY")?,
         &cli_required("APEX_MAX_REPORT_KEY")?,
         &std::env::var("APEX_MAX_MANAGEMENT_BASE")
             .unwrap_or_else(|_| MAX_MANAGEMENT_BASE.to_string()),
         &std::env::var("APEX_MAX_REPORTING_BASE")
             .unwrap_or_else(|_| MAX_REPORTING_BASE.to_string()),
-        transport,
+        transport.clone(),
         Arc::new(SystemWall),
         writable,
-    )
-    .map_err(|e| format!("max adapter: {e}"))?;
+    )?);
 
     let policy = match std::env::var("APEX_RUNNER_POLICY") {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -75,7 +86,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => AutopilotPolicy::conservative(),
     };
-    let runner = Runner::new(Arc::new(ops), policy, FillFormat::Rewarded);
+    let mut runner = Runner::new(ops, policy, FillFormat::Rewarded);
+    if let Some(publisher) = optional("APEX_RUNNER_PUBLISHER") {
+        runner = runner.with_publisher(publisher);
+    }
+    if let Some(raw) = std::env::var("APEX_INVOICE_VAT_BP")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        let bp: u16 = raw
+            .parse()
+            .map_err(|_| "APEX_INVOICE_VAT_BP must be a number")?;
+        runner = runner.with_vat_rate(bp);
+    }
+    if let Some(raw) = std::env::var("APEX_MONITORING_MONTHLY_MICROS")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        let fee: i64 = raw
+            .parse()
+            .map_err(|_| "APEX_MONITORING_MONTHLY_MICROS must be a number")?;
+        runner = runner.with_monitoring(apex_billing::MonitoringPlan {
+            monthly_fee_micros: fee,
+        });
+    }
+    if let (Ok(api_key), Ok(merchant)) = (
+        std::env::var("APEX_ADYEN_API_KEY"),
+        std::env::var("APEX_ADYEN_MERCHANT_ACCOUNT"),
+    ) {
+        let hmac = std::env::var("APEX_ADYEN_HMAC_KEY")
+            .unwrap_or_default()
+            .into_bytes();
+        let base = std::env::var("APEX_ADYEN_CHECKOUT_BASE")
+            .unwrap_or_else(|_| "https://checkout-test.adyen.com".to_string());
+        let client = apex_billing::AdyenClient::new(&api_key, &merchant, hmac, &base)
+            .map_err(|e| format!("adyen client: {e}"))?;
+        runner = runner.with_adyen(Arc::new(client), transport.clone());
+    }
+    if let Some(priors_path) = optional("APEX_RUNNER_PRIORS") {
+        let priors = match std::fs::read_to_string(&priors_path) {
+            Ok(raw) if !raw.trim().is_empty() => {
+                serde_json::from_str::<apex_lift::priors::LiftPriors>(&raw)
+                    .map_err(|e| format!("priors: {e}"))?
+            }
+            _ => apex_lift::priors::LiftPriors::default(),
+        };
+        runner = runner.with_priors(priors, &priors_path);
+    }
+    if let Some(path) = optional("APEX_ALERT_FILE") {
+        let sink: Arc<dyn AlertSink> = Arc::new(FileAlertSink::new(path));
+        runner = runner.with_alerts(sink);
+    }
     let now_unix_ms = apex_autopilot::cli::now_unix_ms();
 
     match command {
@@ -86,8 +147,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .map_err(|e| format!("daily: {e}"))?;
             println!(
-                "daily: pulled {} settled {} {:?}",
-                report.pulled, report.settled, report.outcomes
+                "daily: pulled {} settled {} failures {} {:?}",
+                report.pulled,
+                report.settled,
+                report.failures.len(),
+                report.outcomes
+            );
+            if !report.failures.is_empty() {
+                std::process::exit(1);
+            }
+        }
+        "cycle" => {
+            let snapshot_path = apex_autopilot::cli::flag(&args, "--snapshot")
+                .ok_or("cycle requires --snapshot")?;
+            let mut ledger = ledger;
+            let report = apex_autopilot::cycle::run(
+                &runner,
+                &mut ledger,
+                std::path::Path::new(&snapshot_path),
+                now_unix_ms,
+            )
+            .await
+            .map_err(|e| format!("cycle: {e}"))?;
+            println!(
+                "cycle: proposed {} applied {} awaiting approval {}",
+                report.proposed, report.applied, report.awaiting_approval
             );
         }
         "monthly" => {
@@ -101,21 +185,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|_| "--days must be a number")?;
                     (month, start, days)
                 }
-                // No month given: bill the calendar month just closed.
                 None => apex_autopilot::cli::previous_month(now_unix_ms)?,
             };
+            let publisher = cli_required("APEX_RUNNER_PUBLISHER")?;
             let mut ledger = ledger;
             let report = runner
-                .run_monthly(&mut ledger, &month, &start, days, now_unix_ms)
+                .run_monthly(&mut ledger, &publisher, &month, &start, days, now_unix_ms)
                 .await
                 .map_err(|e| format!("monthly: {e}"))?;
             println!(
-                "monthly {}: billed {} scope(s), {} fee(s): {:?}",
+                "monthly {}: billed {} scope(s), {} fee(s), gross {} micros, {} link(s), collected={}",
                 report.month,
                 report.billed_scopes,
                 report.fees.len(),
-                report.fees
+                report.invoice_total_micros,
+                report.payment_links.len(),
+                report.collected
             );
+        }
+        "recheck" => {
+            let due = runner.due_rechecks(&ledger, now_unix_ms);
+            println!("recheck: {} due", due.len());
+            for item in due {
+                println!(
+                    "  {} (scope {}, {} months, {} days at {:.0}%)",
+                    item.change_id,
+                    item.scope,
+                    item.months_since_keep,
+                    item.plan.analysis_days,
+                    item.plan.old_setting_share * 100.0
+                );
+            }
         }
         "aa" => {
             let unit = apex_autopilot::cli::flag(&args, "--unit").ok_or("aa requires --unit")?;
@@ -141,19 +241,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("aa: {e}"))?;
             println!("aa: started {id}");
         }
-        "recheck" => {
-            let due = runner.due_rechecks(&ledger, now_unix_ms);
-            println!("recheck: {} due", due.len());
-            for item in due {
-                println!(
-                    "  {} (scope {}, {} months, {} days at {:.0}%)",
-                    item.change_id,
-                    item.scope,
-                    item.months_since_keep,
-                    item.plan.analysis_days,
-                    item.plan.old_setting_share * 100.0
-                );
-            }
+        "aa-eval" => {
+            let experiment = apex_autopilot::cli::flag(&args, "--experiment")
+                .ok_or("aa-eval requires --experiment")?;
+            let split: f64 = apex_autopilot::cli::flag(&args, "--split")
+                .unwrap_or_else(|| "0.5".to_string())
+                .parse()
+                .map_err(|_| "--split must be a number between 0 and 1")?;
+            let conclusion = runner
+                .aa_conclusion(&experiment, split)
+                .await
+                .map_err(|e| format!("aa-eval: {e}"))?;
+            println!("aa-eval {experiment}: {conclusion:?}");
         }
         other => return Err(format!("unknown command '{other}'").into()),
     }
@@ -173,5 +272,13 @@ mod tests {
         );
         std::env::remove_var("APEX_RUNNER_TEST_VAR");
         assert!(super::cli_required("APEX_RUNNER_TEST_VAR").is_err());
+    }
+
+    #[test]
+    fn optional_returns_none_for_blanks_and_missing() {
+        std::env::set_var("APEX_RUNNER_TEST_OPT", "  ");
+        assert!(super::optional("APEX_RUNNER_TEST_OPT").is_none());
+        std::env::remove_var("APEX_RUNNER_TEST_OPT");
+        assert!(super::optional("APEX_RUNNER_TEST_OPT").is_none());
     }
 }

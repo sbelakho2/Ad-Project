@@ -26,8 +26,15 @@ pub struct BillingRecord {
     pub lambda: f64,
     pub factor: f64,
     pub incremental: i64,
+    /// This change's log share of the combined factor: the fee re-derives as
+    /// `rate * incremental * share` from the signed record alone.
+    pub log_share: f64,
     pub rate_bp: u16,
     pub fee_micros: i64,
+    /// Whole days the change was billable this month.
+    pub billed_days: u32,
+    /// Days in the month, for the pro-rata re-derivation.
+    pub month_days: u32,
 }
 
 /// A billing change: override, re-check or term end.
@@ -197,8 +204,11 @@ mod tests {
                 lambda: 0.01,
                 factor: 1.01,
                 incremental: 1,
+                log_share: 1.0,
                 rate_bp: 2000,
                 fee_micros: 1,
+                billed_days: 0,
+                month_days: 0,
             }),
             LiftRecord::BillingChange(BillingChangeRecord {
                 change_id: "c".into(),

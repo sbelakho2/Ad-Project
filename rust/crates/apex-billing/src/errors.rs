@@ -84,6 +84,12 @@ pub enum BillingError {
     InvalidSignature,
 }
 
+impl From<std::io::Error> for BillingError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Malformed(format!("storage i/o: {error}"))
+    }
+}
+
 impl From<PlatformError> for BillingError {
     fn from(error: PlatformError) -> Self {
         match error {

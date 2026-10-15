@@ -23,6 +23,9 @@
 //! - `APEX_LEDGER_TOKENS_FILE` — a JSON object of publisher to ledger token;
 //!   without it no ledger is readable over HTTP (the routes answer
 //!   `503 ledger_auth_not_configured`);
+//! - `APEX_COLLECTION_FILE` — the append-only collection log the Adyen
+//!   webhook records accepted events into (replay-protected). Without it the
+//!   webhook answers `503 collection_store_not_configured`;
 //! - `APEX_LEADS_FILE` — the append-only lead log for `POST /v1/leads`;
 //!   `APEX_MAIL_WEBHOOK` optionally forwards each lead to ApexMail.
 //!
@@ -94,6 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(hmac_key) = env_value("APEX_ADYEN_HMAC_KEY") {
         state = state.with_adyen_hmac_key(hmac_key.into_bytes());
+    }
+
+    // Collection state: accepted Adyen events are recorded (and
+    // replay-protected) at the path named by `APEX_COLLECTION_FILE`.
+    if let Some(path) = env_value("APEX_COLLECTION_FILE") {
+        let store = apex_billing::FileCollectionStore::open(std::path::Path::new(&path))
+            .map_err(|error| format!("APEX_COLLECTION_FILE could not be opened: {error}"))?;
+        state = state.with_collection(Arc::new(store));
     }
 
     // Lead capture: append-only JSONL at the path named by `APEX_LEADS_FILE`,

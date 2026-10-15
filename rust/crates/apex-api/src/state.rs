@@ -17,6 +17,7 @@ use crate::error::ApiError;
 use crate::leads::LeadStore;
 use crate::live::{constant_time_eq, LiveAuditor};
 use crate::sources::{AuditSource, LedgerSource};
+use apex_billing::CollectionStore;
 
 /// The complete dependency set of the HTTP surface.
 #[derive(Clone, Debug)]
@@ -46,6 +47,9 @@ pub struct AppState {
     /// Lead capture behind `POST /v1/leads`. `None` makes the route answer
     /// `503 lead_capture_not_configured`.
     pub leads: Option<Arc<dyn LeadStore>>,
+    /// Where accepted Adyen collection events are recorded (replay-protected).
+    /// `None` makes the webhook answer `503 collection_store_not_configured`.
+    pub collection: Option<Arc<dyn CollectionStore>>,
     /// Process request counters behind `GET /metrics`.
     pub metrics: Arc<crate::metrics::Metrics>,
 }
@@ -69,6 +73,7 @@ impl AppState {
             live_auditor: None,
             ledger_tokens: Arc::new(HashMap::new()),
             leads: None,
+            collection: None,
             metrics: Arc::new(crate::metrics::Metrics::new()),
         }
     }
@@ -77,6 +82,13 @@ impl AppState {
     #[must_use]
     pub fn with_leads(mut self, store: Arc<dyn LeadStore>) -> Self {
         self.leads = Some(store);
+        self
+    }
+
+    /// Attach the collection store the webhook records accepted events into.
+    #[must_use]
+    pub fn with_collection(mut self, store: Arc<dyn CollectionStore>) -> Self {
+        self.collection = Some(store);
         self
     }
 
@@ -177,6 +189,37 @@ mod tests {
         assert!(state.adyen.is_none());
         assert!(state.adyen_hmac_key.is_none());
         assert!(format!("{:?}", state.clock).contains("SystemClock"));
+    }
+
+    #[test]
+    fn every_builder_sets_its_field() {
+        let dir = std::env::temp_dir().join(format!("apex-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        )
+        .with_adyen(Arc::new(
+            apex_billing::AdyenClient::new("k", "m", b"h".to_vec(), "https://x").expect("client"),
+        ))
+        .with_leads(Arc::new(crate::leads::FileLeadStore::new(
+            dir.join("leads.jsonl"),
+        )))
+        .with_collection(Arc::new(
+            apex_billing::FileCollectionStore::open(&dir.join("coll.jsonl")).expect("coll"),
+        ))
+        .with_ledger_tokens(std::collections::HashMap::from([(
+            "pub1".to_string(),
+            b"t".to_vec(),
+        )]))
+        .with_ledger_token("pub2", b"t2".to_vec());
+        assert!(state.adyen.is_some());
+        assert!(state.leads.is_some());
+        assert!(state.collection.is_some());
+        assert_eq!(state.ledger_tokens.len(), 2);
+        assert!(state.authorize_ledger("pub1", Some("Bearer t")).is_ok());
+        assert!(state.authorize_ledger("pub2", Some("Bearer t2")).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
-//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` |
+//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n,"new":m}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
@@ -170,7 +170,15 @@ async fn live_audit(
     if !is_valid_publisher(&body.publisher) {
         return Err(ApiError::BadRequest("invalid_publisher"));
     }
-    Ok(Json(auditor.audit(&body.publisher, platform).await?))
+    let (snapshot, report) = auditor
+        .audit_with_snapshot(&body.publisher, platform)
+        .await?;
+    // Persist the snapshot so the read-only audit source and the write cycle
+    // can consume the same bytes the live audit just built.
+    if let Err(error) = state.audit_source.write(platform, &snapshot).await {
+        tracing::warn!(%error, "live audit snapshot could not be persisted");
+    }
+    Ok(Json(report))
 }
 
 /// Capture a free-audit lead: validate the shape, store it append-only, and
@@ -307,15 +315,40 @@ async fn adyen_webhook(
                 ApiError::BadRequest("malformed_event")
             }
         })?;
+    let Some(store) = &state.collection else {
+        return Err(ApiError::CollectionStoreNotConfigured);
+    };
+    // Record every accepted item; a replay of an already-recorded
+    // (eventCode, pspReference) is accepted but not counted again.
+    let now_unix_ms = state.clock.now_unix_s().saturating_mul(1000);
+    let mut new_items = 0usize;
     for item in &items {
-        tracing::info!(
-            event_code = %item.event_code,
-            psp_reference = %item.psp_reference,
-            success = %item.success,
-            "adyen webhook item accepted"
-        );
+        let event = apex_billing::CollectionEvent::from_item(item, now_unix_ms);
+        match store.record(&event) {
+            Ok(true) => {
+                new_items += 1;
+                tracing::info!(
+                    event_code = %item.event_code,
+                    psp_reference = %item.psp_reference,
+                    success = %item.success,
+                    "adyen collection event recorded"
+                );
+            }
+            Ok(false) => {
+                tracing::info!(
+                    psp_reference = %item.psp_reference,
+                    "adyen collection event already recorded (replay)"
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "adyen collection event could not be recorded");
+                return Err(ApiError::Internal("collection_record_failed".into()));
+            }
+        }
     }
-    Ok(Json(json!({ "received": true, "items": items.len() })))
+    Ok(Json(
+        json!({ "received": true, "items": items.len(), "new": new_items }),
+    ))
 }
 
 async fn console_overview() -> Html<String> {

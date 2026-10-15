@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use apex_lift::guardrails::FillFormat;
-use apex_proof::{LedgerLog, LedgerRecord};
+use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 
 use crate::alerts::{Alert, AlertSink, NoopAlertSink};
 use crate::model::{AutopilotPolicy, PlanError, SettleOutcome};
@@ -26,6 +26,9 @@ pub struct DailyReport {
     pub settled: u32,
     /// Settle outcomes in ledger order (experiment id, status label).
     pub outcomes: Vec<(String, String)>,
+    /// Experiments that could not be processed (id, reason). The pass
+    /// continues past a failure so one bad test never starves the rest.
+    pub failures: Vec<(String, String)>,
 }
 
 /// The runner holds the platform adapter and the policy; the ledger is passed
@@ -36,6 +39,21 @@ pub struct Runner {
     policy: AutopilotPolicy,
     fill_format: FillFormat,
     alerts: Arc<dyn AlertSink>,
+    /// The publisher this runner bills; required for the monthly pass.
+    publisher_id: String,
+    /// The vat rate applied to invoice lines (basis points, 0 = none).
+    vat_rate_bp: u16,
+    /// The optional flat monitoring plan, billed as its own invoice line.
+    monitoring: Option<apex_billing::MonitoringPlan>,
+    /// The Adyen collection path: client plus transport. Absent in dry-run
+    /// deployments, which record billing but never collect.
+    adyen: Option<(
+        Arc<apex_billing::AdyenClient>,
+        Arc<dyn apex_connectors::transport::Transport>,
+    )>,
+    /// The bucket model and where it persists; learning follows results.
+    priors: Option<apex_lift::priors::LiftPriors>,
+    priors_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for Runner {
@@ -57,7 +75,58 @@ impl Runner {
             policy,
             fill_format,
             alerts: Arc::new(NoopAlertSink),
+            publisher_id: String::new(),
+            vat_rate_bp: 0,
+            monitoring: None,
+            adyen: None,
+            priors: None,
+            priors_path: None,
         }
+    }
+
+    /// The publisher this runner bills (required for the monthly pass).
+    #[must_use]
+    pub fn with_publisher(mut self, publisher_id: impl Into<String>) -> Self {
+        self.publisher_id = publisher_id.into();
+        self
+    }
+
+    /// The vat rate applied to invoice lines, in basis points.
+    #[must_use]
+    pub fn with_vat_rate(mut self, vat_rate_bp: u16) -> Self {
+        self.vat_rate_bp = vat_rate_bp;
+        self
+    }
+
+    /// Bill the flat monitoring plan as its own invoice line.
+    #[must_use]
+    pub fn with_monitoring(mut self, plan: apex_billing::MonitoringPlan) -> Self {
+        self.monitoring = Some(plan);
+        self
+    }
+
+    /// Attach the Adyen collection path (client + transport).
+    #[must_use]
+    pub fn with_adyen(
+        mut self,
+        client: Arc<apex_billing::AdyenClient>,
+        transport: Arc<dyn apex_connectors::transport::Transport>,
+    ) -> Self {
+        self.adyen = Some((client, transport));
+        self
+    }
+
+    /// Load the bucket model and persist updates to `path` after every
+    /// settled test, so the next cycle's proposals learn from results.
+    #[must_use]
+    pub fn with_priors(
+        mut self,
+        priors: apex_lift::priors::LiftPriors,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.priors = Some(priors);
+        self.priors_path = Some(path.into());
+        self
     }
 
     /// Attach the alert sink that receives customer-impact alerts.
@@ -68,7 +137,8 @@ impl Runner {
     }
 
     /// One daily pass: pull reporting for every running experiment, record the
-    /// pull, and settle any whose window has completed.
+    /// pull, and settle any whose window has completed. A failure on one
+    /// experiment is recorded (and alerted) without starving the rest.
     pub async fn run_daily(
         &self,
         ledger: &mut dyn LedgerLog,
@@ -81,7 +151,10 @@ impl Runner {
                 Err(source) => {
                     self.alert_pull_failure(&experiment.experiment_id, &source)
                         .await;
-                    return Err(PlanError::ApplyFailed { source });
+                    report
+                        .failures
+                        .push((experiment.experiment_id.clone(), source.to_string()));
+                    continue;
                 }
             };
             let rows = apex_lift::emit::day_rows(&days.control, &days.test);
@@ -125,9 +198,17 @@ impl Runner {
                             detail: reason.clone(),
                         })
                         .await;
-                    return Err(PlanError::RollbackFailed { reason });
+                    report
+                        .failures
+                        .push((experiment.experiment_id.clone(), reason));
+                    continue;
                 }
-                Err(other) => return Err(other),
+                Err(other) => {
+                    report
+                        .failures
+                        .push((experiment.experiment_id.clone(), other.to_string()));
+                    continue;
+                }
             };
             // A pending window is not a settlement; everything else is.
             if let SettleOutcome::Pending { .. } = &outcome {
@@ -144,6 +225,7 @@ impl Runner {
                 }
                 _ => {}
             }
+            self.learn(&experiment, ledger, &outcome).await;
             report.settled += 1;
             report
                 .outcomes
@@ -152,9 +234,54 @@ impl Runner {
         Ok(report)
     }
 
+    /// Feed a settled test back into the bucket model and persist it, so the
+    /// next cycle's proposals learn from results (keeps and rollbacks alike,
+    /// or the model conditions on the decision).
+    async fn learn(
+        &self,
+        experiment: &RunningExperiment,
+        ledger: &dyn LedgerLog,
+        outcome: &SettleOutcome,
+    ) {
+        let (Some(priors), Some(path)) = (&self.priors, &self.priors_path) else {
+            return;
+        };
+        let label = status_label(outcome);
+        if !matches!(label.as_str(), "kept" | "rolled_back") {
+            return;
+        }
+        let Some(bucket) = change_bucket(ledger, experiment.change_seq) else {
+            return;
+        };
+        let ratios = match outcome {
+            SettleOutcome::Kept {
+                daily_log_ratios, ..
+            }
+            | SettleOutcome::RolledBack {
+                daily_log_ratios, ..
+            } => daily_log_ratios.clone(),
+            _ => return,
+        };
+        let mut priors = priors.clone();
+        apex_lift::emit::apply_decision_to_priors(&mut priors, &bucket, &label, &ratios);
+        if let Ok(json) = serde_json::to_string_pretty(&priors) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
     /// The policy this runner applies (exposed so callers can pin it in logs).
     pub fn policy(&self) -> &AutopilotPolicy {
         &self.policy
+    }
+
+    /// The bucket model this runner learns into, when configured.
+    pub fn runner_priors(&self) -> Option<&apex_lift::priors::LiftPriors> {
+        self.priors.as_ref()
+    }
+
+    /// The platform adapter behind the write loop.
+    pub fn platform_ops(&self) -> &dyn PlatformOps {
+        self.ops.as_ref()
     }
 
     /// Emit the right alert for a failed daily pull: an expired token when the
@@ -199,6 +326,13 @@ pub struct MonthlyReport {
     pub billed_scopes: u32,
     /// One entry per billed change: its id and the fee in micros.
     pub fees: Vec<(String, i64)>,
+    /// The invoice's gross total (net + vat), in micros.
+    pub invoice_total_micros: i64,
+    /// The Adyen payment links created for this invoice, when collection is
+    /// wired.
+    pub payment_links: Vec<String>,
+    /// Whether collection ran (an Adyen client was attached).
+    pub collected: bool,
 }
 
 impl Runner {
@@ -209,12 +343,33 @@ impl Runner {
     pub async fn run_monthly(
         &self,
         ledger: &mut dyn LedgerLog,
+        publisher_id: &str,
         month: &str,
         month_start: &str,
         month_days: u32,
-        now_unix_ms: i64,
+        _now_unix_ms: i64,
     ) -> Result<MonthlyReport, PlanError> {
+        if publisher_id.trim().is_empty() {
+            return Err(PlanError::Validation(
+                "the monthly pass needs a publisher id to bill".into(),
+            ));
+        }
         let month_end = month_end(month_start, month_days)?;
+        // The fee accrues over the closed month: date every billing record at
+        // the month's last day so the invoice's period check holds.
+        let accrual_at = crate::calendar::day_number(&month_end)
+            .ok_or_else(|| PlanError::Validation("bad month end".into()))?
+            * 86_400_000;
+        let period = apex_billing::BillingPeriod {
+            year_month: month.to_string(),
+            start_unix_ms: crate::calendar::day_number(month_start)
+                .ok_or_else(|| PlanError::Validation("bad month start".into()))?
+                * 86_400_000,
+            end_unix_ms: (crate::calendar::day_number(&month_end)
+                .ok_or_else(|| PlanError::Validation("bad month end".into()))?
+                + 1)
+                * 86_400_000,
+        };
         let mut by_scope: std::collections::BTreeMap<String, Vec<apex_lift::billing::KeptChange>> =
             std::collections::BTreeMap::new();
         for (scope, change) in kept_changes(ledger) {
@@ -224,6 +379,7 @@ impl Runner {
             month: month.to_string(),
             ..MonthlyReport::default()
         };
+        let mut basis: Vec<apex_billing::BillingBasisRecord> = Vec::new();
         for (scope, changes) in by_scope {
             let revenue = self
                 .ops
@@ -233,22 +389,69 @@ impl Runner {
             let run = apex_lift::run::run_month(month, month_start, month_days, revenue, &changes)
                 .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
             for fee in &run.fees {
+                // Adyen collects whole minor units: the signed fee is the
+                // cent-exact one, and the basis re-derives it the same way.
+                let mut fee = fee.clone();
+                fee.fee_micros = apex_billing::round_to_cent(fee.fee_micros);
+                let fee = &fee;
                 let record = apex_lift::emit::monthly_billing(fee, month)
                     .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
                 let payload = record
                     .record
                     .canonical_json()
                     .map_err(|error| PlanError::Validation(format!("monthly billing: {error}")))?;
-                ledger
+                let entry = ledger
                     .append(LedgerRecord::lift_record(
-                        now_unix_ms,
+                        accrual_at,
                         &record.sha256,
                         &payload,
                     ))
                     .map_err(PlanError::Ledger)?;
                 report.fees.push((fee.change_id.clone(), fee.fee_micros));
+                basis.push(apex_billing::BillingBasisRecord {
+                    seq: entry.seq(),
+                    at_unix_ms: accrual_at,
+                    change_id: fee.change_id.clone(),
+                    scope_revenue: fee.scope_revenue,
+                    incremental: fee.incremental,
+                    log_share: fee.log_share,
+                    rate_bp: fee.rate_bp,
+                    fee_micros: fee.fee_micros,
+                    billed_days: fee.billed_days,
+                    month_days: fee.month_days,
+                });
             }
             report.billed_scopes += 1;
+        }
+
+        // The invoice is re-derived from the signed billing records; the flat
+        // monitoring plan is billed as its own line on the same invoice.
+        let mut invoice =
+            apex_billing::compute_invoice_from_basis(publisher_id, period.clone(), &basis)
+                .map_err(|error| PlanError::Validation(format!("invoice: {error}")))?;
+        if let Some(plan) = &self.monitoring {
+            let next_seq = invoice
+                .line_items
+                .iter()
+                .map(|line| line.seq)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            invoice.line_items.push(plan.monthly_line(next_seq, month));
+            invoice.total_micros = invoice
+                .total_micros
+                .checked_add(plan.monthly_fee_micros)
+                .ok_or(PlanError::Validation("invoice overflow".into()))?;
+        }
+        invoice = invoice.with_vat(self.vat_rate_bp);
+        report.invoice_total_micros = invoice.gross_micros;
+
+        if let Some((client, transport)) = &self.adyen {
+            let receipt = apex_billing::create_payment_links(client, transport.as_ref(), &invoice)
+                .await
+                .map_err(|error| PlanError::Validation(format!("collection: {error}")))?;
+            report.payment_links = receipt.links.iter().map(|link| link.url.clone()).collect();
+            report.collected = true;
         }
         Ok(report)
     }
@@ -497,6 +700,23 @@ pub struct RunningExperiment {
 /// void is re-checked until the window closes and the engine voids again.
 fn running_experiments(ledger: &dyn LedgerLog) -> Vec<RunningExperiment> {
     let records = ledger.records();
+    // Only experiments with a signed pre-registration are settled here; an
+    // A/A (null) run has none and is evaluated through `aa_conclusion`
+    // instead, so it never gets mis-attributed to another change's sequence.
+    let pre_registered: std::collections::HashSet<String> = records
+        .iter()
+        .filter_map(|record| match record {
+            LedgerRecord::LiftRecord { payload, .. } => {
+                parse_lift_record(payload).and_then(|parsed| match parsed {
+                    apex_lift::records::LiftRecord::PreRegistration { experiment_id, .. } => {
+                        Some(experiment_id)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect();
     let settled: std::collections::HashSet<String> = records
         .iter()
         .filter_map(|record| match record {
@@ -522,6 +742,9 @@ fn running_experiments(ledger: &dyn LedgerLog) -> Vec<RunningExperiment> {
                 spec,
                 ..
             } => {
+                if !pre_registered.contains(&spec.name) {
+                    return None;
+                }
                 let change_seq = change_before(&records, *seq)?;
                 if settled.contains(experiment_id) || rolled_back.contains(&change_seq) {
                     return None;
@@ -557,6 +780,29 @@ fn pre_registration_before_value(records: &[&LedgerRecord], experiment_name: &st
         }
     }
     String::new()
+}
+
+/// The prior bucket a settled change belongs to: a country-floor move on its
+/// platform. The ad format is not carried by the change record, so the bucket
+/// pools across formats for the platform and tier.
+fn change_bucket(ledger: &dyn LedgerLog, change_seq: u64) -> Option<apex_lift::priors::Bucket> {
+    let record = ledger
+        .records()
+        .into_iter()
+        .find(|r| r.seq() == change_seq)?;
+    match record {
+        LedgerRecord::ChangeApplied {
+            platform,
+            change: ChangeKind::CountryFloorSet { country, .. },
+            ..
+        } => Some(apex_lift::priors::Bucket {
+            lever: "floor".into(),
+            ad_format: "unknown".into(),
+            country_tier: country.clone(),
+            platform: platform.as_str().to_string(),
+        }),
+        _ => None,
+    }
 }
 
 /// The nearest `changeApplied` record before `started_seq`.
@@ -787,6 +1033,257 @@ mod tests {
         );
     }
 
+    /// A transport that answers the Adyen payment-link call and records it.
+    #[derive(Default)]
+    struct AdyenFake {
+        seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
+    }
+
+    #[async_trait]
+    impl apex_connectors::transport::Transport for AdyenFake {
+        async fn request(
+            &self,
+            req: apex_connectors::transport::HttpRequest,
+        ) -> Result<
+            apex_connectors::transport::HttpResponse,
+            apex_connectors::transport::TransportError,
+        > {
+            self.seen.lock().unwrap().push(req);
+            Ok(apex_connectors::transport::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"id":"PL1","url":"https://pay.adyen.com/PL1"}"#.to_vec(),
+            })
+        }
+    }
+
+    async fn kept_ledger(ops: &Arc<RecordingOps>, at: i64) -> InMemoryLedger {
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            at,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        runner.run_daily(&mut l, at + 1).await.expect("daily");
+        l
+    }
+
+    fn kept_ops() -> Arc<RecordingOps> {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 4_400_000));
+        ops.put_scope_revenue("u1", 1_000_000_000);
+        ops
+    }
+
+    #[tokio::test]
+    async fn the_monthly_pass_collects_through_adyen_and_bills_monitoring() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let adyen = Arc::new(AdyenFake::default());
+        let client = Arc::new(
+            apex_billing::AdyenClient::new(
+                "key",
+                "ApexMerchant",
+                b"hmac".to_vec(),
+                "https://checkout-test.adyen.com",
+            )
+            .expect("client"),
+        );
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_publisher("pub1")
+            .with_vat_rate(2_000)
+            .with_monitoring(apex_billing::MonitoringPlan::STANDARD)
+            .with_adyen(client, adyen.clone());
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(report.collected, "the Adyen client collects");
+        // One link per invoice line: the lift fee and the flat monitoring fee.
+        assert_eq!(report.payment_links.len(), 2, "{:?}", report.payment_links);
+        assert!(report
+            .payment_links
+            .iter()
+            .all(|url| url == "https://pay.adyen.com/PL1"));
+        assert!(report.invoice_total_micros > 0);
+        let calls = adyen.seen.lock().unwrap();
+        assert_eq!(calls.len(), 2, "one payment link per invoice line");
+        assert!(calls[0].url.contains("/v71/paymentLinks"));
+    }
+
+    #[tokio::test]
+    async fn the_monthly_pass_without_adyen_records_but_does_not_collect() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let runner =
+            Runner::new(ops.clone(), policy(), FillFormat::Rewarded).with_publisher("pub1");
+        let report = runner
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect("monthly");
+        assert!(!report.collected);
+        assert!(report.payment_links.is_empty());
+        assert!(
+            report.invoice_total_micros > 0,
+            "the invoice is still computed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_monthly_pass_requires_a_publisher() {
+        let ops = kept_ops();
+        let mut l = kept_ledger(&ops, NOW).await;
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let err = runner
+            .run_monthly(&mut l, "", "2023-11", "2023-11-01", 30, NOW + 2)
+            .await
+            .expect_err("publisher required");
+        assert!(matches!(err, PlanError::Validation(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_daily_pass_learns_and_persists_the_bucket_model() {
+        let ops = kept_ops();
+        let dir = std::env::temp_dir().join(format!("apex-priors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let priors_path = dir.join("priors.json");
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded)
+            .with_priors(apex_lift::priors::LiftPriors::default(), &priors_path);
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        let saved = std::fs::read_to_string(&priors_path).expect("saved");
+        assert!(saved.contains("floor"), "the bucket is learned: {saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_aa_run_is_not_swept_into_the_daily_settle_pass() {
+        // An A/A run has no pre-registration; the daily pass must leave it
+        // alone rather than mis-attribute it to another change's sequence.
+        let ops = Arc::new(RecordingOps::new());
+        let mut l = ledger();
+        let runner = Runner::new(ops.clone(), policy(), FillFormat::Rewarded);
+        let spec = apex_core::ExperimentSpec {
+            name: "apex-aa-u1".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "A/A calibration".into(),
+            test_group_allocation: 50,
+        };
+        runner
+            .start_aa(&mut l, apex_core::PlatformId::AppLovinMax, &spec, NOW)
+            .await
+            .expect("aa");
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(report.pulled, 0, "the A/A run is not pulled for settling");
+        assert!(report.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_first_look_that_offers_an_extension_waits_for_its_week() {
+        // A positive point lift with a wide interval offers an extension; with
+        // only ten days of pulls the extended window is incomplete, so the
+        // experiment waits rather than rolling back.
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        // Alternating strong/weak days: a positive mean with a wide spread.
+        let days = ExperimentDays {
+            control: (0..10)
+                .map(|i| arm_day(&format!("2026-10-{:02}", i + 1), 4_000_000))
+                .collect(),
+            test: (0..10)
+                .map(|i| {
+                    let value = if i % 2 == 0 { 4_900_000 } else { 4_020_000 };
+                    arm_day(&format!("2026-10-{:02}", i + 1), value)
+                })
+                .collect(),
+        };
+        ops.put_experiment_days("exp-1", days);
+        let extension_policy = AutopilotPolicy {
+            extension_allowed: true,
+            ..policy()
+        };
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &extension_policy,
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner = Runner::new(ops.clone(), extension_policy, FillFormat::Rewarded);
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        assert_eq!(report.settled, 0, "the first look does not settle");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(
+            !l.records()
+                .iter()
+                .any(|r| matches!(r, LedgerRecord::RollbackPerformed { .. })),
+            "an offered extension never rolls the test back"
+        );
+    }
+
     #[tokio::test]
     async fn a_guardrail_stop_alerts_the_customer() {
         let ops = Arc::new(RecordingOps::new());
@@ -869,7 +1366,12 @@ mod tests {
         .expect("cycle");
         let runner =
             Runner::new(ops.clone(), policy(), FillFormat::Rewarded).with_alerts(alerts.clone());
-        assert!(runner.run_daily(&mut l, NOW + 1).await.is_err());
+        let report = runner.run_daily(&mut l, NOW + 1).await.expect("pass");
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "the failure is recorded, not fatal"
+        );
         assert!(matches!(
             alerts.alerts().as_slice(),
             [Alert::PullFailure { .. }]
@@ -1058,7 +1560,7 @@ mod tests {
         );
 
         let report = runner
-            .run_monthly(&mut l, "2023-11", "2023-11-01", 30, NOW + 2)
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
             .expect("monthly");
         assert_eq!(report.billed_scopes, 1);
@@ -1113,7 +1615,7 @@ mod tests {
         runner.run_daily(&mut l, NOW + 1).await.expect("daily");
 
         let report = runner
-            .run_monthly(&mut l, "2023-11", "2023-11-01", 30, NOW + 2)
+            .run_monthly(&mut l, "pub1", "2023-11", "2023-11-01", 30, NOW + 2)
             .await
             .expect("monthly");
         assert_eq!(report.billed_scopes, 0, "no kept change, no scope");
@@ -1161,6 +1663,25 @@ mod tests {
         let due = runner.due_rechecks(&l, later);
         assert_eq!(due.len(), 1, "{due:?}");
         assert!(due[0].months_since_keep >= 6);
+    }
+
+    #[test]
+    fn change_bucket_is_none_for_non_floor_changes() {
+        let mut l = ledger();
+        l.append(LedgerRecord::change_applied(
+            1,
+            apex_core::PlatformId::Admob,
+            "u1",
+            ChangeKind::EcpmSet {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u1".into(),
+                ecpm: 1,
+            },
+            "k",
+            "p",
+        ))
+        .expect("append");
+        assert!(change_bucket(&l, 0).is_none());
     }
 
     #[tokio::test]
