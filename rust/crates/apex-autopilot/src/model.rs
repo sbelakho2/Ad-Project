@@ -92,7 +92,19 @@ pub struct AutopilotPolicy {
     pub code_version_hash: String,
     /// Refuse every write while any Critical audit result exists.
     pub blackout_on_critical_findings: bool,
+    /// Hold every proposal for explicit approval: run the gates and report the
+    /// proposal, but write nothing. On by default for a customer's first 30
+    /// days (see [`AutopilotPolicy::approval_required`]).
+    #[serde(default)]
+    pub approval_mode: bool,
+    /// When the publisher onboarded, in unix milliseconds. Approval mode is
+    /// forced on for the first [`APPROVAL_WINDOW_MS`] after this.
+    #[serde(default)]
+    pub onboarding_unix_ms: Option<i64>,
 }
+
+/// How long a new publisher runs in approval mode by default.
+pub const APPROVAL_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 fn default_rate_bp() -> u16 {
     2_000
@@ -118,6 +130,20 @@ impl AutopilotPolicy {
             rate_bp: 2_000,
             code_version_hash: default_code_version_hash(),
             blackout_on_critical_findings: true,
+            approval_mode: false,
+            onboarding_unix_ms: None,
+        }
+    }
+
+    /// Whether a proposal must be held for approval at `now_unix_ms`: explicit
+    /// approval mode, or a publisher within the first 30 days of onboarding.
+    pub fn approval_required(&self, now_unix_ms: i64) -> bool {
+        if self.approval_mode {
+            return true;
+        }
+        match self.onboarding_unix_ms {
+            Some(start) => now_unix_ms.saturating_sub(start) < APPROVAL_WINDOW_MS,
+            None => false,
         }
     }
 
@@ -148,6 +174,10 @@ pub enum ActionOutcome {
         change_seq: u64,
         reason: String,
     },
+    /// Approval mode is on: the change is proposed but nothing was written.
+    AwaitingApproval {
+        idempotency_key: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +186,9 @@ pub struct CycleOutcome {
     pub outcomes: Vec<ActionOutcome>,
     pub applied: u32,
     pub skipped: u32,
+    /// Proposals held for explicit approval (approval mode).
+    #[serde(default)]
+    pub awaiting_approval: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -645,6 +645,53 @@ async fn successful_run_records_prereg_change_and_experiment() {
 }
 
 #[tokio::test]
+async fn approval_mode_holds_proposals_without_writing() {
+    let ops = crate::ops::RecordingOps::new();
+    let mut l = ledger();
+    let policy = AutopilotPolicy {
+        approval_mode: true,
+        ..AutopilotPolicy::conservative()
+    };
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &policy,
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert_eq!(outcome.applied, 0);
+    assert_eq!(outcome.awaiting_approval, 1);
+    assert_eq!(
+        outcome.outcomes,
+        vec![ActionOutcome::AwaitingApproval {
+            idempotency_key: "max-floor:u1:EE:2.5".into(),
+        }]
+    );
+    assert!(l.is_empty(), "approval mode writes nothing");
+    let writes = ops
+        .call_log()
+        .iter()
+        .filter(|e| e.starts_with("apply:") || e.starts_with("start:"))
+        .count();
+    assert_eq!(writes, 0, "approval mode costs zero platform writes");
+}
+
+#[test]
+fn a_new_publisher_is_in_approval_mode_for_thirty_days() {
+    let policy = AutopilotPolicy {
+        onboarding_unix_ms: Some(NOW),
+        ..AutopilotPolicy::conservative()
+    };
+    assert!(policy.approval_required(NOW));
+    assert!(policy.approval_required(NOW + 29 * 86_400_000));
+    assert!(!policy.approval_required(NOW + 31 * 86_400_000));
+    assert!(!AutopilotPolicy::conservative().approval_required(NOW));
+}
+
+#[tokio::test]
 async fn pre_registration_is_signed_before_the_platform_call() {
     // The registration is in the ledger even though the platform call fails:
     // it is written first, and a failed start cannot retract it. The split is
@@ -970,7 +1017,8 @@ async fn empty_proposals_produce_an_empty_cycle() {
         crate::model::CycleOutcome {
             outcomes: vec![],
             applied: 0,
-            skipped: 0
+            skipped: 0,
+            awaiting_approval: 0
         }
     );
 }

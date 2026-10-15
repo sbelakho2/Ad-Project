@@ -12,6 +12,7 @@ use std::sync::Arc;
 use apex_lift::guardrails::FillFormat;
 use apex_proof::{LedgerLog, LedgerRecord};
 
+use crate::alerts::{Alert, AlertSink, NoopAlertSink};
 use crate::model::{AutopilotPolicy, PlanError, SettleOutcome};
 use crate::ops::PlatformOps;
 use crate::settle::settle_experiment;
@@ -34,6 +35,7 @@ pub struct Runner {
     ops: Arc<dyn PlatformOps>,
     policy: AutopilotPolicy,
     fill_format: FillFormat,
+    alerts: Arc<dyn AlertSink>,
 }
 
 impl std::fmt::Debug for Runner {
@@ -54,7 +56,15 @@ impl Runner {
             ops,
             policy,
             fill_format,
+            alerts: Arc::new(NoopAlertSink),
         }
+    }
+
+    /// Attach the alert sink that receives customer-impact alerts.
+    #[must_use]
+    pub fn with_alerts(mut self, alerts: Arc<dyn AlertSink>) -> Self {
+        self.alerts = alerts;
+        self
     }
 
     /// One daily pass: pull reporting for every running experiment, record the
@@ -66,11 +76,14 @@ impl Runner {
     ) -> Result<DailyReport, PlanError> {
         let mut report = DailyReport::default();
         for experiment in running_experiments(ledger) {
-            let days = self
-                .ops
-                .experiment_days(&experiment.experiment_id)
-                .await
-                .map_err(|source| PlanError::ApplyFailed { source })?;
+            let days = match self.ops.experiment_days(&experiment.experiment_id).await {
+                Ok(days) => days,
+                Err(source) => {
+                    self.alert_pull_failure(&experiment.experiment_id, &source)
+                        .await;
+                    return Err(PlanError::ApplyFailed { source });
+                }
+            };
             let rows = apex_lift::emit::day_rows(&days.control, &days.test);
             let day = days
                 .control
@@ -93,7 +106,7 @@ impl Runner {
             report.pulled += 1;
 
             let settings_changed = self.settings_changed(&experiment).await;
-            let outcome = settle_experiment(
+            let outcome = match settle_experiment(
                 self.ops.as_ref(),
                 ledger,
                 &experiment.experiment_id,
@@ -102,10 +115,34 @@ impl Runner {
                 &settings_changed,
                 now_unix_ms,
             )
-            .await?;
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(PlanError::RollbackFailed { reason }) => {
+                    self.alerts
+                        .emit(Alert::FailedRollback {
+                            experiment_id: experiment.experiment_id.clone(),
+                            detail: reason.clone(),
+                        })
+                        .await;
+                    return Err(PlanError::RollbackFailed { reason });
+                }
+                Err(other) => return Err(other),
+            };
             // A pending window is not a settlement; everything else is.
             if let SettleOutcome::Pending { .. } = &outcome {
                 continue;
+            }
+            match &outcome {
+                SettleOutcome::RolledBack { reason, .. } | SettleOutcome::Voided { reason } => {
+                    self.alerts
+                        .emit(Alert::GuardrailStop {
+                            experiment_id: experiment.experiment_id.clone(),
+                            detail: reason.clone(),
+                        })
+                        .await;
+                }
+                _ => {}
             }
             report.settled += 1;
             report
@@ -118,6 +155,22 @@ impl Runner {
     /// The policy this runner applies (exposed so callers can pin it in logs).
     pub fn policy(&self) -> &AutopilotPolicy {
         &self.policy
+    }
+
+    /// Emit the right alert for a failed daily pull: an expired token when the
+    /// platform refused the call on auth, otherwise a reporting failure.
+    async fn alert_pull_failure(&self, experiment_id: &str, source: &apex_core::PlatformError) {
+        let alert = match source {
+            apex_core::PlatformError::Auth { platform, .. } => Alert::ExpiredToken {
+                platform: platform.as_str().to_string(),
+                detail: format!("daily pull for {experiment_id} was refused on auth"),
+            },
+            other => Alert::PullFailure {
+                experiment_id: experiment_id.to_string(),
+                detail: other.to_string(),
+            },
+        };
+        self.alerts.emit(alert).await;
     }
 
     /// The scopes whose current settings differ from what the test
@@ -594,6 +647,95 @@ mod tests {
             .filter(|entry| entry.starts_with("deprecate:"))
             .count();
         assert_eq!(deprecated, 1, "a publisher edit deprecates the test");
+    }
+
+    #[tokio::test]
+    async fn a_guardrail_stop_alerts_the_customer() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        // Negative lift trips the fast-harm guardrail and rolls the test back.
+        ops.put_experiment_days("exp-1", constant_days(4_000_000, 3_600_000));
+        let alerts = Arc::new(crate::alerts::RecordingAlertSink::new());
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner =
+            Runner::new(ops.clone(), policy(), FillFormat::Rewarded).with_alerts(alerts.clone());
+        runner.run_daily(&mut l, NOW + 1).await.expect("daily");
+        let emitted = alerts.alerts();
+        assert_eq!(emitted.len(), 1, "{emitted:?}");
+        assert!(
+            matches!(emitted[0], Alert::GuardrailStop { .. }),
+            "{emitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_pull_alerts_the_customer() {
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-1".into())]);
+        ops.put_experiment(
+            "exp-1",
+            ExperimentResult {
+                experiment_id: "exp-1".into(),
+                state: ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        // No scripted days: the pull fails.
+        let alerts = Arc::new(crate::alerts::RecordingAlertSink::new());
+        let mut l = ledger();
+        run_cycle(
+            ops.as_ref(),
+            &mut l,
+            &policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: floor_action(),
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            NOW,
+        )
+        .await
+        .expect("cycle");
+        let runner =
+            Runner::new(ops.clone(), policy(), FillFormat::Rewarded).with_alerts(alerts.clone());
+        assert!(runner.run_daily(&mut l, NOW + 1).await.is_err());
+        assert!(matches!(
+            alerts.alerts().as_slice(),
+            [Alert::PullFailure { .. }]
+        ));
     }
 
     #[tokio::test]

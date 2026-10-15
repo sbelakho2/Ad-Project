@@ -229,6 +229,7 @@ pub async fn run_cycle(
     let mut outcomes = Vec::with_capacity(proposals.len());
     let mut applied_this_cycle: u32 = 0;
     let mut skipped_this_cycle: u32 = 0;
+    let mut awaiting_approval: u32 = 0;
 
     for proposal in proposals {
         if applied_today >= policy.max_actions_per_day {
@@ -264,6 +265,16 @@ pub async fn run_cycle(
             return Err(PlanError::EndpointNotWritable {
                 operation: operation.to_string(),
             });
+        }
+
+        // Approval mode: report the proposal and stop before any write or
+        // pre-registration. On for a customer's first 30 days.
+        if policy.approval_required(now_unix_ms) {
+            awaiting_approval += 1;
+            outcomes.push(ActionOutcome::AwaitingApproval {
+                idempotency_key: key,
+            });
+            continue;
         }
 
         // 1. Pre-registration, signed into the ledger before the first
@@ -405,5 +416,6 @@ pub async fn run_cycle(
         outcomes,
         applied: applied_this_cycle,
         skipped: skipped_this_cycle,
+        awaiting_approval,
     })
 }

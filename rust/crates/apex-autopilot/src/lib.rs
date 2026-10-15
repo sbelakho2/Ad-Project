@@ -19,6 +19,7 @@
     )
 )]
 
+pub mod alerts;
 pub mod calendar;
 pub mod keys;
 pub mod live_max;
@@ -28,6 +29,7 @@ pub mod plan;
 pub mod runner;
 pub mod settle;
 
+pub use alerts::{Alert, AlertSink, NoopAlertSink, RecordingAlertSink};
 pub use keys::{experiment_name, idempotency_key, platform_of};
 pub use model::{
     Action, ActionOutcome, AutopilotPolicy, CycleOutcome, PlanError, Proposal, SettleOutcome,
