@@ -1138,13 +1138,16 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
 }
 
 async fn seed_report_days(store: &Arc<MemoryStore>) {
-    let yesterday = apex_analytics::UtcMillis::from_unix_millis(
-        apex_analytics::UtcMillis::system_now()
-            .expect("clock")
-            .unix_millis()
-            - 86_400_000,
-    )
-    .to_day_string();
+    let now_ms = apex_analytics::UtcMillis::system_now()
+        .expect("clock")
+        .unix_millis();
+    let yesterday =
+        apex_analytics::UtcMillis::from_unix_millis(now_ms - 86_400_000).to_day_string();
+    // The stale source sits exactly ten days behind the as-of day, so the
+    // oldest-gap assertion stays true on every calendar day (a fixed date
+    // would drift one day per day).
+    let stale_day =
+        apex_analytics::UtcMillis::from_unix_millis(now_ms - 10 * 86_400_000).to_day_string();
     let rows = vec![
         ReportDayRow {
             publisher_id: PUBLISHER.to_string(),
@@ -1164,7 +1167,7 @@ async fn seed_report_days(store: &Arc<MemoryStore>) {
             publisher_id: PUBLISHER.to_string(),
             platform: "levelplay".to_string(),
             platform_account_id: "app-1".to_string(),
-            day: "2026-10-05".to_string(),
+            day: stale_day.clone(),
             finality: "final".to_string(),
             revenue_micros: Some(1_000_000),
             impressions: Some(2),

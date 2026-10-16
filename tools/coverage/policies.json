@@ -318,6 +318,10 @@
   {
    "glob": ".apex/**",
    "code": "DATA_ARTIFACT"
+  },
+  {
+   "glob": "*.patch",
+   "code": "DATA_ARTIFACT"
   }
  ],
  "exclusionCodes": [
