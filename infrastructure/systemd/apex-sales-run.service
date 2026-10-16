@@ -1,0 +1,23 @@
+[Unit]
+Description=Apex sales engine: import new free-audit leads, then send what is due
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+# State lives in .apex/sales under the state root unless APEX_SALES_DIR moves it.
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/sales.env
+# Free-audit requests from apex-api are imported first, so a publisher who
+# asked for the audit is never cold-emailed. The import is idempotent; a
+# missing leads file (no lead yet) does not stop the send pass.
+ExecStart=-/usr/local/bin/apex-sales import-leads ${APEX_SALES_LEADS_FILE}
+ExecStart=/usr/local/bin/apex-sales run
+# NoNewPrivileges blocks setgid queue helpers such as Postfix's postdrop, so
+# APEX_SALES_SENDMAIL must name an unprivileged sendmail-compatible client
+# (msmtp relaying to the authenticated outbound SMTP host).
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex

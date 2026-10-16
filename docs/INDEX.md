@@ -45,8 +45,9 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 
 ## 🤖 Sales Automation
 
-> **⚠️ Architecture Note (January 2026):** All sales automation work runs on the **Test Server** (157.90.126.205:4001) connected via **ApexTunnel (P2P Mesh)**.
-> The Control Plane on App Server uses a modularized controller architecture for orchestration.
+- **[Apex Sales Engine](./Internal/Sales/APEX_SALES_ENGINE.md)**: Current runbook for the owner-only outbound engine in `rust/crates/apex-sales`, which finds publishers and emails them.
+
+The entries below describe the removed TypeScript engine and its Test Server deployment; they are kept as history.
 
 - **[Autonomous Sales V2](./Internal/Sales/AUTONOMOUS_SALES_V2.md)**: Zero-cost outbound prospecting with Thompson Sampling, Spintax, and Naive Bayes classification. Runs on Test Server.
 - **[Autonomous Sales V2 Quick Ref](./Internal/Sales/AUTONOMOUS_SALES_V2_QUICK_REF.md)**: Quick reference for V2 operations.

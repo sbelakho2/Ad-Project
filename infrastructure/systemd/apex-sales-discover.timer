@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Apex sales evidence daily, ahead of the business day in Europe
+
+[Timer]
+OnCalendar=*-*-* 01:15:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

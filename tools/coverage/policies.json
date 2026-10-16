@@ -120,6 +120,13 @@
    ]
   },
   {
+   "id": "apex-sales",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-sales/**/*.rs"
+   ]
+  },
+  {
    "id": "docs",
    "kind": "docs",
    "include": [

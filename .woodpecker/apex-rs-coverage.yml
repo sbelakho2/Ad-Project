@@ -41,6 +41,8 @@ matrix:
       PKG: apex-notify
     - CRATE: apex-control
       PKG: apex-control
+    - CRATE: apex-sales
+      PKG: apex-sales
 
 steps:
   apex-rs-crate:

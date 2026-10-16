@@ -98,6 +98,26 @@ Current deployment layout for the no-SDK autopilot product:
   for the schedule-lag histogram; the runner records lag only when this
   variable or the `--scheduled-at` flag is supplied, because systemd's
   specifier set has no timer-fire-time specifier to pass through `ExecStart`.
+- `systemd/apex-sales-*.service` and `*.timer`: the owner-only outbound
+  sales engine (`rust/crates/apex-sales`, runbook in
+  `docs/Internal/Sales/APEX_SALES_ENGINE.md`). It is an internal tool for
+  finding publishers and emailing them; customers never see it.
+  `apex-sales-discover.timer` refreshes public `app-ads.txt` and App Store
+  evidence at 01:15 UTC; `apex-sales-run.timer` runs hourly, imports new
+  free-audit requests from the apex-api leads file, then sends what is due
+  in each contact's local business hours. Both read `/etc/apex/sales.env`:
+  `APEX_SALES_MODE` (`off`, `shadow`, `approval`, `autonomous`; default
+  `shadow`, which writes previews to `.apex/sales/outbox` and sends nothing),
+  `APEX_SALES_FROM`, `APEX_SALES_FROM_NAME`, `APEX_SALES_COMPANY`,
+  `APEX_SALES_ADDRESS` (all four required to send),
+  `APEX_SALES_UNSUBSCRIBE_URL`, `APEX_SALES_TOKEN_SALT`,
+  `APEX_SALES_LEADS_FILE` (the same path as apex-api's `APEX_LEADS_FILE`),
+  `APEX_SALES_SENDMAIL` (an unprivileged sendmail-compatible client such as
+  `/usr/bin/msmtp`; the units set `NoNewPrivileges`, which blocks Postfix's
+  setgid `postdrop`), `APEX_SALES_HOLDOUT`, `APEX_SALES_HOLDOUT_SALT`,
+  `APEX_SALES_EXPERIMENT`, `APEX_SALES_LEGAL_FILE`, `APEX_SALES_DAILY_MAX`,
+  `APEX_SALES_FETCH_DELAY_MS` and `APEX_SALES_DIR` (default `.apex/sales`).
+  The host needs `curl` for discovery.
 - `woodpecker/`: the self-hosted CI server and agent.
 
 Build and roll out:
@@ -108,6 +128,7 @@ install -m 0755 target/release/apex-api /usr/local/bin/apex-api
 install -m 0755 target/release/apex-control /usr/local/bin/apex-control
 install -m 0755 target/release/apex-ingest /usr/local/bin/apex-ingest
 install -m 0755 target/release/apex-runner /usr/local/bin/apex-runner
+install -m 0755 target/release/apex-sales /usr/local/bin/apex-sales
 install -d -o caddy -g caddy /var/log/caddy
 install -d -o apex -g apex /var/lib/apex/.apex/analytics-spool /var/lib/apex/.apex/control
 install -d -o apex -g apex -m 0755 /var/lib/node_exporter/textfile
@@ -119,8 +140,11 @@ install -m 0644 infrastructure/systemd/apex-runner-daily.service /etc/systemd/sy
 install -m 0644 infrastructure/systemd/apex-runner-daily.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-runner-monthly.service /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-runner-monthly.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-sales-run.service infrastructure/systemd/apex-sales-run.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-sales-discover.service infrastructure/systemd/apex-sales-discover.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now apex-ingest.timer apex-runner-daily.timer apex-runner-monthly.timer
+systemctl enable --now apex-sales-discover.timer apex-sales-run.timer   # starts in shadow mode
 systemctl restart apex-api apex-control
 cd monitoring && envsubst < alertmanager.yml > alertmanager.generated.yml
 docker compose up -d

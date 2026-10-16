@@ -136,6 +136,29 @@
     "apex-notify": 88
    },
    "__note": "apex-ui floor 98 (measured 98.19 lines / 98.33 functions); apex-analytics floor 86 (measured 93.42 lines / 86.35 functions); apex-control floor 74 (measured 84.38 lines / 74.86 functions). Registered with the UI/UX application program.; apex-metrics floor 94 (measured 94.28 lines / 94.99 functions); apex-notify floor 93 (measured 93.70 lines / 95.57 functions); corrected to rust 1.88 (CI toolchain) measurements: apex-analytics floor 82 (measured 92.30 lines / 82.31 functions), apex-notify floor 88 (95.69 lines / 88.27 functions), apex-ui 98 (98.39/98.97), apex-metrics 94 (94.05/97.12), apex-control 74 (84.61/75.60)"
+  },
+  {
+   "at": "2026-10-16",
+   "orphanFloorPercent": 0,
+   "mutationKillFloorPercent": 100,
+   "domains": {
+    "apex-core": 95,
+    "apex-connectors": 80,
+    "apex-audit": 99,
+    "apex-autopilot": 84,
+    "apex-proof": 91,
+    "apex-billing": 90,
+    "apex-api": 83,
+    "apex-tools": 54,
+    "apex-lift": 96,
+    "apex-ui": 98,
+    "apex-analytics": 82,
+    "apex-control": 74,
+    "apex-metrics": 94,
+    "apex-notify": 88,
+    "apex-sales": 85
+   },
+   "__note": "apex-sales added (owner-only outbound sales engine). Measured with rustc 1.97 instrument-coverage over the crate's 100 unit tests: 97.65 lines / 97.82 functions, the 0% binary entry point included. Floor 85 leaves room for the rust 1.88 CI toolchain, which has measured up to 7 points lower on functions for other crates; raise it to the first CI measurement."
   }
  ],
  "domains": {
@@ -152,6 +175,7 @@
   "apex-analytics": 82,
   "apex-control": 74,
   "apex-metrics": 94,
-  "apex-notify": 88
+  "apex-notify": 88,
+  "apex-sales": 85
  }
 }

@@ -1,0 +1,18 @@
+[Unit]
+Description=Apex sales engine: refresh app-ads.txt and App Store evidence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/sales.env
+# Fetches only public pages over HTTPS through the system curl, one publisher
+# at a time with APEX_SALES_FETCH_DELAY_MS between requests; evidence older
+# than 30 days is refreshed.
+ExecStart=/usr/local/bin/apex-sales discover --limit 300
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex

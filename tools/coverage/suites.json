@@ -84,6 +84,12 @@
    "covers": [
     "rust/crates/apex-notify/**/*.rs"
    ]
+  },
+  {
+   "id": "apex-sales-unit",
+   "covers": [
+    "rust/crates/apex-sales/**/*.rs"
+   ]
   }
  ]
 }

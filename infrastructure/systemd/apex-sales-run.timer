@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Apex sales engine hourly (sends land in each contact's local business hours)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -22,6 +22,18 @@ env_file = "/etc/apex/ingest.env"
 unit = "infrastructure/systemd/apex-ingest.service"
 timer = "infrastructure/systemd/apex-ingest.timer"
 
+[sales]
+# Owner-only outbound engine; never exposed to customers.
+service = "apex-sales"
+schedule = "hourly"
+discover_schedule = "daily 01:15 UTC"
+state = ".apex/sales"
+env_file = "/etc/apex/sales.env"
+unit = "infrastructure/systemd/apex-sales-run.service"
+timer = "infrastructure/systemd/apex-sales-run.timer"
+discover_unit = "infrastructure/systemd/apex-sales-discover.service"
+discover_timer = "infrastructure/systemd/apex-sales-discover.timer"
+
 [site]
 build = "zola build"
 root = "/srv/site/public"

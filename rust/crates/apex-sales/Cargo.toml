@@ -1,0 +1,18 @@
+[package]
+name = "apex-sales"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Owner-only outbound engine: finds app publishers, scores them and emails them. Never shipped to customers."
+
+[[bin]]
+name = "apex-sales"
+path = "src/bin/apex-sales.rs"
+
+[lints]
+workspace = true
+
+# Deliberately dependency-free: std only. The engine's statistics, JSON and
+# randomness are implemented and tested in-crate.
+[dependencies]

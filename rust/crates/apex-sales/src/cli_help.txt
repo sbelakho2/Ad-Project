@@ -1,0 +1,26 @@
+apex-sales: ApexMediation's outbound sales engine
+
+usage: apex-sales <command> [arguments]
+
+  import-seeds <seeds.csv>   add publishers and contacts from a seed list
+                             (domain,name,country,app_store_ids,email,contact_name,role)
+  import-leads <leads.jsonl> add the free-audit requests written by apex-api
+  discover [--limit N]       fetch app-ads.txt and App Store data (default 50 publishers)
+  plan                       show today's plan and every gate reason
+  run                        plan and send what is due; schedule hourly
+  approve <touch-id>         approve a planned touch (approval mode)
+  ingest <message.eml>       classify a reply or bounce and record it
+  record <target> <outcome> [note]
+                             record an outcome for an email or publisher:
+                             audit_requested, connected, paid, complaint,
+                             unsubscribe, hard_bounce, reply:positive, ...
+  suppress <target>          never contact an email or publisher again
+  reset-health               reset the sending domain after an investigation
+  report                     scores, messages, funnel, health, calibration and
+                             the measured effect of outreach
+  simulate [--publishers N] [--days D] [--seed S]
+                             run the engine and a naive baseline on a synthetic market
+
+Configuration is read from APEX_SALES_* environment variables; see the
+crate documentation. The default mode is shadow: nothing is sent until
+APEX_SALES_MODE is approval or autonomous.
