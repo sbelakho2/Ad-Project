@@ -1,0 +1,26 @@
+[package]
+name = "apex-sales-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The owner-only web UI for the apex-sales engine: Axum server-rendered HTML, zero JavaScript, one global stylesheet."
+
+[lints]
+workspace = true
+
+[dependencies]
+apex-metrics = { path = "../apex-metrics" }
+apex-sales = { path = "../apex-sales" }
+apex-ui = { path = "../apex-ui" }
+axum = "0.8"
+hex = "0.4"
+rand = "0.8"
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }

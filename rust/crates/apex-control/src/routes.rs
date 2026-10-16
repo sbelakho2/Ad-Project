@@ -53,6 +53,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/control/access", get(access))
         .route("/favicon.ico", get(crate::favicon::ico))
         .route("/favicon.svg", get(crate::favicon::svg))
+        .route("/assets/fonts/{name}", get(crate::fonts::font))
         .route("/control/login", get(login_form).post(login_submit))
         .route(
             "/control/login/code",

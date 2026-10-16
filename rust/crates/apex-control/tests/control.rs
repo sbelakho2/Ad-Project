@@ -1432,6 +1432,27 @@ async fn fixture_pages_scale_percentages_exactly_once() {
 }
 
 #[tokio::test]
+async fn font_assets_are_served_from_the_router() {
+    let harness = harness();
+    let app = app(&harness);
+    for name in apex_ui::fonts::FONT_NAMES {
+        // The stylesheet URLs carry the extension; that is the request the
+        // browser actually makes, so the route must answer it.
+        let (status, body) = get(&app, &format!("/assets/fonts/{name}.woff2"), None).await;
+        assert_eq!(status, StatusCode::OK, "{name}.woff2");
+        assert!(
+            body.starts_with("wOF2"),
+            "{name}.woff2 lacks the WOFF2 magic"
+        );
+        let (status, _) = get(&app, &format!("/assets/fonts/{name}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{name} (bare stem)");
+    }
+    let (status, body) = get(&app, "/assets/fonts/manrope-999", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.is_empty(), "asset 404 carries no body");
+}
+
+#[tokio::test]
 async fn unknown_action_routes_and_objects_are_404_pages() {
     let harness = harness();
     let app = app(&harness);
@@ -1477,4 +1498,23 @@ async fn a_configured_but_invalid_operator_file_refuses_startup() {
     let error = ControlState::new(config, ControlData::fixtures()).expect_err("refused");
     assert!(matches!(error, StateError::Config(_)));
     let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn the_hash_password_entry_point_mints_a_verifiable_operator_hash() {
+    // The binary path is exercised through the library entry point (no
+    // process spawn): one password line in, one PHC string out.
+    let mut output = Vec::new();
+    apex_control::cli::hash_password_line(
+        &mut std::io::Cursor::new("operator-password\n"),
+        &mut output,
+    )
+    .expect("hash");
+    let phc = String::from_utf8(output).expect("utf8");
+    assert_eq!(phc.matches('\n').count(), 1);
+    let phc = phc.trim_end();
+    assert!(apex_control::passwords::phc_is_argon2id(phc).is_ok());
+    assert!(apex_control::passwords::verify("operator-password", phc));
+    assert!(!apex_control::passwords::verify("some-other-password", phc));
+    assert!(!phc.contains("operator-password"));
 }

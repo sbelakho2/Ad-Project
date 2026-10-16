@@ -6,7 +6,6 @@
 //! outline or shadow.
 
 use crate::escape::attr;
-use crate::tokens::FONT_SANS;
 
 /// The three master path definitions of the mark, in drawing order.
 pub const MARK_PATHS: [&str; 3] = [
@@ -31,22 +30,26 @@ pub fn mark(height_px: u32, fill: &str) -> String {
     )
 }
 
-/// The mark plus the `Apex` wordmark. The word uses [`FONT_SANS`] at weight
-/// 800 with -0.02em tracking and a font size of 1.375 times the mark height.
+/// The mark plus the `Apex` wordmark. The word is styled entirely by the
+/// shared stylesheet (`.lockup-word`: `FONT_SANS` at weight 800 with -0.02em
+/// tracking); no inline style is emitted. The two design word sizes are the
+/// 28px rail size for the 20px mark and the 44px size for the 32px mark and
+/// above (`.lockup-word-lg`).
 pub fn lockup(fill: &str, height_px: u32) -> String {
-    let font_size = (u64::from(height_px) * 11 + 4) / 8;
+    let size_class = if height_px >= 26 {
+        " lockup-word-lg"
+    } else {
+        ""
+    };
     format!(
-        "<span class=\"lockup\">{}<span class=\"lockup-word\" \
-         style=\"font-family:{};font-weight:800;letter-spacing:-0.02em;font-size:{font_size}px\">Apex</span></span>",
-        mark(height_px, fill),
-        attr(FONT_SANS)
+        "<span class=\"lockup\">{}<span class=\"lockup-word{size_class}\">Apex</span></span>",
+        mark(height_px, fill)
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::escape::html_escape;
 
     #[test]
     fn master_geometry_is_exact() {
@@ -80,16 +83,21 @@ mod tests {
     }
 
     #[test]
-    fn lockup_renders_wordmark_with_frozen_typography() {
+    fn lockup_renders_wordmark_through_the_stylesheet() {
         let html = lockup("#182c31", 32);
         assert!(html.contains("<span class=\"lockup\">"));
-        assert!(html.contains("class=\"lockup-word\""));
-        assert!(html.contains(">Apex</span>"));
-        assert!(html.contains("font-weight:800"));
-        assert!(html.contains("letter-spacing:-0.02em"));
-        assert!(html.contains("font-size:44px"));
-        assert!(html.contains(html_escape(FONT_SANS).as_str()) || html.contains("Manrope"));
+        assert!(html.contains("class=\"lockup-word lockup-word-lg\">Apex</span>"));
+        assert!(
+            !html.contains("style="),
+            "the lockup must not inline styles"
+        );
         let twenty = lockup("#ffffff", 20);
-        assert!(twenty.contains("font-size:28px"));
+        assert!(twenty.contains("class=\"lockup-word\">Apex</span>"));
+        assert!(!twenty.contains("lockup-word-lg"));
+        assert!(!twenty.contains("style="));
+        // The typography lives in the shared stylesheet, not in the fragment.
+        let css = crate::tokens::console_css();
+        assert!(css.contains(".lockup-word{"));
+        assert!(css.contains(".lockup-word-lg{font-size:44px}"));
     }
 }

@@ -1,0 +1,21 @@
+[Unit]
+Description=Apex sales workspace (owner-only web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=apex
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/sales-web.env
+ExecStart=/usr/local/bin/apex-sales-web
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+# /var/lib/node_exporter/textfile is APEX_METRICS_TEXTFILE's directory.
+# The sales store is read-mostly, but the workspace's approve/suppress/
+# record/reset-health actions write events and approvals into .apex/sales.
+ReadWritePaths=/var/lib/apex/.apex/sales /var/lib/node_exporter/textfile
+
+[Install]
+WantedBy=multi-user.target

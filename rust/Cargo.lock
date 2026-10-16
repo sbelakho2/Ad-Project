@@ -249,6 +249,23 @@ name = "apex-sales"
 version = "0.1.0"
 
 [[package]]
+name = "apex-sales-web"
+version = "0.1.0"
+dependencies = [
+ "apex-metrics",
+ "apex-sales",
+ "apex-ui",
+ "axum",
+ "hex",
+ "rand 0.8.8",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "apex-tools"
 version = "0.1.0"
 dependencies = [

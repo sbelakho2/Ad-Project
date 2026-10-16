@@ -1,4 +1,4 @@
-.PHONY: test fmt lint sync-floors dogfood clickhouse-dev clickhouse-stop
+.PHONY: test fmt lint sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop
 
 test:
 	cd rust && cargo test --workspace
@@ -49,3 +49,18 @@ dogfood:
 	cd rust && ./target/debug/apex-tools docs-lint --source --baseline tools/coverage/docs-lint-baseline.txt
 	cd rust && ./target/debug/apex-tools css-lint
 	cd rust && ./target/debug/apex-tools aggregate-verdict --report coverage-report.md
+	cd rust && ./target/debug/apex-tools dogfood-plan
+
+# The live half of the adversarial dogfooding system: boots apex-api,
+# apex-control and apex-sales-web against the ClickHouse dev server and runs
+# every required probe cell in tools/dogfood/surfaces.json (full contract in
+# tools/dogfood/README.md). Requires the clickhouse binary and the harness
+# binaries: cargo build -p apex-api -p apex-control -p apex-sales-web
+# -p apex-sales -p apex-autopilot -p apex-tools --bins.
+# --clickhouse-owned grants the harness the failure-injection ClickHouse
+# severance subprobe (it stops and restarts the server at --clickhouse-url);
+# run it against `make clickhouse-dev` or another server you are happy to see
+# managed for the duration of the run.
+dogfood-live:
+	@command -v clickhouse >/dev/null 2>&1 || { echo "dogfood-live: the clickhouse binary is required (start the dev server with 'make clickhouse-dev')"; exit 1; }
+	python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug

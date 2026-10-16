@@ -1,5 +1,12 @@
 //! `apex-control` binary: serve the operator control plane.
 //!
+//! Besides serving, the binary dispatches one clap-free operational
+//! subcommand before any configuration or listener is touched:
+//! `apex-control hash-password` reads one password line from stdin and
+//! prints exactly one argon2id PHC string for the `APEX_CONTROL_OPERATORS`
+//! file (see [`apex_control::cli`]); `apex-control --help` prints the
+//! usage. No argument serves the control plane.
+//!
 //! Configuration is the `APEX_CONTROL_*` namespace documented on
 //! [`apex_control::config`] plus `APEX_ENVIRONMENT` and the analytics store
 //! pair `APEX_CLICKHOUSE_HTTP` / `APEX_CLICKHOUSE_DB`. The binary never
@@ -36,6 +43,20 @@ use apex_control::state::ControlState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(command) = std::env::args().nth(1) {
+        match command.as_str() {
+            "hash-password" => return hash_password(),
+            "--help" | "-h" => {
+                print_usage(&mut std::io::stdout())?;
+                return Ok(());
+            }
+            other => {
+                eprintln!("apex-control: unknown command '{other}'");
+                print_usage(&mut std::io::stderr())?;
+                std::process::exit(2);
+            }
+        }
+    }
     // Operational log lines (tracing warn/error) must be visible in
     // production: initialize the stderr subscriber once, tolerating an
     // already-installed global subscriber.
@@ -91,6 +112,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     apex_control::telemetry::export_textfile(&metrics_registry);
     Ok(())
+}
+
+/// One password line on stdin, one argon2id PHC string on stdout (and nothing
+/// else); a blank password is a typed error with exit code 1. The password is
+/// never echoed.
+fn hash_password() -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match apex_control::cli::hash_password_line(&mut stdin.lock(), &mut stdout.lock()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            eprintln!("apex-control: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The clap-free usage text shared by `--help` and the unknown-command path.
+fn print_usage(out: &mut dyn std::io::Write) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "usage: apex-control [hash-password]\n\n  (no arguments)   serve the operator control plane (configuration via APEX_CONTROL_*)\n  hash-password    read one password line from stdin, print an argon2id PHC string\n  --help, -h       print this usage"
+    )
 }
 
 /// Resolve when the process is asked to stop (Ctrl-C, or SIGTERM on Unix),

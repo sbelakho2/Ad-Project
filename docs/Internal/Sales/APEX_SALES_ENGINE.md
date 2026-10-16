@@ -3,7 +3,10 @@
 Owner-only. This is the internal tool that finds mobile app publishers and
 emails them about ApexMediation's console autopilot. Customers never see it,
 and it is never offered or sold. Code: `rust/crates/apex-sales`. Units:
-`infrastructure/systemd/apex-sales-*.{service,timer}`.
+`infrastructure/systemd/apex-sales-*.{service,timer}`. The owner-only web
+workspace is a second crate, `rust/crates/apex-sales-web`, unit
+`infrastructure/systemd/apex-sales-web.service`; the Workspace UI section
+below is its runbook.
 
 It replaces the TypeScript prospecting engine that used to live under
 `control-plane/src/services/discovery/`. The other documents in this folder
@@ -113,6 +116,87 @@ Sending needs `APEX_SALES_FROM`, `APEX_SALES_FROM_NAME`,
 unprivileged client such as `msmtp` relaying through the authenticated
 outbound host, with `SPF`, `DKIM` and `DMARC` aligned for the sending
 domain. Discovery needs `curl` on the host.
+
+## Workspace UI
+
+The owner-only workspace is `apex-sales-web` (code:
+`rust/crates/apex-sales-web`; unit:
+`infrastructure/systemd/apex-sales-web.service`). It serves
+`http://127.0.0.1:8795` by default and is never exposed to customers. The
+pages render the engine's own state with the engine's own configuration. The
+UI initiates no sends; it mirrors and gates what the runner would do.
+
+| Route | Page |
+|---|---|
+| `GET /` | Overview: funnel KPIs, the daily send chart and the next steps |
+| `GET /leads` | Leads with filters; `GET /leads/export.csv` is the same filtered view as a CSV attachment |
+| `GET /publishers/{domain}` | One publisher: contacts, evidence, event timeline and the suppress/record forms |
+| `GET /plan` | The engine's plan for today, every gate reason, and the approve forms |
+| `GET /sends` | Send history and the outbox listing; `GET /sends/preview/{file}` renders one `.eml` preview |
+| `GET /replies` | Inbound replies with their classification and pre-selected actions |
+| `GET /domains` | Domain health, warm-up, rate tests and the reset-health confirmation |
+| `GET /models` | Posteriors, calibration and arm performance |
+| `GET /assets/apex.css` | The one stylesheet, described below |
+| `GET /assets/fonts/{name}` | The self-hosted WOFF2 faces; unknown names are a plain 404 |
+| `GET /favicon.ico`, `GET /favicon.svg` | The committed icons |
+| `GET /login` | The sign-in form; `POST /login` verifies the owner token |
+| `POST /logout` | Closes the session after the CSRF check |
+| `POST /actions/{kind}` | `approve`, `suppress`, `record` and `reset-health`; `GET /actions/result/{id}` is the stable result page |
+| `GET /healthz` | A JSON liveness answer |
+
+### Owner gate, sessions and CSRF
+
+`APEX_SALES_WEB_TOKEN` is the owner token and is required. With it unset the
+service starts in its fail-closed not-configured state: every page explains
+the requirement (HTTP 503) and no session can be minted.
+`APEX_SALES_WEB_BIND` selects the listen address (default
+`127.0.0.1:8795`); keep it loopback-only. `APEX_SALES_DIR` (default
+`.apex/sales`) names the store every page reads.
+
+A session opens only after the token verifies in constant time. The
+`apex_sales_session` cookie is opaque, host-only, `HttpOnly`, `SameSite=Lax`
+and scoped to `/`, and it gains `Secure` when `X-Forwarded-Proto: https`
+arrives. A session lives 8 hours absolutely and expires after 60 idle
+minutes, and the store is in memory only, so a restart signs every browser
+out. Each mutating form carries the per-session CSRF token; a mismatch
+answers 400 and writes nothing. Each mutation also carries a one-time
+idempotency key: a replayed form answers the remembered result page, and a
+reused key with a different payload answers 409.
+
+### The look: one stylesheet, self-hosted fonts
+
+Every page links exactly one stylesheet, `GET /assets/apex.css`, which
+answers the design system's own `console_css` bytes (`apex-ui` tokens). Fonts
+are the committed WOFF2 faces served with an immutable one-year cache. Pages
+carry no inline styles and no scripts; the render tests assert the single
+link and the absence of style blocks.
+
+### Modes on `/plan`
+
+`/plan` renders the same plan the CLI prints: ranked touches with expected
+value and send hour, the denied targets with every gate reason, and the
+recent decisions log. The banner states the active mode:
+
+- `shadow`: nothing is sent; the runner turns the gate's touches into `.eml`
+  previews in the outbox.
+- `approval`: a touch with the approval verdict waits for the owner.
+  Approving writes the same durable approval the CLI's `approve` writes, and
+  the runner then sends on its schedule.
+- `autonomous`: the gate decides and the runner sends on its schedule.
+- `off`: the kill switch; nothing is planned or sent through the web surface
+  and inbound processing continues in the CLI.
+
+### Safety posture
+
+The four mutations are gated and mirror their CLI equivalents exactly:
+`approve`, `suppress` (with the same implied outcome events), `record`, and
+`reset-health` behind its exact confirmation phrase. Nothing in the UI
+initiates a send: the runner remains the only sender, on its timer, reading
+the same store. While signed out every protected page answers 401 with the
+sign-in surface, and unknown paths or hostile domains are a neutral 404 that
+reflects nothing back. Metrics carry no public route: with
+`APEX_METRICS_TEXTFILE` set the bounded route-template series are written
+atomically every 15 seconds and once more on shutdown.
 
 ## Limits
 

@@ -30,6 +30,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "perf-budget",
     "console-a11y",
     "docs-lint",
+    "dogfood-plan",
 ];
 
 pub mod a11y;
@@ -42,6 +43,7 @@ pub mod csslint;
 pub mod docs_lint;
 pub mod docslinks;
 pub mod dogfood;
+pub mod dogfood_plan;
 pub mod glob;
 pub mod inventory;
 pub mod mutation;

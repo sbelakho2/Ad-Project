@@ -90,6 +90,12 @@
    "covers": [
     "rust/crates/apex-sales/**/*.rs"
    ]
+  },
+  {
+   "id": "apex-sales-web-unit",
+   "covers": [
+    "rust/crates/apex-sales-web/**/*.rs"
+   ]
   }
  ]
 }

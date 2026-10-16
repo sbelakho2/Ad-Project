@@ -40,6 +40,17 @@ impl ChartColor {
             ChartColor::Ink => tokens::INK,
         }
     }
+
+    /// The stylesheet class carrying the series color as a background for
+    /// the legend swatch (`background:<the exact hex above>`), so the legend
+    /// stays free of inline styles.
+    pub(crate) fn swatch_class(&self) -> &'static str {
+        match self {
+            ChartColor::Control => "chart-swatch-control",
+            ChartColor::Test => "chart-swatch-test",
+            ChartColor::Ink => "chart-swatch-ink",
+        }
+    }
 }
 
 /// One chart series: a label, a color and one optional value per x label.
@@ -429,8 +440,8 @@ fn legend(series: &[ChartSeries]) -> String {
     for series in series {
         let _ = write!(
             out,
-            "<li class=\"chart-legend-item\"><span class=\"chart-legend-swatch\" style=\"background:{}\"></span>{}</li>",
-            series.color.hex(),
+            "<li class=\"chart-legend-item\"><span class=\"chart-legend-swatch {}\"></span>{}</li>",
+            series.color.swatch_class(),
             html_escape(&series.label)
         );
     }
@@ -612,6 +623,37 @@ mod tests {
         assert_eq!(ChartColor::Control.hex(), tokens::SECONDARY);
         assert_eq!(ChartColor::Test.hex(), tokens::COBALT);
         assert_eq!(ChartColor::Ink.hex(), tokens::INK);
+    }
+
+    #[test]
+    fn legend_swatches_use_stylesheet_classes_not_inline_styles() {
+        let html = line_chart(
+            &spec("Lift", &["a", "b"]),
+            &[
+                series("Control", ChartColor::Control, vec![Some(1.0), Some(2.0)]),
+                series("Test", ChartColor::Test, vec![Some(1.0), Some(2.0)]),
+            ],
+            0.0,
+            2.0,
+        );
+        assert!(html.contains("class=\"chart-legend-swatch chart-swatch-control\""));
+        assert!(html.contains("class=\"chart-legend-swatch chart-swatch-test\""));
+        assert!(
+            !html.contains("style="),
+            "the legend must not inline styles"
+        );
+        assert_eq!(ChartColor::Ink.swatch_class(), "chart-swatch-ink");
+        let css = tokens::console_css();
+        for class in [
+            "chart-swatch-control",
+            "chart-swatch-test",
+            "chart-swatch-ink",
+        ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "stylesheet carries no rule for .{class}"
+            );
+        }
     }
 
     #[test]

@@ -114,10 +114,32 @@ Current deployment layout for the no-SDK autopilot product:
   `APEX_SALES_LEADS_FILE` (the same path as apex-api's `APEX_LEADS_FILE`),
   `APEX_SALES_SENDMAIL` (an unprivileged sendmail-compatible client such as
   `/usr/bin/msmtp`; the units set `NoNewPrivileges`, which blocks Postfix's
-  setgid `postdrop`), `APEX_SALES_HOLDOUT`, `APEX_SALES_HOLDOUT_SALT`,
+  setgid `postdrop`),   `APEX_SALES_HOLDOUT`, `APEX_SALES_HOLDOUT_SALT`,
   `APEX_SALES_EXPERIMENT`, `APEX_SALES_LEGAL_FILE`, `APEX_SALES_DAILY_MAX`,
   `APEX_SALES_FETCH_DELAY_MS` and `APEX_SALES_DIR` (default `.apex/sales`).
   The host needs `curl` for discovery.
+- `systemd/apex-sales-web.service`: the owner-only sales workspace UI
+  (`rust/crates/apex-sales-web`), the runbook's "Workspace UI" section in
+  `docs/Internal/Sales/APEX_SALES_ENGINE.md`. It serves only
+  `127.0.0.1:8795` (default; never exposed to customers) and reads
+  `/etc/apex/sales-web.env`: `APEX_SALES_WEB_TOKEN` (the owner gate;
+  **required** — unset means the fail-closed not-configured state where
+  every page explains the requirement and no session can be minted),
+  `APEX_SALES_WEB_BIND` (default `127.0.0.1:8795`), `APEX_SALES_DIR`
+  (default `.apex/sales`; the pages read the store and the
+  approve/suppress/record/reset-health actions write events and approvals
+  into it), every `APEX_SALES_*` variable the engine reads (the service
+  hands the engine the same environment the CLI uses), and the optional
+  `APEX_METRICS_TEXTFILE` export file (for example
+  `/var/lib/node_exporter/textfile/apex-sales-web.prom`; the service
+  exports the bounded route-template series atomically every 15 seconds
+  with no `/metrics` route). The unit pins `WorkingDirectory=/var/lib/apex`,
+  so the relative defaults resolve under the state root, and its
+  `ReadWritePaths` cover `.apex/sales` and the textfile directory. Assets
+  are served by the service itself: `/assets/apex.css` is the shared
+  design-system stylesheet (the exact `console_css` bytes) and the fonts
+  are the self-hosted WOFF2 faces; the UI sends nothing on its own, it
+  only mirrors and gates the engine's plan.
 - `woodpecker/`: the self-hosted CI server and agent.
 
 Build and roll out:
@@ -129,6 +151,7 @@ install -m 0755 target/release/apex-control /usr/local/bin/apex-control
 install -m 0755 target/release/apex-ingest /usr/local/bin/apex-ingest
 install -m 0755 target/release/apex-runner /usr/local/bin/apex-runner
 install -m 0755 target/release/apex-sales /usr/local/bin/apex-sales
+install -m 0755 target/release/apex-sales-web /usr/local/bin/apex-sales-web
 install -d -o caddy -g caddy /var/log/caddy
 install -d -o apex -g apex /var/lib/apex/.apex/analytics-spool /var/lib/apex/.apex/control
 install -d -o apex -g apex -m 0755 /var/lib/node_exporter/textfile
@@ -142,9 +165,11 @@ install -m 0644 infrastructure/systemd/apex-runner-monthly.service /etc/systemd/
 install -m 0644 infrastructure/systemd/apex-runner-monthly.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sales-run.service infrastructure/systemd/apex-sales-run.timer /etc/systemd/system/
 install -m 0644 infrastructure/systemd/apex-sales-discover.service infrastructure/systemd/apex-sales-discover.timer /etc/systemd/system/
+install -m 0644 infrastructure/systemd/apex-sales-web.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now apex-ingest.timer apex-runner-daily.timer apex-runner-monthly.timer
 systemctl enable --now apex-sales-discover.timer apex-sales-run.timer   # starts in shadow mode
+systemctl enable --now apex-sales-web
 systemctl restart apex-api apex-control
 cd monitoring && envsubst < alertmanager.yml > alertmanager.generated.yml
 docker compose up -d

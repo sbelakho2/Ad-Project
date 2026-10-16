@@ -1,0 +1,1273 @@
+{
+  "probe_classes": [
+    "surface-parity",
+    "response-contract",
+    "no-inline",
+    "assets-fonts",
+    "auth-authority",
+    "input-corpus",
+    "csrf-idempotency",
+    "traversal",
+    "escaping",
+    "concurrency",
+    "failure-injection",
+    "differential-truth"
+  ],
+  "site": {
+    "pages_min": 39
+  },
+  "services": {
+    "apex-api": {
+      "routes": [
+        {
+          "path": "/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/audit",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/audit/export.csv",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/audit/findings/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/ledger",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/ledger/records/{seq}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/ledger/session/end",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/connections",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/connections/{platform}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/connections/{platform}/submit",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/connections/{platform}/rotate",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/connections/{platform}/disconnect",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/proposals",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/proposals/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/proposals/{id}/decision",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/experiments",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/experiments/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/experiments/{id}/incident",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/billing",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/billing/invoices/{period}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/settings",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/settings/theme",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/settings/access",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/settings/access/revoke",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/settings/policy",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/settings/monitoring",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/console/analytics",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/free-audit",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/free-audit/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/audit-requested/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/healthz",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.ico",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.svg",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/assets/fonts/{name}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/metrics",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/v1/audit/{platform}",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/v1/ledger/{publisher}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/v1/cycle/{publisher}",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/v1/adyen/webhook",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/v1/leads",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "fixture_pages": 60,
+      "required": [
+        {
+          "surface": "GET /",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /console",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "GET /console/",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "GET /console/audit",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus",
+            "differential-truth",
+            "escaping"
+          ]
+        },
+        {
+          "surface": "GET /console/audit/export.csv",
+          "classes": [
+            "response-contract",
+            "input-corpus",
+            "escaping",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /console/audit/findings/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /console/ledger",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "auth-authority",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "POST /console/ledger",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /console/ledger/records/{seq}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "POST /console/ledger/session/end",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /console/connections",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /console/connections/{platform}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "POST /console/connections/{platform}/submit",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /console/connections/{platform}/rotate",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /console/connections/{platform}/disconnect",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /console/proposals",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /console/proposals/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "POST /console/proposals/{id}/decision",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /console/experiments",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus"
+          ]
+        },
+        {
+          "surface": "GET /console/experiments/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /console/experiments/{id}/incident",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /console/billing",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /console/billing/invoices/{period}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /console/settings",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "POST /console/settings/theme",
+          "classes": [
+            "csrf-idempotency"
+          ]
+        },
+        {
+          "surface": "GET /console/settings/access",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "POST /console/settings/access/revoke",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /console/settings/policy",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /console/settings/monitoring",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /console/analytics",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /free-audit",
+          "classes": [
+            "response-contract",
+            "input-corpus"
+          ]
+        },
+        {
+          "surface": "POST /free-audit",
+          "classes": [
+            "csrf-idempotency",
+            "input-corpus",
+            "concurrency"
+          ]
+        },
+        {
+          "surface": "GET /free-audit/",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus"
+          ]
+        },
+        {
+          "surface": "GET /audit-requested/",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /healthz",
+          "classes": [
+            "response-contract",
+            "surface-parity",
+            "failure-injection"
+          ]
+        },
+        {
+          "surface": "GET /favicon.ico",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /favicon.svg",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /assets/fonts/{name}",
+          "classes": [
+            "assets-fonts",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /metrics",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "GET /v1/audit/{platform}",
+          "classes": [
+            "response-contract",
+            "traversal",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "POST /v1/audit/{platform}",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /v1/ledger/{publisher}",
+          "classes": [
+            "response-contract",
+            "auth-authority",
+            "traversal",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "POST /v1/cycle/{publisher}",
+          "classes": [
+            "csrf-idempotency",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "POST /v1/adyen/webhook",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /v1/leads",
+          "classes": [
+            "csrf-idempotency"
+          ]
+        }
+      ]
+    },
+    "apex-control": {
+      "routes": [
+        {
+          "path": "/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/customers",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/customers/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/ingestion",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/audits",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/experiments",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/experiments/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/incidents",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/incidents/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/finance",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/finance/invoices/{id}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/finance/exports/{register}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/growth",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/system",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/system/policies",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/access",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.ico",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.svg",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/assets/fonts/{name}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/control/login",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/control/login/code",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/control/logout",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/control/actions/{kind}",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/control/actions/{kind}/result/{id}",
+          "methods": [
+            "GET"
+          ]
+        }
+      ],
+      "fixture_pages": 56,
+      "required": [
+        {
+          "surface": "GET /",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "GET /control",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "surface-parity",
+            "failure-injection",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/customers",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "escaping",
+            "input-corpus"
+          ]
+        },
+        {
+          "surface": "GET /control/customers/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/ingestion",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/audits",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /control/experiments",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/experiments/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/incidents",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /control/incidents/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/finance",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/finance/invoices/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/finance/exports/{register}",
+          "classes": [
+            "response-contract",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/growth",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /control/system",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /control/system/policies",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /control/access",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /favicon.ico",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /favicon.svg",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /assets/fonts/{name}",
+          "classes": [
+            "assets-fonts",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /control/login",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /control/login",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /control/login/code",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /control/login/code",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /control/logout",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /control/actions/{kind}",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority",
+            "concurrency"
+          ]
+        },
+        {
+          "surface": "GET /control/actions/{kind}/result/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        }
+      ]
+    },
+    "apex-sales-web": {
+      "routes": [
+        {
+          "path": "/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/leads",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/leads/export.csv",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/publishers/{domain}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/plan",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/sends",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/sends/preview/{file}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/replies",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/domains",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/models",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/healthz",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/assets/apex.css",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/assets/fonts/{name}",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.ico",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/favicon.svg",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/login",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/logout",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/actions/{kind}",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/actions/result/{id}",
+          "methods": [
+            "GET"
+          ]
+        }
+      ],
+      "fixture_pages": 36,
+      "required": [
+        {
+          "surface": "GET /",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /leads",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "input-corpus",
+            "escaping",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /leads/export.csv",
+          "classes": [
+            "response-contract",
+            "input-corpus",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /publishers/{domain}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /plan",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /sends",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /sends/preview/{file}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /replies",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /domains",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /models",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "GET /healthz",
+          "classes": [
+            "response-contract",
+            "surface-parity",
+            "failure-injection"
+          ]
+        },
+        {
+          "surface": "GET /assets/apex.css",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /assets/fonts/{name}",
+          "classes": [
+            "assets-fonts",
+            "traversal"
+          ]
+        },
+        {
+          "surface": "GET /favicon.ico",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /favicon.svg",
+          "classes": [
+            "assets-fonts"
+          ]
+        },
+        {
+          "surface": "GET /login",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /login",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /logout",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /actions/{kind}",
+          "classes": [
+            "csrf-idempotency",
+            "traversal",
+            "auth-authority",
+            "concurrency"
+          ]
+        },
+        {
+          "surface": "GET /actions/result/{id}",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal"
+          ]
+        }
+      ]
+    }
+  }
+}

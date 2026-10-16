@@ -176,6 +176,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/favicon.ico", get(crate::favicon::ico))
         .route("/favicon.svg", get(crate::favicon::svg))
+        .route("/assets/fonts/{name}", get(crate::fonts::font))
         .route("/metrics", get(crate::metrics::metrics))
         .route("/v1/audit/{platform}", get(audit_report).post(live_audit))
         .route("/v1/ledger/{publisher}", get(ledger))
@@ -3041,6 +3042,41 @@ mod tests {
             .await
             .expect("response");
         response.status()
+    }
+
+    #[tokio::test]
+    async fn font_assets_are_served_from_the_router() {
+        use axum::http::header;
+        let app = router(AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        ));
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/assets/fonts/manrope-400")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("font/woff2")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(body.starts_with(b"wOF2"));
+        assert_eq!(
+            get_status(&app, "/assets/fonts/manrope-999").await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     /// Structural checks of the Prometheus exposition: every sample line is

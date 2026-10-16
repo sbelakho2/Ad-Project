@@ -11,6 +11,7 @@ depends_on:
   - contract-coverage
   - site-perf
   - ui-ux
+  - dogfood-live
 
 steps:
   build-apex-tools:
@@ -20,6 +21,6 @@ steps:
 
   aggregate-verdict:
     image: rust:1.88-bookworm
-    depends_on: [apex-rs-coverage, dogfood-audit, contract-coverage, site-perf, ui-ux]
+    depends_on: [apex-rs-coverage, dogfood-audit, contract-coverage, site-perf, ui-ux, dogfood-live]
     commands:
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- aggregate-verdict --report coverage-report.md

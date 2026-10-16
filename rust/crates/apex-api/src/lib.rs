@@ -64,6 +64,7 @@ pub mod cycle;
 pub mod error;
 pub mod experiments;
 pub mod favicon;
+pub mod fonts;
 pub mod html;
 pub mod leads;
 pub mod live;

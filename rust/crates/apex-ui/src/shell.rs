@@ -1,5 +1,6 @@
 //! The full document shell: doctype, head, skip link, dark rail, topbar,
-//! main region and footer for the three areas.
+//! main region and footer for the publisher console, the operator control
+//! plane, the sales workspace and the marketing pages.
 //!
 //! The shell emits no `<h1>` (callers own exactly one) and no `<script>`
 //! (the console is server-rendered with zero JavaScript). App areas render
@@ -24,6 +25,8 @@ pub enum Area {
     PublisherConsole,
     /// The operator control plane (`/control/*`).
     OperatorPlane,
+    /// The sales workspace (`/leads`, `/plan`, `/sends`, ...).
+    SalesPlane,
     /// The public marketing site.
     Marketing,
 }
@@ -78,6 +81,18 @@ const OPERATOR_NAV: [(&str, &str); 10] = [
     ("Access", "/control/access"),
 ];
 
+/// Sales workspace navigation, in the frozen order: the sales UI's own
+/// routes only, never the publisher console or operator control plane.
+const SALES_NAV: [(&str, &str); 7] = [
+    ("Overview", "/"),
+    ("Leads", "/leads"),
+    ("Plan", "/plan"),
+    ("Sends", "/sends"),
+    ("Replies", "/replies"),
+    ("Domains", "/domains"),
+    ("Models", "/models"),
+];
+
 const MARKETING_NAV: [(&str, &str); 4] = [
     ("How it works", "/how-it-works/"),
     ("Pricing", "/pricing/"),
@@ -89,28 +104,47 @@ const MARKETING_NAV: [(&str, &str); 4] = [
 /// [`crate::components`] or caller markup that already follows the design
 /// system).
 pub fn page(ctx: &PageCtx, body_html: &str) -> String {
+    page_inner(ctx, body_html, None)
+}
+
+/// The page with the stylesheet linked instead of embedded: the served
+/// stylesheet at `css_href` must be exactly [`tokens::console_css`] bytes.
+/// Surfaces that share one global stylesheet across pages (one request, one
+/// cache entry) use this; every other property matches [`page`].
+pub fn page_with_css(ctx: &PageCtx, body_html: &str, css_href: &str) -> String {
+    page_inner(ctx, body_html, Some(css_href))
+}
+
+fn page_inner(ctx: &PageCtx, body_html: &str, css_href: Option<&str>) -> String {
     let marketing = ctx.area == Area::Marketing;
     let suffix = if marketing { "Apex" } else { "Apex console" };
     let title = format!("{} \u{2014} {suffix}", ctx.title);
 
     let mut out = String::with_capacity(16_384);
     out.push_str("<!DOCTYPE html>\n");
+    let styles = match css_href {
+        Some(href) => format!("<link rel=\"stylesheet\" href=\"{}\">", html_escape(href)),
+        None => format!("<style>{}</style>", tokens::console_css()),
+    };
     out.push_str(&format!(
         "<html lang=\"en\" {}>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <meta name=\"color-scheme\" content=\"light dark\">\n\
-         <title>{}</title>\n<style>{}</style>\n</head>\n<body>\n",
+         <title>{}</title>\n{}\n</head>\n<body>\n",
         theme::html_attrs(ctx.theme),
         html_escape(&title),
-        tokens::console_css()
+        styles
     ));
     out.push_str("<a class=\"skip-link\" href=\"#main\">Skip to content</a>\n");
     if marketing {
         if ctx.marketing_header {
             out.push_str(&marketing_header());
         }
+        // The block wrapper keeps page fragments in normal flow: `.main` is
+        // a flex column, and without it every direct-child inline action
+        // (an `action` link) would be blockified and stretched full width.
         out.push_str(&format!(
-            "<main id=\"main\" class=\"main\">\n{body_html}\n</main>\n"
+            "<main id=\"main\" class=\"main\">\n<div class=\"page-body\">\n{body_html}\n</div>\n</main>\n"
         ));
         out.push_str(&marketing_footer());
     } else {
@@ -121,19 +155,18 @@ pub fn page(ctx: &PageCtx, body_html: &str) -> String {
 }
 
 fn console_shell(ctx: &PageCtx, body_html: &str) -> String {
-    let operator = ctx.area == Area::OperatorPlane;
-    let (nav, eyebrow, rail_label) = if operator {
-        (
+    let (nav, eyebrow, rail_label) = match ctx.area {
+        Area::OperatorPlane => (
             &OPERATOR_NAV[..],
             "OPERATOR PLANE",
             "Operator control plane",
-        )
-    } else {
-        (
+        ),
+        Area::SalesPlane => (&SALES_NAV[..], "SALES WORKSPACE", "Sales workspace"),
+        _ => (
             &PUBLISHER_NAV[..],
             "PUBLISHER WORKSPACE",
             "Publisher console",
-        )
+        ),
     };
     let mut out = String::from("<div class=\"console\">\n");
     out.push_str(&format!(
@@ -165,8 +198,11 @@ fn console_shell(ctx: &PageCtx, body_html: &str) -> String {
     }
     out.push_str("</nav>\n<div class=\"console-body\">\n");
     out.push_str(&topbar(ctx));
+    // The block wrapper keeps page fragments in normal flow: `.main` is a
+    // flex column, and without it every direct-child inline action (an
+    // `action` link) would be blockified and stretched full width.
     out.push_str(&format!(
-        "<main id=\"main\" class=\"main\">\n{body_html}\n</main>\n"
+        "<main id=\"main\" class=\"main\">\n<div class=\"page-body\">\n{body_html}\n</div>\n</main>\n"
     ));
     out.push_str(&app_footer(ctx));
     out.push_str("</div>\n</div>\n");
@@ -213,6 +249,7 @@ fn app_footer(ctx: &PageCtx) -> String {
     } else {
         match ctx.area {
             Area::OperatorPlane => "Apex operator control plane.",
+            Area::SalesPlane => "Apex sales workspace.",
             _ => "Apex publisher console.",
         }
     };
@@ -330,6 +367,31 @@ mod tests {
     }
 
     #[test]
+    fn page_with_css_links_the_global_stylesheet_and_embeds_none() {
+        let html = page_with_css(&sales_ctx(), "<h1>Leads</h1>", "/assets/apex.css");
+        assert_eq!(html.matches("<style").count(), 0, "no embedded stylesheet");
+        assert_eq!(
+            html.matches("<link rel=\"stylesheet\"").count(),
+            1,
+            "exactly one stylesheet link"
+        );
+        assert!(html.contains("href=\"/assets/apex.css\""));
+        // Everything else matches the embedded-styles page.
+        let embedded = page(&sales_ctx(), "<h1>Leads</h1>");
+        let linked_body = html
+            .split("</head>")
+            .nth(1)
+            .expect("head close")
+            .to_string();
+        let embedded_body = embedded
+            .split("</head>")
+            .nth(1)
+            .expect("head close")
+            .to_string();
+        assert_eq!(linked_body, embedded_body);
+    }
+
+    #[test]
     fn publisher_shell_has_no_h1_and_no_script() {
         let html = page(&publisher_ctx(), "<p>body</p>");
         assert!(!html.contains("<h1"));
@@ -375,6 +437,69 @@ mod tests {
             );
         }
         assert!(!html.contains("/control/"), "rail links an operator route");
+    }
+
+    fn sales_ctx() -> PageCtx {
+        PageCtx {
+            title: "Leads".to_string(),
+            area: Area::SalesPlane,
+            publisher_label: None,
+            breadcrumb: vec!["Sales".to_string(), "Leads".to_string()],
+            read_only: true,
+            theme: Theme::Auto,
+            help_href: None,
+            marketing_header: false,
+        }
+    }
+
+    #[test]
+    fn sales_shell_uses_its_own_eyebrow_and_navigation() {
+        let html = page(&sales_ctx(), "<h1>Leads</h1>");
+        assert!(html.contains("<title>Leads \u{2014} Apex console</title>"));
+        assert!(html.contains("<p class=\"eyebrow\">SALES WORKSPACE</p>"));
+        // The current-state marking and the read-only chip match the other
+        // app areas exactly.
+        assert!(
+            html.contains("<a class=\"rail-link\" aria-current=\"page\" href=\"/leads\">Leads</a>")
+        );
+        assert!(html.contains("<span class=\"status status-read-only\">Read-only</span>"));
+        assert!(html.contains(
+            "<footer class=\"footer\"><p>Read-only mode. No platform settings are changed here.</p></footer>"
+        ));
+        assert!(html.contains("<nav class=\"rail\" aria-label=\"Sales workspace\">"));
+        let mut writable = sales_ctx();
+        writable.read_only = false;
+        let html = page(&writable, "");
+        assert!(!html.contains("class=\"status status-read-only\""));
+        assert!(!html.contains("class=\"rail-foot\""));
+        assert!(html.contains("<footer class=\"footer\"><p>Apex sales workspace.</p></footer>"));
+    }
+
+    #[test]
+    fn sales_nav_lists_only_served_routes() {
+        let html = page(&sales_ctx(), "");
+        assert_eq!(SALES_NAV.len(), 7);
+        // The seven sales routes appear in the exact frozen order.
+        let mut cursor = 0usize;
+        for (label, href) in SALES_NAV {
+            let needle = format!("href=\"{href}\"");
+            let position = html[cursor..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("sales rail is missing the served route {href}"));
+            cursor += position + needle.len();
+            assert!(
+                html.contains(&format!(">{label}</a>")),
+                "sales rail is missing the {label} label"
+            );
+        }
+        assert!(
+            !html.contains("/console"),
+            "sales rail links a console route"
+        );
+        assert!(
+            !html.contains("/control"),
+            "sales rail links an operator route"
+        );
     }
 
     #[test]

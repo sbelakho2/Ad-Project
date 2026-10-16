@@ -127,6 +127,13 @@
    ]
   },
   {
+   "id": "apex-sales-web",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-sales-web/**/*.rs"
+   ]
+  },
+  {
    "id": "docs",
    "kind": "docs",
    "include": [
@@ -178,7 +185,8 @@
     "tools/coverage/*",
     "**/*.toml",
     ".github/required-checks.json",
-    "tools/brand/**"
+    "tools/brand/**",
+    "tools/dogfood/**"
    ]
   }
  ],

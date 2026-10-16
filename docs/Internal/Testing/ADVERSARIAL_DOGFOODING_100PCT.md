@@ -1,6 +1,6 @@
 # Adversarial Dogfooding & 100% Coverage — Master Design
 
-Status: design complete; the stack is implemented and verified. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.
+Status: design complete; the stack is implemented and verified, and since 2026-10-16 it runs as two executable layers. The static half is `apex-tools dogfood-plan`, the live half is `tools/dogfood/live.py`. The static half enforces route-registration parity against `tools/dogfood/surfaces.json`, fixture-page counts, the frozen 12-probe corpus and the live baseline ratchet. The live half runs the 12 probe classes against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service, at 100% of the required cells. `make dogfood-live` runs it locally and the `.woodpecker/dogfood-live.yml` lane runs it in CI; §10 is the executable contract. The Rust product workspace, the Zola site, the console audit lane, and the dogfood gates all run green locally (§9.5); phase-gated items stay visible in §9.3. The 2026-10-14 all-Rust conversion replaced the multi-language stack with the `apex-tools` gates; §9.7 records the conversion sweep and supersedes the lane inventory in §7.2 and the per-domain tooling in §3.
 Owner: @sbelakho2
 
 ---
@@ -227,7 +227,9 @@ The seven product crates (`apex-core`, `apex-connectors`, `apex-audit`, `apex-pr
 
 ## 4. Adversarial dogfooding strategy (the "adversarial" layer)
 
-Dogfooding = the repo tests itself with its own machinery, and every layer above is attacked by the layers below:
+Dogfooding = the repo tests itself with its own machinery, and every layer above is attacked by the layers below. The layer table that follows is kept as design history for the multi-language era and is `superseded (multi-language era)`; the current executable layers and what deliberately stays outside them are listed after the axes paragraph.
+
+Design history, `superseded (multi-language era)`:
 
 | Layer | Adversarial technique | Tooling (first-party or already-in-repo) |
 |---|---|---|
@@ -240,6 +242,56 @@ Dogfooding = the repo tests itself with its own machinery, and every layer above
 | IaC/config | promtool `test rules` (new `monitoring/alerts.test.yml`), `helm template`+kubeconform, `terraform validate`, `nginx -t`, `caddy validate`, `docker compose config` | contract pipeline |
 
 Adversarial axes applied to every domain: malformed input (fuzz/property), resource exhaustion (bombs, unbounded growth), race and ordering (concurrency, retries, idempotency), and authority (authn/z bypass, privilege escalation, tenant isolation). The remaining axes: time (skew, DST, expiry), observability gaps (silent failure must still emit metrics/alerts), and state corruption (crash-between-write, replay, double-spend).
+
+Current executable layers (2026-10-16, the all-Rust tree):
+
+| Executable layer | What it attacks | How it runs |
+|---|---|---|
+| Static parity (`apex-tools dogfood-plan`) | route registrations in the three `routes.rs` files against `tools/dogfood/surfaces.json` in both directions; render-fixtures page counts; the frozen probe corpus; the live baseline ratchet | `cd rust && ./target/release/apex-tools dogfood-plan`; appended to `make dogfood` |
+| The standing static gates | manifest, walker parity, orphan gate, floor ratchet, floors sync, assertion presence, stub ban, yaml policy, mutation smoke and floor, contract checks (CI references, content guard, pipeline paths, docs references), docs links, prose lint, css lint, aggregate verdict | `make dogfood` |
+| Live probes (`tools/dogfood/live.py`) | the 12 classes listed next against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service; every required cell must pass | `make dogfood-live`; the CI lane `.woodpecker/dogfood-live.yml` |
+
+| Live probe class | What it attacks |
+|---|---|
+| surface-parity | a catalog that drifted from the router: runs `apex-tools dogfood-plan` and requires a pass |
+| response-contract | routes that answer the wrong status, render no title, or render more than one h1 |
+| no-inline | inline `style="` attributes, inline `<style>` or `<script>` blocks, and missing or duplicated stylesheet links in any served page |
+| assets-fonts | unreachable assets, font responses without `font/woff2` or the `wOF2` magic, wrong byte sizes, and stylesheet bytes that differ across services |
+| auth-authority | token exchange and login bypass, missing cookie flags, and fail-open startup without an owner token |
+| input-corpus | malformed encoding, `%00` bytes, oversized paths, parameter floods, oversized bodies, and unsafe methods |
+| csrf-idempotency | CSRF-less writes and replayed writes that double-apply to the store |
+| traversal | encoded traversal forms that return foreign content at 200 |
+| escaping | reflected strings that render unescaped, and CSV exports open to formula injection |
+| concurrency | parallel same-payload writes that return 5xx or duplicate a durable effect |
+| failure-injection | crash-restart damage and dishonest analytics states when ClickHouse is severed |
+| differential-truth | rendered or exported numbers that disagree with the engine's own report, the ledger JSON, or direct SQL |
+
+Intentionally outside the live lane:
+
+| Outside the live lane | Where it lives instead |
+|---|---|
+| browser-level font and visual pass | the playwright tooling as a human or agent step (procedure in §9.3) |
+| release-mode and overflow-checks suites | the release verifier runs, one plain and one with `overflow-checks` enabled |
+| randomized differential harness in the apex-analytics gated tests | unchanged in-crate tests; the dogfood-live lane's ClickHouse service now executes them in CI |
+| full fuzz corpora beyond the bounded input-corpus class | the fuzz, crash and soak workstreams stay manual |
+
+Found evidence behind the live layer. The static stack alone stayed green while the following incidents shipped; each row names the probe that covers that class of defect now.
+
+| Shipped defect | Now probed by |
+|---|---|
+| no font route and no `@font-face` existed on any app surface, so every app page silently fell back to system fonts | assets-fonts: font routes are fetched for real and pinned to content type, magic bytes and committed size |
+| a fixture test pinned the wrong font contract, so the suite stayed green while the product rendered fallback fonts | assets-fonts: expected bytes come from the committed files at run time and are byte-compared across all three services |
+| the sends chart rendered epoch labels (a day count passed as seconds) | differential-truth: the sends surfaces are compared against the engine's own report numbers |
+| an inline action stretched full width because the shell main was a flex column | no-inline: presentation must come from the one stylesheet, and the pixel result is covered by the browser pass |
+| concurrent proposal decisions returned 500 with file and event divergence | concurrency: parallel same-payload writes must yield one durable effect and zero 5xx |
+| every operator analytics event was silently refused by the envelope's token-like guard, so no operator event reached the store | differential-truth: store-backed pages are compared against seeded ground truth, so a refused event cannot stay invisible |
+| cross-currency receipts marked USD invoices paid | differential-truth: ledger pages and exports are compared against the authoritative store |
+| memory-vs-ClickHouse reader divergences (7 classes) | differential-truth, plus the apex-analytics randomized differential harness that the lane's ClickHouse service now runs in CI |
+| request-log double ingestion without a cursor | differential-truth: exported and rendered counts must equal the store |
+| a legacy-DB staged-publish hole | differential-truth: readers must keep returning the published version, and the staged and publish tests now run in CI behind the lane's ClickHouse service |
+| a release-only money overflow | the release-mode and overflow-checks verifier runs (outside the live lane, as above) |
+| CSV formula injection | escaping: hostile strings cross every reflected parameter, and CSV exports must neutralize formula cells and end CRLF |
+| a provider-byte truncate panic | input-corpus over the bounded corpus; the full fuzz corpora that find this class stay a manual companion |
 
 ---
 
@@ -498,9 +550,10 @@ Findings are resolved before this design is considered final; the remediation lo
 - Phase-1: delete the 13 pragma files' markers and convert the 12 `|| true` inventories; stale baseline entries fail the policy gate until they are removed.
 - Phase-1: rebuild the two legacy workflows behind `ci-ref-baseline.json`, implement the remaining `AUDIT-REQUIRED` catalog rows with the §0.2 protocol, and populate `suites.json` so `orphanFloorPercent` can begin ratcheting below 100.
 - Phase-2: Unity tier-2 licensed lane, instrumented Android emulator lane, mutation floors.
-- Console layout checks: `color-contrast` and `target-size` run outside axe; the palette ratios are pinned in the apex-api Rust test and the site contrast runs in the Lighthouse lane (documented in `tools/ui-ux/console-a11y.mjs`).
-- Live-sandbox confirmation: the four LevelPlay endpoint paths are `VerifyLive`; autopilot writes through them stay blocked until the live-integration lane confirms them (apex-core `endpoint.rs` and `levelplay.rs`).
-- Not locally executable here: the Woodpecker server itself (the local runs exercise the same commands) and the GitHub-Actions-only toolchains (Android, iOS, Flutter, Kover gradle). Their commands and configs were validated statically; where a local tool existed (dotnet, promtool, bash, node, cargo), the exact commands ran green.
+- Console layout checks: `color-contrast` and `target-size` run outside axe; the palette ratios are pinned in the apex-api Rust test and the site contrast runs in the Lighthouse lane (documented in `tools/ui-ux/console-a11y.mjs`). Font delivery and inline presentation, the gaps behind the shipped font and layout incidents, are now swept mechanically by the live assets-fonts and no-inline classes; the contrast and target-size checks remain outside the live lane.
+- Live-layer manual companions: the browser font and visual pass stays a human or agent step through the playwright tooling. Exact checks: `document.fonts` reports Manrope 400/700/800 and IBM Plex Mono 400/500/600 as loaded, the computed families resolve to the Manrope and Plex Mono stacks, the rendered document carries zero inline styles, and light and dark screenshots at 320px width are captured.
+- Live-sandbox confirmation: the four LevelPlay endpoint paths are `VerifyLive`; autopilot writes through them stay blocked until the live-integration lane confirms them (apex-core `endpoint.rs` and `levelplay.rs`). The live dogfood lane uses seeded sandbox stores only and does not change this.
+- Not locally executable here: the Woodpecker server itself (the local runs exercise the same commands) and the GitHub-Actions-only toolchains (Android, iOS, Flutter, Kover gradle). Their commands and configs were validated statically; where a local tool existed (dotnet, promtool, bash, node, cargo), the exact commands ran green. The environment-gated Rust integration suites that never ran in CI before (they skip without `APEX_CLICKHOUSE_HTTP`) now execute in the dogfood-live lane behind its ClickHouse service.
 
 ### 9.4 Rust verifier waves and pinned regressions
 
@@ -701,3 +754,76 @@ scheduling, the scoreboard, the record emission pipeline, the daily
 settings watcher with override detection, the weekday-balanced switchback
 planner, the impression-postback path with covariate variance reduction,
 and the re-run kit with its CSV template.
+
+---
+
+## 10. Live adversarial dogfooding (implemented 2026-10-16)
+
+The live layer is the executable contract added on 2026-10-16. `tools/dogfood/live.py` runs the twelve probe classes against booted apex-api, apex-control and apex-sales-web with seeded stores and a ClickHouse service, and fails unless every required cell in `tools/dogfood/surfaces.json` was attempted and passed. `rust/crates/apex-tools/src/dogfood_plan.rs` is the authority for the catalog schema and the frozen corpus; `tools/dogfood/README.md` documents the harness.
+
+### 10.1 The surface catalog (`tools/dogfood/surfaces.json`)
+
+```json
+{
+  "probe_classes": ["surface-parity", "response-contract", "no-inline", "assets-fonts",
+    "auth-authority", "input-corpus", "csrf-idempotency", "traversal", "escaping",
+    "concurrency", "failure-injection", "differential-truth"],
+  "services": {
+    "apex-api": {
+      "routes": [ { "path": "/healthz", "methods": ["GET"] } ],
+      "fixture_pages": 60,
+      "required": [ { "surface": "GET /healthz", "classes": ["surface-parity"] } ]
+    }
+  },
+  "site": { "pages_min": 39 }
+}
+```
+
+The block above is abridged to one service; the real catalog declares all three.
+
+- `probe_classes` must equal the frozen `REQUIRED_PROBE_CLASSES` registry exactly, order included; a shortened, reordered or extended list fails the static gate.
+- `services` must declare exactly apex-api, apex-control and apex-sales-web, and nothing else. Per service:
+  - `routes` lists the registered routes as `{"path": ..., "methods": [...]}`; the static gate extracts the real registrations from the crate's `routes.rs` and fails when a registered route is not declared or a declared route is no longer registered.
+  - `fixture_pages` must equal the page count `N` in that crate's `pub const PAGES: [&str; N] = [` array in its render-fixtures bin.
+  - `required` lists the cells the live run must attempt, as `{"surface": "GET /healthz", "classes": ["surface-parity"]}`; a cell may reference only declared classes and declared surfaces.
+- Surface ids are `METHOD /path` in the spelling the router registers, and asset patterns use the same form (for example `GET /assets/fonts/{name}`). Cell ids are `"<service>|<surface>|<class>"`.
+- `site.pages_min` (39) floors the static-site page count when `site/public` is present; an absent build records the skip with its reason instead of passing silently.
+
+### 10.2 The twelve probe classes
+
+| Class | Assertion |
+|---|---|
+| surface-parity | `apex-tools dogfood-plan` passes, so the live run cannot probe a drifted catalog |
+| response-contract | every declared route returns its declared status (200 or 303, and 401, 400 or 404 where anonymous, CSRF or traversal behavior is being observed), with a single h1 and a title |
+| no-inline | every HTML route carries zero `style="` and zero `<script`; apex-sales-web also zero `<style` and exactly one stylesheet link; apex-api and apex-control embed exactly one `<style` block |
+| assets-fonts | every declared asset is fetched; the stylesheet bytes equal the shared fixture on each service; each of the six font files returns 200, `font/woff2`, the `wOF2` magic and its committed byte size; favicon magic bytes |
+| auth-authority | ledger token exchange (wrong token 401, valid token 303, cookie flags), operator login refusal with lockout, sales-web fail-closed with the owner token unset, cross-service cookie rejection |
+| input-corpus | malformed urlencoding, `%00` and `%FF`, an 8KB path, a 500-parameter flood, oversized bodies, HEAD/OPTIONS/PUT/DELETE never 5xx, and the free-audit notes length boundary |
+| csrf-idempotency | every POST without CSRF fails; one keyed action per service, replayed twice, yields the same result and a single durable effect |
+| traversal | the encoded corpus (`..%2f`, encoded slashes, `%00`, absolute and unicode forms) across every id-bearing route: 400 or 404 only, never foreign content at 200 |
+| escaping | hostile strings through every reflected query parameter are escaped or refused; CSV exports neutralize formula cells and end CRLF |
+| concurrency | 32 parallel same-payload free-audit POSTs store one lead and one ref; 32 parallel ledger exchanges and 16 replayed sales-web actions produce zero 5xx and one effect |
+| failure-injection | SIGKILL and restart of apex-api and apex-sales-web; ClickHouse severance only when the harness owns the server: the honest not-available state renders without 5xx and recovery follows the restart |
+| differential-truth | sales-web KPIs equal the `apex-sales report` numbers; console revenue equals a direct ClickHouse SQL sum; the ledger page count equals the `/v1/ledger` JSON; CSV row counts equal page table rows |
+
+### 10.3 The 100% rule and the baseline ratchet
+
+100% means every required cell is attempted and passes. Any failed cell, and any required cell left unattempted, fails the run with exit 1 and prints the cell list. After a fully green run, `--update-baseline` writes `tools/dogfood/live-baseline.json`: the recorded cell set and the update marker. A rerun fails when the run's required cells are not fully recorded in the baseline, and when a baseline cell is no longer required without a `removals` entry that names it with a non-empty reason. Removal entries must name a recorded baseline cell and go stale once the cell is required again, so a silent shrink can never pass; the static gate re-checks the same rule before any live process starts.
+
+### 10.4 How to run
+
+- Local: `make dogfood-live` (a ClickHouse server binary is required; the target runs `python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug`).
+- CI: the `.woodpecker/dogfood-live.yml` lane on push and pull request to main. It builds the product binaries, runs `apex-tools dogfood-plan`, sets `APEX_CLICKHOUSE_HTTP` so the environment-gated apex-analytics and apex-api integration suites execute in CI for the first time, and runs the harness against the lane's ClickHouse service; `coverage-gate` depends on the lane.
+- Static only: `python3 tools/dogfood/live.py --static-only` runs the catalog checks and `dogfood-plan` without booting any process.
+- Recording a baseline: `python3 tools/dogfood/live.py --update-baseline` after a fully green run.
+- Paths and ports: `--bin-dir`, `--workdir`, `--results`, `--port-base` and `--clickhouse-url` (default `http://127.0.0.1:18123`) select the binary directory, scratch directory, results file, port base and store endpoint. A run without a reachable ClickHouse fails; there is no degraded pass.
+
+### 10.5 ClickHouse ownership rules
+
+- External server (the CI service container, or a server you started yourself): pass `--clickhouse-url` without `--clickhouse-owned`. The harness never starts or stops that server; it creates one fresh per-run database, seeds it, and records the severance subprobe as skipped with the reason.
+- Harness-owned server (`--clickhouse-owned`, the `make dogfood-live` path): the harness owns the lifecycle, requires the severance subprobe (stop, honest not-available state, restart, recovery), and on teardown stops the server, drops the per-run database and prints the cleanup proof.
+- Either way the run owns only its own fresh database and never writes into another database on the server.
+
+### 10.6 Coverage classification
+
+`tools/dogfood/**` is classified `contract-build` in `tools/coverage/policies.json`, next to `tools/coverage/*` and `tools/brand/**`: kind `contract`, with no suite claim and no coverage floor entry. The manifest, walker-parity and orphan gates prove the files exist and stay classified, and `dogfood-plan` is the static gate that keeps the catalog in lockstep with the routers.

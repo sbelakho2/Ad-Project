@@ -404,6 +404,71 @@ pub fn ingest_reply(
     (event, c)
 }
 
+/// The settled first-touch prediction pairs used for out-of-sample
+/// calibration: `(predicted interest probability at send time, interested)`.
+///
+/// A lead is settled when it became interested or [`Config::settle_days`]
+/// passed since its last touch; unsettled leads are excluded, so the pairs
+/// never count an unanswered touch as a failure early. This is the exact
+/// pair set [`report`] prints its Brier score, log loss and reliability
+/// bins for.
+pub fn calibration_pairs(learned: &Learned, config: &Config, now: UnixSecs) -> Vec<(f64, bool)> {
+    let mut pairs = Vec::new();
+    for pr in learned.progress.values() {
+        let Some(first) = pr.touches.first() else {
+            continue;
+        };
+        let Some(p) = first.predicted else { continue };
+        let last = pr.touches.last().map_or(0, |t| t.at);
+        let y = pr.interested_at.is_some();
+        if y || now - last > config.settle_days * DAY {
+            pairs.push((p, y));
+        }
+    }
+    pairs
+}
+
+/// The two groups of the randomized holdout and their audit-request
+/// conversions, counting publishers (not contacts): `treated` is the
+/// emailed group, `holdout` the never-emailed group. A publisher counts as
+/// converted when it reached at least [`Stage::AuditRequested`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HoldoutGroups {
+    /// Interested publishers in the treated group.
+    pub treated_conv: f64,
+    /// Publishers in the treated group.
+    pub treated_n: f64,
+    /// Interested publishers in the held-out group.
+    pub holdout_conv: f64,
+    /// Publishers in the held-out group.
+    pub holdout_n: f64,
+}
+
+/// Count the holdout groups as of `learned`. Feed the result to
+/// [`crate::holdout::effect`] for the Newcombe interval; with a zero-sized
+/// group the effect is honestly not estimable yet.
+pub fn holdout_groups(snap: &Snapshot, learned: &Learned, config: &Config) -> HoldoutGroups {
+    let mut groups = HoldoutGroups::default();
+    for key in snap.publishers.keys() {
+        let converted = learned
+            .stages
+            .get(key)
+            .is_some_and(|s| s.reached() >= Stage::AuditRequested);
+        if config.holdout.is_held_out(key) {
+            groups.holdout_n += 1.0;
+            if converted {
+                groups.holdout_conv += 1.0;
+            }
+        } else {
+            groups.treated_n += 1.0;
+            if converted {
+                groups.treated_conv += 1.0;
+            }
+        }
+    }
+    groups
+}
+
 /// A plain-text report of what the engine has learned.
 pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) -> String {
     let mut out = String::new();
@@ -490,18 +555,7 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
     }
 
     // Out-of-sample calibration of first-touch predictions.
-    let mut pairs = Vec::new();
-    for pr in learned.progress.values() {
-        let Some(first) = pr.touches.first() else {
-            continue;
-        };
-        let Some(p) = first.predicted else { continue };
-        let last = pr.touches.last().map_or(0, |t| t.at);
-        let y = pr.interested_at.is_some();
-        if y || now - last > config.settle_days * DAY {
-            pairs.push((p, y));
-        }
-    }
+    let pairs = calibration_pairs(learned, config, now);
     if !pairs.is_empty() {
         let (bins, ece) = reliability(&pairs, 10);
         let _ = writeln!(
@@ -522,25 +576,13 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
     }
 
     // Causal effect: emailed versus held-out publishers reaching the audit.
-    let (mut tn, mut tc, mut hn, mut hc) = (0.0, 0.0, 0.0, 0.0);
-    for key in snap.publishers.keys() {
-        let converted = learned
-            .stages
-            .get(key)
-            .is_some_and(|s| s.reached() >= Stage::AuditRequested);
-        if config.holdout.is_held_out(key) {
-            hn += 1.0;
-            if converted {
-                hc += 1.0;
-            }
-        } else {
-            tn += 1.0;
-            if converted {
-                tc += 1.0;
-            }
-        }
-    }
-    match effect(tc, tn, hc, hn) {
+    let groups = holdout_groups(snap, learned, config);
+    match effect(
+        groups.treated_conv,
+        groups.treated_n,
+        groups.holdout_conv,
+        groups.holdout_n,
+    ) {
         Some(e) => {
             let _ = writeln!(
             out,
@@ -556,7 +598,8 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
         None => {
             let _ = writeln!(
                 out,
-                "\noutreach effect on audit requests: not measurable yet ({tn} emailed-group and {hn} held-out publishers)"
+                "\noutreach effect on audit requests: not measurable yet ({} emailed-group and {} held-out publishers)",
+                groups.treated_n, groups.holdout_n
             );
         }
     }
@@ -772,5 +815,83 @@ mod tests {
         ] {
             assert!(text.contains(needle), "{needle}\n{text}");
         }
+    }
+
+    #[test]
+    fn calibration_pairs_and_holdout_groups_are_the_reports_building_blocks() {
+        let mut snap = Snapshot::default();
+        let mut p = Publisher::new("studio.example", "Studio");
+        p.domain = Some("studio.example".into());
+        snap.publishers.insert(p.key.clone(), p);
+        snap.contacts.insert(
+            "maria@studio.example".into(),
+            Contact {
+                email: "maria@studio.example".into(),
+                name: None,
+                role: None,
+                publisher_key: "studio.example".into(),
+                kind: ContactKind::Named,
+                source: "t".into(),
+                consent: false,
+            },
+        );
+        let config = Config::new(Sender {
+            name: "A".into(),
+            email: "a@apex.example".into(),
+            company: "Apex".into(),
+            postal_address: "Tallinn".into(),
+            unsubscribe_url: None,
+        });
+        let now = 60 * DAY;
+        // An unsettled touch contributes no calibration pair.
+        snap.events.push(Event::Touch {
+            at: now - DAY,
+            email: "maria@studio.example".into(),
+            publisher: "studio.example".into(),
+            step: 0,
+            arm: "t0-finding".into(),
+            message_id: "m".into(),
+            local_hour: 10,
+            predicted: Some(0.05),
+        });
+        let learned = learn(&snap, &config, now);
+        assert!(calibration_pairs(&learned, &config, now).is_empty());
+        // A reply settles it as an interested observation.
+        snap.events.push(Event::Outcome {
+            at: now - DAY + 3600,
+            email: Some("maria@studio.example".into()),
+            publisher: None,
+            outcome: crate::model::Outcome::Reply(crate::model::ReplyClass::Positive),
+            note: None,
+        });
+        snap.events.sort_by_key(Event::at);
+        let learned = learn(&snap, &config, now);
+        let pairs = calibration_pairs(&learned, &config, now);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, 0.05);
+        assert!(pairs[0].1);
+        let groups = holdout_groups(&snap, &learned, &config);
+        assert_eq!((groups.treated_n, groups.holdout_n), (1.0, 0.0));
+        assert_eq!(groups.treated_conv, 0.0);
+        // Reaching the audit moves the publisher into the converted count.
+        snap.events.push(Event::Outcome {
+            at: now - DAY + 7200,
+            email: None,
+            publisher: Some("studio.example".into()),
+            outcome: crate::model::Outcome::AuditRequested,
+            note: None,
+        });
+        snap.events.sort_by_key(Event::at);
+        let learned = learn(&snap, &config, now);
+        let groups = holdout_groups(&snap, &learned, &config);
+        assert_eq!((groups.treated_conv, groups.treated_n), (1.0, 1.0));
+        // A zero-sized group makes the effect not estimable, not zero.
+        assert!(effect(
+            groups.treated_conv,
+            groups.treated_n,
+            groups.holdout_conv,
+            groups.holdout_n
+        )
+        .is_none());
     }
 }

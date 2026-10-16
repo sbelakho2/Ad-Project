@@ -4,8 +4,8 @@
 
 use apex_tools::repo::Repo;
 use apex_tools::{
-    a11y, claims, contract, coverage, csslint, docs_lint, docslinks, dogfood, mutation, perfbudget,
-    policy::Floors,
+    a11y, claims, contract, coverage, csslint, docs_lint, docslinks, dogfood, dogfood_plan,
+    mutation, perfbudget, policy::Floors,
 };
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -167,6 +167,7 @@ fn main() {
             docs_lint::docs_lint(&repo, &parsed)
         })(),
         "mutation-smoke" => mutation::mutation_smoke(&repo),
+        "dogfood-plan" => dogfood_plan::dogfood_plan(&repo),
         other => Err(format!("unknown subcommand '{other}'")),
     };
     match result {

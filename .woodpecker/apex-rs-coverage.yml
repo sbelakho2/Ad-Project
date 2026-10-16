@@ -43,6 +43,8 @@ matrix:
       PKG: apex-control
     - CRATE: apex-sales
       PKG: apex-sales
+    - CRATE: apex-sales-web
+      PKG: apex-sales-web
 
 steps:
   apex-rs-crate:

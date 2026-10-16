@@ -1,7 +1,7 @@
 # Woodpecker CI: the gate stack
 
-Each `*.yml` file in this directory is one Woodpecker pipeline: five lanes
-plus the aggregate verdict in `coverage-gate.yml` (six configs). Trigger:
+Each `*.yml` file in this directory is one Woodpecker pipeline: six lanes
+plus the aggregate verdict in `coverage-gate.yml` (seven configs). Trigger:
 `push` and `pull_request` on `main` and `master`, with no path filters
 (deliberate: see `docs/Internal/Testing/ADVERSARIAL_DOGFOODING_100PCT.md`
 section 9.10).
@@ -13,6 +13,13 @@ Lanes:
 - `dogfood-audit.yml`: manifest, walker parity, orphan ceiling, floor ratchet
   and sync, assertion presence, stub ban, policy bans, mutation smoke and
   floor, docs links, prose ratchet.
+- `dogfood-live.yml`: the live half of the adversarial dogfooding system: the
+  three services booted against a real ClickHouse `service:` container, the
+  live-gated `apex-analytics`/`apex-api` suites finally executing, then
+  `tools/dogfood/live.py` running every required probe cell from
+  `tools/dogfood/surfaces.json` and the ratchet baseline. The static catalog
+  gate (`apex-tools dogfood-plan`) runs here too, so the lane is not
+  redundant in a store-less build.
 - `contract-coverage.yml`: monitoring rules and their tests, the edge config
   (validate plus `infrastructure/caddy/contract.sh`), CI reference integrity,
   pipeline paths, content guard, docs references, stylesheet lint.

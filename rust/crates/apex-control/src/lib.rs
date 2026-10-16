@@ -26,7 +26,8 @@
 //! [`versions`], [`data`] (read models and durable files), [`events`]
 //! (analytics emission), [`actions`] (the action engine), [`telemetry`]
 //! (the bounded metrics registry and the request middleware), [`state`],
-//! [`routes`] and [`pages`].
+//! [`routes`], [`pages`] and [`cli`] (the `hash-password` operational
+//! subcommand the binary dispatches before booting).
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -34,6 +35,7 @@ pub mod actions;
 pub mod auth;
 pub mod base32;
 pub mod capabilities;
+pub mod cli;
 pub mod config;
 pub mod copy;
 pub mod data;
@@ -41,6 +43,7 @@ pub mod events;
 pub mod favicon;
 pub mod fixture_render;
 pub mod fixtures;
+pub mod fonts;
 pub mod governance;
 pub mod jobs;
 pub mod journal;

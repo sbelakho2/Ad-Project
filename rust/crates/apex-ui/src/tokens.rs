@@ -88,6 +88,31 @@ pub(crate) const WARNING_DARK_TEXT: &str = "#f0c98a";
 #[cfg(test)]
 pub(crate) const SUCCESS_DARK_TEXT: &str = "#8fd6b8";
 
+/// The six self-hosted faces: `(family, CSS weight, file stem)`. The stems
+/// are identical to [`crate::fonts::FONT_NAMES`] (a test pins it), so every
+/// advertised `@font-face` URL has committed bytes behind it.
+const FONT_FACES: [(&str, u32, &str); 6] = [
+    ("Manrope", 400, "manrope-400"),
+    ("Manrope", 700, "manrope-700"),
+    ("Manrope", 800, "manrope-800"),
+    ("IBM Plex Mono", 400, "ibm-plex-mono-400"),
+    ("IBM Plex Mono", 500, "ibm-plex-mono-500"),
+    ("IBM Plex Mono", 600, "ibm-plex-mono-600"),
+];
+
+/// The six `@font-face` blocks, one per committed face, pointing at the
+/// origin's `/assets/fonts/<name>.woff2` route with `font-display: swap`.
+fn font_face_css() -> String {
+    let mut css = String::new();
+    for (family, weight, name) in FONT_FACES {
+        css.push_str(&format!(
+            "@font-face{{font-family:\"{family}\";font-style:normal;font-weight:{weight};\
+             font-display:swap;src:url(\"/assets/fonts/{name}.woff2\") format(\"woff2\")}}\n"
+        ));
+    }
+    css
+}
+
 const BASE_CSS: &str = r#"*,*::before,*::after{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;font-family:Manrope, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Arial, sans-serif;font-size:14px;line-height:22px;color:#182c31;background:#f5f6f1}
@@ -110,12 +135,14 @@ a{color:#2849d8}
 .topbar-scope{margin:0}
 .topbar-help{color:#2849d8;background:#f5f6f1}
 .main{width:100%;max-width:1440px;padding:32px;display:flex;flex-direction:column;gap:24px}
+.page-body{display:block}
 .main h1,.page-title{font-size:28px;line-height:36px;font-weight:700;margin:0}
 .main h2,.section-heading,.panel-heading{font-size:18px;line-height:26px;font-weight:700;margin:0}
 .footer{padding:16px 32px;color:#536568;background:#f5f6f1;border-top:1px solid #d9dfdd}
 .footer p{margin:0}
 .lockup{display:inline-flex;align-items:center;gap:8px}
-.lockup-word{font-weight:800;letter-spacing:-0.02em}
+.lockup-word{font-family:Manrope, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Arial, sans-serif;font-weight:800;letter-spacing:-0.02em;font-size:28px}
+.lockup-word-lg{font-size:44px}
 .mark{display:block}
 .action{display:inline-block;padding:8px 16px;border-radius:6px;font-family:inherit;font-size:14px;line-height:22px;font-weight:600;text-decoration:none;border:1px solid transparent;cursor:pointer}
 .action-primary{background:#2849d8;color:#ffffff}
@@ -201,6 +228,9 @@ a{color:#2849d8}
 .chart-legend{list-style:none;display:flex;gap:16px;margin:8px 0 0;padding:0;color:#182c31}
 .chart-legend-item{display:inline-flex;align-items:center}
 .chart-legend-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
+.chart-swatch-control{background:#536568}
+.chart-swatch-test{background:#2849d8}
+.chart-swatch-ink{background:#182c31}
 .chart-table{margin-top:8px}
 .chart-unavailable{margin:0}
 .chart-zero{stroke:#7e8c91;stroke-width:1}
@@ -284,15 +314,21 @@ const TAIL_CSS: &str = r#"@media (max-width:900px){.console{display:block}.rail{
 /// The complete console stylesheet: one `<style>` block for every component
 /// in this crate, covering the light scheme, the dark scheme (both the
 /// explicit `data-theme="dark"` attribute and the `auto` media query),
-/// responsive stacking below 900 CSS pixels and reduced motion.
+/// responsive stacking below 900 CSS pixels and reduced motion. It opens
+/// with the six self-hosted `@font-face` blocks (`/assets/fonts/<name>.woff2`
+/// served by the app origins) so pages never fall back to system fonts.
 pub fn console_css() -> &'static str {
     static CSS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CSS.get_or_init(build_css).as_str()
 }
 
 fn build_css() -> String {
+    let faces = font_face_css();
     let dark_auto = DARK_CSS.replace(":root[data-theme=\"dark\"]", ":root[data-theme=\"auto\"]");
-    let mut css = String::with_capacity(BASE_CSS.len() + DARK_CSS.len() * 2 + TAIL_CSS.len() + 64);
+    let mut css = String::with_capacity(
+        faces.len() + BASE_CSS.len() + DARK_CSS.len() * 2 + TAIL_CSS.len() + 64,
+    );
+    css.push_str(&faces);
     css.push_str(BASE_CSS);
     css.push_str(DARK_CSS);
     css.push_str("@media (prefers-color-scheme: dark){\n");
@@ -372,6 +408,46 @@ mod tests {
         }
         assert!(css.contains(FONT_SANS), "stylesheet must use FONT_SANS");
         assert!(css.contains(FONT_MONO), "stylesheet must use FONT_MONO");
+    }
+
+    #[test]
+    fn stylesheet_prepends_the_six_self_hosted_font_faces() {
+        let css = console_css();
+        assert!(
+            css.starts_with("@font-face{"),
+            "the stylesheet must open with the @font-face blocks"
+        );
+        assert_eq!(css.matches("@font-face{").count(), 6);
+        assert_eq!(css.matches("/assets/fonts/").count(), 6);
+        for (family, weight, name) in FONT_FACES {
+            let block = format!(
+                "@font-face{{font-family:\"{family}\";font-style:normal;font-weight:{weight};\
+                 font-display:swap;src:url(\"/assets/fonts/{name}.woff2\") format(\"woff2\")}}"
+            );
+            assert!(
+                css.contains(&block),
+                "stylesheet is missing the {name} @font-face block"
+            );
+        }
+        assert_eq!(css.matches("@font-face{font-family:\"Manrope\"").count(), 3);
+        assert_eq!(
+            css.matches("@font-face{font-family:\"IBM Plex Mono\"")
+                .count(),
+            3
+        );
+        assert_eq!(css.matches("font-display:swap").count(), 6);
+        assert_eq!(css.matches("format(\"woff2\")").count(), 6);
+        assert_eq!(
+            FONT_FACES.map(|(_, _, name)| name),
+            crate::fonts::FONT_NAMES,
+            "the stylesheet faces and the servable fonts must stay one list"
+        );
+        for name in crate::fonts::FONT_NAMES {
+            assert!(
+                crate::fonts::font_bytes(name).is_some(),
+                "@font-face advertises {name} but no bytes exist"
+            );
+        }
     }
 
     #[test]
@@ -457,6 +533,7 @@ mod tests {
             "footer",
             "lockup",
             "lockup-word",
+            "lockup-word-lg",
             "mark",
             "action",
             "action-primary",
@@ -536,6 +613,9 @@ mod tests {
             "chart-legend",
             "chart-legend-item",
             "chart-legend-swatch",
+            "chart-swatch-control",
+            "chart-swatch-test",
+            "chart-swatch-ink",
             "chart-table",
             "chart-unavailable",
             "chart-zero",

@@ -8,6 +8,8 @@
 //!   attributes.
 //! - [`tokens`]: the exact color, spacing, radius, font and layout constants
 //!   plus [`tokens::console_css`], the one stylesheet every component shares.
+//! - [`fonts`]: the six self-hosted WOFF2 faces (Manrope and IBM Plex Mono)
+//!   as a name-to-bytes map every origin serves from `/assets/fonts/`.
 //! - [`format`]: money in integer micros, UTC timestamps, percentages and CSV
 //!   fields, all without locale guessing.
 //! - [`status`]: the status vocabulary (read-only, verified, needs attention,
@@ -31,6 +33,7 @@
 pub mod charts;
 pub mod components;
 pub mod escape;
+pub mod fonts;
 pub mod format;
 pub mod logo;
 pub mod shell;
