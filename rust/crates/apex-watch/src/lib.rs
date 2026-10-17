@@ -8,10 +8,19 @@
 //! [`WATCH_ROOT_ENV`] (default [`.apex/watch`]); the newest row per
 //! subscriber id wins.
 //!
-//! - [`SubscriberStore::subscribe`] validates the domain and email shapes,
-//!   deduplicates a repeat submission with the same `(domain, email)` within
-//!   a 24-hour window and returns the live subscriber row. The cancel token
-//!   travels back to the caller once; only its SHA-256 hash is stored.
+//! - [`SubscriberStore::subscribe_pending`] validates the domain and email
+//!   shapes, records a `pending` subscriber, derives the tier from the
+//!   reported app count ([`tier_from_evidence`]) and returns the one-time
+//!   email confirmation token (only its SHA-256 hash is stored). A pending
+//!   row runs no check and is never billed.
+//! - [`SubscriberStore::confirm_email`] consumes that token once, within
+//!   [`CONFIRMATION_TTL_MS`]; a second use, an expired token or an unknown
+//!   token is a typed refusal.
+//! - [`SubscriberStore::activate`] flips the matching pending row to `active`
+//!   when the payment is accepted, recording `paid_at`; an already-active row
+//!   is a typed idempotent no-op and an unknown/canceled row is a typed
+//!   refusal. [`SubscriberStore::subscribe`] remains as the legacy direct
+//!   signup used by tools and older tests.
 //! - [`SubscriberStore::cancel`] matches a presented token against the stored
 //!   hash and records the canceled row (cancelled rows stay, they are never
 //!   deleted).
@@ -19,15 +28,22 @@
 //!
 //! # The daily check
 //!
-//! [`run_daily`] walks the active subscribers with a bounded fan-out
-//! ([`daily::DAILY_CONCURRENCY`] checks at a time), then applies alerts and
-//! subscriber rows in subscriber order. For each subscriber it resolves the
-//! domain through the injected [`HostResolver`] and refuses private,
-//! loopback, link-local, shared, multicast, unspecified, broadcast and
-//! metadata answers before any request ([`guard_hosts`]). Then it fetches
-//! the public `app-ads.txt` over HTTPS, falls back to HTTP only when the
-//! HTTPS attempt fails at the transport level, and runs the
-//! `apex-audit` app-ads.txt rule over the bytes. Every fetch failure is
+//! [`run_daily`] walks only active, email-confirmed subscribers with a
+//! bounded fan-out ([`daily::DAILY_CONCURRENCY`] checks at a time), then
+//! applies alerts and subscriber rows in subscriber order. Pending,
+//! canceled and unconfirmed rows are skipped with a typed recorded reason
+//! ([`SKIP_PENDING`], [`SKIP_CANCELED`], [`SKIP_UNCONFIRMED`]). For each
+//! checked subscriber it resolves the domain through the injected
+//! [`HostResolver`] and refuses private, loopback, link-local, shared,
+//! multicast, unspecified, broadcast and metadata answers before any request
+//! ([`guard_hosts`]). Then it fetches the public `app-ads.txt` over HTTPS,
+//! falls back to HTTP only when the HTTPS attempt fails at the transport
+//! level, and runs the `apex-audit` app-ads.txt rule over the bytes. The
+//! fetch is pinned to the guard-approved address with curl's
+//! `--resolve host:port:address`, so a DNS answer that changes between the
+//! guard and the fetch cannot redirect the request. Subscribers watching the
+//! same domain share one resolve-guard-fetch-rule per run, so the public file
+//! is read and parsed once per distinct domain. Every fetch failure is
 //! recorded as the finding kind `unreachable` with a typed reason; a check
 //! never panics.
 //!
@@ -43,10 +59,16 @@
 //! [`run_bill`] issues one invoice per active subscriber through the same
 //! [`apex_billing::InvoiceRegister`] path the runner uses, with the frozen
 //! [`apex_billing::watch_plan`] line: $99 for the normal tier and $199 for
-//! the core tier, in [`apex_billing::PLAN_CURRENCY`]. A subscriber without a
-//! recorded customer profile is refused with a typed reason, and a refusal
-//! consumes no register number. A subscriber already billed for the month is
-//! skipped, so a rerun can never double-bill.
+//! the core tier, in [`apex_billing::PLAN_CURRENCY`], then charges the
+//! subscriber's stored Adyen card (`ContAuth`, `Subscription`, the
+//! subscriber id as `shopperReference`). A subscriber without a recorded
+//! customer profile is refused with a typed reason and consumes no register
+//! number; a subscriber without a stored card gets the issued plan line plus
+//! a typed charge refusal. An issued-but-unpaid invoice is retried on the
+//! next run with the same deterministic reference (the idempotency key) and
+//! is never re-issued. A subscriber already billed and paid for the month is
+//! skipped, so a rerun can never double-bill; a canceled subscriber is not
+//! walked at all.
 //!
 //! # Layering
 //!
@@ -68,14 +90,24 @@ pub mod guard;
 pub mod model;
 pub mod store;
 
-pub use bill::{current_month, month_bounds, run_bill, BillDeps, BillReport, IssuedInvoice};
-pub use daily::{run_daily, watch_page_url, DailyDeps, DailyEntry, DailyReport};
+pub use bill::{
+    current_month, month_bounds, run_bill, BillDeps, BillReport, ChargedInvoice, IssuedInvoice,
+};
+pub use daily::{
+    run_daily, skip_reason, watch_page_url, DailyDeps, DailyEntry, DailyReport, DailySkip,
+    SKIP_CANCELED, SKIP_PENDING, SKIP_UNCONFIRMED,
+};
 pub use fetch::{normalize_domain, CurlFetcher, FetchError, Fetched, Fetcher, MapFetcher};
 pub use findings::{diff_findings, findings_hash, Change, StoredFinding};
 pub use guard::{guard_hosts, HostResolver, SsrfRefusal, StdResolver, REFUSAL_MESSAGE};
 pub use model::{
-    parse_account_ids, publisher_slug_for_domain, validate_watch_signup, Status, SubscribeOutcome,
-    Subscriber, Tier, WatchFieldError, WatchSignup, ACCOUNTS_ERROR, DOMAIN_ERROR, EMAIL_ERROR,
-    FORM_SUMMARY, MAX_ACCOUNT_TEXT_CHARS,
+    parse_account_ids, publisher_slug_for_domain, tier_from_evidence, validate_watch_signup,
+    ActivateOutcome, ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome, SubscribeRequest,
+    Subscriber, Tier, WatchFieldError, WatchSignup, ACCOUNTS_ERROR, CONFIRMATION_TOKEN_HEX_LEN,
+    CONFIRMATION_TTL_MS, CORE_TIER_MIN_APP_COUNT, DOMAIN_ERROR, EMAIL_ERROR, FORM_SUMMARY,
+    MAX_ACCOUNT_TEXT_CHARS,
 };
-pub use store::{now_unix_ms, SubscriberStore, WatchError, DEFAULT_WATCH_ROOT, WATCH_ROOT_ENV};
+pub use store::{
+    is_confirmation_token, now_unix_ms, SubscriberStore, WatchError, DEFAULT_WATCH_ROOT,
+    WATCH_ROOT_ENV,
+};

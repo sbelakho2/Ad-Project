@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::BillingError;
 use crate::profile::{BillingProfile, CustomerProfile};
-use crate::vat::{treatment_for, VatTreatment};
+use crate::vat::{
+    treatment_for_shape, treatment_for_with_vies, HttpViesClient, VatTreatment, ViesEvidence,
+    ViesOutcome,
+};
 
 /// The billing window an invoice covers. `year_month` is the human-facing
 /// `YYYY-MM` label; `start_unix_ms` is inclusive and `end_unix_ms` exclusive.
@@ -140,6 +143,11 @@ pub struct Invoice {
     /// register refuse.
     #[serde(default)]
     pub vat_treatment: VatTreatment,
+    /// The EU VIES answer the treatment was decided from, when one was
+    /// consulted. Kept as evidence on the invoice and in the register line;
+    /// a reverse charge without a matching valid answer cannot render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vies_evidence: Option<ViesEvidence>,
 }
 
 impl Invoice {
@@ -189,26 +197,41 @@ impl Invoice {
     }
 
     /// Decide and apply the VAT treatment for the attached customer against
-    /// `seller`'s profile: the domestic rate, "reverse charge", or no VAT
-    /// outside the EU (see [`crate::vat`] for the exact rules, the in-crate
-    /// EU table, and the documented no-VIES policy). Validates both profiles
-    /// first, so a missing field is a typed refusal naming it; the decided
-    /// treatment is recorded on the invoice.
+    /// `seller`'s profile using the production VIES client. See
+    /// [`Self::apply_vat_treatment_with_vies`] for the injected seam.
     pub fn apply_vat_treatment(mut self, seller: &BillingProfile) -> Result<Self, BillingError> {
+        self = self.apply_vat_treatment_with_vies(seller, &HttpViesClient::default())?;
+        Ok(self)
+    }
+
+    /// Decide and apply the VAT treatment for the attached customer against
+    /// `seller`'s profile, consulting `vies` before any reverse charge.
+    ///
+    /// The decided treatment and the VIES answer (when one was consulted) are
+    /// recorded on the invoice. Both profiles are validated first, so a
+    /// missing field is a typed refusal naming it. An unavailable register
+    /// refuses reverse charge with [`BillingError::ViesUnavailable`]; an
+    /// invalid or unknown number applies domestic VAT.
+    pub fn apply_vat_treatment_with_vies(
+        mut self,
+        seller: &BillingProfile,
+        vies: &dyn crate::vat::ViesClient,
+    ) -> Result<Self, BillingError> {
         let customer = self
             .customer
             .as_ref()
             .ok_or(BillingError::MissingCustomerProfile)?;
-        let treatment = treatment_for(seller, customer)?;
-        // `treatment_for` returns only decided treatments: the domestic rate,
-        // reverse charge, or no VAT outside the EU.
-        let rate_bp = if treatment == VatTreatment::Domestic {
+        let decision = treatment_for_with_vies(seller, customer, vies)?;
+        // `treatment_for_with_vies` returns only decided treatments: the
+        // domestic rate, reverse charge, or no VAT outside the EU.
+        let rate_bp = if decision.treatment == VatTreatment::Domestic {
             seller.vat_rate_bp
         } else {
             0
         };
         self = self.with_vat(rate_bp);
-        self.vat_treatment = treatment;
+        self.vat_treatment = decision.treatment;
+        self.vies_evidence = decision.evidence;
         Ok(self)
     }
 
@@ -239,7 +262,55 @@ impl Invoice {
         if self.vat_treatment == VatTreatment::NotApplied {
             return Err(BillingError::VatTreatmentNotApplied);
         }
-        let expected = treatment_for(seller, customer)?;
+        let expected = if self.vat_treatment == VatTreatment::ReverseCharge {
+            // A reverse charge is lawful only with the matching VIES
+            // confirmation recorded when the treatment was applied. Rendering
+            // never calls the register again, so the recorded evidence is the
+            // authority.
+            let evidence =
+                self.vies_evidence
+                    .as_ref()
+                    .ok_or_else(|| BillingError::InconsistentVat {
+                        detail: "reverse charge requires a recorded VIES confirmation".to_string(),
+                    })?;
+            if !evidence.confirms(customer) {
+                return Err(BillingError::InconsistentVat {
+                    detail: format!(
+                        "reverse charge evidence does not confirm the customer's VAT number: {}",
+                        evidence.detail
+                    ),
+                });
+            }
+            VatTreatment::ReverseCharge
+        } else {
+            let shape = treatment_for_shape(seller, customer)?;
+            if shape == VatTreatment::ReverseCharge {
+                // The parties are cross-border EU with a number, but the
+                // applied treatment is domestic: only an invalid/unknown
+                // VIES answer that matches the customer may explain that.
+                match &self.vies_evidence {
+                    Some(evidence)
+                        if evidence.confirms_country_and_number(customer)
+                            && matches!(
+                                evidence.outcome,
+                                ViesOutcome::Invalid | ViesOutcome::Unknown
+                            ) =>
+                    {
+                        VatTreatment::Domestic
+                    }
+                    _ => {
+                        return Err(BillingError::InconsistentVat {
+                            detail: format!(
+                                "the invoice states {} without a VIES answer that supports it",
+                                self.vat_treatment
+                            ),
+                        })
+                    }
+                }
+            } else {
+                shape
+            }
+        };
         if self.vat_treatment != expected {
             return Err(BillingError::InconsistentVat {
                 detail: format!(
@@ -324,6 +395,11 @@ impl Invoice {
             // worded on an intra-EU B2B invoice.
             out.push_str("VAT: reverse charge\n");
         }
+        if let Some(evidence) = &self.vies_evidence {
+            // The register answer is part of the document, not a hidden
+            // annotation: it is what makes the stated treatment auditable.
+            out.push_str(&format!("VIES: {}\n", evidence.detail));
+        }
         out.push_str(&format!("Gross total: {} micros\n", self.gross_micros));
         Ok(out)
     }
@@ -406,6 +482,7 @@ pub fn compute_invoice(
         gross_micros: total_micros,
         customer: None,
         vat_treatment: VatTreatment::NotApplied,
+        vies_evidence: None,
     })
 }
 
@@ -495,6 +572,7 @@ pub fn compute_invoice_from_basis(
         gross_micros: total_micros,
         customer: None,
         vat_treatment: VatTreatment::NotApplied,
+        vies_evidence: None,
     })
 }
 

@@ -10,13 +10,33 @@
 ///
 /// Input without any of the five characters is copied verbatim.
 pub fn html_escape(input: &str) -> String {
-    if !input
-        .bytes()
-        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
-    {
+    if !needs_escape(input) {
         return input.to_string();
     }
     let mut out = String::with_capacity(input.len() + 16);
+    push_escaped_known_special(&mut out, input);
+    out
+}
+
+/// Append `input` escaped for element text or a quoted attribute. This is the
+/// allocation-free form of [`html_escape`]: repeated renders (large tables,
+/// chart tables) append into one output buffer instead of building one
+/// temporary `String` per value.
+pub(crate) fn push_escaped(out: &mut String, input: &str) {
+    if needs_escape(input) {
+        push_escaped_known_special(out, input);
+    } else {
+        out.push_str(input);
+    }
+}
+
+fn needs_escape(input: &str) -> bool {
+    input
+        .bytes()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+}
+
+fn push_escaped_known_special(out: &mut String, input: &str) {
     for ch in input.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -27,7 +47,6 @@ pub fn html_escape(input: &str) -> String {
             other => out.push(other),
         }
     }
-    out
 }
 
 /// Escape a value for a quoted attribute context.
@@ -74,6 +93,21 @@ mod tests {
             html_escape("<script>alert(1)</script>"),
             "&lt;script&gt;alert(1)&lt;/script&gt;"
         );
+    }
+
+    #[test]
+    fn the_in_place_escaping_path_matches_the_allocating_one() {
+        for input in [
+            "",
+            "plain text",
+            "&",
+            "<script>alert('x')</script>",
+            "caf\u{00e9} \u{4e16}\u{754c} & \"quoted\"",
+        ] {
+            let mut out = String::from("prefix:");
+            push_escaped(&mut out, input);
+            assert_eq!(out, format!("prefix:{}", html_escape(input)), "{input:?}");
+        }
     }
 
     #[test]

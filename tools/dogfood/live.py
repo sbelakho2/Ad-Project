@@ -47,6 +47,7 @@ import csv
 import hashlib
 import hmac
 import http.client
+import http.server
 import io
 import json
 import os
@@ -55,6 +56,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -72,9 +74,33 @@ FROZEN_PROBE_CLASSES = [
     "concurrency",
     "failure-injection",
     "differential-truth",
+    "tenant-isolation",
+    "auth-surface",
+    "signin-ownership",
+    "payment-activation",
 ]
 
+# The dispatch order is not the registry order: `failure-injection` restarts
+# the owned ClickHouse server on a fresh data path, so every
+# ClickHouse-dependent class (`differential-truth`, which asserts the seeded
+# projections and the runner's billing truth) must run before it. The frozen
+# class registry above stays unchanged; only the execution schedule moves.
 PROBE_ORDER = list(FROZEN_PROBE_CLASSES)
+PROBE_ORDER.remove("differential-truth")
+PROBE_ORDER.insert(PROBE_ORDER.index("failure-injection"), "differential-truth")
+
+# The always-run core set the relevance filter adds to every selection. Must
+# stay in lockstep with `CORE_CELLS` in
+# rust/crates/apex-tools/src/dogfood_plan.rs: the published `/healthz`
+# contract (which also runs the static parity gate), the console session gate
+# and the two-publisher tenant isolation of the overview and the ledger.
+CORE_CELLS = [
+    "apex-api|GET /healthz|surface-parity",
+    "apex-api|GET /healthz|response-contract",
+    "apex-api|GET /console/audit|auth-surface",
+    "apex-api|GET /|tenant-isolation",
+    "apex-api|GET /console/ledger|tenant-isolation",
+]
 
 SERVICES = ["apex-api", "apex-control", "apex-sales-web"]
 
@@ -91,6 +117,61 @@ CONTROL_LOCKED_OPERATOR = "locked-probe"
 WATCH_DOMAIN = "dogfood-watch.example"
 WATCH_PUBLISHER = "dogfood-watch-example"
 WATCH_EMAIL = "watch@dogfood-watch.example"
+# The second publisher the tenant-isolation probe seeds: a distinct snapshot,
+# a distinct ledger and its own bearer token, so a leak in either direction is
+# observable in the bytes.
+RIVAL_PUBLISHER = "rival"
+RIVAL_TOKEN = "dogfood-live-rival-token"
+RIVAL_LEDGER_RECORDS = 5
+# The publisher the console's own session is minted for (the token file's
+# primary entry).
+API_PUBLISHER = "northstar"
+RIVAL_DOMAIN = "rival-only.example"
+RIVAL_UNIT = "rival-only-unit"
+NORTHSTAR_UNIT = "northstar-only-unit"
+# Markers that appear on the rendered audit page as the missing-network
+# finding's message: the northstar (hostile) snapshot is missing mintegral.com,
+# the rival snapshot is missing rival-missing.example. The audit page is what
+# the tenant-isolation probe compares, so the markers must be finding text,
+# not snapshot fields (ad-unit names are only rendered when a rule cites them).
+NORTHSTAR_AUDIT_MARKER = "mintegral.com"
+RIVAL_AUDIT_MARKER = "rival-missing.example"
+# The marker the DNS-rebinding probe's stub curl emits when the fetch did NOT
+# pin the guard-approved address: the re-resolution landed elsewhere. The
+# fixed fetch passes `--resolve host:port:address`, so the marker never
+# reaches a recorded finding.
+REBIND_CANARY = "REBOUND-TO-LOOPBACK"
+# The Adyen webhook reference the payment-activation probe settles.
+WATCH_SETTLEMENT_REFERENCE = "dogfood-watch-settlement"
+# The Adyen HMAC key (hex) the harness signs the settlement notification with
+# and hands the API through APEX_ADYEN_HMAC_KEY.
+API_ADYEN_HMAC_KEY_HEX = "646f67666f6f642d616479656e2d686d61632d6b6579"
+# The loopback Adyen checkout stub the API and the watch bill charge through:
+# a successful payment link and an accepted card-on-file charge. The public
+# developer site is a real HTTPS domain whose `/app-ads.txt` is a 404, so the
+# live audit's app-ads read is an honest "absent" without reaching a private
+# address (the guard refuses loopback names).
+API_ADYEN_MERCHANT_ACCOUNT = "DogfoodECOM"
+API_ADYEN_CHECKOUT_LINK = "https://checkout.dogfood.example/pay/DOGFOOD-LINK"
+API_LIVE_DEVELOPER_SITE = "digitalturbine.com"
+# The vaulted LevelPlay key set the tenant/LevelPlay probes onboard: the base
+# URL is repointed at the harness's loopback stub so the reporting request is
+# recorded.
+LEVELPLAY_SECRET_KEY = "dogfood-levelplay-secret"
+LEVELPLAY_REFRESH_TOKEN = "dogfood-levelplay-refresh"
+LEVELPLAY_APP_KEY = "dogfood-levelplay-app"
+LEVELPLAY_ACCOUNT_ID = "dogfood-levelplay-account"
+# The cross-border EU customer the VIES probe bills: Estonia, so a Finnish
+# seller is out of country and a VAT number is required for reverse charge.
+VIES_CUSTOMER_VAT = "EE123456789"
+VIES_CUSTOMER_COUNTRY = "EE"
+# The label the fixed VAT treatment records as its VIES evidence. The probe
+# avoids the substring in its own publisher/customer names (a bare "vies"
+# marker would match "vies-probe" and mask the defect), so the markers are the
+# serialized evidence *key* and the confirmation word.
+VIES_EVIDENCE_MARKERS = ('"vies', "confirmation")
+VIES_PROBE_DOMAIN = "cross-border-probe.example"
+VIES_PROBE_PUBLISHER = "cross-border-probe"
 # The seeded monitoring band: USD 350,000 of reported 30-day revenue, inside
 # the Mid band ($100k..$500k) so the chosen tier ($1,500/month) is provably
 # band-selected and not a default.
@@ -236,10 +317,214 @@ def log(message):
     print(message, flush=True)
 
 
+def source_matches(changed, source):
+    """Whether a changed repo path matches one declared surface source. A
+    source naming a directory (trailing slash) matches it and anything under
+    it; otherwise the match is exact. Mirrors `source_matches` in
+    rust/crates/apex-tools/src/dogfood_plan.rs so the two relevance filters
+    agree byte-for-byte."""
+    if source.endswith("/"):
+        return changed == source[:-1] or changed.startswith(source)
+    return changed == source
+
+
+def select_relevant_cells(required, surface_sources, changed, core=CORE_CELLS):
+    """The pure relevance selection, mirroring `select_cells` in
+    dogfood_plan.rs: with no changed paths return every cell; otherwise select
+    the cells whose surface `sources` intersect a changed path, add the
+    always-run core, and report the classes with no selected cell and the
+    changed paths that matched no declared source. Deterministic."""
+    all_cells = set(required)
+    if not changed:
+        return all_cells, set(), []
+    selected = set()
+    for cell_id in sorted(all_cells):
+        service, surface, _cls = cell_id.split("|", 2)
+        path = surface.split(" ", 1)[1] if " " in surface else surface
+        sources = surface_sources.get("%s|%s" % (service, path), [])
+        if any(source_matches(change, source) for change in changed for source in sources):
+            selected.add(cell_id)
+    unmatched = [
+        change
+        for change in changed
+        if not any(
+            source_matches(change, source)
+            for sources in surface_sources.values()
+            for source in sources
+        )
+    ]
+    for cell in core:
+        if cell in all_cells:
+            selected.add(cell)
+    required_classes = set(cell.split("|", 2)[2] for cell in all_cells)
+    selected_classes = set(cell.split("|", 2)[2] for cell in selected)
+    return selected, required_classes - selected_classes, unmatched
+
+
+def relevance_self_test():
+    """The four documented relevance cases, against a miniature catalog. Kept
+    beside the frozen core so the always-run set stays honest."""
+    required = [
+        "apex-api|GET /console/audit|response-contract",
+        "apex-api|GET /console/audit|tenant-isolation",
+        "apex-api|GET /console/audit|auth-surface",
+        "apex-api|GET /|tenant-isolation",
+        "apex-api|GET /console/ledger|tenant-isolation",
+        "apex-api|GET /healthz|surface-parity",
+        "apex-api|GET /healthz|response-contract",
+        "apex-api|POST /watch|failure-injection",
+        "apex-sales-web|GET /leads|response-contract",
+    ]
+    sources = {
+        "apex-api|/console/audit": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+        ],
+        "apex-api|/": ["rust/crates/apex-api/src/html/overview.rs"],
+        "apex-api|/console/ledger": ["rust/crates/apex-api/src/html/ledger.rs"],
+        "apex-api|/healthz": ["rust/crates/apex-api/src/routes.rs"],
+        "apex-api|/watch": [
+            "rust/crates/apex-watch/src/fetch.rs",
+            "rust/crates/apex-watch/src/guard.rs",
+        ],
+        "apex-sales-web|/leads": ["rust/crates/apex-sales-web/src/routes.rs"],
+    }
+
+    def cell_present(selected, needle):
+        return any(needle == cell for cell in selected)
+
+    problems = []
+    # 1. A changed console page selects the console + tenant cells, skips sales.
+    selected, skipped, unmatched = select_relevant_cells(
+        required, sources, ["rust/crates/apex-api/src/html/audit.rs"]
+    )
+    if not cell_present(selected, "apex-api|GET /console/audit|response-contract"):
+        problems.append("console change did not select the console response-contract cell")
+    if not cell_present(selected, "apex-api|GET /console/audit|tenant-isolation"):
+        problems.append("console change did not select the tenant cell")
+    if not cell_present(selected, "apex-api|GET /|tenant-isolation"):
+        problems.append("console change did not add the core tenant cell")
+    if cell_present(selected, "apex-sales-web|GET /leads|response-contract"):
+        problems.append("console change selected a sales cell")
+    if "failure-injection" not in skipped:
+        problems.append("console change did not skip the fetch class")
+    if unmatched:
+        problems.append("console change reported an unmatched path: %s" % unmatched)
+    # 2. A changed watch fetch selects the fetch/SSRF cell.
+    selected, _skipped, _unmatched = select_relevant_cells(
+        required, sources, ["rust/crates/apex-watch/src/fetch.rs"]
+    )
+    if not cell_present(selected, "apex-api|POST /watch|failure-injection"):
+        problems.append("fetch change did not select the SSRF cell")
+    # 3. No paths selects everything, nothing skipped.
+    selected, skipped, unmatched = select_relevant_cells(required, sources, [])
+    if selected != set(required) or skipped or unmatched:
+        problems.append("no paths did not select everything")
+    # 4. An unknown path selects the core set only and reports the path.
+    selected, _skipped, unmatched = select_relevant_cells(
+        required, sources, ["docs/nowhere.md"]
+    )
+    core = set(cell for cell in CORE_CELLS if cell in required)
+    if selected != core:
+        problems.append("unknown path did not select the core only: %s" % sorted(selected))
+    if unmatched != ["docs/nowhere.md"]:
+        problems.append("unknown path not reported: %s" % unmatched)
+    return problems
+
+
+def adyen_sign(hmac_key_hex, item):
+    """The base64 HMAC-SHA256 Adyen puts in `additionalData.hmacSignature`:
+    the eight documented fields colon-joined, in order (mirrors
+    apex_billing::adyen::NotificationItem::signed_message)."""
+    key = bytes.fromhex(hmac_key_hex)
+    message = ":".join(
+        [
+            item["pspReference"],
+            item.get("originalReference", ""),
+            item["merchantAccountCode"],
+            item["merchantReference"],
+            str(item["amount"]["value"]),
+            item["amount"]["currency"],
+            item["eventCode"],
+            item["success"],
+        ]
+    )
+    return base64.b64encode(hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()).decode()
+
+
+class _StubHandler(http.server.BaseHTTPRequestHandler):
+    """One request against a `LocalStub`, recorded then answered."""
+
+    def log_message(self, *args):  # keep the harness output clean
+        return
+
+    def _serve(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        self.server.record(self.command, self.path, dict(self.headers), body)
+        status, payload = self.server.answer(self.command, self.path)
+        data = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    do_GET = _serve
+    do_POST = _serve
+
+
+class LocalStub:
+    """A loopback HTTP stub the product talks to through a configured base
+    URL. Every request is recorded so a probe can assert the exact request the
+    product issued (for example the LevelPlay reporting query string)."""
+
+    def __init__(self, responder):
+        self.responder = responder
+        self.requests = []
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
+        self.httpd.record = self._record
+        self.httpd.answer = self._answer
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def _record(self, method, path, headers, body):
+        self.requests.append(
+            {
+                "method": method,
+                "path": path,
+                "headers": headers,
+                "body": body.decode("utf-8", "replace"),
+            }
+        )
+
+    def _answer(self, method, path):
+        return self.responder(method, path, self.requests)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    @property
+    def port(self):
+        return self.httpd.server_address[1]
+
+    def base_url(self):
+        return "http://127.0.0.1:%d" % self.port
+
+    def stop(self):
+        try:
+            self.httpd.shutdown()
+        except Exception:
+            pass
+        try:
+            self.httpd.server_close()
+        except Exception:
+            pass
+
+
 def materialize(template):
     path = template
-    for token, value in PATH_PARAMETERS.items():
-        path = path.replace(token, value, 1)
+    for token, value in PATH_PARAMETERS.items():        path = path.replace(token, value, 1)
     return path
 
 
@@ -673,6 +958,16 @@ class Harness:
         self.cells = {}
         self.surface = {}
         self.required = set()
+        # Relevance: `surface_sources` is the per-surface repo-path list read
+        # from the catalog, `selected` is the filtered cell set (== required
+        # when unfiltered), and `skipped_classes` lists the classes the filter
+        # left untouched.
+        self.surface_sources = {}
+        self.selected = set()
+        self.filtered = False
+        self.changed_paths = []
+        self.skipped_classes = set()
+        self.selection_notes = []
         self.failures = []
         self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.runner_ran = False
@@ -695,6 +990,11 @@ class Harness:
         self._cell_index_cache = None
         self._contract_expectations = {}
         self._no_inline_targets = None
+        # Per-class wall time (measurement, never asserted) and the run start
+        # for the total. Reporting only: the probes and their order are
+        # unchanged.
+        self.class_timings = {}
+        self.run_started_monotonic = time.monotonic()
 
     # ------------------------------------------------------------------ io
     def repo_path(self, rel):
@@ -739,7 +1039,11 @@ class Harness:
                 "probe_classes %r != the frozen registry %r" % (declared, FROZEN_PROBE_CLASSES),
             )
         else:
-            self.check("catalog|probe-classes", True, "the 12 frozen probe classes, in order")
+            self.check(
+                "catalog|probe-classes",
+                True,
+                "the %d frozen probe classes, in order" % len(FROZEN_PROBE_CLASSES),
+            )
         for service, declared_service in self.surface["services"].items():
             for cell in declared_service["required"]:
                 for cls in cell["classes"]:
@@ -755,6 +1059,16 @@ class Harness:
             for route in declared_service["routes"]:
                 for method in route["methods"]:
                     declared_surfaces.add("%s|%s %s" % (service, method.upper(), route["path"]))
+                sources = route.get("sources") or []
+                if not sources:
+                    self.check(
+                        "catalog|sources",
+                        False,
+                        "%s %s declares no sources; the relevance filter needs them"
+                        % (service, route["path"]),
+                    )
+                self.surface_sources["%s|%s" % (service, route["path"])] = list(sources)
+        self.selected = set(self.required)
         bad = []
         for cell_id in sorted(self.required):
             service, surface, cls = cell_id.split("|", 2)
@@ -822,7 +1136,65 @@ class Harness:
             % (bad_markers, collisions, len(self.session_required)),
         )
 
+    # ------------------------------------------------------------ relevance
+    def git_diff_paths(self, spec):
+        proc = subprocess.run(
+            ["git", "diff", "--name-only", spec],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            raise ReqError(
+                "git diff --name-only %s failed (exit %d): %s"
+                % (spec, proc.returncode, (proc.stderr or "").strip())
+            )
+        return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+    def resolve_changed_paths(self):
+        changed = list(self.args.changed or [])
+        if self.args.git_diff:
+            changed.extend(self.git_diff_paths(self.args.git_diff))
+        return sorted(set(changed))
+
+    def apply_selection(self):
+        """Resolve `--changed` / `--git-diff` into the cell subset to run. With
+        neither flag the run is unfiltered (every declared cell). Otherwise
+        only the cells whose surface `sources` intersect a changed path are
+        selected, plus the always-run core set; classes with no selected cell
+        are skipped and reported."""
+        changed = self.resolve_changed_paths()
+        if not changed:
+            self.selected = set(self.required)
+            self.filtered = False
+            return
+        self.filtered = True
+        self.changed_paths = changed
+        selected, skipped, unmatched = select_relevant_cells(
+            self.required, self.surface_sources, changed
+        )
+        self.selected = selected
+        self.skipped_classes = skipped
+        if unmatched:
+            self.selection_notes.append(
+                "%d changed path(s) matched no declared source: %s"
+                % (len(unmatched), ", ".join(unmatched))
+            )
+
+    def site_selected(self):
+        if not self.filtered:
+            return True
+        return any(change.startswith("site/") for change in self.changed_paths)
+
     def check_site(self):
+        if not self.site_selected():
+            self.check(
+                "site|pages-min",
+                True,
+                "SKIPPED: no changed path touches site/; the static half is not in this selection",
+            )
+            return
         public = self.repo_path("site/public")
         pages_min = int(self.surface.get("site", {}).get("pages_min", 0))
         if not os.path.isdir(public):
@@ -962,6 +1334,7 @@ class Harness:
                 "APEX_RUNNER_SIGNING_KEY_HEX": RUNNER_SIGNING_SEED_HEX,
                 "APEX_RUNNER_DATA_DIR": self.fleet["runner_data"],
                 "APEX_CONNECTIONS_ROOT": self.fleet["credentials"],
+                "APEX_RUNNER_SNAPSHOT": self.fleet["snapshots"],
                 "APEX_VAULT_KEY_HEX": API_VAULT_KEY_HEX,
                 "APEX_RUNNER_LEDGER_ROOT": self.fleet["ledgers"],
                 "APEX_BILLING_PROFILE": self.fleet["seller"],
@@ -1412,10 +1785,32 @@ class Harness:
         ledgers = os.path.join(work, "ledgers")
         os.makedirs(snapshots)
         os.makedirs(ledgers)
+
+        # One loopback stub serves the two checkout/AdMob seams the corrected
+        # live probes exercise: the Adyen payment-link/card-on-file calls and
+        # the AdMob mediation-group read. Every request is recorded.
+        def stub_responder(method, path, requests):
+            if path.startswith("/v1beta/") and "mediationGroups" in path:
+                return (200, {"mediationGroups": []})
+            if path.startswith("/v71/paymentLinks"):
+                return (200, {"id": "pl_dogfood_live", "url": API_ADYEN_CHECKOUT_LINK})
+            if path.startswith("/v71/payments"):
+                return (
+                    200,
+                    {
+                        "pspReference": "PSPCARDOGFOODLIVE",
+                        "resultCode": "Authorised",
+                        "amount": {"value": int(WATCH_FEE_MICROS // 10_000), "currency": "USD"},
+                    },
+                )
+            return (404, {"error": "unexpected stub path"})
+
+        self.api["stub"] = LocalStub(stub_responder).start()
         os.makedirs(os.path.join(work, "proposals"))
         os.makedirs(os.path.join(work, "credentials"))
         shutil.copy(self.repo_path("rust/crates/apex-api/fixtures/admob.json"), snapshots)
         shutil.copy(self.repo_path("rust/crates/apex-api/fixtures/northstar.jsonl"), ledgers)
+        self.normalize_fixture_lift_records(os.path.join(ledgers, "northstar.jsonl"))
         # The escaping probe owns the snapshot copy: one ad unit carries a
         # hostile name and a formula-leading id, so the CSV export has to
         # neutralize it and the HTML has to escape it.
@@ -1440,13 +1835,153 @@ class Harness:
                     walk(item)
 
         walk(snapshot)
+        # A northstar-only marker unit so the tenant-isolation probe can prove
+        # which publisher's snapshot a page rendered.
+        snapshot.setdefault("adUnits", []).append(
+            {
+                "platformUnitId": "northstar-only-1",
+                "name": NORTHSTAR_UNIT,
+                "format": "rewarded",
+                "enabled": True,
+                "countryFloors": [],
+            }
+        )
         with open(snapshot_path, "w", encoding="utf-8") as fh:
             json.dump(snapshot, fh)
+        # The fixed contract keys snapshots by publisher and platform
+        # (`<root>/<publisher>/<platform>.json`) while the current tree reads
+        # the flat `<root>/<platform>.json`. Both layouts are seeded: the flat
+        # hostile copy keeps the escaping/assets probes fed on either tree, the
+        # per-publisher copies are what the tenant-isolation probe compares.
+        for publisher in (API_PUBLISHER, RIVAL_PUBLISHER):
+            publisher_dir = os.path.join(snapshots, publisher)
+            os.makedirs(publisher_dir, exist_ok=True)
+            with open(os.path.join(publisher_dir, "admob.json"), "w", encoding="utf-8") as fh:
+                json.dump(snapshot, fh)
+        # The rival's snapshot carries its own markers so a shared-snapshot read
+        # is visible in the bytes of the other publisher's pages.
+        rival_snapshot = {
+            "platform": "admob",
+            "fetchedAtUnixMs": int(time.time() * 1000),
+            "adUnits": [
+                {
+                    "platformUnitId": "rival-only-1",
+                    "name": RIVAL_UNIT,
+                    "format": "banner",
+                    "enabled": True,
+                    "countryFloors": [],
+                }
+            ],
+            "waterfall": [],
+            "mediationGroups": [],
+            "bidderAccounts": [],
+            "countryRevenue": [],
+            "appAdsTxt": {
+                "present": True,
+                "lines": ["rival-only.example, pub-rival, DIRECT"],
+                "expectedNetworks": ["rival-only.example", RIVAL_AUDIT_MARKER],
+            },
+            "platformTotals30d": {"revenue30d": 0, "impressions30d": 0},
+            "mediationTotals30d": {"revenue30d": 0, "impressions30d": 0},
+        }
+        with open(
+            os.path.join(snapshots, RIVAL_PUBLISHER, "admob.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(rival_snapshot, fh)
+        # The rival ledger: the first five verified records of the fixture check
+        # under the same deployment key, so the overview's "Verified records"
+        # total is 24 for northstar and 5 for rival. The two must never be
+        # summed across a session.
+        with open(self.repo_path("rust/crates/apex-api/fixtures/northstar.jsonl"), "r", encoding="utf-8") as fh:
+            fixture_lines = [line for line in fh.read().splitlines() if line.strip()]
+        with open(os.path.join(ledgers, RIVAL_PUBLISHER + ".jsonl"), "w", encoding="utf-8") as fh:
+            for line in fixture_lines[:RIVAL_LEDGER_RECORDS]:
+                fh.write(line + "\n")
         with open(os.path.join(work, "tokens.json"), "w", encoding="utf-8") as fh:
-            json.dump({"northstar": API_LEDGER_TOKEN}, fh)
+            json.dump({"northstar": API_LEDGER_TOKEN, RIVAL_PUBLISHER: RIVAL_TOKEN}, fh)
+        # The stub sendmail: appends every composed message to a file and marks
+        # its end, so the signin-ownership probe can read the `To:` and the
+        # one-time link of each delivery.
+        mail_outbox = os.path.join(work, "mail.outbox")
+        with open(mail_outbox, "w", encoding="utf-8"):
+            pass
+        sendmail_stub = os.path.join(work, "sendmail-stub.sh")
+        with open(sendmail_stub, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'cat >> "%s"\n'
+                'printf \'\\n===DOGFOOD-MESSAGE-END===\\n\' >> "%s"\n'
+                "exit 0\n" % (mail_outbox, mail_outbox)
+            )
+        os.chmod(sendmail_stub, 0o755)
+        self.api["mail_outbox"] = mail_outbox
+        self.api["sendmail_stub"] = sendmail_stub
+        self.api["rival_token"] = RIVAL_TOKEN
         self.seed_signin_rows(work)
         self.seed_billing_stores(work)
         return work
+
+    def normalize_fixture_lift_records(self, path):
+        """Re-seal the committed ledger copy so every `liftRecord` payload uses
+        a shape the product's current `LiftRecord` parser accepts.
+
+        The committed fixture still carries one legacy `{"type":"lift"}`
+        payload; the runner's daily pass fails closed on it ("an unparseable
+        lift payload refuses the scan"). The fixture itself is product data,
+        so the harness normalizes only its own copy: the legacy measurement is
+        rewritten as an equivalent `dataPull` record (semantically inert for
+        the fee scan) and the whole chain from that point is re-sealed with the
+        same [7u8; 32] seed the fixture already uses. The API's own ledger
+        verifier remains the final oracle."""
+        accepted = {
+            "preRegistration",
+            "dataPull",
+            "guardrail",
+            "result",
+            "monthlyBilling",
+            "billingChange",
+        }
+        seed = bytes.fromhex(RUNNER_SIGNING_SEED_HEX)
+        with open(path, "r", encoding="utf-8") as fh:
+            entries = [json.loads(line) for line in fh if line.strip()]
+        previous = "0" * 64
+        changed = 0
+        out = []
+        for entry in entries:
+            record = entry["record"]
+            reseal = False
+            if record.get("type") == "liftRecord":
+                try:
+                    payload = json.loads(record.get("payload") or "{}")
+                except ValueError:
+                    payload = {}
+                if payload.get("type") not in accepted:
+                    at_ms = int(record.get("atUnixMs") or int(time.time() * 1000))
+                    replacement = {
+                        "type": "dataPull",
+                        "day": time.strftime("%Y-%m-%d", time.gmtime(at_ms / 1000.0)),
+                        "rows_sha256": hashlib.sha256(b"[]").hexdigest(),
+                        "rows": [],
+                    }
+                    text = canonical_json(replacement)
+                    record["payload"] = text
+                    record["payloadSha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    reseal = True
+                    changed += 1
+            if changed:
+                record = seal_ledger_record(record, record["seq"], previous)
+                entry = json.loads(ledger_line(record, seed))
+            previous = record["hash"]
+            out.append(json.dumps(entry, separators=(",", ":"), ensure_ascii=False))
+        if changed:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(out) + "\n")
+            self.check(
+                "boot|ledger-lift-shape",
+                True,
+                "normalized %d legacy lift payload(s) in the harness ledger copy and re-sealed the chain "
+                "with the fixture seed (the product's parser is the oracle)" % changed,
+            )
 
     def seed_signin_rows(self, work):
         """Hash-only `signin.jsonl` rows beside the leads file: one valid link,
@@ -1494,7 +2029,10 @@ class Harness:
         os.makedirs(credentials, exist_ok=True)
         now_ms = int(time.time() * 1000)
         account = {
-            "developer_site": "studio.example.com",
+            # A real public HTTPS site whose `/app-ads.txt` is a 404: the live
+            # audit records an honest absent file instead of failing on a
+            # private address (the app-ads guard refuses loopback names).
+            "developer_site": API_LIVE_DEVELOPER_SITE,
             "expected_networks": [],
             "ad_unit_ids": [],
             "bidder_accounts": [],
@@ -1502,7 +2040,7 @@ class Harness:
                 "admob": {
                     "api_key": "dogfood-live-admob-key",
                     "account_id": "pub-1234567890",
-                    "base_url": "https://127.0.0.1:9",
+                    "base_url": self.api["stub"].base_url(),
                     "report_key": None,
                     "reporting_base_url": None,
                     "refresh_token": None,
@@ -1584,11 +2122,34 @@ class Harness:
         snapshot_path = os.path.join(snapshot_dir, "band-snapshot.json")
         with open(snapshot_path, "w", encoding="utf-8") as fh:
             json.dump(band_snapshot, fh)
+        # The fleet cycle now consumes each publisher's own
+        # `<snapshot_root>/<publisher>/<wire>.json` (its `--snapshot`
+        # arguments are replaced), so the runner root holds the committed
+        # AdMob fixture with the band's reported 30-day revenue: the cycle
+        # still has real proposals to hold AND the monitoring tier is chosen
+        # from the seeded $350k band.
+        runner_snapshots = os.path.join(self.workdir, "runner-snapshots")
+        shutil.rmtree(runner_snapshots, ignore_errors=True)
+        runner_publisher = os.path.join(runner_snapshots, API_PUBLISHER)
+        os.makedirs(runner_publisher)
+        with open(self.repo_path("rust/crates/apex-api/fixtures/admob.json"), "r", encoding="utf-8") as fh:
+            runner_snapshot = json.load(fh)
+        runner_snapshot["platformTotals30d"] = {
+            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+            "impressions30d": runner_snapshot.get("platformTotals30d", {}).get("impressions30d", 0),
+        }
+        runner_snapshot["mediationTotals30d"] = {
+            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+            "impressions30d": runner_snapshot.get("mediationTotals30d", {}).get("impressions30d", 0),
+        }
+        with open(os.path.join(runner_publisher, "admob.json"), "w", encoding="utf-8") as fh:
+            json.dump(runner_snapshot, fh)
         self.fleet = {
             "credentials": credentials,
             "ledgers": os.path.join(work, "ledgers"),
             "seller": seller_path,
             "snapshot": snapshot_path,
+            "snapshots": runner_snapshots,
             "runner_data": os.path.join(self.workdir, "runner"),
             "jobs_dir": os.path.join(self.workdir, "runner", "jobs"),
         }
@@ -1604,20 +2165,34 @@ class Harness:
             "APEX_API_BIND": "127.0.0.1:%d" % port,
             "APEX_SNAPSHOT_ROOT": os.path.join(work, "snapshots"),
             "APEX_LEDGER_ROOT": os.path.join(work, "ledgers"),
-            "APEX_LEDGER_KEYS": "northstar=%s" % NORTHSTAR_PUBKEY_HEX,
+            "APEX_LEDGER_KEYS": "northstar=%s,%s=%s"
+            % (NORTHSTAR_PUBKEY_HEX, RIVAL_PUBLISHER, NORTHSTAR_PUBKEY_HEX),
             "APEX_LEDGER_TOKENS_FILE": os.path.join(work, "tokens.json"),
             "APEX_LEADS_FILE": os.path.join(work, "leads.jsonl"),
             "APEX_LEAD_ID_SALT": "dogfood" * 8,
             "APEX_PROPOSALS_ROOT": os.path.join(work, "proposals"),
-            "APEX_CONSOLE_PUBLISHER": "northstar",
+            "APEX_CONSOLE_PUBLISHER": API_PUBLISHER,
             "APEX_CONSOLE_PUBLISHER_NAME": "Northstar Studio",
             "APEX_CONSOLE_CURRENCY": "USD",
+            # The transactional sink, pointed at the harness's stub sendmail so
+            # the signin-ownership probe can read where a link was delivered.
+            "APEX_NOTIFY_SINK": "email",
+            "APEX_NOTIFY_FROM": "ops@dogfood.example",
+            "APEX_NOTIFY_SENDMAIL": self.api["sendmail_stub"],
+            "APEX_DOGFOOD_MAIL_OUTBOX": self.api["mail_outbox"],
             "APEX_CREDENTIAL_ROOT": os.path.join(work, "credentials"),
             "APEX_VAULT_KEY_HEX": API_VAULT_KEY_HEX,
             "APEX_LIVE_AUDIT_TOKEN": API_LIVE_AUDIT_TOKEN,
             "APEX_OPERATOR_JOBS_TOKEN": API_OPERATOR_JOBS_TOKEN,
             "APEX_OPERATOR_JOBS_DIR": os.path.join(work, "jobs"),
             "APEX_WATCH_ROOT": os.path.join(work, "watch"),
+            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
+            # The checkout client the setup-watch sign-up records a link
+            # through (the harness stub answers with a stable link).
+            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
+            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
+            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
+            "APEX_COLLECTION_FILE": os.path.join(work, "collection.jsonl"),
             "APEX_CLICKHOUSE_HTTP": self.ch_url,
             "APEX_CLICKHOUSE_DB": self.database,
             "APEX_ANALYTICS_ENV": "production",
@@ -1995,13 +2570,19 @@ class Harness:
 
     # ------------------------------------------------------------- probes
     def cells_of(self, cls, service=None):
-        """The required cells of one probe class, in sorted order, from the
-        class index built once per run."""
+        """The selected cells of one probe class, in sorted order, from the
+        class index built once per run. Under a relevance selection only the
+        selected cells are returned, so a probe asserts exactly the subset. A
+        harness stand-in without a `selected` set (the CI bookkeeping check)
+        gets the unfiltered class."""
         cells = self._cell_index().get(cls)
         if not cells:
             return []
+        selected = getattr(self, "selected", None)
+        if selected is not None:
+            cells = [entry for entry in cells if entry[2] in selected]
         if service is None:
-            return list(cells)
+            return cells
         return [entry for entry in cells if entry[0] == service]
 
     def _cell_index(self):
@@ -2015,7 +2596,12 @@ class Harness:
 
     def run_all_probes(self):
         for cls in PROBE_ORDER:
+            if not self.cells_of(cls):
+                # Filtered run: nothing in this class is selected, so the
+                # probe (and its side work) is skipped entirely.
+                continue
             probe = getattr(self, "probe_" + cls.replace("-", "_"))
+            started = time.monotonic()
             try:
                 probe()
             except ReqError as error:
@@ -2026,11 +2612,19 @@ class Harness:
                 for _svc, _surface, cell_id in self.cells_of(cls):
                     if cell_id not in self.cells:
                         self.cell(cell_id, False, "probe error %r: %s" % (type(error).__name__, error))
+            finally:
+                self.class_timings[cls] = self.class_timings.get(cls, 0.0) + (
+                    time.monotonic() - started
+                )
 
     # 1 ------------------------------------------------------ surface-parity
     def probe_surface_parity(self):
+        argv = [self.bin_path("apex-tools"), "dogfood-plan"]
+        if self.filtered:
+            for change in self.changed_paths:
+                argv += ["--changed", change]
         proc = subprocess.run(
-            [self.bin_path("apex-tools"), "dogfood-plan"],
+            argv,
             cwd=self.root,
             capture_output=True,
             text=True,
@@ -2043,7 +2637,7 @@ class Harness:
                 cell_id,
                 ok,
                 "apex-tools dogfood-plan exit=%d; %s" % (proc.returncode, sanitize_evidence(out)),
-                "apex-tools dogfood-plan",
+                " ".join(argv),
             )
 
     # 2 --------------------------------------------------- response-contract
@@ -2096,6 +2690,7 @@ class Harness:
                 "/watch": ({303}, None, False),
                 "/watch/": ({200}, None, True),
                 "/watch/requested": ({200}, None, True),
+                "/watch/confirm": ({400}, None, False),
                 "/healthz": ({200}, None, False),
                 "/favicon.ico": ({200}, None, False),
                 "/favicon.svg": ({200}, None, False),
@@ -2187,6 +2782,108 @@ class Harness:
         for service, _surface, cell_id in cells:
             surface = cell_id.split("|")[1]
             method, template = surface.split(" ", 1)
+            if service == "apex-api" and template == "/watch/confirm":
+                problems = []
+                refused_copy = "This confirmation link is no longer valid."
+                url = self.base_url(service) + template
+                missing = http_req("GET", url)
+                if missing.status != 400 or refused_copy not in missing.text:
+                    problems.append(
+                        "missing token -> %d (expected the 400 refusal page)" % missing.status
+                    )
+                garbage = http_req("GET", url + "?token=not-a-confirmation-token")
+                if garbage.status != 400 or refused_copy not in garbage.text:
+                    problems.append(
+                        "garbage token -> %d (expected the 400 refusal page)" % garbage.status
+                    )
+                self.clear_mail_outbox()
+                signup = http_req(
+                    "POST",
+                    self.base_url(service) + "/watch",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    body=form_body(
+                        [
+                            ("domain", "confirm-probe.example"),
+                            ("email", "confirm@confirm-probe.example"),
+                            ("accounts", "admob.com = pub-confirm-probe"),
+                        ]
+                    ),
+                )
+                token = None
+                if signup.status == 303:
+                    tokens = re.findall(
+                        r"/watch/confirm\?token=([0-9a-f]{32})", self.read_mail_outbox()
+                    )
+                    token = tokens[-1] if tokens else None
+                if token is None:
+                    problems.append(
+                        "the sign-up did not send a confirmation token (HTTP %d)" % signup.status
+                    )
+                    first = second = None
+                else:
+                    first = http_req("GET", url + "?token=" + token)
+                    second = http_req("GET", url + "?token=" + token)
+                    if first.status != 200 or "Your email is confirmed." not in first.text:
+                        problems.append(
+                            "a fresh token -> %d (expected the 200 confirmed page)" % first.status
+                        )
+                    if second.status != 200 or refused_copy not in second.text:
+                        problems.append(
+                            "a spent token -> %d (expected the 200 refusal page)" % second.status
+                        )
+                detail = (
+                    "missing=%d garbage=%d signup=%d fresh=%s used=%s"
+                    % (
+                        missing.status,
+                        garbage.status,
+                        signup.status,
+                        first.status if first else "n/a",
+                        second.status if second else "n/a",
+                    )
+                )
+                if problems:
+                    detail += "; " + "; ".join(problems)
+                self.cell(
+                    cell_id,
+                    not problems,
+                    detail,
+                    "GET /watch/confirm (missing, garbage, fresh and spent tokens)",
+                )
+                continue
+            if service == "apex-api" and template == "/v1/audit/{platform}":
+                problems = []
+                path = materialize(template)
+                anonymous = http_req("GET", self.base_url(service) + path)
+                if anonymous.status != 401:
+                    problems.append(
+                        "anonymous HTTP %d (expected 401: the bearer gate is first)" % anonymous.status
+                    )
+                authorized = http_req(
+                    "GET",
+                    self.base_url(service) + path + "?publisher=" + API_PUBLISHER,
+                    headers={"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+                )
+                if authorized.status != 200:
+                    problems.append(
+                        "bearer + ?publisher=%s -> %d (expected 200)" % (API_PUBLISHER, authorized.status)
+                    )
+                elif NORTHSTAR_AUDIT_MARKER not in authorized.text:
+                    problems.append("the report does not carry the named publisher's own data")
+                elif RIVAL_AUDIT_MARKER in authorized.text:
+                    problems.append("the report carries another publisher's data")
+                detail = "anonymous=%d bearer+publisher=%d" % (
+                    anonymous.status,
+                    authorized.status,
+                )
+                if problems:
+                    detail += "; " + "; ".join(problems)
+                self.cell(
+                    cell_id,
+                    not problems,
+                    detail,
+                    "GET /v1/audit/admob (anonymous; then bearer + ?publisher=%s)" % API_PUBLISHER,
+                )
+                continue
             expect = expectations[service].get(template)
             if expect is None:
                 self.cell(cell_id, False, "no response-contract expectation for %s" % template)
@@ -2306,6 +3003,7 @@ class Harness:
                 ("GET /", "/"),
                 ("GET /free-audit/", "/free-audit/"),
                 ("GET /audit-requested/", "/audit-requested/"),
+                ("GET /watch/confirm", "/watch/confirm?token=not-a-confirmation-token"),
             ],
             "apex-control": [
                 ("GET /control", "/control"),
@@ -2829,8 +3527,24 @@ class Harness:
             note("apex-api", resp.status == 400, "malformed percent in query -> %d (expected 400)" % resp.status)
             resp = http_req("GET", base + "/console/audit/findings/%00", headers=cookie)
             note("apex-api", resp.status in (400, 404), "%%00 path segment -> %d" % resp.status)
+            # Auth runs before path decoding: anonymous is the gate's 401;
+            # behind the bearer the malformed platform is the typed 400/404.
             resp = http_req("GET", base + "/v1/audit/%ff")
-            note("apex-api", resp.status in (400, 404), "%%ff path segment -> %d" % resp.status)
+            note(
+                "apex-api",
+                resp.status == 401,
+                "%%ff path segment anonymous -> %d (expected the auth-first 401)" % resp.status,
+            )
+            resp = http_req(
+                "GET",
+                base + "/v1/audit/%ff?publisher=" + API_PUBLISHER,
+                headers={"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+            )
+            note(
+                "apex-api",
+                resp.status in (400, 404),
+                "%%ff path segment with bearer -> %d (expected 400/404 for the malformed platform)" % resp.status,
+            )
             resp = http_req("GET", base + "/" + "a" * 8192)
             note("apex-api", resp.status < 500, "8KB path -> %d" % resp.status)
             flood = "&".join("p%d=%d" % (i, i) for i in range(500))
@@ -2982,12 +3696,44 @@ class Harness:
             for _svc, _surface, cell_id in self.cells_of("csrf-idempotency", service):
                 self.cell(cell_id, ok, detail)
 
+    def ensure_monitoring_plan_state(self):
+        """Write the monitoring `PlanState` the console cancel action loads,
+        in `apex-billing`'s exact camelCase shape, atomically (temp file then
+        rename), when the cycle has not already recorded it. The publisher is
+        the session publisher and the plan id is Monitoring."""
+        root = os.path.join(self.api["work"], "credentials")
+        path = os.path.join(root, "%s.monitoring.json" % API_PUBLISHER)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    if json.load(fh).get("plan") == "monitoring":
+                        return path
+            except ValueError:
+                pass
+        period = time.strftime("%Y-%m", time.gmtime())
+        state = {
+            "plan": "monitoring",
+            "active": True,
+            "since": period + "-01",
+            "monthlyFeeMicros": MONITORING_MID_FEE_MICROS,
+            "currency": "USD",
+            "tier": "mid",
+            "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+        }
+        os.makedirs(root, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+        os.replace(tmp, path)
+        return path
+
     def csrf_api(self):
         problems = []
         notes = []
         base = self.base_url("apex-api")
         self.api_session()
         cookie = self.cookie_header("apex-api")
+        self.ensure_monitoring_plan_state()
         session_posts = [
             ("/console/ledger/session/end", ""),
             ("/console/connections/admob/submit", "platform=admob"),
@@ -3112,7 +3858,7 @@ class Harness:
                 ("accounts", "admob.com = pub-1234567890\napplovin.com = dogfood-live"),
             ]
         )
-        watch_before = count_lines(subscribers_path)
+        watch_before = len(self.read_watch_subscribers(watch_root))
         watch_first = http_req(
             "POST",
             base + "/watch",
@@ -3125,7 +3871,7 @@ class Harness:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=signup,
         )
-        watch_after = count_lines(subscribers_path)
+        watch_after = len(self.read_watch_subscribers(watch_root))
         watch_refs = [resp.header("location") for resp in (watch_first, watch_second)]
         self.monetization["watch_ref"] = None
         if watch_first.status != 303 or watch_second.status != 303:
@@ -3133,7 +3879,7 @@ class Harness:
         elif watch_refs[0] != watch_refs[1] or not (watch_refs[0] or "").startswith("/watch/requested?ref=sub_"):
             problems.append("watch replay returned refs %s (expected one /watch/requested?ref=sub_...)" % watch_refs)
         elif watch_after - watch_before != 1:
-            problems.append("watch replay stored %d subscriber rows, expected 1" % (watch_after - watch_before))
+            problems.append("watch replay stored %d subscriber(s), expected 1" % (watch_after - watch_before))
         else:
             self.monetization["watch_ref"] = watch_refs[0].split("ref=", 1)[-1]
             notes.append("watch replay: same ref %s, one durable subscriber" % self.monetization["watch_ref"])
@@ -3141,6 +3887,26 @@ class Harness:
         # cancellations both 303 and the recorded stop period is never
         # re-dated (idempotent, recorded-forever state).
         csrf = form_body([("csrf_token", self.api.get("csrf") or "")])
+        # The no-plan state is an honest 400, separately from the CSRF gate:
+        # park the seeded monitoring file for one request, then restore it.
+        monitoring_state = self.ensure_monitoring_plan_state()
+        parked = monitoring_state + ".dogfood-parked"
+        os.replace(monitoring_state, parked)
+        try:
+            no_plan = http_req(
+                "POST",
+                base + "/console/settings/monitoring/cancel",
+                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+                body=csrf,
+            )
+        finally:
+            os.replace(parked, monitoring_state)
+        if no_plan.status != 400:
+            problems.append(
+                "cancel without a plan state -> %d (expected the honest 400)" % no_plan.status
+            )
+        else:
+            notes.append("no plan state: cancel -> 400")
         for path in ("/console/settings/monitoring/cancel", "/console/settings/billing/managed/cancel"):
             plan_name = "monitoring" if "monitoring" in path else "managed"
             state_path = os.path.join(self.api["work"], "credentials", "northstar.%s.json" % plan_name)
@@ -3369,6 +4135,51 @@ class Harness:
                 headers = {}
             for _svc, surface, cell_id in self.cells_of("traversal", service):
                 method, template = surface.split(" ", 1)
+                if service == "apex-api" and template == "/watch/confirm":
+                    # The email-ownership route takes its hostile input in the
+                    # `token` query parameter. A malformed token is the 400
+                    # refusal page; a well-shaped unknown one is the same
+                    # refusal rendered at 200. Neither may carry foreign bytes.
+                    problems = []
+                    observations = []
+                    for payload in TRAVERSAL_CORPUS:
+                        url = (
+                            self.base_url(service)
+                            + "/watch/confirm?token="
+                            + urllib.parse.quote(payload, safe="")
+                        )
+                        try:
+                            resp = http_req("GET", url, headers=headers)
+                        except ReqError as error:
+                            problems.append("%s -> %s" % (payload, error))
+                            continue
+                        accepted = resp.status in (400, 404, 303, 401)
+                        if resp.status == 200 and (
+                            "This confirmation link is no longer valid." in resp.text
+                            or "Your email is confirmed." in resp.text
+                        ):
+                            accepted = True
+                        if not accepted:
+                            problems.append(
+                                "%s -> HTTP %d (neither a typed refusal nor an honest state)"
+                                % (payload, resp.status)
+                            )
+                        for canary in TRAVERSAL_CANARIES:
+                            if canary in resp.body:
+                                problems.append("%s leaked %r" % (payload, canary.decode()))
+                        observations.append("%d" % resp.status)
+                    detail = "GET /watch/confirm?token=<corpus> statuses [%s]" % ", ".join(
+                        observations
+                    )
+                    if problems:
+                        detail += "; " + "; ".join(problems[:4])
+                    self.cell(
+                        cell_id,
+                        not problems,
+                        detail,
+                        "GET /watch/confirm?token=<corpus>",
+                    )
+                    continue
                 if "{" not in template:
                     self.cell(cell_id, False, "declared traversal surface %s has no parameter" % surface)
                     continue
@@ -3650,8 +4461,24 @@ class Harness:
             "apex-control": self.failure_control(),
             "apex-sales-web": self.failure_sales(),
         }
-        for service, _surface, cell_id in self.cells_of("failure-injection"):
-            ok, detail = results[service]
+        # The watch sub-probes run after `failure_api` has restarted apex-api.
+        watch_results = {}
+
+        def watch_result(surface):
+            if surface not in watch_results:
+                if surface == "POST /watch":
+                    watch_results[surface] = self.failure_dns_rebinding()
+                elif surface == "GET /watch":
+                    watch_results[surface] = self.failure_unpaid_subscriber()
+                else:
+                    watch_results[surface] = results["apex-api"]
+            return watch_results[surface]
+
+        for service, surface, cell_id in self.cells_of("failure-injection"):
+            if service == "apex-api" and surface in ("POST /watch", "GET /watch"):
+                ok, detail = watch_result(surface)
+            else:
+                ok, detail = results[service]
             self.cell(cell_id, ok, detail)
 
     def failure_api(self):
@@ -3799,10 +4626,17 @@ class Harness:
             "--logger.log=%s/server.log" % work,
             "--logger.errorlog=%s/server.err.log" % work,
         ]
+        # ClickHouse resolves DNS after forking its resolver thread. On macOS
+        # the Objective-C runtime aborts the forked child (SIGABRT/exit 134)
+        # unless this is set, which would turn the severance subprobe's own
+        # restart into a failure. Inherit a caller-set value when present.
+        recovered_env = dict(os.environ)
+        recovered_env.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
         try:
             proc = subprocess.Popen(
                 argv,
                 cwd=self.root,
+                env=recovered_env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -3883,8 +4717,24 @@ class Harness:
             "apex-control": self.differential_control(),
             "apex-sales-web": self.differential_sales(),
         }
-        for service, _surface, cell_id in self.cells_of("differential-truth"):
+        # The two ApAudit expectations that ride differential-truth get their
+        # own sub-result so the failing cell names the exact assertion.
+        levelplay = (True, "")
+        vies = (True, "")
+        if self.cells_of("differential-truth", "apex-api"):
+            surfaces = {surface for _svc, surface, _cid in self.cells_of("differential-truth", "apex-api")}
+            if "POST /v1/audit/{platform}" in surfaces:
+                levelplay = self.differential_levelplay()
+            if "GET /console/settings/billing" in surfaces:
+                vies = self.differential_vies()
+        for service, surface, cell_id in self.cells_of("differential-truth"):
             ok, detail = results[service]
+            if service == "apex-api" and surface == "POST /v1/audit/{platform}":
+                ok = ok and levelplay[0]
+                detail = "; ".join(part for part in ("LevelPlay: " + levelplay[1], detail) if part)
+            elif service == "apex-api" and surface == "GET /console/settings/billing":
+                ok = ok and vies[0]
+                detail = "; ".join(part for part in ("VIES: " + vies[1], detail) if part)
             self.cell(cell_id, ok, detail)
 
     def differential_api(self):
@@ -3935,6 +4785,187 @@ class Harness:
         ok, detail = self.differential_monetization(base, cookie)
         (notes if ok else problems).append(detail)
         return (not problems, "; ".join(problems + notes))
+
+    def differential_levelplay(self):
+        """The LevelPlay reporting request shape: the runner's experiment pull
+        must ask for `metrics=revenue,activeUsers` with
+        `breakdowns=date,abTest`, so the lift value is revenue and the active
+        users ride separately."""
+        problems = []
+
+        def responder(method, path, requests):
+            if "/partners/publisher/auth" in path:
+                return (200, {"token": "dogfood-levelplay-bearer"})
+            if "/levelPlay/reporting/v1" in path:
+                return (
+                    200,
+                    {
+                        "code": 200,
+                        "results": [
+                            {"abTest": "A", "revenue": "12.5", "activeUsers": "100"},
+                            {"abTest": "B", "revenue": "13.1", "activeUsers": "110"},
+                        ],
+                    },
+                )
+            if "/levelPlay/groups/v4" in path:
+                return (
+                    200,
+                    {
+                        "groups": [
+                            {"groupId": "exp_dogfood", "abTest": "B", "name": "variant"},
+                            {"groupId": "exp_dogfood_control", "abTest": "A", "name": "control"},
+                        ]
+                    },
+                )
+            if "/levelPlay/network/instances/v4" in path:
+                return (200, {"instances": []})
+            return (200, {})
+
+        stub = LocalStub(responder).start()
+        credentials = os.path.join(self.workdir, "levelplay-probe-registry")
+        shutil.rmtree(credentials, ignore_errors=True)
+        os.makedirs(credentials, exist_ok=True)
+        lp_blob = os.path.join(credentials, "levelplay-probe.blob")
+        lp_meta = os.path.join(credentials, "levelplay-probe.connections.json")
+        try:
+            account = {
+                "developer_site": "example.com",
+                "expected_networks": [],
+                "ad_unit_ids": [],
+                "bidder_accounts": [],
+                "platforms": {
+                    "levelplay": {
+                        "api_key": LEVELPLAY_SECRET_KEY,
+                        "account_id": LEVELPLAY_APP_KEY,
+                        "base_url": stub.base_url(),
+                        "report_key": None,
+                        "reporting_base_url": None,
+                        "refresh_token": LEVELPLAY_REFRESH_TOKEN,
+                    }
+                },
+            }
+            with open(lp_blob, "w", encoding="utf-8") as fh:
+                fh.write(vault_encrypt(API_VAULT_KEY_HEX, json.dumps(account)))
+            with open(lp_meta, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "platforms": {
+                            "levelplay": {
+                                "state": "validated",
+                                "validated_at_unix_ms": int(time.time() * 1000),
+                                "reporting": True,
+                                "credential_fields": ["account_id", "api_key", "refresh_token"],
+                                "failure_class": None,
+                            }
+                        }
+                    },
+                    fh,
+                )
+            proc = self.run_runner_command(
+                ["aa-eval", "--experiment", "exp_dogfood", "--json"],
+                extra_env={"APEX_CONNECTIONS_ROOT": credentials},
+                timeout=180,
+            )
+            reporting = [r for r in stub.requests if "/levelPlay/reporting/v1" in r["path"]]
+            if not reporting:
+                problems.append(
+                    "the runner never called the LevelPlay reporting endpoint (exit %d): %s"
+                    % (proc.returncode, sanitize_evidence((proc.stdout or "") + (proc.stderr or ""), 200))
+                )
+            else:
+                bad = [
+                    r["path"]
+                    for r in reporting
+                    if "metrics=revenue,activeUsers" not in r["path"]
+                    or "breakdowns=date,abTest" not in r["path"]
+                ]
+                if bad:
+                    problems.append(
+                        "the LevelPlay reporting request carries the wrong metrics/breakdowns: %s" % bad[0]
+                    )
+                else:
+                    return (
+                        True,
+                        "the LevelPlay reporting request carries metrics=revenue,activeUsers + breakdowns=date,abTest (%d pull(s))"
+                        % len(reporting),
+                    )
+        finally:
+            stub.stop()
+            for path in (lp_blob, lp_meta):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return (not problems, "; ".join(problems))
+
+    def differential_vies(self):
+        """Reverse charge is only stated with a VIES confirmation, and the
+        answer is recorded as evidence. A cross-border EU customer is billed
+        through the product's own watch bill; the register line's treatment
+        must cite the VIES answer, and with VIES unavailable the treatment is
+        not reverse charge."""
+        problems = []
+        watch_root = os.path.join(self.workdir, "vies-watch")
+        shutil.rmtree(watch_root, ignore_errors=True)
+        os.makedirs(watch_root, exist_ok=True)
+        now_ms = int(time.time() * 1000)
+        row = {
+            "id": "sub_vies000001",
+            "publisher": VIES_PROBE_PUBLISHER,
+            "domain": VIES_PROBE_DOMAIN,
+            "email": "billing@cross-border-probe.example",
+            "tier": "normal",
+            "createdMs": now_ms,
+            "status": "active",
+            "cancelTokenHash": hashlib.sha256(b"vies-token").hexdigest(),
+            "billing": {
+                "legalName": "Cross Border OU",
+                "addressLines": ["Telliskivi 1"],
+                "country": VIES_CUSTOMER_COUNTRY,
+                "vatNumber": VIES_CUSTOMER_VAT,
+            },
+        }
+        with open(os.path.join(watch_root, "subscribers.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+        cwd = os.path.join(self.workdir, "vies-billing")
+        shutil.rmtree(cwd, ignore_errors=True)
+        os.makedirs(cwd, exist_ok=True)
+        env = {
+            "APEX_WATCH_ROOT": watch_root,
+            "APEX_BILLING_PROFILE": self.fleet["seller"],
+            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+        }
+        result = self.watch_bill(self.current_period(), cwd, env)
+        register_path = os.path.join(cwd, ".apex", "billing", "invoices.jsonl")
+        line = ""
+        if os.path.exists(register_path):
+            with open(register_path, "r", encoding="utf-8") as fh:
+                lines = [entry for entry in fh.read().splitlines() if entry.strip()]
+            line = lines[0] if lines else ""
+        output = (result or {}).get("output", "")
+        if (result or {}).get("issued") != 1:
+            # A typed hold/refusal that cites the missing VIES confirmation is
+            # the other documented fixed outcome when VIES cannot confirm.
+            lowered = output.lower()
+            if "refused" in lowered and any(marker in lowered for marker in ("vies", "confirmation")):
+                return (True, "the cross-border bill held the invoice pending the VIES confirmation")
+            problems.append(
+                "the cross-border VAT invoice was neither issued with evidence nor held with a VIES reason (bill=%s)"
+                % (result or "failed")
+            )
+        reverse = "reverse charge" in line.lower() or '"reverseCharge"' in line
+        if reverse and not any(marker in line.lower() for marker in VIES_EVIDENCE_MARKERS):
+            problems.append(
+                "the invoice states reverse charge for %s with no recorded VIES confirmation as evidence"
+                % VIES_CUSTOMER_VAT
+            )
+        if not line and (result or {}).get("issued") == 1:
+            problems.append("the billing register recorded no invoice line for the VIES probe")
+        return (
+            not problems,
+            "; ".join(problems)
+            or "the cross-border invoice cites the VIES confirmation (or refuses reverse charge without one)",
+        )
 
     def differential_monetization(self, base, cookie):
         """The monetization truth cells, differential across the harness-seeded
@@ -4056,10 +5087,27 @@ class Harness:
         # second run (one month never bills twice).
         ref = self.monetization.get("watch_ref")
         subscribers_path = os.path.join(self.api["work"], "watch", "subscribers.jsonl")
-        rows = []
-        if os.path.exists(subscribers_path):
-            with open(subscribers_path, "r", encoding="utf-8") as fh:
-                rows = [json.loads(line) for line in fh if line.strip()]
+        # The store is append-only: an update writes a new row, so fold by id
+        # before asserting "one subscriber" (a raw line count would count
+        # every payment-link and status update).
+        rows = list(self.read_watch_subscribers(os.path.dirname(subscribers_path)).values())
+        target = next((row for row in rows if row.get("id") == ref), None)
+        if target is not None and target.get("status") == "pending":
+            # The corrected sign-up lands pending; the $99 line is billed only
+            # after the payment webhook switches the subscriber on. Settle the
+            # seeded row through the product's own signed webhook path.
+            settlement = self.post_adyen_notification(
+                "PSPDOGFOODDIFFERENTIAL", "apex-watch:" + ref, "card-dogfood-differential"
+            )
+            if settlement.status != 200:
+                problems.append("the seeded subscriber's settlement answered %d" % settlement.status)
+            else:
+                try:
+                    if settlement.json().get("new") != 1:
+                        problems.append("the seeded subscriber's settlement was not recorded")
+                except (ValueError, ReqError):
+                    problems.append("the seeded subscriber's settlement returned no JSON")
+            rows = list(self.read_watch_subscribers(os.path.dirname(subscribers_path)).values())
         active = [
             row
             for row in rows
@@ -4073,6 +5121,12 @@ class Harness:
             "APEX_WATCH_ROOT": os.path.join(self.api["work"], "watch"),
             "APEX_BILLING_PROFILE": self.fleet["seller"],
             "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+            # The webhook recorded the card; the stub accepts the ContAuth
+            # charge so the idempotent second run is the only skip.
+            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
+            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
+            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
+            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
         }
         sidecar = os.path.join(watch_env["APEX_WATCH_ROOT"], WATCH_PUBLISHER + ".billing.json")
         with open(sidecar, "w", encoding="utf-8") as fh:
@@ -4098,21 +5152,46 @@ class Harness:
         return (not problems, "; ".join(problems + notes))
 
     def watch_bill(self, period, cwd, env):
+        merged = dict(os.environ)
+        if env:
+            merged.update(env)
         proc = subprocess.run(
             [self.bin_path("apex-watch"), "bill", period],
             cwd=cwd,
-            env={**os.environ, **env},
+            env=merged,
             capture_output=True,
             text=True,
             timeout=60,
         )
-        if proc.returncode != 0:
-            return None
         out = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode != 0:
+            return {
+                "issued": 0,
+                "refused": 0,
+                "skipped": 0,
+                "charged": 0,
+                "returncode": proc.returncode,
+                "output": out,
+            }
         match = re.search(r"(\d+) issued, (\d+) refused, (\d+) skipped", out)
+        charged = re.search(r"(\d+) charged", out)
         if not match:
-            return None
-        return {"issued": int(match.group(1)), "refused": int(match.group(2)), "skipped": int(match.group(3))}
+            return {
+                "issued": 0,
+                "refused": 0,
+                "skipped": 0,
+                "charged": 0,
+                "returncode": proc.returncode,
+                "output": out,
+            }
+        return {
+            "issued": int(match.group(1)),
+            "refused": int(match.group(2)),
+            "skipped": int(match.group(3)),
+            "charged": int(charged.group(1)) if charged else 0,
+            "returncode": proc.returncode,
+            "output": out,
+        }
 
     def differential_control(self):
         problems = []
@@ -4201,6 +5280,899 @@ class Harness:
             notes.append("sends page shows the seeded Touch history")
         return (not problems, "; ".join(notes + problems))
 
+    # 13 -------------------------------------------------- auth-surface
+    def open_console_session(self, publisher, token):
+        """Mint a console session bound to `publisher` (the ledger-token
+        exchange). Returns the session cookie id or None."""
+        resp = http_req(
+            "POST",
+            self.base_url("apex-api") + "/console/ledger",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=form_body([("publisher", publisher), ("token", token)]),
+        )
+        if resp.status != 303:
+            return None
+        return cookie_value(resp.header("set-cookie") or "", "apex_ledger_session")
+
+    def console_cookie(self, cookie):
+        return {"Cookie": "apex_ledger_session=" + cookie} if cookie else {}
+
+    def probe_auth_surface(self):
+        """The `/v1/audit/{platform}` bearer gate (401 without it, 200 with it)
+        and the console session gate (303 without a session, 200 with one)."""
+        cells = self.cells_of("auth-surface")
+        for service, surface, cell_id in cells:
+            method, template = surface.split(" ", 1)
+            base = self.base_url(service)
+            path = materialize(template)
+            problems = []
+            detail = ""
+            if service == "apex-api" and template == "/v1/audit/{platform}":
+                is_get = method.upper() == "GET"
+                scoped = base + path + "?publisher=" + API_PUBLISHER
+                anon_headers = {} if is_get else {"Content-Type": "application/json"}
+                anon_body = None if is_get else b"{}"
+                anonymous = http_req(
+                    method, scoped, headers=anon_headers, body=anon_body
+                )
+                if anonymous.status != 401:
+                    problems.append(
+                        "anonymous %s /v1/audit/admob answered %d, expected 401 (the report is behind the bearer)"
+                        % (method, anonymous.status)
+                    )
+                headers = {"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN}
+                body = None
+                if not is_get:
+                    headers["Content-Type"] = "application/json"
+                    body = json.dumps({"publisher": API_PUBLISHER}).encode("utf-8")
+                authorized = http_req(method, scoped, headers=headers, body=body)
+                if authorized.status != 200:
+                    problems.append(
+                        "bearer %s /v1/audit/admob?publisher=%s answered %d, expected 200"
+                        % (method, API_PUBLISHER, authorized.status)
+                    )
+                elif RIVAL_AUDIT_MARKER in authorized.text:
+                    problems.append("the named publisher's report carries the rival's data")
+                elif is_get and NORTHSTAR_AUDIT_MARKER not in authorized.text:
+                    problems.append("the named publisher's report does not carry its own data")
+                detail = "%s /v1/audit/admob?publisher=%s anon=%d bearer=%d" % (
+                    method,
+                    API_PUBLISHER,
+                    anonymous.status,
+                    authorized.status,
+                )
+                if is_get:
+                    rival = http_req(
+                        "GET",
+                        base + path + "?publisher=" + RIVAL_PUBLISHER,
+                        headers={"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+                    )
+                    if rival.status != 200:
+                        problems.append(
+                            "the second publisher read answered %d, expected 200" % rival.status
+                        )
+                    elif RIVAL_AUDIT_MARKER not in rival.text:
+                        problems.append("the second publisher read does not carry its own data")
+                    elif NORTHSTAR_AUDIT_MARKER in rival.text:
+                        problems.append("the second publisher read carries northstar's data")
+                    detail += "; rival=%d" % rival.status
+            elif service == "apex-api" and template.startswith("/console"):
+                anonymous = http_req("GET", base + path)
+                gate = ("%s|%s" % (service, surface)) in self.session_required
+                if gate:
+                    if anonymous.status != 303:
+                        problems.append(
+                            "session-gated %s answered %d without a session, expected 303"
+                            % (path, anonymous.status)
+                        )
+                    elif anonymous.header("location") != "/console/ledger":
+                        problems.append(
+                            "session gate %s Location %r, expected /console/ledger"
+                            % (path, anonymous.header("location"))
+                        )
+                elif template in ("/console/ledger",):
+                    if anonymous.status != 200:
+                        problems.append(
+                            "public access panel %s answered %d, expected 200" % (path, anonymous.status)
+                        )
+                elif anonymous.status not in (200, 303, 401):
+                    problems.append("%s answered %d anonymously" % (path, anonymous.status))
+                detail = "GET %s anon=%d (session gate %s)" % (
+                    path,
+                    anonymous.status,
+                    "recorded" if gate else "public",
+                )
+            elif service == "apex-api" and template.startswith("/v1/"):
+                headers = {"Content-Type": "application/json"}
+                anonymous = http_req(method, base + path, headers=headers, body=b"")
+                if anonymous.status != 401:
+                    problems.append(
+                        "%s %s answered %d without a bearer, expected 401"
+                        % (method, path, anonymous.status)
+                    )
+                detail = "%s %s anon=%d" % (method, path, anonymous.status)
+            else:
+                anonymous = http_req(method, base + path)
+                if anonymous.status not in (200, 303, 401):
+                    problems.append("%s %s answered %d anonymously" % (method, path, anonymous.status))
+                detail = "%s %s anon=%d" % (method, path, anonymous.status)
+            if problems:
+                detail += "; " + "; ".join(problems)
+            self.cell(cell_id, not problems, detail, "%s %s" % (method, base + path))
+
+    # 14 ------------------------------------------------- tenant-isolation
+    def publisher_audit_text(self, cookie, platform="admob"):
+        resp = http_req(
+            "GET",
+            self.base_url("apex-api") + "/console/audit?platform=" + platform,
+            headers=self.console_cookie(cookie),
+        )
+        return resp
+
+    def overview_records(self, cookie):
+        resp = http_req("GET", self.base_url("apex-api") + "/", headers=self.console_cookie(cookie))
+        match = re.search(
+            r'kpi-label">Verified records</p><p class="kpi-value">(?:<a[^>]*>)?(\d+)',
+            resp.text,
+        )
+        return resp, (int(match.group(1)) if match else None)
+
+    def ledger_record_count(self, cookie):
+        resp = http_req(
+            "GET", self.base_url("apex-api") + "/console/ledger", headers=self.console_cookie(cookie)
+        )
+        links = len(re.findall(r"/console/ledger/records/\d+", resp.text))
+        return resp, links
+
+    def probe_tenant_isolation(self):
+        """Seed two publishers and prove each session sees only its own
+        snapshot and its own ledger totals."""
+        base = self.base_url("apex-api")
+        northstar = self.open_console_session(API_PUBLISHER, API_LEDGER_TOKEN)
+        rival = self.open_console_session(RIVAL_PUBLISHER, RIVAL_TOKEN)
+        if not northstar or not rival:
+            for _service, _surface, cell_id in self.cells_of("tenant-isolation"):
+                self.cell(
+                    cell_id,
+                    False,
+                    "could not mint both publisher sessions (northstar=%r rival=%r)"
+                    % (bool(northstar), bool(rival)),
+                )
+            return
+        ns_audit = self.publisher_audit_text(northstar)
+        rv_audit = self.publisher_audit_text(rival)
+        ns_csv = http_req(
+            "GET",
+            base + "/console/audit/export.csv?platform=admob",
+            headers=self.console_cookie(northstar),
+        )
+        rv_csv = http_req(
+            "GET",
+            base + "/console/audit/export.csv?platform=admob",
+            headers=self.console_cookie(rival),
+        )
+        ns_over, ns_total = self.overview_records(northstar)
+        rv_over, rv_total = self.overview_records(rival)
+        ns_ledger, ns_links = self.ledger_record_count(northstar)
+        rv_ledger, rv_links = self.ledger_record_count(rival)
+        v1_audit = http_req(
+            "GET",
+            base + "/v1/audit/admob?publisher=" + API_PUBLISHER,
+            headers={"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+        )
+        v1_audit_rival = http_req(
+            "GET",
+            base + "/v1/audit/admob?publisher=" + RIVAL_PUBLISHER,
+            headers={"Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+        )
+        v1_ledger_ns = http_req(
+            "GET", base + "/v1/ledger/" + API_PUBLISHER, headers={"Authorization": "Bearer " + API_LEDGER_TOKEN}
+        )
+        v1_ledger_rv = http_req(
+            "GET", base + "/v1/ledger/" + RIVAL_PUBLISHER, headers={"Authorization": "Bearer " + RIVAL_TOKEN}
+        )
+
+        def snapshot_problems(label, session_text, own, other):
+            problems = []
+            if own not in session_text:
+                problems.append("%s does not show its own snapshot marker %s" % (label, own))
+            if other in session_text:
+                problems.append("%s carries the other publisher's snapshot marker %s" % (label, other))
+            return problems
+
+        northstar_records = count_lines(
+            os.path.join(self.fleet["ledgers"], API_PUBLISHER + ".jsonl")
+        )
+        rival_records = count_lines(os.path.join(self.fleet["ledgers"], RIVAL_PUBLISHER + ".jsonl"))
+
+        for service, surface, cell_id in self.cells_of("tenant-isolation"):
+            problems = []
+            detail = ""
+            if surface == "GET /console/audit":
+                problems += snapshot_problems(
+                    "northstar session", ns_audit.text, NORTHSTAR_AUDIT_MARKER, RIVAL_AUDIT_MARKER
+                )
+                problems += snapshot_problems(
+                    "rival session", rv_audit.text, RIVAL_AUDIT_MARKER, NORTHSTAR_AUDIT_MARKER
+                )
+                detail = "northstar/audit=%d rival/audit=%d" % (ns_audit.status, rv_audit.status)
+            elif surface == "GET /console/audit/export.csv":
+                problems += snapshot_problems(
+                    "northstar CSV", ns_csv.text, NORTHSTAR_AUDIT_MARKER, RIVAL_AUDIT_MARKER
+                )
+                problems += snapshot_problems(
+                    "rival CSV", rv_csv.text, RIVAL_AUDIT_MARKER, NORTHSTAR_AUDIT_MARKER
+                )
+                detail = "northstar/csv=%d rival/csv=%d" % (ns_csv.status, rv_csv.status)
+            elif surface == "GET /":
+                if ns_total != northstar_records:
+                    problems.append(
+                        "northstar overview shows %r verified records, expected its own %d"
+                        % (ns_total, northstar_records)
+                    )
+                if rv_total != rival_records:
+                    problems.append(
+                        "rival overview shows %r verified records, expected its own %d"
+                        % (rv_total, rival_records)
+                    )
+                detail = "northstar/overview=%r (own %d) rival/overview=%r (own %d)" % (
+                    ns_total,
+                    northstar_records,
+                    rv_total,
+                    rival_records,
+                )
+            elif surface == "GET /console/ledger":
+                if ns_links != northstar_records:
+                    problems.append(
+                        "northstar ledger page links %d records, expected its own %d"
+                        % (ns_links, northstar_records)
+                    )
+                if rv_links != rival_records:
+                    problems.append(
+                        "rival ledger page links %d records, expected its own %d"
+                        % (rv_links, rival_records)
+                    )
+                detail = "northstar/ledger=%d rival/ledger=%d" % (ns_links, rv_links)
+            elif surface == "GET /v1/audit/{platform}":
+                if v1_audit.status != 200 or v1_audit_rival.status != 200:
+                    problems.append(
+                        "/v1/audit/admob answered northstar=%d rival=%d"
+                        % (v1_audit.status, v1_audit_rival.status)
+                    )
+                else:
+                    if NORTHSTAR_AUDIT_MARKER not in v1_audit.text:
+                        problems.append("the northstar read does not carry northstar's own data")
+                    if RIVAL_AUDIT_MARKER in v1_audit.text:
+                        problems.append("the northstar read exposes the rival snapshot")
+                    if RIVAL_AUDIT_MARKER not in v1_audit_rival.text:
+                        problems.append("the rival read does not carry rival's own data")
+                    if NORTHSTAR_AUDIT_MARKER in v1_audit_rival.text:
+                        problems.append("the rival read exposes the northstar snapshot")
+                detail = "/v1/audit northstar=%d rival=%d" % (
+                    v1_audit.status,
+                    v1_audit_rival.status,
+                )
+            elif surface == "POST /v1/audit/{platform}":
+                # The write route is live and would overwrite the read-only
+                # snapshot the isolation cells compare, so its cell pins the
+                # two contract refusals that never write: the auth gate and
+                # the required publisher in the body.
+                anonymous_post = http_req(
+                    "POST",
+                    base + "/v1/audit/admob",
+                    headers={"Content-Type": "application/json"},
+                    body=b'{"publisher":"%s"}' % API_PUBLISHER.encode(),
+                )
+                missing_publisher = http_req(
+                    "POST",
+                    base + "/v1/audit/admob",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN,
+                    },
+                    body=b"{}",
+                )
+                if anonymous_post.status != 401:
+                    problems.append(
+                        "anonymous POST /v1/audit/admob -> %d (expected 401)"
+                        % anonymous_post.status
+                    )
+                if missing_publisher.status != 400:
+                    problems.append(
+                        "bearer POST without a publisher -> %d (expected 400)"
+                        % missing_publisher.status
+                    )
+                detail = "POST /v1/audit/admob anon=%d no-publisher=%d" % (
+                    anonymous_post.status,
+                    missing_publisher.status,
+                )
+            elif surface == "GET /v1/ledger/{publisher}":
+                if v1_ledger_ns.status != 200 or v1_ledger_rv.status != 200:
+                    problems.append(
+                        "/v1/ledger readers answered %d/%d"
+                        % (v1_ledger_ns.status, v1_ledger_rv.status)
+                    )
+                else:
+                    ns_names = set(re.findall(r'"publisher":"([^"]+)"', v1_ledger_ns.text))
+                    rv_names = set(re.findall(r'"publisher":"([^"]+)"', v1_ledger_rv.text))
+                    if ns_names and ns_names != {API_PUBLISHER}:
+                        problems.append("northstar bearer read named %s" % sorted(ns_names))
+                    if rv_names and rv_names != {RIVAL_PUBLISHER}:
+                        problems.append("rival bearer read named %s" % sorted(rv_names))
+                detail = "/v1/ledger northstar=%d rival=%d" % (
+                    v1_ledger_ns.status,
+                    v1_ledger_rv.status,
+                )
+            if problems:
+                detail += "; " + "; ".join(problems)
+            self.cell(cell_id, not problems, detail)
+
+    # 15 ------------------------------------------------- signin-ownership
+    def read_mail_outbox(self):
+        path = self.api.get("mail_outbox")
+        if not path or not os.path.exists(path):
+            return ""
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+
+    def clear_mail_outbox(self):
+        path = self.api.get("mail_outbox")
+        if path:
+            with open(path, "w", encoding="utf-8"):
+                pass
+
+    def probe_signin_ownership(self):
+        """An existing workspace never sends its link to a form-supplied
+        attacker address, a brand-new workspace refuses a mismatched email
+        domain, and a spent single-use link is refused."""
+        problems = []
+        base = self.base_url("apex-api")
+        # 1. An attacker against the existing northstar workspace.
+        self.clear_mail_outbox()
+        attacker = "attacker@evil.example"
+        resp = http_req(
+            "POST",
+            base + "/free-audit",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=form_body(
+                [
+                    ("studio", "Northstar"),
+                    ("email", attacker),
+                    ("platforms", "admob"),
+                    ("revenue", "10k-50k"),
+                    ("notes", "dogfood ownership probe"),
+                ]
+            ),
+        )
+        if resp.status not in (303, 200):
+            problems.append("free-audit for the own attacker answered %d" % resp.status)
+        outbox = self.read_mail_outbox()
+        if "To: " + attacker in outbox or attacker in outbox:
+            problems.append(
+                "the sign-in link for the existing workspace was delivered to the form-supplied attacker %s" % attacker
+            )
+        # 2. A brand-new workspace with a mismatched email domain.
+        self.clear_mail_outbox()
+        intruder = "intruder@evil.example"
+        http_req(
+            "POST",
+            base + "/free-audit",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=form_body(
+                [
+                    ("studio", "Brand New Studio"),
+                    ("email", intruder),
+                    ("platforms", "admob"),
+                    ("revenue", "10k-50k"),
+                    ("notes", "dogfood ownership probe"),
+                ]
+            ),
+        )
+        outbox = self.read_mail_outbox()
+        if intruder in outbox:
+            problems.append(
+                "a brand-new workspace delivered a sign-in link to a mismatched-domain email %s" % intruder
+            )
+        # 3. The single-use link is refused on every repeat: a spent link and a
+        # second request of that same spent link both answer the refusal, never
+        # a second session.
+        signin = self.api.get("signin") or {}
+        used = http_req("GET", base + "/console/signin?token=" + signin.get("used", ""))
+        replay = http_req("GET", base + "/console/signin?token=" + signin.get("used", ""))
+        if used.status != 200 or "Sign-in refused." not in used.text:
+            problems.append("a spent sign-in link answered %d, expected the 200 refusal" % used.status)
+        if replay.status != 200 or "Sign-in refused." not in replay.text:
+            problems.append("a repeated sign-in link answered %d, expected the 200 refusal" % replay.status)
+        detail = "attacker delivery=%s; mismatched-domain delivery=%s; repeat=%d" % (
+            "LEAKED" if "attacker@evil.example" in self.read_mail_outbox() else "refused",
+            "LEAKED" if intruder in outbox else "refused",
+            replay.status,
+        )
+        if problems:
+            detail += "; " + "; ".join(problems)
+        delivery_ok = not problems
+        for service, surface, cell_id in self.cells_of("signin-ownership"):
+            if surface == "GET /console/signin":
+                replay_ok = (
+                    used.status == 200
+                    and "Sign-in refused." in used.text
+                    and replay.status == 200
+                    and "Sign-in refused." in replay.text
+                )
+                self.cell(
+                    cell_id,
+                    replay_ok,
+                    "spent sign-in link -> %d; repeat -> %d" % (used.status, replay.status),
+                )
+            else:
+                self.cell(cell_id, delivery_ok, detail)
+
+    # 16 ------------------------------------------------ payment-activation
+    def read_watch_subscribers(self, watch_root):
+        path = os.path.join(watch_root, "subscribers.jsonl")
+        folded = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if row.get("id"):
+                        folded[row["id"]] = row
+        return folded
+
+    def watch_signup(self, domain, email, accounts, core=False):
+        # `app_count` is no longer a form field and `tier` is not an input:
+        # both are sent deliberately so the probe proves the product ignores
+        # them and prices from evidence.
+        fields = [
+            ("domain", domain),
+            ("email", email),
+            ("accounts", accounts),
+            ("app_count", "999"),
+        ]
+        if core:
+            fields.append(("tier", "core"))
+        return http_req(
+            "POST",
+            self.base_url("apex-api") + "/watch",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=form_body(fields),
+        )
+
+    def watch_confirmation_token(self, email):
+        """The one-time confirmation token the product mailed to `email`."""
+        outbox = self.read_mail_outbox()
+        for block in outbox.split("===DOGFOOD-MESSAGE-END==="):
+            if email not in block:
+                continue
+            match = re.search(r"/watch/confirm\?token=([0-9a-f]{32})", block)
+            if match:
+                return match.group(1)
+        return None
+
+    def post_adyen_notification(self, psp_reference, merchant_reference, stored_card):
+        """Sign and post one Adyen AUTHORISATION notification through the
+        product's own HMAC-verified webhook route."""
+        item = {
+            "pspReference": psp_reference,
+            "originalReference": "",
+            "merchantAccountCode": API_ADYEN_MERCHANT_ACCOUNT,
+            "merchantReference": merchant_reference,
+            "amount": {"value": WATCH_FEE_MICROS // 10_000, "currency": "USD"},
+            "eventCode": "AUTHORISATION",
+            "success": "true",
+        }
+        body = {
+            "live": "false",
+            "notificationItems": [
+                {
+                    "NotificationRequestItem": {
+                        **item,
+                        "additionalData": {
+                            "hmacSignature": adyen_sign(API_ADYEN_HMAC_KEY_HEX, item),
+                            "storedPaymentMethodId": stored_card,
+                        },
+                    }
+                }
+            ],
+        }
+        return http_req(
+            "POST",
+            self.base_url("apex-api") + "/v1/adyen/webhook",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps(body).encode("utf-8"),
+        )
+
+    def run_watch_daily(self, watch_root, extra_env=None, path_dir=None):
+        env = dict(os.environ)
+        env.update(
+            {
+                "APEX_WATCH_ROOT": watch_root,
+                "APEX_NOTIFY_SINK": "file",
+                "APEX_NOTIFY_FILE": os.path.join(self.workdir, "watch-alerts.jsonl"),
+            }
+        )
+        if extra_env:
+            env.update(extra_env)
+        if path_dir:
+            env["PATH"] = path_dir + os.pathsep + env.get("PATH", "")
+        return subprocess.run(
+            [self.bin_path("apex-watch"), "daily"],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+    def watch_checked_count(self, proc):
+        out = (proc.stdout or "") + (proc.stderr or "")
+        match = re.search(r"(\d+) checked", out)
+        return int(match.group(1)) if match else None
+
+    def probe_payment_activation(self):
+        """The corrected setup-watch flow end to end: a pending sign-up priced
+        from evidence, a mailed confirmation token, an Adyen settlement (both
+        merchant-reference forms), the stored card, a replay, and a daily pass
+        that sees the subscriber as checkable."""
+        problems = []
+        base = self.base_url("apex-api")
+        watch_root = os.path.join(self.api["work"], "watch")
+        os.makedirs(watch_root, exist_ok=True)
+        domain_a = "pending-a.example"
+        email_a = "owner@pending-a.example"
+        domain_b = "pending-b.example"
+        email_b = "owner@pending-b.example"
+        self.clear_mail_outbox()
+        # 1. Both sign-ups land pending. `tier=core` and `app_count=999` are
+        # sent as form fields the product must ignore: the domain has no
+        # app-ads evidence the harness can serve, so the honest tier is
+        # Normal and no check may run yet.
+        resp_a = self.watch_signup(domain_a, email_a, "admob.com = pub-1", core=True)
+        resp_b = self.watch_signup(domain_b, email_b, "admob.com = pub-2", core=False)
+        if resp_a.status != 303:
+            problems.append("watch sign-up answered %d, expected 303" % resp_a.status)
+        if resp_b.status != 303:
+            problems.append("watch sign-up (b) answered %d, expected 303" % resp_b.status)
+        rows = self.read_watch_subscribers(watch_root)
+        by_domain = {
+            row.get("domain"): row
+            for row in rows.values()
+            if row.get("domain") in (domain_a, domain_b)
+        }
+        for domain in (domain_a, domain_b):
+            row = by_domain.get(domain)
+            if row is None:
+                problems.append("no subscriber row was recorded for %s" % domain)
+                continue
+            if row.get("status") != "pending":
+                problems.append(
+                    "the sign-up for %s landed %r; it must be pending until payment"
+                    % (domain, row.get("status"))
+                )
+            if row.get("lastCheckAt"):
+                problems.append("the pending sign-up for %s already ran a check" % domain)
+            if row.get("tier") != "normal":
+                problems.append(
+                    "the tier for %s is %r; with no app-ads evidence it must be normal"
+                    % (domain, row.get("tier"))
+                )
+            if row.get("paymentLink") != API_ADYEN_CHECKOUT_LINK:
+                problems.append(
+                    "the sign-up for %s records payment link %r, expected the checkout link"
+                    % (domain, row.get("paymentLink"))
+                )
+            if row.get("shopperReference") != row.get("id"):
+                problems.append(
+                    "the sign-up for %s does not record its id as the shopper reference" % domain
+                )
+        active_before = [
+            domain
+            for domain in (domain_a, domain_b)
+            if (by_domain.get(domain) or {}).get("status") == "active"
+        ]
+        if active_before:
+            problems.append("the sign-ups are active before payment: %s" % active_before)
+        # 2. The confirmation page shows the recorded checkout link, and the
+        # mailed token confirms the address (single use).
+        requested = http_req(
+            "GET",
+            base + "/watch/requested?ref=" + str((by_domain.get(domain_a) or {}).get("id", "")),
+        )
+        if (
+            requested.status != 200
+            or API_ADYEN_CHECKOUT_LINK not in requested.text
+            or "Your watch is requested." not in requested.text
+        ):
+            problems.append(
+                "the confirmation page did not render the checkout link (HTTP %d)" % requested.status
+            )
+        tokens = {
+            domain_a: self.watch_confirmation_token(email_a),
+            domain_b: self.watch_confirmation_token(email_b),
+        }
+        for domain in (domain_a, domain_b):
+            token = tokens[domain]
+            if not token:
+                problems.append("no confirmation token was mailed for %s" % domain)
+                continue
+            first = http_req("GET", base + "/watch/confirm?token=" + token)
+            if first.status != 200 or "Your email is confirmed." not in first.text:
+                problems.append(
+                    "confirming %s answered %d without the confirmed copy" % (domain, first.status)
+                )
+        if tokens[domain_a]:
+            replay = http_req("GET", base + "/watch/confirm?token=" + tokens[domain_a])
+            if replay.status != 200 or "This confirmation link is no longer valid." not in replay.text:
+                problems.append(
+                    "a spent confirmation token answered %d instead of the refusal" % replay.status
+                )
+        # 3. The webhook activates both pending rows, once with the bare
+        # subscriber id and once with the canonical `apex-watch:<id>`.
+        ids = {domain: (by_domain.get(domain) or {}).get("id") for domain in (domain_a, domain_b)}
+        cards = {domain_a: "card-dogfood-a", domain_b: "card-dogfood-b"}
+        webhooks = {}
+        if ids[domain_a]:
+            webhooks[domain_a] = self.post_adyen_notification(
+                "PSP" + WATCH_SETTLEMENT_REFERENCE.upper() + "A", ids[domain_a], cards[domain_a]
+            )
+        if ids[domain_b]:
+            webhooks[domain_b] = self.post_adyen_notification(
+                "PSP" + WATCH_SETTLEMENT_REFERENCE.upper() + "B",
+                "apex-watch:" + ids[domain_b],
+                cards[domain_b],
+            )
+        for domain in (domain_a, domain_b):
+            resp = webhooks.get(domain)
+            if resp is None:
+                continue
+            if resp.status != 200:
+                problems.append("the settlement webhook for %s answered %d" % (domain, resp.status))
+            else:
+                try:
+                    new = resp.json().get("new")
+                except (ValueError, ReqError):
+                    new = None
+                if new != 1:
+                    problems.append("the settlement for %s recorded new=%r, expected 1" % (domain, new))
+        rows = self.read_watch_subscribers(watch_root)
+        for domain in (domain_a, domain_b):
+            row = rows.get(ids[domain] or "", {})
+            if row.get("status") != "active":
+                problems.append(
+                    "the settled subscriber %s stayed %r; payment must switch it on"
+                    % (domain, row.get("status"))
+                )
+            if row.get("storedPaymentMethodId") != cards[domain]:
+                problems.append(
+                    "the settled subscriber %s records card %r, expected %r"
+                    % (domain, row.get("storedPaymentMethodId"), cards[domain])
+                )
+            if not row.get("paidAt"):
+                problems.append("the settled subscriber %s records no paid_at" % domain)
+            if row.get("confirmed") is not True:
+                problems.append("the settled subscriber %s is not marked confirmed" % domain)
+        folded_before = len(rows)
+        replay = self.post_adyen_notification(
+            "PSP" + WATCH_SETTLEMENT_REFERENCE.upper() + "A", ids[domain_a] or "", cards[domain_a]
+        )
+        if replay.status != 200:
+            problems.append("the replayed settlement answered %d, expected 200" % replay.status)
+        else:
+            try:
+                new = replay.json().get("new")
+            except (ValueError, ReqError):
+                new = None
+            if new != 0:
+                problems.append("the replayed settlement recorded new=%r, expected 0" % new)
+        folded_after = len(self.read_watch_subscribers(watch_root))
+        if folded_after != folded_before:
+            problems.append(
+                "the replay added subscriber rows (%d -> %d)" % (folded_before, folded_after)
+            )
+        # 4. The daily pass must see both confirmed active subscribers as
+        # checkable (the unresolved domain is an unreachable check, not a
+        # skip).
+        daily = self.run_watch_daily(watch_root)
+        checked = self.watch_checked_count(daily)
+        if daily.returncode != 0:
+            problems.append(
+                "the daily pass failed: %s"
+                % sanitize_evidence((daily.stdout or "") + (daily.stderr or ""), 240)
+            )
+        elif checked != 2:
+            problems.append("the daily pass checked %r subscribers, expected 2" % checked)
+        # 5. The monthly bill charges the stored card and is idempotent.
+        for domain in (domain_a, domain_b):
+            publisher = (by_domain.get(domain) or {}).get("publisher")
+            if not publisher:
+                continue
+            with open(os.path.join(watch_root, publisher + ".billing.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"legalName": "Pending %s Oy" % publisher, "addressLines": ["Testikatu 1"], "country": "FI"},
+                    fh,
+                )
+        bill_cwd = os.path.join(self.workdir, "payment-billing")
+        shutil.rmtree(bill_cwd, ignore_errors=True)
+        os.makedirs(bill_cwd, exist_ok=True)
+        bill_env = {
+            "APEX_WATCH_ROOT": watch_root,
+            "APEX_BILLING_PROFILE": self.fleet["seller"],
+            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+            "APEX_ADYEN_API_KEY": "dogfood-live-adyen-key",
+            "APEX_ADYEN_MERCHANT_ACCOUNT": API_ADYEN_MERCHANT_ACCOUNT,
+            "APEX_ADYEN_CHECKOUT_BASE": self.api["stub"].base_url(),
+            "APEX_ADYEN_HMAC_KEY": API_ADYEN_HMAC_KEY_HEX,
+        }
+        first = self.watch_bill(self.current_period(), bill_cwd, bill_env)
+        second = self.watch_bill(self.current_period(), bill_cwd, bill_env)
+        if first.get("issued") != 2 or first.get("charged") != 2 or first.get("refused") != 0:
+            problems.append("the watch bill did not charge both stored cards: %s" % first)
+        # The shared watch root may also hold an already-billed subscriber
+        # from the differential pass: idempotency means zero new issues and
+        # zero new charges, with at least this probe's two rows skipped.
+        if (
+            second.get("issued") != 0
+            or second.get("charged") != 0
+            or second.get("skipped", 0) < 2
+        ):
+            problems.append("the settled path is not idempotent: second run %s" % second)
+        detail = (
+            "pending=%s/%s tier=%s/%s confirmed=%s/%s active=%s cards=%s replay-new=0 checked=%s "
+            "bill=%d charged=%d second=%d skipped=%d"
+            % (
+                (by_domain.get(domain_a) or {}).get("status"),
+                (by_domain.get(domain_b) or {}).get("status"),
+                (by_domain.get(domain_a) or {}).get("tier"),
+                (by_domain.get(domain_b) or {}).get("tier"),
+                bool(tokens[domain_a]),
+                bool(tokens[domain_b]),
+                rows.get(ids[domain_a] or "", {}).get("status"),
+                cards[domain_a],
+                checked,
+                first.get("issued", 0),
+                first.get("charged", 0),
+                second.get("issued", 0),
+                second.get("skipped", 0),
+            )
+        )
+        if problems:
+            detail += "; " + "; ".join(problems)
+        for _service, surface, cell_id in self.cells_of("payment-activation"):
+            if surface == "GET /watch/requested":
+                ok = (
+                    requested.status == 200
+                    and API_ADYEN_CHECKOUT_LINK in requested.text
+                    and "Your watch is requested." in requested.text
+                )
+                self.cell(cell_id, ok, "watch sign-up redirect=%d; checkout page=%d" % (resp_a.status, requested.status))
+            else:
+                self.cell(cell_id, not problems, detail)
+
+    def current_period(self):
+        return time.strftime("%Y-%m", time.gmtime())
+
+    # 13b ------------------------------------------ failure-injection (watch)
+    def failure_dns_rebinding(self):
+        """The fetch must pin the guard-approved address with
+        `curl --resolve host:port:address`, so a DNS answer that changes
+        between the guard and the fetch cannot redirect it."""
+        problems = []
+        watch_root = os.path.join(self.workdir, "rebind-watch")
+        shutil.rmtree(watch_root, ignore_errors=True)
+        os.makedirs(watch_root, exist_ok=True)
+        now_ms = int(time.time() * 1000)
+        token = "rebind-token"
+        row = {
+            "id": "sub_rebind0001",
+            "publisher": "dogfood-watch-example",
+            "domain": "example.com",
+            "email": WATCH_EMAIL,
+            "tier": "normal",
+            "createdMs": now_ms,
+            "status": "active",
+            "cancelTokenHash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        }
+        with open(os.path.join(watch_root, "subscribers.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+        stub_dir = os.path.join(self.workdir, "curl-stub")
+        shutil.rmtree(stub_dir, ignore_errors=True)
+        os.makedirs(stub_dir)
+        argv_log = os.path.join(self.workdir, "curl-argv.log")
+        verdict_log = os.path.join(self.workdir, "curl-verdict.log")
+        for path in (argv_log, verdict_log):
+            with open(path, "w", encoding="utf-8"):
+                pass
+        stub = os.path.join(stub_dir, "curl")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(%r, 'a') as fh:\n"
+                "    fh.write('\\t'.join(args) + '\\n')\n"
+                "resolve = []\n"
+                "url = ''\n"
+                "i = 0\n"
+                "while i < len(args):\n"
+                "    if args[i] == '--resolve' and i + 1 < len(args):\n"
+                "        resolve.append(args[i + 1]); i += 2; continue\n"
+                "    if args[i].startswith('http'):\n"
+                "        url = args[i]\n"
+                "    i += 1\n"
+                "host = url.split('//', 1)[-1].split('/', 1)[0].split(':')[0]\n"
+                "pinned = any(entry.split(':', 1)[0] == host for entry in resolve)\n"
+                "with open(%r, 'a') as fh:\n"
+                "    fh.write(('PINNED ' if pinned else 'UNPINNED ') + (resolve[0] if resolve else '') + '\\n')\n"
+                "if pinned:\n"
+                "    body = 'admob.com, pub-northstar, DIRECT\\n'\n"
+                "else:\n"
+                "    body = 'REBOUND-TO-LOOPBACK.example, pub-evil, DIRECT\\n'\n"
+                "sys.stdout.write(body + '\\n@@apex-watch-status@@200|')\n"
+                % (argv_log, verdict_log)
+            )
+        os.chmod(stub, 0o755)
+        proc = self.run_watch_daily(
+            watch_root,
+            extra_env={
+                "APEX_DOGFOOD_CURL_LOG": argv_log,
+                "APEX_DOGFOOD_CURL_VERDICT": verdict_log,
+            },
+            path_dir=stub_dir,
+        )
+        with open(verdict_log, "r", encoding="utf-8") as fh:
+            verdicts = [line.strip() for line in fh if line.strip()]
+        if not verdicts:
+            problems.append(
+                "the watch fetch never called curl (no request observed); daily exit=%d" % proc.returncode
+            )
+        else:
+            unpinned = [line for line in verdicts if line.startswith("UNPINNED")]
+            pinned = [line for line in verdicts if line.startswith("PINNED")]
+            if unpinned:
+                problems.append(
+                    "the fetch re-resolved the host instead of pinning the guard-approved address (%d unpinned call(s))"
+                    % len(unpinned)
+                )
+            if not pinned:
+                problems.append("no `--resolve host:port:address` call was observed")
+        rows = self.read_watch_subscribers(watch_root)
+        blob = json.dumps(rows)
+        if REBIND_CANARY in blob or "REBOUND-TO-LOOPBACK" in blob:
+            problems.append("the rebound loopback body reached a recorded finding")
+        return (not problems, "; ".join(problems) or "watch fetch pinned the guard-approved address")
+
+    def failure_unpaid_subscriber(self):
+        """A subscriber that has not paid runs no daily check. The run is
+        against a copy of the API's watch store so the daily pass appends its
+        update rows there, never to the shared store the other cells read."""
+        problems = []
+        source = os.path.join(self.api["work"], "watch")
+        watch_root = os.path.join(self.workdir, "unpaid-watch")
+        shutil.rmtree(watch_root, ignore_errors=True)
+        if os.path.isdir(source):
+            shutil.copytree(source, watch_root)
+        else:
+            problems.append("the API watch store was never created; nothing to check")
+            return (False, "; ".join(problems))
+        proc = self.run_watch_daily(watch_root)
+        checked = self.watch_checked_count(proc)
+        if checked is None:
+            problems.append(
+                "apex-watch daily produced no checked count (exit %d): %s"
+                % (proc.returncode, sanitize_evidence((proc.stdout or "") + (proc.stderr or ""), 200))
+            )
+        elif checked != 0:
+            problems.append(
+                "an unpaid subscriber ran %d daily check(s); an unpaid watch must run none" % checked
+            )
+        return (not problems, "; ".join(problems) or "unpaid subscriber ran no check (0 checked)")
+
     # 13 ----------------------------------------------- deferred lockout probe
     def run_lockout_probe(self):
         """The lockout copy requires five failures, which locks the client key
@@ -4248,7 +6220,11 @@ class Harness:
         recorded = set(baseline.get("cells", []))
         removals = {entry.get("cell") for entry in baseline.get("removals", []) if entry.get("cell")}
         problems = []
-        missing = sorted(self.required - recorded)
+        # Under a relevance selection the run is deliberately partial, so the
+        # "new required cell not yet recorded" direction is not enforced (a
+        # filtered run cannot record the whole catalog); the ratchet still
+        # refuses a baseline cell that is no longer required.
+        missing = [] if self.filtered else sorted(self.required - recorded)
         dangling = sorted(recorded - self.required - removals)
         if self.args.update_baseline and not dangling and missing:
             # The recording run itself: pure additions are what `--update-baseline`
@@ -4310,6 +6286,8 @@ class Harness:
                 "bin_dir": self.bin_dir,
                 "workdir": self.workdir,
                 "exit_code": exit_code,
+                "elapsed_seconds": getattr(self, "elapsed_seconds", None),
+                "class_seconds": dict(sorted(self.class_timings.items())),
             },
             "summary": {
                 "required_cells": len(self.required),
@@ -4348,6 +6326,11 @@ class Harness:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+        for key in ("stub",):
+            stub = self.api.get(key)
+            if stub is not None:
+                stub.stop()
+                self.api[key] = None
         proofs = []
         for name, port in sorted(self.ports.items()):
             lsof = subprocess.run(
@@ -4370,19 +6353,38 @@ class Harness:
     # ---------------------------------------------------------------- main
     def run_static(self):
         self.load_catalog()
+        self.apply_selection()
+        self.report_selection()
         self.probe_surface_parity()
         self.check_site()
         self.check_baseline()
-        for cell_id in sorted(self.required):
+        for cell_id in sorted(self.selected):
             self.cell(cell_id, True, "SKIPPED: --static-only records the cell without attempting it")
         log(
             "static-only: %d cells recorded as skipped; %d checks run"
-            % (len(self.required), len(self.checks))
+            % (len(self.selected), len(self.checks))
         )
+
+    def report_selection(self):
+        if not self.filtered:
+            return
+        log(
+            "relevance: selected %d of %d cells (skipped %d unrelated); skipped classes: %s"
+            % (
+                len(self.selected),
+                len(self.required),
+                len(self.required) - len(self.selected),
+                ", ".join(sorted(self.skipped_classes)) or "(none)",
+            )
+        )
+        for note in self.selection_notes:
+            log("relevance: %s" % note)
 
     def run_live(self):
         try:
             self.load_catalog()
+            self.apply_selection()
+            self.report_selection()
             self.check_site()
             if not self.require_binaries():
                 return
@@ -4429,16 +6431,27 @@ class Harness:
 
     def summarize(self):
         failed_cells = sorted(c for c, cell in self.cells.items() if cell["status"] == "fail")
-        unattempted = sorted(self.required - set(self.cells))
+        unattempted = sorted(self.selected - set(self.cells))
         failed_checks = [entry["check"] for entry in self.checks if entry["status"] == "fail"]
         log("")
         log("dogfood-live summary")
-        log("  required cells:  %d" % len(self.required))
+        if self.filtered:
+            log(
+                "  relevance:       selected %d of %d cells (skipped %d unrelated)"
+                % (len(self.selected), len(self.required), len(self.required) - len(self.selected))
+            )
+        log("  required cells:  %d" % len(self.selected))
         log("  attempted cells: %d" % len(self.cells))
         log(
             "  passed cells:    %d"
             % sum(1 for cell in self.cells.values() if cell["status"] == "pass")
         )
+        if self.class_timings:
+            log("  class timings (wall seconds, measurement only):")
+            for cls in PROBE_ORDER:
+                seconds = self.class_timings.get(cls)
+                if seconds is not None:
+                    log("    %-22s %7.2fs" % (cls, seconds))
         if failed_cells:
             log("  FAILED CELLS:")
             for cell_id in failed_cells:
@@ -4467,7 +6480,9 @@ class Harness:
                 self.teardown()
             if green and not self.static_only and self.args.update_baseline:
                 self.write_baseline()
-            unattempted = sorted(self.required - set(self.cells))
+            self.elapsed_seconds = time.monotonic() - self.run_started_monotonic
+            log("  total wall time: %.2fs" % self.elapsed_seconds)
+            unattempted = sorted(self.selected - set(self.cells))
             exit_code = 0 if green else 1
             self.write_results(exit_code, unattempted)
         return 0 if green else 1
@@ -4483,6 +6498,27 @@ def parse_args(argv):
     parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument("--port-base", type=int, default=18700)
     parser.add_argument(
+        "--changed",
+        action="extend",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help="run only the cells whose surface sources intersect this repo-relative path "
+        "(repeatable); adds the always-run core set",
+    )
+    parser.add_argument(
+        "--git-diff",
+        default=None,
+        metavar="BASE..HEAD",
+        help="run only the cells whose surface sources intersect the files changed between "
+        "two git revisions",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the relevance-selection self-test (the four documented cases) and exit",
+    )
+    parser.add_argument(
         "--clickhouse-owned",
         action="store_true",
         help="the operator granted the harness ownership of the ClickHouse server at --clickhouse-url "
@@ -4493,6 +6529,15 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.self_test:
+        problems = relevance_self_test()
+        if problems:
+            print("relevance self-test FAILED:")
+            for problem in problems:
+                print("  - %s" % problem)
+            return 1
+        print("relevance self-test PASS: the four documented cases")
+        return 0
     return Harness(args).run()
 
 

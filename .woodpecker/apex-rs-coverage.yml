@@ -12,9 +12,13 @@
 #
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so every `cd` below is absolute and idempotent.
+# Path relevance: the lane watches the Rust workspace only, so an unrelated
+# change no longer spends 18 matrix entries on a workspace that did not move.
 when:
   - event: [push, pull_request]
     branch: [main, master]
+    path:
+      - rust/**
 
 matrix:
   include:

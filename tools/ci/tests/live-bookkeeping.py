@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Bookkeeping equivalence and scaling check for tools/dogfood/live.py.
 
-The live harness holds 259 required cells; run_all_probes and the per-class
-probes used to rescan the whole cell set (and rebuild the per-service lookup
-tables) once per cell. This script proves the per-run indexes
+The live harness holds the required cells declared in
+tools/dogfood/surfaces.json; run_all_probes and the per-class probes used to
+rescan the whole cell set (and rebuild the per-service lookup tables) once per
+cell. This script proves the per-run indexes
 (cells_of/_cell_index, response_contract_expectations, no_inline_targets)
 return exactly what the pre-index code returned, then prints an n vs 2n
 timing comparison of the indexed bookkeeping against the pre-fix linear
@@ -17,6 +18,7 @@ import importlib.util
 import json
 import sys
 import time
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -88,6 +90,112 @@ def check_cells_of_equivalence(required):
                 )
             checked += 1
     return checked
+
+
+class SpawnFakeHarness(FakeHarness):
+    """The surface-parity probe's minimal host: it records the cells it wrote
+    and runs no real binary."""
+
+    probe_surface_parity = live.Harness.probe_surface_parity
+
+    def __init__(self, required):
+        super().__init__(required)
+        self.root = str(ROOT)
+        self.filtered = False
+        self.changed_paths = []
+        self.recorded = []
+
+    def bin_path(self, name):
+        return "/bin/true"
+
+    def cell(self, cell_id, ok, detail, command=None):
+        self.recorded.append((cell_id, ok))
+
+
+def check_single_parity_spawn(required):
+    """The parity gate is one `apex-tools dogfood-plan` process per run, not
+    one per cell (the pre-fix per-cell form spawned it 287 times)."""
+    fake = SpawnFakeHarness(required)
+    cells = [entry[2] for entry in live.Harness.cells_of(fake, "surface-parity")]
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+
+        class Result:
+            returncode = 0
+            stdout = "dogfood-plan PASS: synthetic\n"
+            stderr = ""
+
+        return Result()
+
+    with unittest.mock.patch.object(live.subprocess, "run", side_effect=fake_run):
+        live.Harness.probe_surface_parity(fake)
+    if len(calls) != 1:
+        raise SystemExit(
+            "surface-parity spawned %d dogfood-plan processes for %d cells"
+            % (len(calls), len(cells))
+        )
+    if len(fake.recorded) != len(cells) or not all(ok for _cell, ok in fake.recorded):
+        raise SystemExit(
+            "surface-parity recorded %d/%d cells as passing"
+            % (len(fake.recorded), len(cells))
+        )
+    return len(cells)
+
+
+def check_clickhouse_restart_env():
+    """The failure-injection restart must carry the macOS fork-safety switch:
+    without it the forked ClickHouse resolver aborts (SIGABRT/exit 134) and
+    the owned-store recovery subprobe fails. No server is started here; the
+    Popen call is captured."""
+    import tempfile
+
+    workdir = tempfile.mkdtemp(prefix="apex-live-bookkeeping-")
+    captured = {}
+
+    class Fake:
+        ch_port = 18123
+        ch_owned_procs = []
+        root = str(ROOT)
+
+        def repo_path(self, rel):
+            return str(ROOT / rel)
+
+        def ch_reachable(self):
+            return True
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs.get("env")
+        captured["argv"] = list(argv)
+
+        class Proc:
+            pid = 1
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+        return Proc()
+
+    try:
+        Fake.workdir = workdir
+        with unittest.mock.patch.object(live.subprocess, "Popen", side_effect=fake_popen):
+            # Import the class method directly so the fake need not construct
+            # the whole harness.
+            live.Harness.clickhouse_start(Fake())
+    finally:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
+    env = captured.get("env") or {}
+    if env.get("OBJC_DISABLE_INITIALIZE_FORK_SAFETY") != "YES":
+        raise SystemExit(
+            "the ClickHouse recovery restart did not pass "
+            "OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES (macOS aborts the fork)"
+        )
+    if "server" not in captured.get("argv", []):
+        raise SystemExit("the recovery restart did not launch a ClickHouse server")
 
 
 def check_table_caches(required):
@@ -188,16 +296,24 @@ def time_no_inline_targets(required, rebuild):
 
 def main():
     required = real_required()
-    if len(required) != 259:
-        raise SystemExit("expected the frozen 259-cell matrix, found %d" % len(required))
+    total = len(required)
+    if total < 287:
+        raise SystemExit("the required matrix shrank below the frozen floor: found %d" % total)
     pairs_checked = check_cells_of_equivalence(required)
     tables_checked = check_table_caches(required)
+    parity_cells = check_single_parity_spawn(required)
+    check_clickhouse_restart_env()
     print(
         "equivalence: cells_of matches the pre-fix scan for %d class/service pairs; "
         "%d per-run tables are built once and byte-identical" % (pairs_checked, tables_checked)
     )
+    print(
+        "surface-parity: one dogfood-plan process for %d cells (no per-cell spawn)"
+        % parity_cells
+    )
+    print("clickhouse recovery: the restart carries the macOS fork-safety switch")
 
-    for n in (259, 518):
+    for n in (total, 2 * total):
         matrix = synth_matrix(n)
         indexed = time_cells_of(matrix, MATRIX_ROUNDS)
         reference = time_reference_cells_of(matrix, MATRIX_ROUNDS)
@@ -209,14 +325,14 @@ def main():
     tables_rebuild = time_contract_tables(required, rebuild=True)
     tables_cached = time_contract_tables(required, rebuild=False)
     print(
-        "response-contract tables (68 cells x 200 rounds): cached=%.1f ms rebuild-per-cell=%.1f ms"
+        "response-contract tables (69 cells x 200 rounds): cached=%.1f ms rebuild-per-cell=%.1f ms"
         % (tables_cached * 1000, tables_rebuild * 1000)
     )
 
     targets_rebuild = time_no_inline_targets(required, rebuild=True)
     targets_cached = time_no_inline_targets(required, rebuild=False)
     print(
-        "no-inline targets (52 cells x 200 rounds): cached=%.1f ms rebuild-scan-per-cell=%.1f ms"
+        "no-inline targets (53 cells x 200 rounds): cached=%.1f ms rebuild-scan-per-cell=%.1f ms"
         % (targets_cached * 1000, targets_rebuild * 1000)
     )
     return 0

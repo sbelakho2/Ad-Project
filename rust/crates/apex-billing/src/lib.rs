@@ -16,8 +16,9 @@
 //!   renderer that refuses to print anything short of a lawful VAT document.
 //! - [`profile`]: the seller's billing profile (deployment config) and the
 //!   customer's legal identity (carried on the invoice).
-//! - [`vat`]: the in-crate EU membership table, the minimal VAT-number shape
-//!   check (no live VIES call), and the per-customer treatment rules.
+//! - [`vat`]: the in-crate EU membership table, the VAT-number shape check,
+//!   the VIES register seam (production calls VIES over TLS; tests inject a
+//!   stub), and the per-customer treatment rules.
 //! - [`register`]: the append-only invoice register and its gapless
 //!   sequential numbering.
 //!
@@ -43,8 +44,8 @@
 //! `APEX_BILLING_PROFILE` (`legalName`, `addressLines`, `country`,
 //! `vatNumber`, `vatRateBp`); `APEX_BILLING_VAT_RATE_BP` overrides the
 //! domestic rate. Load it at startup with [`BillingProfile::from_env`] and
-//! refuse to run when it errors. The full contract, including the no-VIES
-//! policy and the EU-through-invoice flow, is documented on [`profile`].
+//! refuse to run when it errors. The full contract, including the VIES
+//! reverse-charge confirmation and evidence, is documented on [`vat`].
 //! Monitoring's tier prices and legacy fallback are documented on
 //! [`subscription`].
 //!
@@ -95,7 +96,12 @@ pub use subscription::{
     MONITORING_TIER_TOP_ENV, MONITORING_TOP_FEE_MICROS, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
     WATCH_PRICE_MICROS,
 };
-pub use vat::{is_eu_member, is_valid_vat_number, VatTreatment, EU_MEMBER_STATES, MAX_VAT_RATE_BP};
+pub use vat::{
+    is_eu_member, is_valid_vat_number, treatment_for, treatment_for_shape, treatment_for_with_vies,
+    CachedVies, HttpViesClient, VatDecision, VatTreatment, ViesCheck, ViesClient, ViesError,
+    ViesEvidence, ViesOutcome, EU_MEMBER_STATES, MAX_VAT_RATE_BP, VIES_ENDPOINT,
+    VIES_MAX_EVIDENCE_CHARS, VIES_TIMEOUT_SECS,
+};
 pub use webhook::verify_adyen_webhook;
 
 #[cfg(test)]

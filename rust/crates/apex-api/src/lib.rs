@@ -40,8 +40,9 @@
 //!
 //! ## Data sources
 //!
-//! Snapshots come from [`JsonFileAuditSource`] (`<root>/<platform>.json`) and
-//! ledgers from [`FileLedgerSource`] (`<root>/<publisher>.jsonl`), which
+//! Snapshots come from [`JsonFileAuditSource`]
+//! (`<root>/<publisher>/<platform>.json`, the runner's own layout) and ledgers
+//! from [`FileLedgerSource`] (`<root>/<publisher>.jsonl`), which
 //! re-verifies every line with `apex_proof::Ledger::verify` before serving a
 //! single record. Publisher names are the *only* file names derived from the
 //! URL, and they are restricted to `^[A-Za-z0-9_-]{1,64}$` (anything else is a
@@ -61,6 +62,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod analytics;
+pub mod app_ads_proof;
 pub mod billing_view;
 pub mod clock;
 pub mod config;
@@ -89,6 +91,10 @@ pub mod state;
 pub use apex_vault as vault;
 
 pub use analytics::AnalyticsAccess;
+pub use app_ads_proof::{
+    app_ads_proves_owner, classify as classify_proof_address, DomainResolver, HttpAppAdsProof,
+    StaticAppAdsProof, StdDomainResolver,
+};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{decode_hex_env_key, env_value, parse_keys, HexKeyError};
 pub use cycle::{
@@ -105,8 +111,10 @@ pub use outcomes::{OutcomesAppender, OutcomesError};
 pub use routes::{router, MAX_BODY_BYTES};
 pub use session::{LedgerSessions, SESSION_COOKIE, SESSION_IDLE_MS};
 pub use signin::{
-    email_sink_from_env, is_signin_token, SigninRow, SigninService, SigninStore, WarningLog,
-    WorkspaceTokens,
+    canonical_email, email_sink_from_env, is_recordable_email, is_signin_token, SigninRow,
+    SigninService, SigninStore, WarningLog, WorkspaceEnsure, WorkspaceProofSource, WorkspaceRecord,
+    WorkspaceRefusal, WorkspaceTokens, RECORDED_CONTACTS_RULE, UNKNOWN_CONTACT_REASON,
+    UNPROVEN_DOMAIN_REASON, WORKSPACES_FILE_SUFFIX,
 };
 pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,

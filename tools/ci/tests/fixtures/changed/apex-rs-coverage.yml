@@ -1,0 +1,10 @@
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+    path:
+      - rust/**
+steps:
+  cov:
+    image: alpine:3.20
+    commands:
+      - echo apex-rs-coverage

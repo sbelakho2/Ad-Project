@@ -5,7 +5,7 @@
 **App Server:** 203.0.113.10  
 **DB Server:** 203.0.113.12
 
-> **Note:** This report was originally run on DigitalOcean (164.90.232.151) during the migration.  
+> **Note:** This report was originally run on DigitalOcean (203.0.113.9) during the migration.  
 > The platform has since migrated to Hetzner (December 2025). All tests remain valid.
 
 ## Executive Summary

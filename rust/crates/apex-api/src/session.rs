@@ -23,7 +23,7 @@
 //!   and every other state-changing console action (settings, connections,
 //!   proposal decisions).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use rand::RngCore;
@@ -48,6 +48,16 @@ struct SessionState {
 #[derive(Debug, Default)]
 struct Inner {
     sessions: HashMap<String, SessionState>,
+    /// `(last_seen_ms, session id)` in eviction order. The oldest entry is
+    /// `first()`: least recently used, ties broken by the smallest id exactly
+    /// as the previous linear scan did. Keeping the order here makes pruning
+    /// cost the expired entries (not the whole store) and eviction cost a
+    /// `log n` removal.
+    by_age: BTreeSet<(i64, String)>,
+    /// Entries dropped by idle expiry (tests and diagnostics).
+    pruned: u64,
+    /// Entries dropped because the store was at capacity (tests).
+    evictions: u64,
 }
 
 /// A bounded in-memory store of opaque console sessions.
@@ -118,20 +128,11 @@ impl LedgerSessions {
             // Oldest `last_seen_ms` first; equal millisecond timestamps are
             // broken by the smallest session id so the victim is
             // deterministic instead of arbitrary map order.
-            let Some(oldest) = inner
-                .sessions
-                .iter()
-                .min_by(|(id_a, a), (id_b, b)| {
-                    a.last_seen_ms
-                        .cmp(&b.last_seen_ms)
-                        .then_with(|| id_a.cmp(id_b))
-                })
-                .map(|(id, _)| id.clone())
-            else {
+            if !inner.evict_oldest() {
                 break;
-            };
-            inner.sessions.remove(&oldest);
+            }
         }
+        inner.by_age.insert((now_unix_ms, id.clone()));
         inner.sessions.insert(
             id.clone(),
             SessionState {
@@ -149,17 +150,31 @@ impl LedgerSessions {
     /// id returns `None` and the entry is dropped.
     pub fn touch(&self, id: &str, now_unix_ms: i64) -> Option<SessionView> {
         let mut inner = self.lock();
-        let state = inner.sessions.get_mut(id)?;
-        if now_unix_ms.saturating_sub(state.last_seen_ms) >= self.idle_ms {
-            inner.sessions.remove(id);
+        let expired = {
+            let state = inner.sessions.get(id)?;
+            now_unix_ms.saturating_sub(state.last_seen_ms) >= self.idle_ms
+        };
+        if expired {
+            inner.remove(id);
             return None;
         }
-        state.last_seen_ms = now_unix_ms;
-        Some(SessionView {
-            publisher: state.publisher.clone(),
-            csrf: state.csrf.clone(),
-            handle: state.handle.clone(),
-        })
+        let previous = {
+            let state = inner.sessions.get_mut(id)?;
+            let previous = state.last_seen_ms;
+            state.last_seen_ms = now_unix_ms;
+            let view = SessionView {
+                publisher: state.publisher.clone(),
+                csrf: state.csrf.clone(),
+                handle: state.handle.clone(),
+            };
+            (previous, view)
+        };
+        let (previous, view) = previous;
+        if previous != now_unix_ms {
+            inner.by_age.remove(&(previous, id.to_string()));
+            inner.by_age.insert((now_unix_ms, id.to_string()));
+        }
+        Some(view)
     }
 
     /// Every live session, pruned of expired entries, ordered by first seen.
@@ -195,14 +210,14 @@ impl LedgerSessions {
             .find(|(_, state)| state.handle == handle && state.publisher == publisher)
             .map(|(id, _)| id.clone());
         match victim {
-            Some(id) => inner.sessions.remove(&id).is_some(),
+            Some(id) => inner.remove(&id).is_some(),
             None => false,
         }
     }
 
     /// Drop a session. Returns whether it existed.
     pub fn close(&self, id: &str) -> bool {
-        self.lock().sessions.remove(id).is_some()
+        self.lock().remove(id).is_some()
     }
 
     /// Number of sessions currently kept.
@@ -226,9 +241,40 @@ impl LedgerSessions {
 }
 
 impl Inner {
+    /// Drop every session whose idle window closed at `now_unix_ms`. The age
+    /// index is ordered, so this visits exactly the expired prefix and stops
+    /// at the first live entry instead of scanning the whole store.
     fn prune(&mut self, now_unix_ms: i64, idle_ms: i64) {
-        self.sessions
-            .retain(|_, state| now_unix_ms.saturating_sub(state.last_seen_ms) < idle_ms);
+        while let Some((last_seen_ms, id)) = self.by_age.first().cloned() {
+            if now_unix_ms.saturating_sub(last_seen_ms) < idle_ms {
+                break;
+            }
+            self.by_age.remove(&(last_seen_ms, id.clone()));
+            if self.sessions.remove(&id).is_some() {
+                self.pruned += 1;
+            }
+        }
+    }
+
+    /// Drop the least recently used session (smallest id on a timestamp tie).
+    fn evict_oldest(&mut self) -> bool {
+        let Some((last_seen_ms, id)) = self.by_age.first().cloned() else {
+            return false;
+        };
+        self.by_age.remove(&(last_seen_ms, id.clone()));
+        if self.sessions.remove(&id).is_some() {
+            self.evictions += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove one session from both the map and the age index.
+    fn remove(&mut self, id: &str) -> Option<SessionState> {
+        let state = self.sessions.remove(id)?;
+        self.by_age.remove(&(state.last_seen_ms, id.to_string()));
+        Some(state)
     }
 }
 
@@ -461,6 +507,52 @@ mod tests {
             "the other session survives"
         );
         assert!(sessions.touch(&third.id, T0).is_some());
+    }
+
+    /// Churn at a 100k-session capacity: opening a session must cost the
+    /// expired prefix plus one eviction, never a scan of the whole store.
+    /// The deterministic counters (pruned/evicted, not wall-clock time) show
+    /// that one extra open at capacity evicts exactly one entry, and one
+    /// clock advance past the idle window prunes exactly the 100k stored
+    /// sessions.
+    #[test]
+    fn one_hundred_thousand_session_churn_does_bounded_work() {
+        let sessions = LedgerSessions::new(100_000, SESSION_IDLE_MS);
+        let mut ids = Vec::with_capacity(100_000);
+        for index in 0..100_000 {
+            ids.push(sessions.open("pub", T0 + index).id);
+        }
+        assert_eq!(sessions.len(), 100_000);
+
+        // At capacity: exactly one eviction (the oldest), no prune scan.
+        let extra = sessions.open("pub", T0 + 100_000);
+        {
+            let inner = sessions.lock();
+            assert_eq!(inner.evictions, 1, "one open at capacity evicts one");
+            assert_eq!(inner.pruned, 0, "nothing was expired yet");
+        }
+        assert_eq!(sessions.len(), 100_000);
+        assert!(
+            sessions.touch(&ids[0], T0 + 100_000).is_none(),
+            "the oldest session is the eviction victim"
+        );
+        assert!(sessions.touch(&extra.id, T0 + 100_000).is_some());
+
+        // Past the idle window every stored session is expired. One open
+        // prunes them all and leaves exactly the new session.
+        let later = T0 + 100_000 + SESSION_IDLE_MS + 1;
+        let fresh = sessions.open("pub", later);
+        {
+            let inner = sessions.lock();
+            assert_eq!(
+                inner.pruned, 100_000,
+                "exactly the expired entries were visited and dropped"
+            );
+            assert_eq!(inner.evictions, 1, "no further eviction was needed");
+            assert_eq!(inner.sessions.len(), 1);
+        }
+        assert!(sessions.touch(&fresh.id, later).is_some());
+        assert_eq!(sessions.len(), 1, "only the new session remains");
     }
 
     #[test]

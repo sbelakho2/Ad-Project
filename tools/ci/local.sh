@@ -16,6 +16,10 @@ with the same commands, mounted at the CI_WORKSPACE path the lanes use.
 
 flags:
   --lane <name>      run one lane (repeatable; default: all lanes)
+  --changed <path>   select the lanes and steps whose path filters match a
+                     changed repo path (repeatable); a lane or step with no
+                     path filter always runs. With --list, prints only what
+                     would run.
   --list             list lanes, steps, services and images; run nothing
   --keep             keep containers, network and step scripts for debugging
   --dry-run          print the docker commands; execute nothing
@@ -37,6 +41,7 @@ die() {
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 
 SELECTED=
+CHANGED=
 LIST=0
 KEEP=0
 DRY=0
@@ -46,6 +51,12 @@ while [ $# -gt 0 ]; do
     --lane)
       [ $# -ge 2 ] || die "--lane needs a lane name"
       SELECTED="$SELECTED $2"
+      shift 2
+      ;;
+    --changed)
+      [ $# -ge 2 ] || die "--changed needs a path"
+      CHANGED="$CHANGED
+$2"
       shift 2
       ;;
     --list)
@@ -123,7 +134,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT HUP TERM
 
+# The leading newline the accumulator carries is not a path; strip one char.
+APEX_CI_CHANGED="${CHANGED#?}"
+export APEX_CI_CHANGED
+
 if ! python3 - "$LANES_DIR" > "$STREAM" <<'PYEOF'
+import fnmatch
 import os
 import sys
 
@@ -300,6 +316,61 @@ def as_list(value, what, path):
     fail("%s: %s must be a list of strings" % (path, what))
 
 
+def when_paths(when):
+    """Path globs from a `when:` block, or None when the block has none.
+
+    Woodpecker accepts a string, a list of strings, or an include/exclude
+    mapping for `path`. A block with no `path` key at all is unrestricted.
+    """
+    if when is None:
+        return None
+    items = when if isinstance(when, list) else [when]
+    pats = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get('path')
+        if value is None:
+            continue
+        if isinstance(value, str):
+            pats.append(value)
+        elif isinstance(value, list):
+            pats.extend(x for x in value if isinstance(x, str))
+        elif isinstance(value, dict):
+            include = value.get('include')
+            if isinstance(include, str):
+                pats.append(include)
+            elif isinstance(include, list):
+                pats.extend(x for x in include if isinstance(x, str))
+    return pats
+
+
+def glob_segments(patterns, segments):
+    if not patterns:
+        return not segments
+    if patterns[0] == '**':
+        for i in range(len(segments) + 1):
+            if glob_segments(patterns[1:], segments[i:]):
+                return True
+        return False
+    if not segments:
+        return False
+    if not fnmatch.fnmatchcase(segments[0], patterns[0]):
+        return False
+    return glob_segments(patterns[1:], segments[1:])
+
+
+def path_matches(pattern, path):
+    return glob_segments(pattern.split('/'), path.split('/'))
+
+
+def selected(paths, changed):
+    """A lane or step with no path filter always runs; otherwise any match."""
+    if not paths:
+        return True
+    return any(path_matches(p, c) for p in paths for c in changed)
+
+
 def load_lane(path):
     name = os.path.basename(path)
     with open(path, encoding='utf-8') as fh:
@@ -312,6 +383,7 @@ def load_lane(path):
         'steps': [],
         'depends_on': as_list(doc.get('depends_on'), 'depends_on', name),
         'matrix': [],
+        'paths': when_paths(doc.get('when')),
     }
     services = doc.get('services') or {}
     if not isinstance(services, dict):
@@ -358,6 +430,7 @@ def load_lane(path):
             'image': image,
             'commands': clean,
             'depends_on': as_list(sdef.get('depends_on'), 'depends_on', name),
+            'paths': when_paths(sdef.get('when')),
         })
     return lane
 
@@ -413,8 +486,12 @@ def main():
     lanes_by_name = {}
     for l in lanes:
         lanes_by_name[l['name']] = l
+    changed = [p.strip() for p in os.environ.get('APEX_CI_CHANGED', '').splitlines()
+               if p.strip()]
     for lane_name in topo(lane_names, lambda n: lane_deps[n]):
         lane = lanes_by_name[lane_name]
+        if changed and not selected(lane.get('paths'), changed):
+            continue
         deps = lane_deps[lane_name]
         emit('LANE', lane['name'], ",".join(deps) if deps else '-', '-', '-')
         for svc in lane['services']:
@@ -422,6 +499,8 @@ def main():
             emit('SERVICE', lane['name'], svc['name'], svc['image'], '-', env if env else '-')
         for step in lane['run_order']:
             sdef = lane['steps_by_name'][step]
+            if changed and not selected(sdef.get('paths'), changed):
+                continue
             entries = lane['matrix'] if lane['matrix'] else [[]]
             for entry in entries:
                 env = ",".join("%s=%s" % (k, v) for k, v in entry)

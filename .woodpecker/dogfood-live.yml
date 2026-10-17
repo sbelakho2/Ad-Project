@@ -18,9 +18,23 @@
 #
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so each command below is absolute and idempotent.
+#
+# Relevance: the lane wakes on changes to the Rust tree, the dogfood catalog,
+# the ClickHouse infra or this file. The full probe-cell run (dogfood-plan,
+# live-rust-suites, run-harness) is reserved for pushes that touch the Rust
+# tree, the dogfood catalog or the ClickHouse infra, and for manual and tag
+# runs. The `dogfood subset` step then runs the cells relevant to the changed
+# paths whenever the lane wakes, so the lane stays live without paying for
+# every cell on a file that only moved the lane itself.
 when:
   - event: [push, pull_request]
     branch: [main, master]
+    path:
+      - rust/**
+      - tools/dogfood/**
+      - infrastructure/clickhouse/**
+      - .woodpecker/dogfood-live.yml
+  - event: [manual, tag]
 
 services:
   clickhouse:
@@ -42,12 +56,26 @@ steps:
   dogfood-plan:
     image: rust:1.88-bookworm
     depends_on: [build]
+    when:
+      - event: [manual, tag]
+      - event: [push, pull_request]
+        path:
+          - rust/**
+          - tools/dogfood/**
+          - infrastructure/clickhouse/**
     commands:
       - cd "$CI_WORKSPACE"/rust && cargo run --release -q -p apex-tools -- dogfood-plan
 
   live-rust-suites:
     image: rust:1.88-bookworm
     depends_on: [build]
+    when:
+      - event: [manual, tag]
+      - event: [push, pull_request]
+        path:
+          - rust/**
+          - tools/dogfood/**
+          - infrastructure/clickhouse/**
     commands:
       # The gated suites read APEX_CLICKHOUSE_HTTP/APEX_CLICKHOUSE_DB; the wait
       # loop turns a slowly starting service container into a bounded wait.
@@ -57,7 +85,26 @@ steps:
   run-harness:
     image: rust:1.88-bookworm
     depends_on: [build, dogfood-plan]
+    when:
+      - event: [manual, tag]
+      - event: [push, pull_request]
+        path:
+          - rust/**
+          - tools/dogfood/**
+          - infrastructure/clickhouse/**
     commands:
       - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3
       - for i in $(seq 1 45); do (echo > /dev/tcp/clickhouse/8123) 2>/dev/null && break; sleep 2; done; (echo > /dev/tcp/clickhouse/8123) 2>/dev/null
       - cd "$CI_WORKSPACE" && python3 tools/dogfood/live.py --bin-dir rust/target/debug --clickhouse-url http://clickhouse:8123
+
+  dogfood subset:
+    image: rust:1.88-bookworm
+    depends_on: [build]
+    commands:
+      # The subset step needs the build (services plus apex-tools) and a
+      # reachable store. It is report-only: it prints the changed path count
+      # and the harness summary and exits 0, while the full run-harness step
+      # stays the blocking gate on the paths that wake it.
+      - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3
+      - for i in $(seq 1 45); do (echo > /dev/tcp/clickhouse/8123) 2>/dev/null && break; sleep 2; done; (echo > /dev/tcp/clickhouse/8123) 2>/dev/null
+      - cd "$CI_WORKSPACE" && CHANGED=$(git diff --name-only "${CI_COMMIT_BEFORE_SHA:-}" "${CI_COMMIT_SHA:-HEAD}" 2>/dev/null || git diff --name-only HEAD~1 HEAD 2>/dev/null || git show --pretty= --name-only HEAD 2>/dev/null || printf '') && printf 'dogfood subset %s changed path(s)\n' "$(printf '%s\n' "$CHANGED" | awk 'NF {n++} END {print n+0}')" && { python3 tools/dogfood/live.py --clickhouse-url http://clickhouse:8123 --changed $CHANGED --clickhouse-owned --bin-dir rust/target/debug || printf 'dogfood subset harness exited %s (report only)\n' "$?"; }

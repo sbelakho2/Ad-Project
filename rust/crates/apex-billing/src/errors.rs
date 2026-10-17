@@ -97,9 +97,20 @@ pub enum BillingError {
     InvalidVatRate { detail: String },
 
     /// A VAT number fails the minimal shape check (non-empty, ASCII
-    /// alphanumeric, 4..=14 characters). No VIES call is made.
+    /// alphanumeric, 4..=14 characters).
     #[error("invalid VAT number for the {party}: {detail}")]
     InvalidVatNumber { party: &'static str, detail: String },
+
+    /// The EU VIES register could not confirm a customer VAT number, so the
+    /// reverse-charge treatment is refused (a typed hold, never a silent
+    /// domestic charge and never a silently stated reverse charge). The
+    /// evidence carries the register's bounded reason.
+    #[error("VIES could not confirm VAT number {country}{vat_number}: {evidence}")]
+    ViesUnavailable {
+        country: String,
+        vat_number: String,
+        evidence: String,
+    },
 
     /// A country code is not exactly two ASCII letters.
     #[error("invalid country code for the {party}: {value:?}")]

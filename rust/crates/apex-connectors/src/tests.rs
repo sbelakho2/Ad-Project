@@ -14,7 +14,8 @@ use crate::admob::{
     normalize_account_id, AdmobClient, MediationAbExperimentState, MediationAbVariantLeader,
     ADMOB_ENDPOINTS, ADMOB_REVENUE_PER_VARIANT,
 };
-use crate::levelplay::{AbTestActiveUsersRow, LevelPlayClient, LEVELPLAY_ENDPOINTS};
+use crate::app_ads::AppAdsTxtFetcher;
+use crate::levelplay::{AbTestReportRow, LevelPlayClient, LEVELPLAY_ENDPOINTS};
 use crate::max::{MaxClient, MaxReportClient, MAX_ENDPOINTS};
 use crate::transport::{
     HttpBody, HttpMethod, HttpRequest, HttpResponse, PlatformCaller, RecordingSleeper,
@@ -331,6 +332,60 @@ async fn network_error_retryable_for_reads_only() {
         .unwrap_err();
     assert!(matches!(err, PlatformError::Network { .. }));
     assert_eq!(mock2.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn redirects_pass_through_the_retry_wrapper_without_a_retry() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::with_header(
+            MockTransport::status(302),
+            "Location",
+            "https://example.com/app-ads.txt",
+        )),
+        Ok(MockTransport::ok(200, Some("after"))),
+    ]));
+    let sleeper = Arc::new(RecordingSleeper::default());
+    let retry: Arc<dyn Transport> = Arc::new(RetryTransport::new(mock.clone(), 2, sleeper.clone()));
+    let request = HttpRequest {
+        platform: PlatformId::Admob,
+        operation: "fetchAppAdsTxt".into(),
+        method: HttpMethod::Get,
+        url: "https://example.com/app-ads.txt".into(),
+        headers: vec![],
+        body: None,
+        timeout_ms: 1_000,
+    };
+    let response = retry
+        .request(request)
+        .await
+        .expect("redirect passes through");
+    assert_eq!(response.status, 302);
+    assert_eq!(
+        response.header("location"),
+        Some("https://example.com/app-ads.txt")
+    );
+    assert_eq!(mock.calls().len(), 1, "a redirect is not retried");
+    assert!(sleeper.slept_ms().is_empty(), "no backoff for a redirect");
+}
+
+#[tokio::test]
+async fn app_ads_404_through_the_retry_wrapper_is_one_call_and_absent() {
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::status(
+        404,
+    ))]));
+    let sleeper = Arc::new(RecordingSleeper::default());
+    let retry: Arc<dyn Transport> = Arc::new(RetryTransport::new(mock.clone(), 2, sleeper.clone()));
+    let txt = AppAdsTxtFetcher::new(retry)
+        .fetch(PlatformId::Admob, "example.com", vec!["admob.com".into()])
+        .await
+        .expect("404 is absent, not a failed fetch");
+    assert!(!txt.present);
+    assert_eq!(
+        mock.calls().len(),
+        1,
+        "404 is a terminal verdict, never a retry storm"
+    );
+    assert!(sleeper.slept_ms().is_empty(), "no backoff for a 404");
 }
 
 #[tokio::test]
@@ -684,7 +739,7 @@ async fn lp_hostile_app_key_is_percent_encoded_in_every_path() {
     client.list_waterfall("u1").await.unwrap();
     client.list_groups().await.unwrap();
     client
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .unwrap();
     let calls = mock.calls();
@@ -699,7 +754,7 @@ async fn lp_hostile_app_key_is_percent_encoded_in_every_path() {
     assert_eq!(
         calls[3].url,
         format!(
-            "https://lp.test/levelPlay/reporting/v1?appKey={encoded}&breakdowns=abTest&metrics=activeUsers&startDate=2026-10-01&endDate=2026-10-14"
+            "https://lp.test/levelPlay/reporting/v1?appKey={encoded}&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate=2026-10-01&endDate=2026-10-14"
         )
     );
     for call in calls.iter().skip(1) {
@@ -712,39 +767,137 @@ async fn lp_hostile_app_key_is_percent_encoded_in_every_path() {
 }
 
 #[tokio::test]
-async fn lp_reporting_ab_test_active_users_recording_parses_rows() {
+async fn lp_reporting_ab_test_recording_parses_revenue_and_active_users() {
     let body = r#"{"code":200,"count":2,"results":[
-        {"abTest":"Control","activeUsers":"120"},
-        {"abTest":"Variant A","activeUsers":95}
+        {"date":"2026-10-01","abTest":"Control","revenue":"12.50","activeUsers":"120"},
+        {"date":"2026-10-01","abTest":"Variant A","revenue":13.25,"activeUsers":95}
     ]}"#;
     let mock = Arc::new(MockTransport::scripted(vec![
         Ok(MockTransport::ok(200, Some(r#""bearer""#))),
         Ok(MockTransport::ok(200, Some(body))),
     ]));
     let rows = lp_client(mock.clone())
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect("rows");
     assert_eq!(
         rows,
         vec![
-            AbTestActiveUsersRow {
+            AbTestReportRow {
+                day: "2026-10-01".into(),
                 ab_test: "Control".into(),
-                active_users: 120
+                revenue: 12_500_000,
+                active_users: 120,
             },
-            AbTestActiveUsersRow {
+            AbTestReportRow {
+                day: "2026-10-01".into(),
                 ab_test: "Variant A".into(),
-                active_users: 95
+                revenue: 13_250_000,
+                active_users: 95,
             },
-        ]
+        ],
+        "the decimal currency amount parses exactly into micros"
     );
     let call = &mock.calls()[1];
     assert_eq!(call.method, HttpMethod::Get);
     assert_eq!(
         call.url,
-        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=abTest&metrics=activeUsers&startDate=2026-10-01&endDate=2026-10-14"
+        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate=2026-10-01&endDate=2026-10-14"
     );
+    assert!(call.url.contains("metrics=revenue,activeUsers"));
+    assert!(call.url.contains("breakdowns=date,abTest"));
     assert!(call.header("Authorization").unwrap().starts_with("Bearer "));
+}
+
+#[tokio::test]
+async fn lp_reporting_requires_every_row_field_naming_it() {
+    // Each case omits exactly one required field; the typed schema error must
+    // name that field instead of silently zeroing the measurement.
+    let cases = [
+        (
+            r#"{"code":200,"count":1,"results":[{"date":"2026-10-01","abTest":"A","activeUsers":10}]}"#,
+            "revenue",
+        ),
+        (
+            r#"{"code":200,"count":1,"results":[{"date":"2026-10-01","abTest":"A","revenue":"1.00"}]}"#,
+            "activeUsers",
+        ),
+        (
+            r#"{"code":200,"count":1,"results":[{"abTest":"A","revenue":"1.00","activeUsers":10}]}"#,
+            "date",
+        ),
+    ];
+    for (body, field) in cases {
+        let mock = Arc::new(MockTransport::scripted(vec![
+            Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+            Ok(MockTransport::ok(200, Some(body))),
+        ]));
+        let error = lp_client(mock)
+            .ab_test_report("2026-10-01", "2026-10-14")
+            .await
+            .expect_err("missing field");
+        match &error {
+            PlatformError::Schema { detail, .. } => {
+                assert!(detail.contains(field), "names '{field}': {detail}")
+            }
+            other => panic!("expected a typed Schema error, got {other:?}"),
+        }
+        assert!(!error.is_retryable(), "schema drift is not retryable");
+    }
+}
+
+#[tokio::test]
+async fn lp_app_revenue_sums_the_reporting_month() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(
+                r#"{"code":200,"count":3,"results":[
+                    {"date":"2026-10-01","revenue":"12.50"},
+                    {"date":"2026-10-02","revenue":13.25},
+                    {"date":"2026-10-02","revenue":"0.25"}
+                ]}"#,
+            ),
+        )),
+    ]));
+    let revenue = lp_client(mock.clone())
+        .app_revenue("2026-10-01", "2026-10-31")
+        .await
+        .expect("revenue");
+    assert_eq!(revenue, 26_000_000, "12.50 + 13.25 + 0.25 = 26.00 units");
+    let call = &mock.calls()[1];
+    assert_eq!(call.method, HttpMethod::Get);
+    assert_eq!(
+        call.url,
+        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date&metrics=revenue&startDate=2026-10-01&endDate=2026-10-31"
+    );
+}
+
+#[tokio::test]
+async fn lp_app_revenue_is_read_once_per_window_for_every_scope() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"code":200,"count":1,"results":[{"date":"2026-10-01","revenue":"10.00"}]}"#),
+        )),
+    ]));
+    let client = lp_client(mock.clone());
+    for _ in 0..5 {
+        assert_eq!(
+            client
+                .app_revenue("2026-10-01", "2026-10-31")
+                .await
+                .expect("revenue"),
+            10_000_000
+        );
+    }
+    assert_eq!(
+        mock.calls().len(),
+        2,
+        "one auth plus one revenue read, not one read per ad-unit scope"
+    );
 }
 
 #[tokio::test]
@@ -758,7 +911,7 @@ async fn lp_reporting_error_mapping_is_typed() {
         )),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(
@@ -772,7 +925,7 @@ async fn lp_reporting_error_mapping_is_typed() {
         Ok(MockTransport::ok(200, Some(r#"{"code":200}"#))),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
@@ -783,12 +936,12 @@ async fn lp_reporting_error_mapping_is_typed() {
         Ok(MockTransport::ok(
             200,
             Some(
-                r#"{"code":200,"count":1,"results":[{"abTest":"A","activeUsers":"not a number"}]}"#,
+                r#"{"code":200,"count":1,"results":[{"date":"2026-10-01","abTest":"A","revenue":"1.00","activeUsers":"not a number"}]}"#,
             ),
         )),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
@@ -798,11 +951,13 @@ async fn lp_reporting_error_mapping_is_typed() {
         Ok(MockTransport::ok(200, Some(r#""bearer""#))),
         Ok(MockTransport::ok(
             200,
-            Some(r#"{"code":200,"count":1,"results":[{"activeUsers":1}]}"#),
+            Some(
+                r#"{"code":200,"count":1,"results":[{"date":"2026-10-01","revenue":"1.00","activeUsers":1}]}"#,
+            ),
         )),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
@@ -814,7 +969,7 @@ async fn lp_reporting_error_mapping_is_typed() {
         Ok(MockTransport::status(404)),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(
@@ -827,7 +982,7 @@ async fn lp_reporting_error_mapping_is_typed() {
         Ok(MockTransport::status(429)),
     ]));
     let err = lp_client(mock)
-        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .ab_test_report("2026-10-01", "2026-10-14")
         .await
         .expect_err("must fail");
     assert!(matches!(err, PlatformError::RateLimited { .. }), "{err}");
@@ -1273,8 +1428,8 @@ fn endpoint_metas_are_pinned() {
         .unwrap()
         .writable());
     // The corrected/added surface is present in the capability table: groups
-    // and the abTest/activeUsers report are GETs, so readiness shows them as
-    // implemented rows.
+    // and the date/abTest revenue+activeUsers report are GETs, so readiness
+    // shows them as implemented rows.
     for (name, method) in [
         ("listGroups", apex_core::endpoint::HttpMethod::Get),
         (
@@ -1323,6 +1478,25 @@ fn no_code_path_emits_the_old_endpoints() {
     assert!(
         !levelplay.contains("partners/publisher/mediation"),
         "the partner-gate mediation form must not come back"
+    );
+    // The reporting request carries revenue and active users over the date and
+    // abTest breakdowns. The old activeUsers-only request is gone from every
+    // code path: this source guard sees unexercised paths as well as fixtures.
+    assert!(
+        levelplay.contains("breakdowns=date,abTest"),
+        "the reporting request must break down by date and abTest"
+    );
+    assert!(
+        levelplay.contains("metrics=revenue,activeUsers"),
+        "the reporting request must ask for revenue and active users together"
+    );
+    assert!(
+        !levelplay.contains("breakdowns=abTest&metrics=activeUsers"),
+        "the activeUsers-only reporting URL must not come back"
+    );
+    assert!(
+        !levelplay.contains("metrics=activeUsers&"),
+        "no code path may request active users without revenue"
     );
     let admob = include_str!("admob.rs");
     assert!(

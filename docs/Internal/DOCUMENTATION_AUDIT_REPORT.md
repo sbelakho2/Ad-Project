@@ -28,7 +28,7 @@ The platform migrated from DigitalOcean to Hetzner in December 2025. The followi
 ### Updated Files
 
 1. **[VRA_IMPLEMENTATION_SUMMARY.md](../VRA_IMPLEMENTATION_SUMMARY.md)**
-   - Fixed: Outdated reference to `164.90.232.151` (DigitalOcean droplet)
+   - Fixed: Outdated reference to `203.0.113.9` (DigitalOcean droplet)
    - Updated: Deployment status now reflects Hetzner infrastructure
 
 2. **[INDEX.md](../INDEX.md)**

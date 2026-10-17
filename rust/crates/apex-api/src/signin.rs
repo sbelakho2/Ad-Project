@@ -28,7 +28,7 @@
 //! lock is held, and it applies to minting only: sessions already minted
 //! live out their own idle window. The token is never echoed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +44,10 @@ use crate::error::ApiError;
 pub const SIGNIN_FILE_NAME: &str = "signin.jsonl";
 /// The route that consumes a one-time link.
 pub const SIGNIN_PATH: &str = "/console/signin";
+/// The route that consumes a setup-watch email confirmation token.
+pub const WATCH_CONFIRM_PATH: &str = "/watch/confirm";
+/// Subject of the setup-watch confirmation email.
+pub const WATCH_CONFIRM_SUBJECT: &str = "Confirm your Apex setup watch";
 /// The query parameter carrying the opaque link token.
 pub const SIGNIN_TOKEN_PARAM: &str = "token";
 /// Length of the opaque token: 32 lowercase hex characters (128 random bits),
@@ -314,13 +318,154 @@ impl SigninStore {
     }
 }
 
+/// Suffix of the workspace-ownership sidecar written beside the token file.
+/// The token file itself keeps the operator's plain `publisher -> token`
+/// shape; the sidecar records who created each workspace and the contacts a
+/// sign-in link may ever be sent to.
+pub const WORKSPACES_FILE_SUFFIX: &str = ".workspaces.json";
+
+/// The recorded-contacts rule, stated verbatim wherever a workspace refuses
+/// an unrecorded address.
+pub const RECORDED_CONTACTS_RULE: &str =
+    "Sign-in links go only to the email addresses recorded when the workspace was created.";
+/// Why an existing workspace refused a different address.
+pub const UNKNOWN_CONTACT_REASON: &str = "This email is not a recorded contact for this workspace.";
+/// Why a new workspace was refused: its email domain could not prove
+/// ownership through the public app-ads.txt file.
+pub const UNPROVEN_DOMAIN_REASON: &str =
+    "The email domain's app-ads.txt does not record this address as OWNERDOMAIN= or CONTACT=.";
+
+/// The creating email and the contacts of one workspace. The first email is
+/// the owner; every later accepted address must already be in `contacts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecord {
+    /// The address that created the workspace (the first recorded contact).
+    pub owner_email: String,
+    /// Every address a sign-in link may be delivered to, canonicalized.
+    #[serde(default)]
+    pub contacts: BTreeSet<String>,
+}
+
+impl WorkspaceRecord {
+    /// Whether `email` is one of the recorded contacts (case-insensitive).
+    pub fn has_contact(&self, email: &str) -> bool {
+        let email = canonical_email(email);
+        self.contacts.contains(&email)
+    }
+}
+
+/// A typed workspace refusal, carrying the recorded reason.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WorkspaceRefusal {
+    /// The publisher segment cannot be a file name.
+    #[error("invalid publisher")]
+    InvalidPublisher,
+    /// The supplied email is not a single usable address.
+    #[error("invalid email")]
+    InvalidEmail,
+    /// The workspace already exists and the address is not one of its
+    /// recorded contacts. The workspace never grows its contact list.
+    #[error("{UNKNOWN_CONTACT_REASON} {RECORDED_CONTACTS_RULE}")]
+    UnknownContact {
+        /// The workspace that refused.
+        publisher: String,
+    },
+    /// A new workspace needs a proof (the email domain's app-ads.txt names
+    /// the domain as owner or the address as a contact).
+    #[error("{UNPROVEN_DOMAIN_REASON} {reason}")]
+    UnprovenDomain {
+        /// The email domain that was checked.
+        domain: String,
+        /// The bounded, operator-facing detail.
+        reason: String,
+    },
+    /// The workspace store could not be read or written.
+    #[error("workspace store unavailable: {detail}")]
+    Store {
+        /// What failed.
+        detail: String,
+    },
+}
+
+impl WorkspaceRefusal {
+    /// The stable, operator-facing reason line (never a raw email).
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::InvalidPublisher => "invalid publisher",
+            Self::InvalidEmail => "invalid email",
+            Self::UnknownContact { .. } => UNKNOWN_CONTACT_REASON,
+            Self::UnprovenDomain { .. } => UNPROVEN_DOMAIN_REASON,
+            Self::Store { .. } => "workspace store unavailable",
+        }
+    }
+}
+
+/// What [`WorkspaceTokens::ensure`] found or created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceEnsure {
+    /// The publisher's ledger token (unchanged for an existing workspace).
+    pub token: String,
+    /// The recorded ownership.
+    pub record: WorkspaceRecord,
+    /// Whether this call created the workspace.
+    pub created: bool,
+}
+
+/// Canonical contact form: trimmed and ASCII-lowercased (email domains are
+/// case-insensitive; the local part is compared the same way so one address
+/// has one recorded identity).
+pub fn canonical_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+/// Whether `email` is a single usable address (the same minimal shape the
+/// lead form accepts, plus a dotted domain).
+pub fn is_recordable_email(email: &str) -> bool {
+    let email = email.trim();
+    if email.len() < 6 || email.len() > 320 || email.contains(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
+        && !domain.contains('@')
+        && apex_watch::normalize_domain(domain).is_ok()
+}
+
+/// A new-workspace ownership proof source: fetch the creating email domain's
+/// public app-ads.txt and accept only an `OWNERDOMAIN=` equal to the domain
+/// or a `CONTACT=` equal to the address. Failure is a typed refusal; a link
+/// is never issued without it.
+#[async_trait::async_trait]
+pub trait WorkspaceProofSource: Send + Sync + std::fmt::Debug {
+    /// Prove that `email`'s domain owns the workspace.
+    async fn prove_owner(&self, email: &str) -> Result<(), WorkspaceRefusal>;
+    /// The public evidence used to price the watch tier: the number of
+    /// distinct publisher account ids recorded in `domain`'s app-ads.txt. A
+    /// refusal means the evidence is unavailable; the caller records it and
+    /// falls back to the normal tier instead of inventing a count.
+    async fn app_count(&self, domain: &str) -> Result<u32, WorkspaceRefusal>;
+}
+
 /// The per-publisher ledger-token file (`APEX_LEDGER_TOKENS_FILE`) behind the
 /// self-serve workspace: a JSON object of publisher to token, exactly the
 /// operator's existing format. [`ensure`](Self::ensure) creates or extends an
 /// entry without touching any other one.
+///
+/// Ownership lives in the [`WORKSPACES_FILE_SUFFIX`] sidecar: an existing
+/// workspace never adds a contact and never delivers to an unrecorded
+/// address; a new workspace records its creating email as owner only after
+/// [`WorkspaceProofSource::prove_owner`] accepted the domain.
 #[derive(Debug)]
 pub struct WorkspaceTokens {
     path: PathBuf,
+    records_path: PathBuf,
     inner: Mutex<WorkspaceState>,
 }
 
@@ -328,13 +473,19 @@ pub struct WorkspaceTokens {
 struct WorkspaceState {
     loaded: bool,
     tokens: BTreeMap<String, String>,
+    records: BTreeMap<String, WorkspaceRecord>,
 }
 
 impl WorkspaceTokens {
-    /// A workspace over the token file at `path` (loaded lazily).
+    /// A workspace over the token file at `path` (loaded lazily). The
+    /// ownership sidecar is `<path>.workspaces.json`.
     pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut records_name = path.clone().into_os_string();
+        records_name.push(WORKSPACES_FILE_SUFFIX);
         Self {
-            path: path.into(),
+            path,
+            records_path: PathBuf::from(records_name),
             inner: Mutex::new(WorkspaceState::default()),
         }
     }
@@ -344,22 +495,116 @@ impl WorkspaceTokens {
         &self.path
     }
 
-    /// Ensure `publisher` has a ledger token, creating the file and the entry
-    /// when needed; an existing entry (operator- or self-serve-created) is
-    /// returned unchanged. Returns the publisher's token.
-    pub fn ensure(&self, publisher: &str) -> Result<String, ApiError> {
+    /// The ownership sidecar path.
+    pub fn records_path(&self) -> &Path {
+        &self.records_path
+    }
+
+    /// Ensure `publisher` has a ledger token and a recorded owner.
+    ///
+    /// An existing workspace is returned unchanged, but **only** when
+    /// `email` is already one of its recorded contacts: the contact list is
+    /// never extended by a later submission. A new workspace is created only
+    /// when `new_workspace_proven` is true (the caller has verified the
+    /// creating email domain's app-ads.txt through
+    /// [`WorkspaceProofSource`]); it records `email` as owner and its only
+    /// contact.
+    pub fn ensure(
+        &self,
+        publisher: &str,
+        email: &str,
+        new_workspace_proven: bool,
+    ) -> Result<WorkspaceEnsure, WorkspaceRefusal> {
         if !crate::is_valid_publisher(publisher) {
-            return Err(ApiError::BadRequest("invalid_publisher"));
+            return Err(WorkspaceRefusal::InvalidPublisher);
         }
+        if !is_recordable_email(email) {
+            return Err(WorkspaceRefusal::InvalidEmail);
+        }
+        let email = canonical_email(email);
         let mut state = self.lock();
-        self.load(&mut state)?;
-        if let Some(token) = state.tokens.get(publisher) {
-            return Ok(token.clone());
+        self.load(&mut state)
+            .map_err(|error| WorkspaceRefusal::Store {
+                detail: error.to_string(),
+            })?;
+
+        let existing_token = state.tokens.get(publisher).cloned();
+        let existing_record = state.records.get(publisher).cloned();
+        match (existing_token, existing_record) {
+            (Some(token), Some(record)) => {
+                if !record.has_contact(&email) {
+                    return Err(WorkspaceRefusal::UnknownContact {
+                        publisher: publisher.to_string(),
+                    });
+                }
+                Ok(WorkspaceEnsure {
+                    token,
+                    record,
+                    created: false,
+                })
+            }
+            // A token without ownership is an operator-created entry: it has
+            // no recorded contacts, so it can never receive a self-serve
+            // link. It also never gains one from a submission.
+            (Some(_), None) => Err(WorkspaceRefusal::UnknownContact {
+                publisher: publisher.to_string(),
+            }),
+            // Ownership without a token is a partially written creation: the
+            // same recorded owner may finish it, nobody else may.
+            (None, Some(record)) => {
+                if !record.has_contact(&email) {
+                    return Err(WorkspaceRefusal::UnknownContact {
+                        publisher: publisher.to_string(),
+                    });
+                }
+                let token = random_workspace_token();
+                state.tokens.insert(publisher.to_string(), token.clone());
+                self.write_tokens(&state.tokens)
+                    .map_err(|error| WorkspaceRefusal::Store {
+                        detail: error.to_string(),
+                    })?;
+                Ok(WorkspaceEnsure {
+                    token,
+                    record,
+                    created: false,
+                })
+            }
+            (None, None) => {
+                if !new_workspace_proven {
+                    let domain = email
+                        .split_once('@')
+                        .map(|(_, domain)| domain.to_string())
+                        .unwrap_or_default();
+                    return Err(WorkspaceRefusal::UnprovenDomain {
+                        domain,
+                        reason: "no app-ads.txt proof was recorded".to_string(),
+                    });
+                }
+                let token = random_workspace_token();
+                let record = WorkspaceRecord {
+                    owner_email: email.clone(),
+                    contacts: BTreeSet::from([email]),
+                };
+                // Write the ownership first: a crash between the two writes
+                // leaves a record whose recorded owner can finish creation,
+                // never a token with no recorded contacts.
+                state.records.insert(publisher.to_string(), record.clone());
+                self.write_records(&state.records)
+                    .map_err(|error| WorkspaceRefusal::Store {
+                        detail: error.to_string(),
+                    })?;
+                state.tokens.insert(publisher.to_string(), token.clone());
+                self.write_tokens(&state.tokens)
+                    .map_err(|error| WorkspaceRefusal::Store {
+                        detail: error.to_string(),
+                    })?;
+                Ok(WorkspaceEnsure {
+                    token,
+                    record,
+                    created: true,
+                })
+            }
         }
-        let token = random_workspace_token();
-        state.tokens.insert(publisher.to_string(), token.clone());
-        self.write(&state.tokens)?;
-        Ok(token)
     }
 
     /// The stored token for `publisher`, when the file holds one. An
@@ -368,6 +613,30 @@ impl WorkspaceTokens {
         let mut state = self.lock();
         self.load(&mut state).ok()?;
         state.tokens.get(publisher).cloned()
+    }
+
+    /// The recorded ownership for `publisher`, when the sidecar holds one.
+    /// An unreadable sidecar yields `None` (fail closed).
+    pub fn record(&self, publisher: &str) -> Option<WorkspaceRecord> {
+        let mut state = self.lock();
+        self.load(&mut state).ok()?;
+        state.records.get(publisher).cloned()
+    }
+
+    /// Whether `publisher` has a workspace entry or recorded ownership.
+    pub fn has_workspace(&self, publisher: &str) -> bool {
+        let mut state = self.lock();
+        if self.load(&mut state).is_err() {
+            return false;
+        }
+        state.tokens.contains_key(publisher) || state.records.contains_key(publisher)
+    }
+
+    /// Whether a sign-in link for `publisher` may be delivered to `email`:
+    /// true only for an address recorded with the workspace.
+    pub fn contact_recorded(&self, publisher: &str, email: &str) -> bool {
+        self.record(publisher)
+            .is_some_and(|record| record.has_contact(email))
     }
 
     /// Whether no publisher token is recorded. An unreadable file counts as
@@ -380,17 +649,17 @@ impl WorkspaceTokens {
         state.tokens.is_empty()
     }
 
-    /// Read the JSON object once per store instance.
+    /// Read the token object and the ownership sidecar once per store
+    /// instance. A missing sidecar is an empty ownership map: operator
+    /// entries then keep working as tokens but can never receive a self-serve
+    /// link (they have no recorded contacts).
     fn load(&self, state: &mut WorkspaceState) -> Result<(), ApiError> {
         if state.loaded {
             return Ok(());
         }
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                state.loaded = true;
-                return Ok(());
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => {
                 return Err(ApiError::Internal(format!(
                     "ledger tokens read {}: {error}",
@@ -398,30 +667,68 @@ impl WorkspaceTokens {
                 )))
             }
         };
-        let tokens: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|error| {
-            ApiError::Internal(format!(
-                "ledger tokens {} are not a JSON object: {error}",
-                self.path.display()
-            ))
-        })?;
+        let tokens: BTreeMap<String, String> = if raw.trim().is_empty() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_str(&raw).map_err(|error| {
+                ApiError::Internal(format!(
+                    "ledger tokens {} are not a JSON object: {error}",
+                    self.path.display()
+                ))
+            })?
+        };
+        let records_raw = match std::fs::read_to_string(&self.records_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ApiError::Internal(format!(
+                    "workspace ownership read {}: {error}",
+                    self.records_path.display()
+                )))
+            }
+        };
+        let records: BTreeMap<String, WorkspaceRecord> = if records_raw.trim().is_empty() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_str(&records_raw).map_err(|error| {
+                ApiError::Internal(format!(
+                    "workspace ownership {} is not a JSON object: {error}",
+                    self.records_path.display()
+                ))
+            })?
+        };
         state.tokens = tokens;
+        state.records = records;
         state.loaded = true;
         Ok(())
     }
 
-    /// Write the whole object atomically (temp file plus rename, mode 0600).
-    fn write(&self, tokens: &BTreeMap<String, String>) -> Result<(), ApiError> {
-        if let Some(parent) = self.path.parent() {
+    /// Write the token object atomically (temp file plus rename, mode 0600).
+    fn write_tokens(&self, tokens: &BTreeMap<String, String>) -> Result<(), ApiError> {
+        let body = serde_json::to_string_pretty(tokens)
+            .map_err(|error| ApiError::Internal(format!("ledger tokens serialization: {error}")))?;
+        self.write_atomic(&self.path, body.as_bytes(), "ledger tokens")
+    }
+
+    /// Write the ownership sidecar atomically (temp file plus rename, mode
+    /// 0600).
+    fn write_records(&self, records: &BTreeMap<String, WorkspaceRecord>) -> Result<(), ApiError> {
+        let body = serde_json::to_string_pretty(records).map_err(|error| {
+            ApiError::Internal(format!("workspace ownership serialization: {error}"))
+        })?;
+        self.write_atomic(&self.records_path, body.as_bytes(), "workspace ownership")
+    }
+
+    /// Replace `path` atomically with `body` (a sibling temp file plus
+    /// rename, mode 0600 on Unix).
+    fn write_atomic(&self, path: &Path, body: &[u8], label: &str) -> Result<(), ApiError> {
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    ApiError::Internal(format!("ledger tokens directory: {error}"))
-                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| ApiError::Internal(format!("{label} directory: {error}")))?;
             }
         }
-        let mut body = serde_json::to_string_pretty(tokens)
-            .map_err(|error| ApiError::Internal(format!("ledger tokens serialization: {error}")))?;
-        body.push('\n');
-        let mut tmp_name = self.path.clone().into_os_string();
+        let mut tmp_name = path.to_path_buf().into_os_string();
         tmp_name.push(".tmp");
         let tmp = PathBuf::from(tmp_name);
         let mut options = std::fs::OpenOptions::new();
@@ -433,16 +740,13 @@ impl WorkspaceTokens {
         }
         use std::io::Write;
         let mut file = options.open(&tmp).map_err(|error| {
-            ApiError::Internal(format!("ledger tokens temp {}: {error}", tmp.display()))
+            ApiError::Internal(format!("{label} temp {}: {error}", tmp.display()))
         })?;
-        file.write_all(body.as_bytes())
-            .map_err(|error| ApiError::Internal(format!("ledger tokens temp write: {error}")))?;
+        file.write_all(body)
+            .map_err(|error| ApiError::Internal(format!("{label} temp write: {error}")))?;
         drop(file);
-        std::fs::rename(&tmp, &self.path).map_err(|error| {
-            ApiError::Internal(format!(
-                "ledger tokens rename {}: {error}",
-                self.path.display()
-            ))
+        std::fs::rename(&tmp, path).map_err(|error| {
+            ApiError::Internal(format!("{label} rename {}: {error}", path.display()))
         })
     }
 
@@ -511,6 +815,7 @@ pub struct SigninService {
     public_base: Option<String>,
     mailer: Option<Arc<dyn NotificationSink>>,
     warnings: Arc<WarningLog>,
+    workspaces: Option<Arc<WorkspaceTokens>>,
 }
 
 impl SigninService {
@@ -523,7 +828,17 @@ impl SigninService {
             public_base: None,
             mailer: None,
             warnings: Arc::new(WarningLog::new()),
+            workspaces: None,
         }
+    }
+
+    /// Bind the workspace ownership records: a link is delivered only to an
+    /// address recorded with the workspace. Without this binding the service
+    /// creates the durable link row but never sends it.
+    #[must_use]
+    pub fn with_workspaces(mut self, workspaces: Arc<WorkspaceTokens>) -> Self {
+        self.workspaces = Some(workspaces);
+        self
     }
 
     /// Set the link lifetime. Callers pass a value already validated by
@@ -584,19 +899,111 @@ impl SigninService {
         }
     }
 
+    /// The setup-watch confirmation link a token travels in.
+    pub fn watch_confirm_link(&self, token: &str) -> String {
+        match &self.public_base {
+            Some(base) => format!("{base}{WATCH_CONFIRM_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
+            None => format!("{WATCH_CONFIRM_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
+        }
+    }
+
+    /// Send the setup-watch confirmation link (and the checkout link when one
+    /// was created) through the transactional sink. Best effort by contract:
+    /// a missing mailer or a send failure records a warning and never fails
+    /// the accepted pending sign-up.
+    pub async fn send_watch_confirmation(
+        &self,
+        email: &str,
+        reference: &str,
+        token: &str,
+        checkout_url: Option<&str>,
+        expires_at_unix_ms: i64,
+    ) {
+        let link = self.watch_confirm_link(token);
+        let expires = apex_ui::format::utc_datetime(expires_at_unix_ms);
+        let payment_line = match checkout_url {
+            Some(url) => format!("Complete the checkout: {url}"),
+            None => "We will email a payment link before the watch starts.".to_string(),
+        };
+        let Some(mailer) = &self.mailer else {
+            self.warnings.record(format!(
+                "setup-watch confirmation for '{reference}' was created but not sent: set {SINK_ENV}=email (with {FROM_ENV}) to deliver it (expires {expires})"
+            ));
+            return;
+        };
+        let text = format!(
+            "Confirm your Apex setup watch:\n\n{link}\n\nThis link can be used once and expires on {expires}.\n{payment_line}\n{SIGNIN_EMAIL_WRONG_PERSON}"
+        );
+        let message = DeliveryMessage {
+            to: email.to_string(),
+            subject: WATCH_CONFIRM_SUBJECT.to_string(),
+            html: watch_confirm_email_html(&link, &expires, &payment_line),
+            text,
+            template_class: TemplateClass::ReportingAccess,
+            dedup_key: format!("watch_confirm:{reference}"),
+            reference: None,
+        };
+        match mailer.send(&message).await {
+            Ok(receipt) => tracing::info!(
+                reference,
+                state = receipt.state.as_str(),
+                "setup-watch confirmation sent"
+            ),
+            Err(error) => self.warnings.record(format!(
+                "setup-watch confirmation for '{reference}' could not be sent: {error}"
+            )),
+        }
+    }
+
     /// Create the durable single-use row for `publisher` and send the link to
-    /// `email`. The email is best effort by contract: an absent mailer or a
-    /// delivery failure records a warning and never fails the caller, so a
-    /// saved lead stays a success even when the mail path fails.
+    /// `email`.
+    ///
+    /// Delivery is restricted to the workspace's recorded contacts: when a
+    /// workspace binding is present and `email` is not one of them, no row is
+    /// created and the typed refusal is returned. Without a workspace binding
+    /// the row may be created for a direct caller, but nothing is ever sent
+    /// (a warning is recorded). An absent mailer or a delivery failure is a
+    /// warning, never a failure: a saved lead stays a success even when the
+    /// mail path fails.
     pub async fn issue_link(
         &self,
         publisher: &str,
         email: &str,
         now_unix_ms: i64,
     ) -> Result<CreatedSignin, ApiError> {
+        if let Some(workspaces) = &self.workspaces {
+            if !workspaces.contact_recorded(publisher, email) {
+                return Err(ApiError::BadRequest("workspace_contact_not_recorded"));
+            }
+        }
         let created = self.store.create(publisher, now_unix_ms, self.ttl_ms)?;
+        if self.workspaces.is_none() {
+            let expires = apex_ui::format::utc_datetime(created.expires_at_unix_ms);
+            let reason = if self.mailer.is_some() {
+                format!("no workspace contact records are configured (expires {expires})")
+            } else {
+                format!(
+                    "set {SINK_ENV}=email (with {FROM_ENV}) to deliver sign-in links (expires {expires})"
+                )
+            };
+            self.warnings.record(format!(
+                "sign-in link for '{publisher}' was created but not sent: {reason}"
+            ));
+            return Ok(created);
+        }
         self.deliver(publisher, email, &created).await;
         Ok(created)
+    }
+
+    /// Record one operator-facing refusal reason (also emitted as a
+    /// `tracing::warn!`). The message never carries a raw email address.
+    pub fn record_warning(&self, message: impl Into<String>) {
+        self.warnings.record(message);
+    }
+
+    /// The recorded warning lines (tests and diagnostics).
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.lines()
     }
 
     /// Best-effort delivery of one created link.
@@ -656,6 +1063,20 @@ fn signin_email_html(link: &str, expires: &str) -> String {
          <p><a href=\"{href}\">{href}</a></p>\
          <p>This link can be used once and expires on {expires}.</p>\
          <p>{}</p>",
+        crate::html_escape(SIGNIN_EMAIL_WRONG_PERSON)
+    )
+}
+
+/// The minimal HTML twin of the plain-text setup-watch confirmation email.
+fn watch_confirm_email_html(link: &str, expires: &str, payment_line: &str) -> String {
+    let href = crate::html_escape(link);
+    format!(
+        "<p>Confirm your Apex setup watch:</p>\
+         <p><a href=\"{href}\">{href}</a></p>\
+         <p>This link can be used once and expires on {expires}.</p>\
+         <p>{}</p>\
+         <p>{}</p>",
+        crate::html_escape(payment_line),
         crate::html_escape(SIGNIN_EMAIL_WRONG_PERSON)
     )
 }
@@ -862,13 +1283,29 @@ mod tests {
             Some("operator-token")
         );
 
-        let first = workspaces.ensure("northstar-studio").expect("ensure");
-        assert_eq!(first.len(), 64, "32 random bytes as hex");
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let again = workspaces.ensure("northstar-studio").expect("idempotent");
-        assert_eq!(first, again, "an existing entry is never replaced");
-        workspaces.ensure("bright-arcade").expect("second");
-        assert_ne!(first, workspaces.token("bright-arcade").expect("stored"));
+        let first = workspaces
+            .ensure("northstar-studio", "Founder@Studio.Example", true)
+            .expect("ensure");
+        assert_eq!(first.token.len(), 64, "32 random bytes as hex");
+        assert!(first.token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(first.created);
+        assert_eq!(first.record.owner_email, "founder@studio.example");
+        assert!(first.record.has_contact("FOUNDER@studio.example"));
+        let again = workspaces
+            .ensure("northstar-studio", "founder@studio.example", false)
+            .expect("idempotent");
+        assert_eq!(
+            first.token, again.token,
+            "an existing entry is never replaced"
+        );
+        assert!(!again.created);
+        workspaces
+            .ensure("bright-arcade", "b@arcade.example", true)
+            .expect("second");
+        assert_ne!(
+            first.token,
+            workspaces.token("bright-arcade").expect("stored")
+        );
 
         let raw = std::fs::read_to_string(&path).expect("tokens file");
         let file: std::collections::BTreeMap<String, String> =
@@ -879,39 +1316,118 @@ mod tests {
         );
         assert_eq!(
             file.get("northstar-studio").map(String::as_str),
-            Some(first.as_str())
+            Some(first.token.as_str())
         );
         assert_eq!(file.len(), 3);
-        // A fresh store over the same file sees the same entries.
+        let records_raw = std::fs::read_to_string(workspaces.records_path()).expect("sidecar");
+        let records: std::collections::BTreeMap<String, WorkspaceRecord> =
+            serde_json::from_str(&records_raw).expect("ownership json");
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records
+                .get("northstar-studio")
+                .map(|record| record.owner_email.as_str()),
+            Some("founder@studio.example")
+        );
+
+        // A fresh store over the same files sees the same entries.
         let fresh = WorkspaceTokens::open(&path);
         assert_eq!(
             fresh.token("bright-arcade"),
             workspaces.token("bright-arcade")
         );
-        assert!(fresh.ensure("operator-pub").expect("keep") == "operator-token");
+        assert!(fresh.contact_recorded("northstar-studio", "founder@studio.example"));
+        assert!(!fresh.contact_recorded("northstar-studio", "attacker@evil.example"));
 
-        // An invalid publisher never reaches the file.
+        // An existing workspace never adds a contact, even with a "proof".
+        let before = std::fs::read_to_string(workspaces.records_path()).expect("sidecar");
+        let refusal = workspaces
+            .ensure("northstar-studio", "attacker@evil.example", true)
+            .expect_err("unrecorded contact");
+        assert!(matches!(refusal, WorkspaceRefusal::UnknownContact { .. }));
+        assert!(refusal.to_string().contains(RECORDED_CONTACTS_RULE));
+        assert_eq!(
+            std::fs::read_to_string(workspaces.records_path()).expect("sidecar"),
+            before,
+            "a refusal writes nothing"
+        );
+        // An operator token has no recorded contacts and never gains one.
         assert!(matches!(
-            workspaces.ensure("../etc"),
-            Err(ApiError::BadRequest("invalid_publisher"))
+            workspaces.ensure("operator-pub", "ops@studio.example", true),
+            Err(WorkspaceRefusal::UnknownContact { .. })
         ));
+
+        // Invalid names and addresses are refused before any write.
+        assert!(matches!(
+            workspaces.ensure("../etc", "a@studio.example", true),
+            Err(WorkspaceRefusal::InvalidPublisher)
+        ));
+        assert!(matches!(
+            workspaces.ensure("valid-pub", "not-an-email", true),
+            Err(WorkspaceRefusal::InvalidEmail)
+        ));
+        assert!(!workspaces.has_workspace("valid-pub"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn a_missing_file_is_an_empty_workspace_and_an_invalid_one_fails_closed() {
+    fn a_new_workspace_needs_a_proof_and_a_missing_file_is_empty() {
         let root = temp_root("workspace-invalid");
         let missing = WorkspaceTokens::open(root.join("missing.json"));
         assert!(missing.is_empty());
         assert_eq!(missing.token("pub"), None);
-        assert!(missing.ensure("pub").is_ok());
+        assert!(missing.record("pub").is_none());
+        assert!(matches!(
+            missing.ensure("pub", "a@studio.example", false),
+            Err(WorkspaceRefusal::UnprovenDomain { .. })
+        ));
+        assert!(!missing.has_workspace("pub"));
+        let created = missing
+            .ensure("pub", "a@studio.example", true)
+            .expect("proven");
+        assert!(created.created);
+        assert!(missing.contact_recorded("pub", "a@studio.example"));
 
         let path = root.join("broken.json");
         std::fs::write(&path, "not json").expect("write");
         let broken = WorkspaceTokens::open(&path);
         assert!(broken.is_empty(), "an invalid file counts as empty");
         assert_eq!(broken.token("pub"), None);
-        assert!(matches!(broken.ensure("pub"), Err(ApiError::Internal(_))));
+        assert!(matches!(
+            broken.ensure("pub", "a@studio.example", true),
+            Err(WorkspaceRefusal::Store { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn issue_link_refuses_unrecorded_contacts_and_delivers_recorded_ones() {
+        let root = temp_root("workspace-delivery");
+        let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
+        workspaces
+            .ensure("northstar-studio", "founder@studio.example", true)
+            .expect("workspace");
+        let service = SigninService::open(&root).with_workspaces(Arc::clone(&workspaces));
+
+        let refused = service
+            .issue_link("northstar-studio", "attacker@evil.example", 1_000)
+            .await
+            .expect_err("unrecorded contact");
+        assert!(matches!(
+            refused,
+            ApiError::BadRequest("workspace_contact_not_recorded")
+        ));
+        assert!(
+            service.store().read_rows().expect("rows").is_empty(),
+            "a refused delivery creates no link row"
+        );
+
+        let created = service
+            .issue_link("northstar-studio", "founder@studio.example", 1_000)
+            .await
+            .expect("recorded contact");
+        assert_eq!(service.store().read_rows().expect("rows").len(), 1);
+        assert!(!created.token.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

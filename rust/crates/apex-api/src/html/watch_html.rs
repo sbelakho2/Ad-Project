@@ -8,9 +8,7 @@
 //! confirmation shows the checkout link when the deployment configures one
 //! and the honest "we will email a payment link" line otherwise.
 
-use apex_ui::components::{
-    checkbox, field, form_error_summary, input, notice, panel, split, textarea,
-};
+use apex_ui::components::{field, form_error_summary, input, notice, panel, split, textarea};
 use apex_ui::status::StatusKind;
 
 use super::{html_escape, marketing_document, ConsoleCtx};
@@ -33,7 +31,6 @@ pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.
 pub const WATCH_PAYMENT_LINE: &str = "We will email a payment link before the watch starts.";
 /// The checkout action label.
 pub const WATCH_CHECKOUT_LABEL: &str = "Complete the checkout";
-
 /// The preserved form values of one submission.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchFormValues {
@@ -43,8 +40,6 @@ pub struct WatchFormValues {
     pub email: String,
     /// The submitted account-id textarea.
     pub accounts: String,
-    /// Whether the core-portfolio checkbox was on.
-    pub core: bool,
 }
 
 /// What the request page is rendering.
@@ -106,7 +101,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
         "Start the setup watch"
     };
     let form = format!(
-        "<form method=\"post\" action=\"{WATCH_ACTION}\">{}{}{}{}\
+        "<form method=\"post\" action=\"{WATCH_ACTION}\">{}{}{}\
          <div class=\"form-actions\">\
          <button class=\"action action-primary\" type=\"submit\">{submit_label}</button></div>\
          <p class=\"field-help\">We use these details to run the watch and send its alerts. \
@@ -152,17 +147,10 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
                 Some(apex_watch::MAX_ACCOUNT_TEXT_CHARS)
             ),
         ),
-        field(
-            "tier",
-            "Tier",
-            Some("Core portfolios are billed at the higher tier."),
-            error_for("tier"),
-            &checkbox("tier-core", "tier", "I run a core portfolio", values.core),
-        ),
     );
     let mut aside = panel(
         "What you get",
-        "<p>$99 per month. $199 per month for core portfolios.</p>\
+        "<p>$99 per month. $199 per month for core portfolios (ten or more publisher account ids in your public app-ads.txt).</p>\
          <p>A daily check of the public app-ads.txt file and an email when something leaks.</p>",
         None,
     );
@@ -177,12 +165,19 @@ pub fn render_confirmation(
     ctx: &ConsoleCtx,
     reference: Option<&str>,
     checkout_url: Option<&str>,
+    tier: Option<&str>,
 ) -> String {
     let mut body = String::from("<h1>Your watch is requested.</h1>");
     body.push_str(
         "<p>The daily check starts after the first payment. Every alert goes to the email \
          address you gave us.</p>",
     );
+    if let Some(tier) = tier {
+        body.push_str(&format!(
+            "<p class=\"table-note\">Plan from your app count: {}</p>",
+            html_escape(tier)
+        ));
+    }
     match checkout_url {
         Some(url) => {
             body.push_str(&format!(
@@ -210,6 +205,28 @@ pub fn render_confirmation(
     marketing_document(ctx, "Watch requested", &body)
 }
 
+/// Render the one-time email confirmation's success state.
+pub fn render_email_confirmed(ctx: &ConsoleCtx, email: &str) -> String {
+    let body = format!(
+        "<h1>Your email is confirmed.</h1>\
+         <p>We recorded {} as the contact for this watch. The daily check starts after the \
+         first payment; every alert goes to that address.</p>\
+         <p class=\"table-note\">The confirmation link can be used once.</p>",
+        html_escape(email)
+    );
+    marketing_document(ctx, "Email confirmed", &body)
+}
+
+/// Render the one-time email confirmation's refusal state (used, expired or
+/// unknown token). The token is never echoed.
+pub fn render_email_confirmation_refused(ctx: &ConsoleCtx) -> String {
+    let body = "<h1>This confirmation link is no longer valid.</h1>\
+                <p>The link was used already, expired, or never existed. A fresh sign-up \
+                sends a new confirmation link.</p>\
+                <p><a class=\"action action-secondary\" href=\"/watch/\">Start a new watch</a></p>";
+    marketing_document(ctx, "Confirmation link refused", body)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -229,10 +246,8 @@ mod tests {
             ">Domain</label>",
             ">Email</label>",
             ">Network account ids (optional)</label>",
-            ">Tier</label>",
-            "> I run a core portfolio</label>",
             ">Start the setup watch</button>",
-            "$99 per month. $199 per month for core portfolios.",
+            "$199 per month for core portfolios (ten or more publisher account ids in your public app-ads.txt).",
             WATCH_NO_KEYS_NOTE,
             "Read the privacy notice",
         ] {
@@ -252,7 +267,6 @@ mod tests {
                     domain: "\" onmouseover=\"alert(1)".into(),
                     email: "founder@northstar.example".into(),
                     accounts: "admob.com = pub-1".into(),
-                    core: true,
                 },
                 errors: vec![
                     apex_watch::WatchFieldError {
@@ -274,12 +288,7 @@ mod tests {
         assert!(html.contains("value=\"&quot; onmouseover=&quot;alert(1)\""));
         assert!(!html.contains("onmouseover=\"alert(1)\""));
         assert!(html.contains("admob.com = pub-1"));
-        assert!(
-            html.contains(
-                "<input aria-describedby=\"tier-help\" type=\"checkbox\" id=\"tier-core\" name=\"tier\" checked>"
-            ),
-            "{html}"
-        );
+        assert!(!html.contains("type=\"checkbox\""), "{html}");
         assert!(!html.contains(SUBMISSION_FAILURE_TITLE));
     }
 
@@ -291,7 +300,6 @@ mod tests {
                 domain: "northstar.example".into(),
                 email: "founder@northstar.example".into(),
                 accounts: String::new(),
-                core: false,
             })),
         );
         assert!(html.contains(SUBMISSION_FAILURE_TITLE));
@@ -306,19 +314,22 @@ mod tests {
             &ctx(),
             Some("sub_0123456789"),
             Some("https://checkout.example/pay?x=1&y=2"),
+            Some("core ($199 per month)"),
         );
         assert!(with_link.contains("<h1>Your watch is requested.</h1>"));
         assert!(with_link.contains(WATCH_CHECKOUT_LABEL));
         assert!(with_link.contains("href=\"https://checkout.example/pay?x=1&amp;y=2\""));
         assert!(with_link.contains("Confirmation ID: <code>sub_0123456789</code>"));
         assert!(!with_link.contains(WATCH_PAYMENT_LINE));
+        assert!(with_link.contains("Plan from your app count: core ($199 per month)"));
 
-        let without = render_confirmation(&ctx(), None, None);
+        let without = render_confirmation(&ctx(), None, None, None);
         assert!(without.contains(WATCH_PAYMENT_LINE));
         assert!(!without.contains(WATCH_CHECKOUT_LABEL));
         assert!(!without.contains("Confirmation ID"));
 
-        let hostile = render_confirmation(&ctx(), Some("sub_<script>alert(1)</script>"), None);
+        let hostile =
+            render_confirmation(&ctx(), Some("sub_<script>alert(1)</script>"), None, None);
         assert!(!hostile.contains("<script>alert(1)"));
         assert!(hostile.contains("&lt;script&gt;"));
     }

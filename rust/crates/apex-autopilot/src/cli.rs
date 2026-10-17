@@ -15,6 +15,41 @@ pub fn flag(args: &[String], name: &str) -> Option<String> {
     args.get(index + 1).cloned()
 }
 
+/// Every value of a repeated `--flag value` in `args`, in order. The cycle
+/// consumes one snapshot per value so a publisher with several platforms is
+/// handed several files.
+pub fn flags(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == name {
+            if let Some(value) = args.get(index + 1) {
+                out.push(value.clone());
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
+/// `args` with every `--flag value` pair removed: the fleet driver strips the
+/// operator's snapshot arguments before injecting each publisher's own files.
+pub fn without_flag(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == name {
+            index += 2;
+        } else {
+            out.push(args[index].clone());
+            index += 1;
+        }
+    }
+    out
+}
+
 /// The environment variable a timer uses to pass the expected start time
 /// (unix milliseconds), the fallback for `--scheduled-at`.
 pub const SCHEDULED_AT_ENV: &str = "APEX_SCHEDULED_AT_MS";
@@ -577,6 +612,9 @@ pub struct FleetPublisher {
     pub runner: crate::runner::Runner,
     /// The per-publisher ledger path.
     pub ledger_path: std::path::PathBuf,
+    /// This publisher's own per-platform snapshots, the adapter platform
+    /// first. The fleet cycle is handed exactly these files.
+    pub snapshot_paths: Vec<std::path::PathBuf>,
 }
 
 /// One registry skip as the fleet report carries it.
@@ -646,6 +684,7 @@ pub fn build_fleet(
     registry: &crate::registry::PublisherRegistry,
     ledger_root: &std::path::Path,
     vault_root: &std::path::Path,
+    snapshot_root: &std::path::Path,
     signing_key: &apex_proof::Keypair,
     transport: std::sync::Arc<dyn apex_connectors::transport::Transport>,
     instrumentation: &Instrumentation,
@@ -663,10 +702,16 @@ pub fn build_fleet(
             instrumentation,
             singleton,
         )?;
+        let snapshot_paths = registered
+            .snapshot_platforms()
+            .into_iter()
+            .map(|wire| crate::registry::snapshot_path(snapshot_root, &registered.publisher, &wire))
+            .collect();
         publishers.push(FleetPublisher {
             publisher: registered.publisher.clone(),
             runner,
             ledger_path: ledger_root.join(format!("{}.jsonl", registered.publisher)),
+            snapshot_paths,
         });
     }
     let skipped = registry
@@ -727,7 +772,28 @@ pub async fn dispatch_fleet(
         let mut ledger =
             apex_proof::Ledger::open(&publisher.ledger_path, fleet.signing_key.clone())
                 .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
-        let outcome = dispatch(command, args, &publisher.runner, &mut ledger, now_unix_ms).await?;
+        // The cycle consumes only this publisher's own per-platform snapshots.
+        // A publisher with several platforms gets several files; the operator's
+        // own `--snapshot` arguments (if any) are replaced, and every other
+        // command keeps them untouched.
+        let call_args = if command == "cycle" && !publisher.snapshot_paths.is_empty() {
+            let mut injected = without_flag(args, "--snapshot");
+            for path in &publisher.snapshot_paths {
+                injected.push("--snapshot".to_string());
+                injected.push(path.display().to_string());
+            }
+            injected
+        } else {
+            args.to_vec()
+        };
+        let outcome = dispatch(
+            command,
+            &call_args,
+            &publisher.runner,
+            &mut ledger,
+            now_unix_ms,
+        )
+        .await?;
         outcomes.push((publisher.publisher.clone(), outcome));
     }
     if fleet.is_singleton() {
@@ -888,6 +954,360 @@ pub async fn dispatch_fleet(
         json: serde_json::Value::Object(json).to_string(),
         failed,
     })
+}
+
+/// One platform snapshot the fleet audit built and scored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditSnapshotReport {
+    /// The platform wire name (`applovin_max`, `levelplay`, `admob`).
+    pub platform: String,
+    /// The adapter platform the wire maps to; drives the fleet mode label.
+    pub platform_id: apex_core::PlatformId,
+    /// The file the snapshot was written to.
+    pub path: String,
+    /// Ad units in the snapshot.
+    pub ad_units: usize,
+    /// The audit engine's digest of the snapshot.
+    pub digest: String,
+    pub findings: usize,
+    pub critical: usize,
+    pub warning: usize,
+    pub info: usize,
+    pub eligible_rule_groups: u32,
+    pub expected_rule_groups: u32,
+    pub missing_inputs: Vec<String>,
+}
+
+/// One publisher's audit: its per-platform snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditPublisherReport {
+    /// The publisher name.
+    pub publisher: String,
+    /// The snapshots built for it, adapter platform first.
+    pub snapshots: Vec<AuditSnapshotReport>,
+}
+
+/// One platform snapshot the fleet audit could not build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditFailure {
+    pub publisher: String,
+    pub platform: String,
+    /// The typed platform error, rendered.
+    pub reason: String,
+}
+
+/// The whole fleet audit, before rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetAuditReport {
+    /// The runnable publishers that were audited (sorted).
+    pub publishers: Vec<AuditPublisherReport>,
+    /// The registry's skipped publishers with typed reasons (sorted).
+    pub skipped: Vec<FleetSkip>,
+    /// Platform snapshots that could not be built.
+    pub failures: Vec<AuditFailure>,
+}
+
+/// Audit every registered publisher, one snapshot per platform its vault
+/// holds, each written at `<root>/<publisher>/<platform>.json` (the layout the
+/// console's `JsonFileAuditSource` reads). A publisher that fails its
+/// per-platform refresh is recorded as a typed failure and the pass continues;
+/// a registry skip keeps its typed reason. Returns the built snapshots so the
+/// caller renders the human and JSON reports.
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_fleet_snapshots(
+    registry: &crate::registry::PublisherRegistry,
+    snapshot_root: &std::path::Path,
+    transport: std::sync::Arc<dyn apex_connectors::transport::Transport>,
+    instrumentation: &Instrumentation,
+    rule_version: &str,
+    now_unix_ms: i64,
+) -> Result<FleetAuditReport, String> {
+    let mut publishers = Vec::new();
+    let mut failures = Vec::new();
+    // Every platform of a publisher reads the same public app-ads.txt. One
+    // per-run cache means one fetch per distinct developer site, not one per
+    // platform; the 404/410 verdict is cached too.
+    let app_ads_cache = std::sync::Arc::new(apex_connectors::app_ads::AppAdsCache::new());
+    let transport = app_ads_cache.wrap(transport);
+    for registered in registry.runnable() {
+        let account = crate::audit_job::SnapshotAccount::from(registered);
+        // The instrumentation handle is built before the publisher is known;
+        // stamping a clone here makes every audit event tenant-scoped.
+        let events = instrumentation.events.as_ref().map(|events| {
+            std::sync::Arc::new(
+                (**events)
+                    .clone()
+                    .with_publisher(registered.publisher.clone()),
+            )
+        });
+        let mut snapshots = Vec::new();
+        for wire in registered.snapshot_platforms() {
+            let Some(credentials) = registered.vaulted_platforms.get(&wire) else {
+                continue;
+            };
+            let path = crate::registry::snapshot_path(snapshot_root, &registered.publisher, &wire);
+            let started = std::time::Instant::now();
+            match crate::audit_job::audited_platform_snapshot(
+                &wire,
+                credentials,
+                &account,
+                std::sync::Arc::clone(&transport),
+                events.as_deref(),
+                rule_version,
+                now_unix_ms,
+            )
+            .await
+            {
+                Ok(snapshot) => {
+                    let report = apex_audit::run(&snapshot);
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let critical = report
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.severity.as_str() == "critical")
+                        .count();
+                    let warning = report
+                        .findings
+                        .iter()
+                        .filter(|finding| finding.severity.as_str() == "warning")
+                        .count();
+                    let info = report.findings.len() - critical - warning;
+                    let (eligible, expected, missing) = audit_coverage(&snapshot);
+                    // Atomic temp+rename beside the reads, exactly like the
+                    // legacy single-file write. A write failure is this
+                    // platform's typed failure, not a reason to abandon the
+                    // rest of the fleet.
+                    if let Err(error) = crate::write_snapshot(&path, &snapshot) {
+                        instrumentation
+                            .telemetry
+                            .audit_run(rule_version, apex_metrics::vocab::Outcome::Failed);
+                        failures.push(AuditFailure {
+                            publisher: registered.publisher.clone(),
+                            platform: wire.clone(),
+                            reason: format!("snapshot write: {error}"),
+                        });
+                        continue;
+                    }
+                    instrumentation
+                        .telemetry
+                        .audit_run(rule_version, apex_metrics::vocab::Outcome::Completed);
+                    if let Some(events) = &events {
+                        events
+                            .audit_completed(
+                                &report.snapshot_digest,
+                                rule_version,
+                                eligible,
+                                expected,
+                                critical as u32,
+                                warning as u32,
+                                info as u32,
+                                missing.clone(),
+                                duration_ms,
+                                now_unix_ms,
+                            )
+                            .await;
+                    }
+                    snapshots.push(AuditSnapshotReport {
+                        platform: wire.clone(),
+                        platform_id: snapshot.platform,
+                        path: path.display().to_string(),
+                        ad_units: snapshot.ad_units.len(),
+                        digest: report.snapshot_digest.clone(),
+                        findings: report.findings.len(),
+                        critical,
+                        warning,
+                        info,
+                        eligible_rule_groups: eligible,
+                        expected_rule_groups: expected,
+                        missing_inputs: missing,
+                    });
+                }
+                Err(error) => {
+                    // The typed refresh error is recorded and the pass moves
+                    // on: one flaky platform must not starve the rest of the
+                    // fleet of its snapshots.
+                    instrumentation
+                        .telemetry
+                        .audit_run(rule_version, apex_metrics::vocab::Outcome::Failed);
+                    failures.push(AuditFailure {
+                        publisher: registered.publisher.clone(),
+                        platform: wire.clone(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(notify) = &instrumentation.notify {
+            notify
+                .audit_ready(
+                    &registered.publisher,
+                    &crate::calendar::format_day(now_unix_ms.div_euclid(86_400_000)),
+                    now_unix_ms,
+                )
+                .await;
+        }
+        publishers.push(AuditPublisherReport {
+            publisher: registered.publisher.clone(),
+            snapshots,
+        });
+    }
+    let skipped = registry
+        .skipped()
+        .map(|skip| FleetSkip {
+            publisher: skip.publisher.clone(),
+            reason: skip.reason.to_string(),
+        })
+        .collect();
+    Ok(FleetAuditReport {
+        publishers,
+        skipped,
+        failures,
+    })
+}
+
+/// Render one fleet audit into the human and versioned JSON reports.
+pub fn render_fleet_audit(report: &FleetAuditReport, now_unix_ms: i64) -> DispatchOutcome {
+    let reference = run_reference(now_unix_ms);
+    let mut lines = vec![format!(
+        "Fleet: {} publisher(s) / {} skipped / {} snapshot(s)",
+        report.publishers.len(),
+        report.skipped.len(),
+        report
+            .publishers
+            .iter()
+            .map(|publisher| publisher.snapshots.len())
+            .sum::<usize>()
+    )];
+    let mut publisher_blocks = Vec::new();
+    for publisher in &report.publishers {
+        lines.push(format!("Publisher: {}", publisher.publisher));
+        let mut snapshots_json = Vec::new();
+        let mut findings = 0usize;
+        let mut critical = 0usize;
+        let mut warning = 0usize;
+        let mut info = 0usize;
+        let mut missing_inputs: Vec<String> = Vec::new();
+        for snapshot in &publisher.snapshots {
+            lines.push(format!(
+                "Platform: {} / {} ad unit(s)",
+                snapshot.platform, snapshot.ad_units
+            ));
+            lines.push(format!(
+                "Audit: {} finding(s) ({} critical / {} warning / {} info)",
+                snapshot.findings, snapshot.critical, snapshot.warning, snapshot.info
+            ));
+            if !snapshot.missing_inputs.is_empty() {
+                lines.push(format!(
+                    "Audit coverage: {}/{} rule group(s); missing {:?}",
+                    snapshot.eligible_rule_groups,
+                    snapshot.expected_rule_groups,
+                    snapshot.missing_inputs
+                ));
+            }
+            lines.push(format!(
+                "Snapshot: wrote {} ad units to {}",
+                snapshot.ad_units, snapshot.path
+            ));
+            findings += snapshot.findings;
+            critical += snapshot.critical;
+            warning += snapshot.warning;
+            info += snapshot.info;
+            for input in &snapshot.missing_inputs {
+                if !missing_inputs.contains(input) {
+                    missing_inputs.push(input.clone());
+                }
+            }
+            snapshots_json.push(serde_json::json!({
+                "platform": snapshot.platform,
+                "path": snapshot.path,
+                "ad_units": snapshot.ad_units,
+                "digest": snapshot.digest,
+                "findings": snapshot.findings,
+                "critical": snapshot.critical,
+                "warning": snapshot.warning,
+                "info": snapshot.info,
+                "eligible_rule_groups": snapshot.eligible_rule_groups,
+                "expected_rule_groups": snapshot.expected_rule_groups,
+                "missing_inputs": snapshot.missing_inputs,
+            }));
+        }
+        missing_inputs.sort();
+        publisher_blocks.push(serde_json::json!({
+            "publisher": publisher.publisher,
+            "snapshots": snapshots_json,
+            "audit": {
+                "findings": findings,
+                "critical": critical,
+                "warning": warning,
+                "info": info,
+                "missing_inputs": missing_inputs,
+            },
+        }));
+    }
+    for skip in &report.skipped {
+        lines.push(format!("Skipped: {}: {}", skip.publisher, skip.reason));
+    }
+    for failure in &report.failures {
+        lines.push(format!(
+            "Failed: {}: {}: {}",
+            failure.publisher, failure.platform, failure.reason
+        ));
+    }
+    lines.push(format!("Run reference: {reference}"));
+
+    // The fleet's mode is its snapshots' platform when every publisher has
+    // exactly one and they all agree; a mixed fleet reports `fleet`.
+    let mut platform_ids: Vec<apex_core::PlatformId> = report
+        .publishers
+        .iter()
+        .flat_map(|publisher| publisher.snapshots.iter().map(|s| s.platform_id))
+        .collect();
+    platform_ids.sort_by_key(|platform| mode_of(*platform));
+    platform_ids.dedup();
+    let single_each = report
+        .publishers
+        .iter()
+        .all(|publisher| publisher.snapshots.len() == 1);
+    let mode = match platform_ids.as_slice() {
+        [only] if single_each => mode_of(*only).to_string(),
+        _ => "fleet".to_string(),
+    };
+    let skipped: Vec<serde_json::Value> = report
+        .skipped
+        .iter()
+        .map(|skip| serde_json::json!({ "publisher": skip.publisher, "reason": skip.reason }))
+        .collect();
+    let failures: Vec<serde_json::Value> = report
+        .failures
+        .iter()
+        .map(|failure| {
+            serde_json::json!({
+                "publisher": failure.publisher,
+                "platform": failure.platform,
+                "reason": failure.reason,
+            })
+        })
+        .collect();
+    let mut json = serde_json::Map::new();
+    json.insert(
+        "schema_version".into(),
+        serde_json::Value::from(REPORT_SCHEMA_VERSION),
+    );
+    json.insert("command".into(), serde_json::Value::from("audit"));
+    json.insert("mode".into(), serde_json::Value::from(mode));
+    json.insert("publisher".into(), serde_json::Value::Null);
+    json.insert("run_reference".into(), serde_json::Value::from(reference));
+    json.insert(
+        "publishers".into(),
+        serde_json::Value::Array(publisher_blocks),
+    );
+    json.insert("skipped".into(), serde_json::Value::Array(skipped));
+    json.insert("failures".into(), serde_json::Value::Array(failures));
+    DispatchOutcome {
+        human: lines.join("\n"),
+        json: serde_json::Value::Object(json).to_string(),
+        failed: !report.failures.is_empty(),
+    }
 }
 
 /// The fleet-level verified payment pass: one cursor over the collection
@@ -1548,21 +1968,36 @@ async fn dispatch_inner(
             })
         }
         "cycle" => {
-            let snapshot = flag(args, "--snapshot")
-                .ok_or("cycle requires --snapshot (or APEX_RUNNER_SNAPSHOT)")?;
+            // One snapshot per platform this publisher owns. The fleet driver
+            // hands each publisher only its own files; the legacy single-file
+            // deployment names one `--snapshot` path (or `APEX_RUNNER_SNAPSHOT`).
+            let mut snapshot_paths: Vec<std::path::PathBuf> = flags(args, "--snapshot")
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            if snapshot_paths.is_empty() {
+                if let Some(path) =
+                    env_nonempty(&|name| std::env::var(name).ok(), "APEX_RUNNER_SNAPSHOT")
+                {
+                    snapshot_paths.push(std::path::PathBuf::from(path));
+                }
+            }
+            if snapshot_paths.is_empty() {
+                return Err("cycle requires --snapshot (or APEX_RUNNER_SNAPSHOT)".to_string());
+            }
             // The monitoring activation seam, exact: a publisher reaches a
             // cycle only once its console connection validated, so this is
             // the connection moment for the flat plan. The tier is chosen
-            // from the snapshot's reported 30-day revenue and recorded;
-            // later cycles never re-tier a recorded plan and never
-            // resurrect a cancelled one.
+            // from the adapter platform's snapshot reported 30-day revenue
+            // (the first file, which the fleet orders adapter-platform
+            // first) and recorded; later cycles never re-tier a recorded plan
+            // and never resurrect a cancelled one.
             let activated = runner
-                .activate_monitoring_from_snapshot(std::path::Path::new(&snapshot), now_unix_ms)
+                .activate_monitoring_from_snapshot(&snapshot_paths[0], now_unix_ms)
                 .map_err(|e| format!("monitoring activation: {e}"))?;
-            let report =
-                crate::cycle::run(runner, ledger, std::path::Path::new(&snapshot), now_unix_ms)
-                    .await
-                    .map_err(|e| format!("cycle: {e}"))?;
+            let report = crate::cycle::run(runner, ledger, &snapshot_paths, now_unix_ms)
+                .await
+                .map_err(|e| format!("cycle: {e}"))?;
             let mut lines = vec![format!(
                 "Cycle: proposed {} applied {} awaiting approval {}",
                 report.proposed, report.applied, report.awaiting_approval
@@ -2983,6 +3418,7 @@ mod tests {
             &registry,
             &ledger_root,
             &root,
+            &root.join("snapshots"),
             &signing_key,
             std::sync::Arc::new(NoTransport),
             &instrumentation,
@@ -3047,6 +3483,7 @@ mod tests {
             &registry,
             &ledger_root,
             &root,
+            &root.join("snapshots"),
             &signing_key,
             std::sync::Arc::new(NoTransport),
             &instrumentation,
@@ -3079,6 +3516,7 @@ mod tests {
             &registry,
             &ledger_root,
             &root,
+            &root.join("snapshots"),
             &signing_key,
             std::sync::Arc::new(NoTransport),
             &instrumentation,
@@ -3242,6 +3680,7 @@ mod tests {
                 publisher: registered.publisher.clone(),
                 runner,
                 ledger_path,
+                snapshot_paths: Vec::new(),
             });
         }
         let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
@@ -3316,6 +3755,7 @@ mod tests {
             &registry,
             &ledger_root,
             &root,
+            &root.join("snapshots"),
             &signing_key,
             std::sync::Arc::new(NoTransport),
             &instrumentation,
@@ -3363,6 +3803,7 @@ mod tests {
             publisher: registered.publisher.clone(),
             runner,
             ledger_path: ledger_root.join(format!("{}.jsonl", registered.publisher)),
+            snapshot_paths: Vec::new(),
         }];
         let skipped: Vec<FleetSkip> = registry
             .skipped()
@@ -3425,6 +3866,7 @@ mod tests {
             &registry,
             &ledger_root,
             &root,
+            &root.join("snapshots"),
             &signing_key,
             std::sync::Arc::new(NoTransport),
             &instrumentation,
@@ -3493,6 +3935,7 @@ mod tests {
                 publisher: (*publisher).to_string(),
                 runner,
                 ledger_path,
+                snapshot_paths: Vec::new(),
             });
         }
         let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
@@ -3581,6 +4024,7 @@ mod tests {
                 publisher: publisher.to_string(),
                 runner,
                 ledger_path: ledger_root.join(format!("{publisher}.jsonl")),
+                snapshot_paths: Vec::new(),
             });
         }
         let collection = root.join("collection.jsonl");
@@ -4023,5 +4467,644 @@ mod tests {
     #[test]
     fn now_is_after_the_product_epoch() {
         assert!(now_unix_ms() > 1_700_000_000_000);
+    }
+
+    // ------------------------------------------------------------------
+    // Fleet audit: one snapshot per publisher and platform.
+    // ------------------------------------------------------------------
+
+    /// A transport that answers from a fixed queue in call order and records
+    /// the requests; the snapshot builders' call order is what the queue
+    /// encodes, so an out-of-order build is a visible test failure.
+    #[derive(Debug, Default)]
+    struct ScriptedTransport {
+        queue:
+            std::sync::Mutex<std::collections::VecDeque<apex_connectors::transport::HttpResponse>>,
+        seen: std::sync::Mutex<Vec<apex_connectors::transport::HttpRequest>>,
+    }
+
+    impl ScriptedTransport {
+        fn push(&self, status: u16, body: &str) {
+            self.queue
+                .lock()
+                .unwrap()
+                .push_back(apex_connectors::transport::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body: body.as_bytes().to_vec(),
+                });
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl apex_connectors::transport::Transport for ScriptedTransport {
+        async fn request(
+            &self,
+            request: apex_connectors::transport::HttpRequest,
+        ) -> Result<
+            apex_connectors::transport::HttpResponse,
+            apex_connectors::transport::TransportError,
+        > {
+            self.seen.lock().unwrap().push(request);
+            Ok(self.queue.lock().unwrap().pop_front().unwrap_or(
+                apex_connectors::transport::HttpResponse {
+                    status: 500,
+                    headers: vec![],
+                    body: b"script exhausted".to_vec(),
+                },
+            ))
+        }
+    }
+
+    fn reporting_body(unit: &str) -> String {
+        format!(
+            r#"{{"code":200,"results":[{{"day":"2026-10-01","country":"EE","max_ad_unit_id":"{unit}","estimated_revenue":"12.5","impressions":"100"}}]}}"#
+        )
+    }
+
+    fn ad_units_body(unit: &str) -> String {
+        format!(
+            r#"[{{"id":"{unit}","name":"Rewarded","ad_format":"REWARD","platform":"android","package_name":"com.x"}}]"#
+        )
+    }
+
+    fn levelplay_instances_body() -> String {
+        r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","price":1.0,"position":1}]}"#
+            .to_string()
+    }
+
+    fn admob_groups_body() -> String {
+        r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"Main","format":"interstitial","adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2}]}]}"#
+            .to_string()
+    }
+
+    /// Vault a publisher with an arbitrary platform map and validated states.
+    fn write_vaulted_account(
+        root: &std::path::Path,
+        publisher: &str,
+        platforms: serde_json::Value,
+        states: &[(&str, &str)],
+        ad_unit_ids: &[&str],
+    ) {
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault key");
+        let account = serde_json::json!({
+            "developer_site": "studio.example.com",
+            "expected_networks": [],
+            "ad_unit_ids": ad_unit_ids,
+            "bidder_accounts": [],
+            "platforms": platforms,
+        });
+        std::fs::write(
+            root.join(format!("{publisher}.blob")),
+            vault.encrypt(&account.to_string()),
+        )
+        .expect("blob");
+        let mut meta_platforms = serde_json::Map::new();
+        for (wire, state) in states {
+            meta_platforms.insert(
+                (*wire).to_string(),
+                serde_json::json!({ "state": state, "credentialFields": ["api_key"] }),
+            );
+        }
+        let meta = serde_json::json!({ "platforms": meta_platforms });
+        std::fs::write(
+            root.join(format!("{publisher}.connections.json")),
+            meta.to_string(),
+        )
+        .expect("meta");
+    }
+
+    fn max_credentials(api_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "api_key": api_key,
+            "account_id": "acct-1",
+            "base_url": "https://api.example.test",
+            "report_key": "report-key",
+            "reporting_base_url": null,
+            "refresh_token": null
+        })
+    }
+
+    async fn audit_fleet(
+        registry: &crate::registry::PublisherRegistry,
+        snapshot_root: &std::path::Path,
+        transport: std::sync::Arc<ScriptedTransport>,
+    ) -> (FleetAuditReport, DispatchOutcome) {
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let report = audit_fleet_snapshots(
+            registry,
+            snapshot_root,
+            transport,
+            &instrumentation,
+            &audit_rule_version(),
+            golden_now(),
+        )
+        .await
+        .expect("fleet audit");
+        let outcome = render_fleet_audit(&report, golden_now());
+        (report, outcome)
+    }
+
+    fn read_snapshot(path: &std::path::Path) -> apex_audit::Snapshot {
+        serde_json::from_slice(&std::fs::read(path).expect("snapshot file")).expect("snapshot json")
+    }
+
+    fn unit_ids(snapshot: &apex_audit::Snapshot) -> Vec<String> {
+        snapshot
+            .ad_units
+            .iter()
+            .map(|unit| unit.platform_unit_id.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_publishers_in_one_audit_run_write_their_own_snapshots() {
+        let root = fleet_dir("audit-two");
+        let snapshot_root = root.join("snapshots");
+        write_vaulted_publisher(&root, "aurora", "management-key-aurora", "validated");
+        write_vaulted_publisher(&root, "northstar", "management-key-north", "validated");
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 2);
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        // aurora (sorted first): reporting + ad units + app-ads.txt. Both
+        // fixtures share a developer site, so northstar replays the cached
+        // app-ads.txt read.
+        transport.push(200, &reporting_body("aurora-unit"));
+        transport.push(200, &ad_units_body("aurora-unit"));
+        transport.push(200, "google.com, pub-1, DIRECT\n");
+        // northstar: its own distinct unit.
+        transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &ad_units_body("northstar-unit"));
+
+        let (report, outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
+        assert_eq!(report.publishers.len(), 2);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.publishers[0].publisher, "aurora");
+        assert_eq!(report.publishers[1].publisher, "northstar");
+
+        let aurora_path = snapshot_root.join("aurora").join("applovin_max.json");
+        let northstar_path = snapshot_root.join("northstar").join("applovin_max.json");
+        assert!(aurora_path.is_file(), "each publisher gets its own file");
+        assert!(northstar_path.is_file());
+        let aurora = read_snapshot(&aurora_path);
+        let northstar = read_snapshot(&northstar_path);
+        assert_eq!(unit_ids(&aurora), vec!["aurora-unit".to_string()]);
+        assert_eq!(unit_ids(&northstar), vec!["northstar-unit".to_string()]);
+        assert_eq!(aurora.platform, apex_core::PlatformId::AppLovinMax);
+        // The bytes never cross: no file carries another publisher's unit.
+        let aurora_bytes = std::fs::read_to_string(&aurora_path).expect("bytes");
+        let northstar_bytes = std::fs::read_to_string(&northstar_path).expect("bytes");
+        assert!(!aurora_bytes.contains("northstar-unit"), "{aurora_bytes}");
+        assert!(
+            !northstar_bytes.contains("aurora-unit"),
+            "{northstar_bytes}"
+        );
+
+        let aurora_digest = &report.publishers[0].snapshots[0].digest;
+        let northstar_digest = &report.publishers[1].snapshots[0].digest;
+        assert_ne!(
+            aurora_digest, northstar_digest,
+            "each snapshot has its own digest"
+        );
+
+        assert!(
+            outcome
+                .human
+                .starts_with("Fleet: 2 publisher(s) / 0 skipped / 2 snapshot(s)\n"),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["command"], "audit");
+        assert_eq!(json["mode"], "max");
+        assert_eq!(json["publisher"], serde_json::Value::Null);
+        let blocks = json["publishers"].as_array().expect("publishers");
+        assert_eq!(blocks.len(), 2, "{json}");
+        assert_eq!(blocks[0]["publisher"], "aurora");
+        assert_eq!(blocks[1]["publisher"], "northstar");
+        assert_eq!(blocks[0]["snapshots"][0]["platform"], "applovin_max");
+        assert_eq!(
+            blocks[0]["snapshots"][0]["path"],
+            aurora_path.display().to_string()
+        );
+        assert_eq!(blocks[0]["snapshots"][0]["ad_units"], 1);
+        assert!(blocks[0]["audit"]["findings"].as_u64().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_publisher_per_platform_writes_three_files_with_the_right_platform_inside() {
+        let root = fleet_dir("audit-platforms");
+        let snapshot_root = root.join("snapshots");
+        // Sorted order: admob-pub, levelplay-pub, max-pub.
+        write_vaulted_account(
+            &root,
+            "admob-pub",
+            serde_json::json!({ "admob": {
+                "api_key": "access-token",
+                "account_id": "accounts/pub-1234567890",
+                "base_url": "https://admob.googleapis.com"
+            }}),
+            &[("admob", "validated")],
+            &[],
+        );
+        write_vaulted_account(
+            &root,
+            "levelplay-pub",
+            serde_json::json!({ "levelplay": {
+                "api_key": "secret-key",
+                "account_id": "app-key-1",
+                "base_url": "https://platform.ironsrc.com",
+                "refresh_token": "refresh-token"
+            }}),
+            &[("levelplay", "validated")],
+            &["u1"],
+        );
+        write_vaulted_account(
+            &root,
+            "max-pub",
+            serde_json::json!({ "applovin_max": max_credentials("management-key") }),
+            &[("applovin_max", "validated")],
+            &[],
+        );
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 3);
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        // All three fixtures share one developer site, so the run cache
+        // serves one app-ads.txt read to every publisher: only one response
+        // is queued.
+        // admob-pub: mediation groups + app-ads.txt.
+        transport.push(200, &admob_groups_body());
+        transport.push(200, "google.com, pub-1, DIRECT\n");
+        // levelplay-pub: auth + one unit's instances (app-ads is replayed).
+        transport.push(200, r#""bearer-token""#);
+        transport.push(200, &levelplay_instances_body());
+        // max-pub: reporting + ad units (app-ads is replayed).
+        transport.push(200, &reporting_body("max-unit"));
+        transport.push(200, &ad_units_body("max-unit"));
+
+        let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.publishers.len(), 3);
+
+        let admob_path = snapshot_root.join("admob-pub").join("admob.json");
+        let levelplay_path = snapshot_root.join("levelplay-pub").join("levelplay.json");
+        let max_path = snapshot_root.join("max-pub").join("applovin_max.json");
+        assert!(admob_path.is_file());
+        assert!(levelplay_path.is_file());
+        assert!(max_path.is_file());
+
+        let admob = read_snapshot(&admob_path);
+        let levelplay = read_snapshot(&levelplay_path);
+        let max = read_snapshot(&max_path);
+        assert_eq!(admob.platform, apex_core::PlatformId::Admob);
+        assert_eq!(levelplay.platform, apex_core::PlatformId::LevelPlay);
+        assert_eq!(max.platform, apex_core::PlatformId::AppLovinMax);
+        // Each snapshot carries its own platform's reads.
+        assert_eq!(admob.mediation_groups.len(), 1);
+        assert_eq!(levelplay.waterfall.len(), 1);
+        assert_eq!(unit_ids(&max), vec!["max-unit".to_string()]);
+        // A mixed fleet does not claim one platform.
+        let json: serde_json::Value =
+            serde_json::from_str(&render_fleet_audit(&report, golden_now()).json).expect("json");
+        assert_eq!(json["mode"], "fleet");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_validated_publisher_can_carry_several_platforms_each_with_its_own_file() {
+        let root = fleet_dir("audit-multi");
+        let snapshot_root = root.join("snapshots");
+        // One publisher, both platform key sets validated: two snapshots.
+        write_vaulted_account(
+            &root,
+            "studio",
+            serde_json::json!({
+                "applovin_max": max_credentials("management-key"),
+                "levelplay": {
+                    "api_key": "secret-key",
+                    "account_id": "app-key-1",
+                    "base_url": "https://platform.ironsrc.com",
+                    "refresh_token": "refresh-token"
+                }
+            }),
+            &[("applovin_max", "validated"), ("levelplay", "validated")],
+            &["u1"],
+        );
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        let registered = registry.runnable().next().expect("studio");
+        // The adapter platform (applovin_max) comes first so monitoring reads
+        // the adapter's own snapshot.
+        assert_eq!(
+            registered.snapshot_platforms(),
+            vec!["applovin_max".to_string(), "levelplay".to_string()]
+        );
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        // applovin_max first: reporting + ad units + app-ads.txt.
+        transport.push(200, &reporting_body("multi-unit"));
+        transport.push(200, &ad_units_body("multi-unit"));
+        transport.push(200, "google.com, pub-1, DIRECT\n");
+        // then levelplay: auth + instances. Its app-ads.txt read is replayed
+        // from the run cache, so no second app-ads response is queued: a
+        // broken cache would consume the exhausted script and fail the
+        // snapshot.
+        transport.push(200, r#""bearer-token""#);
+        transport.push(200, &levelplay_instances_body());
+
+        let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport.clone()).await;
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.publishers.len(), 1);
+        assert_eq!(report.publishers[0].snapshots.len(), 2);
+        let app_ads_fetches = transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.operation == "fetchAppAdsTxt")
+            .count();
+        assert_eq!(
+            app_ads_fetches, 1,
+            "one app-ads.txt fetch for every platform of a publisher"
+        );
+        assert!(snapshot_root
+            .join("studio")
+            .join("applovin_max.json")
+            .is_file());
+        assert!(snapshot_root
+            .join("studio")
+            .join("levelplay.json")
+            .is_file());
+
+        // build_fleet hands the cycle both files, adapter platform first.
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let built = build_fleet(
+            |_| None,
+            &registry,
+            &ledger_root,
+            &root,
+            &snapshot_root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        assert_eq!(
+            built.publishers[0].snapshot_paths,
+            vec![
+                snapshot_root.join("studio").join("applovin_max.json"),
+                snapshot_root.join("studio").join("levelplay.json"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_write_failure_is_recorded_and_the_fleet_continues() {
+        let root = fleet_dir("audit-write-failure");
+        let snapshot_root = root.join("snapshots");
+        write_vaulted_publisher(&root, "aurora", "management-key-aurora", "validated");
+        write_vaulted_publisher(&root, "northstar", "management-key-north", "validated");
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+
+        // northstar's snapshot directory is a file: the write must fail
+        // typed for that publisher without aborting aurora's audit.
+        std::fs::create_dir_all(&snapshot_root).unwrap();
+        std::fs::write(snapshot_root.join("northstar"), b"not a directory").unwrap();
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        transport.push(200, &reporting_body("aurora-unit"));
+        transport.push(200, &ad_units_body("aurora-unit"));
+        transport.push(200, "google.com, pub-1, DIRECT\n");
+        transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &ad_units_body("northstar-unit"));
+
+        let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.failures[0].publisher, "northstar");
+        assert!(
+            report.failures[0].reason.contains("snapshot write"),
+            "{}",
+            report.failures[0].reason
+        );
+        assert!(snapshot_root
+            .join("aurora")
+            .join("applovin_max.json")
+            .is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn unvalidated_and_undecryptable_publishers_are_skipped_in_the_audit_report() {
+        let root = fleet_dir("audit-skips");
+        let snapshot_root = root.join("snapshots");
+        write_vaulted_publisher(&root, "northstar", "management-key", "validated");
+        write_vaulted_publisher(&root, "pending", "management-key", "unvalidated");
+        // A validated meta whose blob was written under another vault key.
+        let other_vault = apex_vault::Vault::from_hex_key(FLEET_KEY_A).expect("vault");
+        std::fs::write(root.join("wrongkey.blob"), other_vault.encrypt("{}")).expect("blob");
+        let meta = serde_json::json!({
+            "platforms": { "applovin_max": { "state": "validated" } }
+        });
+        std::fs::write(root.join("wrongkey.connections.json"), meta.to_string()).expect("meta");
+
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 1);
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        transport.push(200, &reporting_body("northstar-unit"));
+        transport.push(200, &ad_units_body("northstar-unit"));
+        transport.push(200, "google.com, pub-1, DIRECT\n");
+
+        let (report, outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
+        assert_eq!(
+            report.publishers.len(),
+            1,
+            "only the validated publisher ran"
+        );
+        assert_eq!(report.skipped.len(), 2);
+        assert!(
+            outcome
+                .human
+                .contains("Skipped: pending: no validated platform connection"),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            outcome.human.contains(
+                "Skipped: wrongkey: credential decrypt failed: decryption failed (wrong key or tampered ciphertext)"
+            ),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(
+            json["skipped"],
+            serde_json::json!([
+                { "publisher": "pending", "reason": "no validated platform connection" },
+                {
+                    "publisher": "wrongkey",
+                    "reason": "credential decrypt failed: decryption failed (wrong key or tampered ciphertext)"
+                },
+            ])
+        );
+        // A skipped publisher never gets a snapshot directory.
+        assert!(!snapshot_root.join("pending").exists());
+        assert!(!snapshot_root.join("wrongkey").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Write a MAX snapshot carrying one enabled ad unit with an EE floor.
+    fn write_unit_snapshot(path: &std::path::Path, unit: &str) {
+        let snapshot = apex_audit::Snapshot {
+            platform: apex_core::PlatformId::AppLovinMax,
+            fetched_at_unix_ms: golden_now(),
+            ad_units: vec![apex_core::AdUnit {
+                platform_unit_id: unit.to_string(),
+                name: "Rewarded".to_string(),
+                format: apex_core::AdFormat::Rewarded,
+                enabled: true,
+                country_floors: Some(vec![apex_core::CountryFloor {
+                    country: "EE".to_string(),
+                    floor_ecpm: 2_500_000,
+                    group: None,
+                }]),
+                platform: Some("android".to_string()),
+                package_name: Some("com.example".to_string()),
+            }],
+            waterfall: Vec::new(),
+            mediation_groups: Vec::new(),
+            bidder_accounts: Vec::new(),
+            country_revenue: Vec::new(),
+            app_ads_txt: apex_audit::AppAdsTxt {
+                present: true,
+                lines: Vec::new(),
+                expected_networks: Vec::new(),
+            },
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+        };
+        crate::write_snapshot(path, &snapshot).expect("snapshot");
+    }
+
+    #[tokio::test]
+    async fn each_publishers_cycle_reads_only_its_own_snapshot() {
+        let root = fleet_dir("cycle-scoped");
+        let snapshot_root = root.join("snapshots");
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&snapshot_root).unwrap();
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+
+        let mut publishers = Vec::new();
+        for (publisher, unit) in [("aurora", "u-aurora"), ("northstar", "u-northstar")] {
+            let path = crate::registry::snapshot_path(&snapshot_root, publisher, "applovin_max");
+            write_unit_snapshot(&path, unit);
+            let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
+            ops.set_change_in_test_arm(true);
+            ops.script_start(vec![Ok(format!("exp-{publisher}"))]);
+            let runner = crate::runner::Runner::new(
+                ops,
+                test_policy(),
+                apex_lift::guardrails::FillFormat::Rewarded,
+            )
+            .with_publisher(publisher);
+            publishers.push(FleetPublisher {
+                publisher: publisher.to_string(),
+                runner,
+                ledger_path: ledger_root.join(format!("{publisher}.jsonl")),
+                snapshot_paths: vec![path],
+            });
+        }
+        let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
+        let outcome = dispatch_fleet("cycle", &[], &fleet, golden_now())
+            .await
+            .expect("fleet cycle");
+        assert!(!outcome.failed, "{outcome:?}");
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["command"], "cycle");
+        assert_eq!(json["publishers"].as_array().expect("blocks").len(), 2);
+
+        // Each ledger's started experiment names only that publisher's unit:
+        // a wrong-publisher proposal is impossible.
+        for (publisher, own, other) in [
+            ("aurora", "u-aurora", "u-northstar"),
+            ("northstar", "u-northstar", "u-aurora"),
+        ] {
+            let records = apex_proof::Ledger::read_verified(
+                ledger_root.join(format!("{publisher}.jsonl")),
+                &signing_key.verifying_key(),
+            )
+            .expect("ledger verifies");
+            let units: Vec<String> = records
+                .iter()
+                .filter_map(|record| match record {
+                    apex_proof::LedgerRecord::ExperimentStarted { spec, .. } => {
+                        Some(spec.ad_unit_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(!units.is_empty(), "{publisher} started an experiment");
+            assert!(
+                units.iter().all(|unit| unit == own),
+                "{publisher}: {units:?}"
+            );
+            assert!(
+                units.iter().all(|unit| unit != other),
+                "{publisher}: {units:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_single_snapshot_cycle_output_is_unchanged() {
+        // The legacy mode (no registry) keeps the single `--snapshot` path and
+        // the committed single-publisher report shape: no `publishers` block.
+        let dir = fleet_dir("cycle-legacy");
+        let path = dir.join("applovin_max.json");
+        write_unit_snapshot(&path, "u-legacy");
+        let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok("exp-legacy".to_string())]);
+        let runner = crate::runner::Runner::new(
+            ops,
+            test_policy(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_publisher("northstar");
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[3u8; 32]));
+        let args = vec!["--snapshot".to_string(), path.display().to_string()];
+        let outcome = dispatch("cycle", &args, &runner, &mut ledger, golden_now())
+            .await
+            .expect("legacy cycle");
+        assert!(outcome
+            .human
+            .starts_with("Mode: MAX / Publisher: northstar\n"));
+        assert!(!outcome.json.contains("\"publishers\""), "{}", outcome.json);
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["publisher"], "northstar");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

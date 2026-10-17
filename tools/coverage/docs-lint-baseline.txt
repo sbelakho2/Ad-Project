@@ -317,6 +317,7 @@
 4 rust/crates/apex-analytics/tests/clickhouse.rs
 0 rust/crates/apex-api/benches/api_latency.rs
 0 rust/crates/apex-api/src/analytics.rs
+0 rust/crates/apex-api/src/app_ads_proof.rs
 1 rust/crates/apex-api/src/billing_view.rs
 0 rust/crates/apex-api/src/bin/render-fixtures.rs
 0 rust/crates/apex-api/src/clock.rs
@@ -347,7 +348,7 @@
 0 rust/crates/apex-api/src/metrics.rs
 0 rust/crates/apex-api/src/outcomes.rs
 0 rust/crates/apex-api/src/proposals.rs
-2 rust/crates/apex-api/src/routes.rs
+4 rust/crates/apex-api/src/routes.rs
 1 rust/crates/apex-api/src/session.rs
 0 rust/crates/apex-api/src/settings.rs
 0 rust/crates/apex-api/src/signin.rs
@@ -359,6 +360,7 @@
 3 rust/crates/apex-api/tests/console_phase2.rs
 0 rust/crates/apex-api/tests/operator_jobs.rs
 0 rust/crates/apex-api/tests/signin.rs
+1 rust/crates/apex-api/tests/watch.rs
 0 rust/crates/apex-audit/src/digest.rs
 0 rust/crates/apex-audit/src/engine.rs
 0 rust/crates/apex-audit/src/errors.rs
@@ -394,7 +396,7 @@
 0 rust/crates/apex-autopilot/src/projections_job.rs
 0 rust/crates/apex-autopilot/src/proposals.rs
 1 rust/crates/apex-autopilot/src/registry.rs
-2 rust/crates/apex-autopilot/src/runner.rs
+5 rust/crates/apex-autopilot/src/runner.rs
 0 rust/crates/apex-autopilot/src/settle.rs
 0 rust/crates/apex-autopilot/src/telemetry.rs
 0 rust/crates/apex-autopilot/src/tests.rs
@@ -403,16 +405,16 @@
 0 rust/crates/apex-billing/src/adyen.rs
 0 rust/crates/apex-billing/src/collection.rs
 1 rust/crates/apex-billing/src/errors.rs
-1 rust/crates/apex-billing/src/invoice.rs
-2 rust/crates/apex-billing/src/lib.rs
-1 rust/crates/apex-billing/src/profile.rs
+5 rust/crates/apex-billing/src/invoice.rs
+3 rust/crates/apex-billing/src/lib.rs
+2 rust/crates/apex-billing/src/profile.rs
 0 rust/crates/apex-billing/src/register.rs
 0 rust/crates/apex-billing/src/subscription.rs
 1 rust/crates/apex-billing/src/tests.rs
-2 rust/crates/apex-billing/src/vat.rs
+25 rust/crates/apex-billing/src/vat.rs
 1 rust/crates/apex-billing/src/webhook.rs
 0 rust/crates/apex-billing/tests/plans.rs
-0 rust/crates/apex-billing/tests/vat_invoices.rs
+1 rust/crates/apex-billing/tests/vat_invoices.rs
 0 rust/crates/apex-connectors/src/admob.rs
 0 rust/crates/apex-connectors/src/app_ads.rs
 0 rust/crates/apex-connectors/src/decimal.rs
@@ -586,7 +588,7 @@
 0 rust/crates/apex-tools/src/docs_lint.rs
 0 rust/crates/apex-tools/src/docslinks.rs
 1 rust/crates/apex-tools/src/dogfood.rs
-10 rust/crates/apex-tools/src/dogfood_plan.rs
+11 rust/crates/apex-tools/src/dogfood_plan.rs
 0 rust/crates/apex-tools/src/glob.rs
 0 rust/crates/apex-tools/src/inventory.rs
 0 rust/crates/apex-tools/src/lib.rs
@@ -610,8 +612,8 @@
 0 rust/crates/apex-ui/tests/frozen_api.rs
 0 rust/crates/apex-ui/tests/no_inline_styles.rs
 1 rust/crates/apex-vault/src/lib.rs
-0 rust/crates/apex-watch/src/bill.rs
-0 rust/crates/apex-watch/src/bin/apex-watch.rs
+2 rust/crates/apex-watch/src/bill.rs
+3 rust/crates/apex-watch/src/bin/apex-watch.rs
 1 rust/crates/apex-watch/src/daily.rs
 0 rust/crates/apex-watch/src/fetch.rs
 0 rust/crates/apex-watch/src/findings.rs
@@ -659,4 +661,4 @@
 0 site/content/terms.md
 0 site/public/rerun-kit/README.md
 10 site/static/rerun-kit/README.md
-TOTAL 8015
+TOTAL 8057

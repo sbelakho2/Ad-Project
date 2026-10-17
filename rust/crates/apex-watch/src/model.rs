@@ -25,6 +25,17 @@ use crate::fetch::normalize_domain;
 pub const MAX_ACCOUNT_TEXT_CHARS: usize = 2_000;
 /// The most account-id rows one submission may carry.
 pub const MAX_ACCOUNT_ROWS: usize = 20;
+/// The evidence threshold that makes a sign-up the core-portfolio tier: a
+/// publisher with at least this many apps is core. The tier is derived from
+/// the evidence (the app count the caller observed) and never from a form
+/// checkbox.
+pub const CORE_TIER_MIN_APP_COUNT: u32 = 10;
+/// Lifetime of the one-time email-confirmation token, mirroring the
+/// self-serve sign-in link: 72 hours.
+pub const CONFIRMATION_TTL_MS: i64 = 72 * 60 * 60 * 1000;
+/// Length of the one-time confirmation token: 32 lowercase hex characters
+/// (128 random bits), the same shape as the console sign-in token.
+pub const CONFIRMATION_TOKEN_HEX_LEN: usize = 32;
 
 /// House copy for an unusable domain.
 pub const DOMAIN_ERROR: &str = "Enter the domain where your app-ads.txt lives.";
@@ -70,10 +81,26 @@ impl Tier {
     }
 }
 
+/// Derive the subscription tier from the evidence: the number of apps the
+/// publisher reported. A publisher with at least
+/// [`CORE_TIER_MIN_APP_COUNT`] apps is the core-portfolio tier; every smaller
+/// count is the standard tier. The sign-up form has no tier input that this
+/// reads: a checkbox can never buy the higher tier.
+#[must_use]
+pub fn tier_from_evidence(app_count: u32) -> Tier {
+    if app_count >= CORE_TIER_MIN_APP_COUNT {
+        Tier::Core
+    } else {
+        Tier::Normal
+    }
+}
+
 /// Whether the subscription is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    /// The sign-up exists but has not paid yet: no check runs.
+    Pending,
     /// The watch is on and the monthly line bills.
     Active,
     /// The watch is off; cancelled rows stay recorded, never deleted.
@@ -84,9 +111,16 @@ impl Status {
     /// The stable wire name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Active => "active",
             Self::Canceled => "canceled",
         }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -114,6 +148,42 @@ pub struct Subscriber {
     /// When the cancellation was recorded, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canceled_ms: Option<i64>,
+    /// Whether the creating email address was confirmed through the one-time
+    /// link. Legacy rows that predate the confirmation flow default to
+    /// `true`, so an already-active deployment keeps checking; the pending
+    /// sign-up flow always writes `false` explicitly.
+    #[serde(default = "confirmed_by_default")]
+    pub confirmed: bool,
+    /// SHA-256 (lowercase hex) of the one-time confirmation token. The token
+    /// itself is returned once by `subscribe_pending` and never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_token_hash: Option<String>,
+    /// Absolute expiry of the confirmation token, in unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_expires_at: Option<i64>,
+    /// When the confirmation token was consumed, in unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_used_at: Option<i64>,
+    /// When the creating email address was confirmed, in unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_confirmed_at: Option<i64>,
+    /// When the payment was accepted and the watch switched on, in unix
+    /// milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid_at: Option<i64>,
+    /// The Adyen payment link created for this sign-up, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_link: Option<String>,
+    /// The Adyen `shopperReference` the payment link was created with: the
+    /// subscriber id, so the stored card and the subscriber row are the same
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shopper_reference: Option<String>,
+    /// The stored card (Adyen stored payment method id) the monthly bill
+    /// charges. Recorded by the webhook that stores the card on the first
+    /// payment; absent until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_payment_method_id: Option<String>,
     /// When the last daily check ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check_at: Option<i64>,
@@ -138,6 +208,27 @@ pub struct Subscriber {
     /// the monthly pass can never issue a second line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_billed_month: Option<String>,
+    /// The last month whose issued invoice was successfully charged to the
+    /// stored card. When it trails [`Self::last_billed_month`], the invoice is
+    /// issued but unpaid and the next monthly run retries the same charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_paid_month: Option<String>,
+    /// The register number of the last issued invoice, kept so an unpaid
+    /// invoice can be retried without re-reading or re-issuing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_invoice_number: Option<u64>,
+    /// The deterministic Adyen reference of the last charge attempt (the
+    /// idempotency key the retry reuses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_charge_reference: Option<String>,
+    /// The gross amount (micros) of the last issued invoice, so a retry
+    /// charges exactly the invoiced amount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_charge_amount_micros: Option<i64>,
+    /// Why the last charge attempt failed, when it did. The next monthly run
+    /// retries; the reason is never hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_charge_error: Option<String>,
 }
 
 impl Subscriber {
@@ -145,6 +236,67 @@ impl Subscriber {
     pub fn is_active(&self) -> bool {
         self.status == Status::Active
     }
+
+    /// Whether the watch may run a check: active and with a confirmed email.
+    pub fn is_checkable(&self) -> bool {
+        self.is_active() && self.confirmed
+    }
+}
+
+/// Legacy rows predate the confirmation flow and count as confirmed, so an
+/// already-active deployment keeps checking after an upgrade.
+fn confirmed_by_default() -> bool {
+    true
+}
+
+/// One public sign-up as the pending flow consumes it. `app_count` is the
+/// evidence the tier is derived from; there is deliberately no tier checkbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeRequest {
+    /// The submitted domain (normalized by the store).
+    pub domain: String,
+    /// The submitted contact email (trimmed by the store).
+    pub email: String,
+    /// The optional `network = account id` textarea.
+    pub accounts: String,
+    /// The number of apps the sign-up reported; the tier evidence.
+    pub app_count: u32,
+}
+
+/// What one accepted `subscribe_pending` call reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOutcome {
+    /// The subscriber id the caller uses as its durable reference (and as the
+    /// Adyen `shopperReference`).
+    pub reference: String,
+    /// The tier derived from the reported app count.
+    pub tier: Tier,
+    /// The plaintext one-time confirmation token, returned exactly once so
+    /// the caller can email it. Only its SHA-256 hash is stored.
+    pub confirmation_token: String,
+}
+
+/// What one accepted `confirm_email` call reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmOutcome {
+    /// The subscriber whose email was confirmed.
+    pub reference: String,
+    /// The confirmed email address.
+    pub email: String,
+    /// When the confirmation was recorded, in unix milliseconds.
+    pub confirmed_at: i64,
+}
+
+/// What one `activate` call reports. An already-active row is a typed no-op:
+/// `already_active` is `true` and no second row is appended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivateOutcome {
+    /// The subscriber the reference named.
+    pub reference: String,
+    /// When the payment was first accepted, in unix milliseconds.
+    pub paid_at: i64,
+    /// Whether the row was already active before this call.
+    pub already_active: bool,
 }
 
 /// The validated sign-up as the store consumes it.
@@ -469,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn the_tier_comes_from_the_app_count_boundary_never_a_checkbox() {
+        assert_eq!(tier_from_evidence(0), Tier::Normal);
+        assert_eq!(
+            tier_from_evidence(CORE_TIER_MIN_APP_COUNT - 1),
+            Tier::Normal
+        );
+        assert_eq!(tier_from_evidence(CORE_TIER_MIN_APP_COUNT), Tier::Core);
+        assert_eq!(tier_from_evidence(CORE_TIER_MIN_APP_COUNT + 1), Tier::Core);
+        assert_eq!(tier_from_evidence(u32::MAX), Tier::Core);
+    }
+
+    #[test]
     fn subscriber_rows_round_trip_camel_case() {
         let mut account_ids = BTreeMap::new();
         account_ids.insert("admob.com".to_string(), "pub-1".to_string());
@@ -482,6 +646,15 @@ mod tests {
             created_ms: 7,
             status: Status::Active,
             canceled_ms: None,
+            confirmed: true,
+            confirmation_token_hash: Some("ef".to_string()),
+            confirmation_expires_at: Some(11),
+            confirmation_used_at: Some(12),
+            email_confirmed_at: Some(12),
+            paid_at: Some(13),
+            payment_link: Some("https://checkout.example/pl_1".to_string()),
+            shopper_reference: Some("sub_0123456789".to_string()),
+            stored_payment_method_id: Some("card_1".to_string()),
             last_check_at: Some(9),
             last_findings_hash: Some("ab".to_string()),
             last_findings: Some(vec![crate::findings::StoredFinding {
@@ -493,6 +666,11 @@ mod tests {
             cancel_token_hash: "cd".to_string(),
             billing: None,
             last_billed_month: Some("2026-10".to_string()),
+            last_paid_month: Some("2026-10".to_string()),
+            last_invoice_number: Some(4),
+            last_charge_reference: Some("watch:sub_0123456789:2026-10".to_string()),
+            last_charge_amount_micros: Some(118_800_000),
+            last_charge_error: None,
         };
         let json = serde_json::to_string(&subscriber).expect("serialize");
         assert!(json.contains("\"createdMs\":7"), "{json}");
@@ -500,6 +678,11 @@ mod tests {
         assert!(json.contains("\"cancelTokenHash\":\"cd\""), "{json}");
         assert!(json.contains("\"tier\":\"normal\""), "{json}");
         assert!(json.contains("\"lastBilledMonth\":\"2026-10\""), "{json}");
+        assert!(json.contains("\"confirmationTokenHash\":\"ef\""), "{json}");
+        assert!(
+            json.contains("\"storedPaymentMethodId\":\"card_1\""),
+            "{json}"
+        );
         let back: Subscriber = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, subscriber);
     }

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use apex_api::{AppState, FileLedgerSource, JsonFileAuditSource};
@@ -330,6 +330,63 @@ pub fn token_auditor(token: &str) -> Arc<apex_api::LiveAuditor> {
     )
 }
 
+/// A DNS resolver that answers one fixed public address, so the guarded
+/// app-ads proof can fetch in tests without touching the real resolver.
+#[derive(Debug)]
+pub struct PublicResolver;
+
+#[async_trait::async_trait]
+impl apex_api::app_ads_proof::DomainResolver for PublicResolver {
+    async fn resolve(&self, _domain: &str) -> Result<Vec<std::net::IpAddr>, String> {
+        Ok(vec!["93.184.216.34"
+            .parse()
+            .expect("a public test address")])
+    }
+}
+
+/// A transport that counts every request and answers `body` with `200`, used
+/// to prove how many guarded app-ads fetches a request performs.
+#[derive(Debug)]
+pub struct CountingAppAdsTransport {
+    calls: AtomicUsize,
+    body: String,
+}
+
+impl CountingAppAdsTransport {
+    pub fn new(body: impl Into<String>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            body: body.into(),
+        }
+    }
+
+    /// How many requests this transport has answered.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl apex_connectors::transport::Transport for CountingAppAdsTransport {
+    async fn request(
+        &self,
+        request: apex_connectors::transport::HttpRequest,
+    ) -> Result<apex_connectors::transport::HttpResponse, apex_connectors::transport::TransportError>
+    {
+        assert!(
+            request.url.ends_with("/app-ads.txt"),
+            "the proof fetches app-ads.txt, not {}",
+            request.url
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(apex_connectors::transport::HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: self.body.as_bytes().to_vec(),
+        })
+    }
+}
+
 /// The ledger token `/v1/ledger/{PUBLISHER}` and `/console/ledger` require.
 pub const LEDGER_TOKEN: &str = "ledger-token-pub1";
 
@@ -387,12 +444,24 @@ pub fn minimal_snapshot(unit_ids: &[&str]) -> Value {
     })
 }
 
-/// Write `<platform>.json` into `dir` and return the path.
-pub fn write_snapshot(dir: &Path, platform: &str, snapshot: &Value) -> PathBuf {
-    let path = dir.join(format!("{platform}.json"));
+/// Write `<dir>/<publisher>/<platform>.json` and return the path.
+pub fn write_snapshot_for(
+    dir: &Path,
+    publisher: &str,
+    platform: &str,
+    snapshot: &Value,
+) -> PathBuf {
+    let path = dir.join(publisher).join(format!("{platform}.json"));
+    std::fs::create_dir_all(path.parent().expect("snapshot parent")).expect("snapshot directory");
     let bytes = serde_json::to_vec_pretty(snapshot).expect("serialize snapshot");
     std::fs::write(&path, bytes).expect("write snapshot");
     path
+}
+
+/// Write [`PUBLISHER`]'s `<platform>.json` into the publisher-scoped layout
+/// (`<dir>/<publisher>/<platform>.json`) and return the path.
+pub fn write_snapshot(dir: &Path, platform: &str, snapshot: &Value) -> PathBuf {
+    write_snapshot_for(dir, PUBLISHER, platform, snapshot)
 }
 
 /// One signed `changeApplied` record (usable with [`Ledger::append`]).

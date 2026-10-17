@@ -74,7 +74,17 @@ use crate::util::re;
 /// equal this table exactly (order included); removing or renaming a class
 /// requires editing this constant and the pinning test below, which is the
 /// point of freezing it in code.
-pub const REQUIRED_PROBE_CLASSES: [&str; 12] = [
+///
+/// The first twelve are the original corpus. The last four are the
+/// ApAudit-review classes: `tenant-isolation` (one publisher's session never
+/// sees another's snapshot, ledger totals or audit rows), `auth-surface`
+/// (`/v1/audit/{platform}` refuses the anonymous read and the console GETs
+/// refuse a session-less read), `signin-ownership` (the free-audit sign-in
+/// link is delivered only to a workspace's recorded contacts and a repeat
+/// single-use link is refused) and `payment-activation` (a setup-watch
+/// sign-up lands pending, the webhook activates it, the tier follows evidence
+/// and the monthly bill charges the stored card).
+pub const REQUIRED_PROBE_CLASSES: [&str; 16] = [
     "surface-parity",
     "response-contract",
     "no-inline",
@@ -87,6 +97,24 @@ pub const REQUIRED_PROBE_CLASSES: [&str; 12] = [
     "concurrency",
     "failure-injection",
     "differential-truth",
+    "tenant-isolation",
+    "auth-surface",
+    "signin-ownership",
+    "payment-activation",
+];
+
+/// The always-run core set the relevance filter adds to every selection: the
+/// published `/healthz` contract (which also runs the static parity gate), the
+/// console session gate (`auth-surface`), and the two-publisher tenant
+/// isolation of the overview and the ledger. A filtered run always proves
+/// these before it proves the changed subset, so a change never removes the
+/// workspace-isolation and liveness guarantees.
+pub const CORE_CELLS: [&str; 5] = [
+    "apex-api|GET /healthz|surface-parity",
+    "apex-api|GET /healthz|response-contract",
+    "apex-api|GET /console/audit|auth-surface",
+    "apex-api|GET /|tenant-isolation",
+    "apex-api|GET /console/ledger|tenant-isolation",
 ];
 
 /// The declared surface catalog owned by the live harness.
@@ -145,6 +173,13 @@ struct DeclaredRoute {
     methods: Vec<String>,
     #[serde(default)]
     session_required: Option<bool>,
+    /// The repo paths that implement the surface. The relevance filter
+    /// (`--changed` / `--git-diff`) selects only the cells whose surface
+    /// sources intersect the changed paths, so every route must name at least
+    /// one real path. An empty list here is a schema drift, never a way to opt
+    /// a surface out of relevance.
+    #[serde(default)]
+    sources: Vec<String>,
 }
 
 /// The documented publisher-console GET paths that deliberately stay public:
@@ -387,9 +422,211 @@ fn declared_route_surfaces(
     out
 }
 
+/// The relevance selection over the required cells.
+///
+/// `changed` empty means the unfiltered catalog (`--changed` absent): every
+/// cell is selected and no class is skipped. Otherwise every cell whose
+/// surface `sources` intersect a changed path is selected, the always-run
+/// [`CORE_CELLS`] are added, and the classes with no selected cell are
+/// reported as skipped. A changed path that matches no declared source is
+/// returned in `unmatched`, so the caller can say so instead of silently
+/// dropping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relevance {
+    /// The selected cells, sorted.
+    pub selected: BTreeSet<String>,
+    /// The classes with no selected cell (reported as skipped).
+    pub skipped_classes: BTreeSet<String>,
+    /// The changed paths that matched no declared source.
+    pub unmatched: Vec<String>,
+}
+
+/// Whether a changed repo path matches one declared source. A source naming a
+/// directory (trailing `/`) matches it and any path under it; otherwise the
+/// match is exact. Byte-exact, so the selection is deterministic.
+fn source_matches(changed: &str, source: &str) -> bool {
+    match source.strip_suffix('/') {
+        Some(dir) => changed == dir || changed.starts_with(source),
+        None => changed == source,
+    }
+}
+
+/// The per-surface `sources` map (`"<service>|<path>"` to the declared paths).
+/// Every declared route must name at least one repo-relative path: the
+/// relevance filter depends on it, so a missing or absolute source is a hard
+/// schema failure, never a silent opt-out.
+fn declared_route_sources(
+    surfaces: &SurfacesFile,
+    problems: &mut Vec<String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    for (service, declared) in &surfaces.services {
+        if !SOURCES.iter().any(|(id, _, _)| id == service) {
+            continue;
+        }
+        for route in &declared.routes {
+            if route.sources.is_empty() {
+                problems.push(format!(
+                    "{SURFACES_REL}: {service} {}: declares no `sources`; the relevance filter needs the implementing repo paths",
+                    route.path
+                ));
+                continue;
+            }
+            for source in &route.sources {
+                if source.trim().is_empty() || source.starts_with('/') || source.contains("..") {
+                    problems.push(format!(
+                        "{SURFACES_REL}: {service} {}: source '{source}' must be a repo-relative path",
+                        route.path
+                    ));
+                }
+            }
+            out.insert(format!("{service}|{}", route.path), route.sources.clone());
+        }
+    }
+    out
+}
+
+/// Select the required cells relevant to `changed`. The cell key is
+/// `"<service>|<METHOD path>|<class>"`; its surface key is `"<service>|<path>"`.
+pub fn select_cells(
+    all_cells: &BTreeSet<String>,
+    surface_sources: &BTreeMap<String, Vec<String>>,
+    changed: &[String],
+) -> Relevance {
+    if changed.is_empty() {
+        return Relevance {
+            selected: all_cells.clone(),
+            skipped_classes: BTreeSet::new(),
+            unmatched: Vec::new(),
+        };
+    }
+    let mut selected = BTreeSet::new();
+    for cell in all_cells {
+        let mut parts = cell.split('|');
+        let (Some(service), Some(surface)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = surface.split_once(' ').map_or(surface, |(_, path)| path);
+        let key = format!("{service}|{path}");
+        if let Some(sources) = surface_sources.get(&key) {
+            if changed
+                .iter()
+                .any(|change| sources.iter().any(|source| source_matches(change, source)))
+            {
+                selected.insert(cell.clone());
+            }
+        }
+    }
+    let unmatched: Vec<String> = changed
+        .iter()
+        .filter(|change| {
+            !surface_sources
+                .values()
+                .flatten()
+                .any(|source| source_matches(change, source))
+        })
+        .cloned()
+        .collect();
+    for cell in CORE_CELLS {
+        if all_cells.contains(cell) {
+            selected.insert(cell.to_string());
+        }
+    }
+    let skipped_classes: BTreeSet<String> = all_cells
+        .iter()
+        .map(|cell| cell.split('|').nth(2).unwrap_or("").to_string())
+        .filter(|class| {
+            !selected
+                .iter()
+                .any(|cell| cell.split('|').nth(2) == Some(class.as_str()))
+        })
+        .collect();
+    Relevance {
+        selected,
+        skipped_classes,
+        unmatched,
+    }
+}
+
+/// The services whose declared route sources intersect `changed`, sorted.
+/// Used by the static gate to run route/session/fixture parity for the
+/// changed subset only.
+fn services_for_changes(
+    surface_sources: &BTreeMap<String, Vec<String>>,
+    changed: &[String],
+) -> BTreeSet<String> {
+    let mut services = BTreeSet::new();
+    for (key, sources) in surface_sources {
+        let service = key.split('|').next().unwrap_or("");
+        if changed
+            .iter()
+            .any(|change| sources.iter().any(|source| source_matches(change, source)))
+        {
+            services.insert(service.to_string());
+        }
+    }
+    services
+}
+
+/// Resolve the changed repo paths from CLI arguments: `--changed <path>`
+/// (repeatable) and `--git-diff <base>..<head>`. The paths are sorted and
+/// de-duplicated so the selection is stable.
+fn changed_paths_from_args(args: &[String]) -> Result<Vec<String>, String> {
+    let mut changed: Vec<String> = Vec::new();
+    let mut git_diff: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--changed" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--changed needs a repo-relative path")?;
+                changed.push(value.clone());
+                index += 2;
+            }
+            "--git-diff" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or("--git-diff needs a <base>..<head> range")?;
+                git_diff = Some(value.clone());
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    if let Some(spec) = git_diff {
+        changed.extend(git_diff_paths(&spec)?);
+    }
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
+}
+
+/// The repo-relative paths changed between two git revisions.
+fn git_diff_paths(spec: &str) -> Result<Vec<String>, String> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", spec])
+        .output()
+        .map_err(|error| format!("git diff --name-only {spec}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git diff --name-only {spec} exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 fn check_route_parity<'a>(
     surfaces: &'a SurfacesFile,
     registered: &BTreeMap<&str, Vec<RegisteredRoute>>,
+    only: Option<&BTreeSet<String>>,
     problems: &mut Vec<String>,
 ) -> BTreeMap<&'a str, BTreeSet<String>> {
     let mut declared_by_service: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
@@ -401,6 +638,7 @@ fn check_route_parity<'a>(
         let Some(actual_routes) = registered.get(service.as_str()) else {
             continue;
         };
+        let report = only.is_none_or(|set| set.contains(service));
         let actual: BTreeSet<String> = actual_routes
             .iter()
             .flat_map(|route| {
@@ -410,15 +648,17 @@ fn check_route_parity<'a>(
                     .map(move |method| format!("{method} {}", route.path))
             })
             .collect();
-        for surface in actual.difference(&declared_surfaces) {
-            problems.push(format!(
-                "registered route not declared in {SURFACES_REL}: {service} {surface}"
-            ));
-        }
-        for surface in declared_surfaces.difference(&actual) {
-            problems.push(format!(
-                "declared route is no longer registered (stale declaration): {service} {surface}"
-            ));
+        if report {
+            for surface in actual.difference(&declared_surfaces) {
+                problems.push(format!(
+                    "registered route not declared in {SURFACES_REL}: {service} {surface}"
+                ));
+            }
+            for surface in declared_surfaces.difference(&actual) {
+                problems.push(format!(
+                    "declared route is no longer registered (stale declaration): {service} {surface}"
+                ));
+            }
         }
         declared_by_service.insert(service, declared_surfaces);
     }
@@ -428,9 +668,13 @@ fn check_route_parity<'a>(
 fn check_fixture_parity(
     surfaces: &SurfacesFile,
     fixture_counts: &BTreeMap<&str, usize>,
+    only: Option<&BTreeSet<String>>,
     problems: &mut Vec<String>,
 ) {
     for (service, declared) in &surfaces.services {
+        if only.is_some_and(|set| !set.contains(service)) {
+            continue;
+        }
         let Some(actual) = fixture_counts.get(service.as_str()) else {
             continue;
         };
@@ -449,8 +693,15 @@ fn check_fixture_parity(
 /// asserts (anonymous `303 /console/ledger`, session `200`), so a marker the
 /// product cannot honor — or one on a route that is documented public — must
 /// fail here, before any live run repeats it.
-fn check_session_required(surfaces: &SurfacesFile, problems: &mut Vec<String>) {
+fn check_session_required(
+    surfaces: &SurfacesFile,
+    only: Option<&BTreeSet<String>>,
+    problems: &mut Vec<String>,
+) {
     for (service, declared) in &surfaces.services {
+        if only.is_some_and(|set| !set.contains(service)) {
+            continue;
+        }
         for route in &declared.routes {
             match route.session_required {
                 None => continue,
@@ -616,7 +867,22 @@ fn check_baseline(
 /// Run the static parity gate: `tools/dogfood/surfaces.json` against the real
 /// route registrations, fixture page lists, the frozen probe corpus and the
 /// recorded baseline.
+///
+/// Flags are read from the process arguments (`--changed <path>`,
+/// `--git-diff <base>..<head>`), mirroring the live harness. With no flag the
+/// whole catalog is checked; with a change set the route, session-marker and
+/// fixture-page checks run for the services the change set touches only, and
+/// the schema, corpus and baseline checks always run.
 pub fn dogfood_plan(repo: &Repo) -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let changed = changed_paths_from_args(&args)?;
+    dogfood_plan_with(repo, &changed)
+}
+
+/// [`dogfood_plan`] with an explicit change set (`[]` means the whole
+/// catalog). Exposed so the relevance selection is testable without touching
+/// the process arguments.
+pub fn dogfood_plan_with(repo: &Repo, changed: &[String]) -> Result<(), String> {
     if !repo.exists(SURFACES_REL) {
         return Err("the live dogfood surface catalog is missing".into());
     }
@@ -652,9 +918,18 @@ pub fn dogfood_plan(repo: &Repo) -> Result<(), String> {
             extract_fixture_page_count(&repo.read(fixture_rel)?, fixture_rel)?,
         );
     }
-    let declared_surfaces = check_route_parity(&surfaces, &registered, &mut problems);
-    check_fixture_parity(&surfaces, &fixture_counts, &mut problems);
-    check_session_required(&surfaces, &mut problems);
+    // The per-surface source map is always built and validated (schema), and it
+    // is what narrows the route/session/fixture checks to the changed subset.
+    let surface_sources = declared_route_sources(&surfaces, &mut problems);
+    let only: Option<BTreeSet<String>> = if changed.is_empty() {
+        None
+    } else {
+        Some(services_for_changes(&surface_sources, changed))
+    };
+    let declared_surfaces =
+        check_route_parity(&surfaces, &registered, only.as_ref(), &mut problems);
+    check_fixture_parity(&surfaces, &fixture_counts, only.as_ref(), &mut problems);
+    check_session_required(&surfaces, only.as_ref(), &mut problems);
     let required_cells = expand_required_cells(&surfaces, &declared_surfaces, &mut problems);
     let baseline: Option<BaselineFile> = if repo.exists(BASELINE_REL) {
         Some(
@@ -677,6 +952,7 @@ pub fn dogfood_plan(repo: &Repo) -> Result<(), String> {
             problems.join("\n  - ")
         ));
     }
+    let relevance = select_cells(&required_cells, &surface_sources, changed);
     println!(
         "dogfood-plan PASS: routes registered/declared {}; fixture pages declared/actual {}; probe classes {}/{}; cells required={} baseline={} removals={}",
         route_counts(&registered, &surfaces),
@@ -687,6 +963,29 @@ pub fn dogfood_plan(repo: &Repo) -> Result<(), String> {
         baseline.as_ref().map_or(0, |b| b.cells.len()),
         baseline.as_ref().map_or(0, |b| b.removals.len())
     );
+    if !changed.is_empty() {
+        let services = only.unwrap_or_default();
+        println!(
+            "dogfood-plan relevance: selected {} of {} cells (skipped {} unrelated); changed services [{}]; skipped classes [{}]",
+            relevance.selected.len(),
+            required_cells.len(),
+            required_cells.len().saturating_sub(relevance.selected.len()),
+            services.iter().cloned().collect::<Vec<_>>().join(", "),
+            relevance
+                .skipped_classes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if !relevance.unmatched.is_empty() {
+            println!(
+                "dogfood-plan relevance: {} changed path(s) matched no declared source (schema checks still ran): [{}]",
+                relevance.unmatched.len(),
+                relevance.unmatched.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -739,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_registry_is_pinned_to_the_frozen_twelve() {
+    fn probe_registry_is_pinned_to_the_frozen_sixteen() {
         assert_eq!(
             REQUIRED_PROBE_CLASSES.to_vec(),
             vec![
@@ -755,8 +1054,204 @@ mod tests {
                 "concurrency",
                 "failure-injection",
                 "differential-truth",
+                "tenant-isolation",
+                "auth-surface",
+                "signin-ownership",
+                "payment-activation",
             ]
         );
+    }
+
+    #[test]
+    fn core_cells_are_declared_requirements() {
+        // The always-run relevance core names real cells; a typo would make the
+        // core silently empty.
+        for cell in CORE_CELLS {
+            assert_eq!(cell.split('|').count(), 3, "{cell}");
+            assert!(
+                parse_cell_id(cell).is_some(),
+                "core cell is malformed: {cell}"
+            );
+        }
+        assert_eq!(CORE_CELLS.len(), 5);
+    }
+
+    fn relevance_fixture() -> (BTreeSet<String>, BTreeMap<String, Vec<String>>) {
+        let cells: BTreeSet<String> = [
+            "apex-api|GET /console/audit|response-contract",
+            "apex-api|GET /console/audit|tenant-isolation",
+            "apex-api|GET /console/audit|auth-surface",
+            "apex-api|GET /|tenant-isolation",
+            "apex-api|GET /console/ledger|tenant-isolation",
+            "apex-api|GET /healthz|surface-parity",
+            "apex-api|GET /healthz|response-contract",
+            "apex-api|POST /watch|failure-injection",
+            "apex-sales-web|GET /leads|response-contract",
+        ]
+        .iter()
+        .map(|cell| cell.to_string())
+        .collect();
+        let sources: BTreeMap<String, Vec<String>> = [
+            (
+                "apex-api|/console/audit",
+                vec![
+                    "rust/crates/apex-api/src/routes.rs",
+                    "rust/crates/apex-api/src/html/",
+                ],
+            ),
+            (
+                "apex-api|/",
+                vec!["rust/crates/apex-api/src/html/overview.rs"],
+            ),
+            (
+                "apex-api|/console/ledger",
+                vec!["rust/crates/apex-api/src/html/ledger.rs"],
+            ),
+            (
+                "apex-api|/healthz",
+                vec!["rust/crates/apex-api/src/routes.rs"],
+            ),
+            (
+                "apex-api|/watch",
+                vec![
+                    "rust/crates/apex-watch/src/fetch.rs",
+                    "rust/crates/apex-watch/src/guard.rs",
+                ],
+            ),
+            (
+                "apex-sales-web|/leads",
+                vec!["rust/crates/apex-sales-web/src/routes.rs"],
+            ),
+        ]
+        .into_iter()
+        .map(|(key, values)| {
+            (
+                key.to_string(),
+                values.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+        (cells, sources)
+    }
+
+    #[test]
+    fn relevance_selects_a_changed_console_page_and_skips_sales() {
+        let (cells, sources) = relevance_fixture();
+        let changed = vec!["rust/crates/apex-api/src/html/audit.rs".to_string()];
+        let relevance = select_cells(&cells, &sources, &changed);
+        assert!(
+            relevance
+                .selected
+                .contains("apex-api|GET /console/audit|response-contract"),
+            "{:?}",
+            relevance.selected
+        );
+        assert!(
+            relevance
+                .selected
+                .contains("apex-api|GET /console/audit|tenant-isolation"),
+            "{:?}",
+            relevance.selected
+        );
+        assert!(
+            relevance
+                .selected
+                .contains("apex-api|GET /|tenant-isolation"),
+            "the always-run core tenant cell is selected"
+        );
+        assert!(
+            !relevance
+                .selected
+                .contains("apex-sales-web|GET /leads|response-contract"),
+            "the sales web is untouched"
+        );
+        assert!(
+            relevance.skipped_classes.contains("failure-injection"),
+            "{:?}",
+            relevance.skipped_classes
+        );
+        assert!(relevance.unmatched.is_empty(), "{:?}", relevance.unmatched);
+    }
+
+    #[test]
+    fn relevance_selects_the_ssrf_fetch_cell_by_its_source() {
+        let (cells, sources) = relevance_fixture();
+        let changed = vec!["rust/crates/apex-watch/src/fetch.rs".to_string()];
+        let relevance = select_cells(&cells, &sources, &changed);
+        assert!(
+            relevance
+                .selected
+                .contains("apex-api|POST /watch|failure-injection"),
+            "{:?}",
+            relevance.selected
+        );
+        assert!(!relevance
+            .selected
+            .contains("apex-sales-web|GET /leads|response-contract"));
+    }
+
+    #[test]
+    fn relevance_without_paths_selects_everything_and_an_unknown_path_selects_the_core() {
+        let (cells, sources) = relevance_fixture();
+        let all = select_cells(&cells, &sources, &[]);
+        assert_eq!(all.selected, cells);
+        assert!(all.skipped_classes.is_empty());
+        assert!(all.unmatched.is_empty());
+
+        let unknown = vec!["docs/nowhere.md".to_string()];
+        let relevance = select_cells(&cells, &sources, &unknown);
+        let core: BTreeSet<String> = CORE_CELLS
+            .iter()
+            .filter(|cell| cells.contains(**cell))
+            .map(|cell| (*cell).to_string())
+            .collect();
+        assert_eq!(
+            relevance.selected, core,
+            "unknown path selects the core only"
+        );
+        assert_eq!(relevance.unmatched, unknown);
+        assert!(relevance.selected.len() < cells.len());
+        assert_eq!(
+            select_cells(&cells, &sources, &unknown),
+            relevance,
+            "the selection is deterministic"
+        );
+    }
+
+    #[test]
+    fn relevance_source_matching_is_prefix_aware_and_exact() {
+        assert!(source_matches(
+            "rust/crates/apex-api/src/html/audit.rs",
+            "rust/crates/apex-api/src/html/"
+        ));
+        assert!(source_matches(
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/"
+        ));
+        assert!(!source_matches(
+            "rust/crates/apex-api/src/html_extra/x.rs",
+            "rust/crates/apex-api/src/html/"
+        ));
+        assert!(source_matches(
+            "rust/crates/apex-watch/src/fetch.rs",
+            "rust/crates/apex-watch/src/fetch.rs"
+        ));
+        assert!(!source_matches(
+            "rust/crates/apex-watch/src/fetch.rs.bak",
+            "rust/crates/apex-watch/src/fetch.rs"
+        ));
+    }
+
+    #[test]
+    fn changed_paths_from_args_parses_repeatable_and_git_diff_flags() {
+        let args: Vec<String> = ["--changed", "a/b.rs", "--changed", "c/d.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let changed = changed_paths_from_args(&args).unwrap();
+        assert_eq!(changed, vec!["a/b.rs".to_string(), "c/d.rs".to_string()]);
+        let args: Vec<String> = ["--changed"].iter().map(|s| s.to_string()).collect();
+        assert!(changed_paths_from_args(&args).is_err());
     }
 
     #[test]
@@ -886,11 +1381,13 @@ mod tests {
                             path: "/a".into(),
                             methods: vec!["GET".into()],
                             session_required: None,
+                            sources: vec!["rust/crates/apex-api/src/routes.rs".to_string()],
                         },
                         DeclaredRoute {
                             path: "/stale".into(),
                             methods: vec!["POST".into()],
                             session_required: None,
+                            sources: vec!["rust/crates/apex-api/src/routes.rs".to_string()],
                         },
                     ],
                     fixture_pages: 0,
@@ -916,7 +1413,7 @@ mod tests {
         .into_iter()
         .collect();
         let mut problems = Vec::new();
-        check_route_parity(&surfaces, &registered, &mut problems);
+        check_route_parity(&surfaces, &registered, None, &mut problems);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(
             problems
@@ -941,6 +1438,7 @@ mod tests {
                         path: "/a".into(),
                         methods: vec!["GET".into()],
                         session_required: None,
+                        sources: vec!["rust/crates/apex-api/src/routes.rs".to_string()],
                     }],
                     fixture_pages: 0,
                     required: vec![
@@ -1045,6 +1543,7 @@ mod tests {
                             path: path.into(),
                             methods: methods.iter().map(|m| (*m).into()).collect(),
                             session_required: marker,
+                            sources: vec!["rust/crates/apex-api/src/routes.rs".to_string()],
                         }],
                         fixture_pages: 0,
                         required: vec![],
@@ -1058,6 +1557,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-api", "/console/audit", &["GET"], Some(true)),
+            None,
             &mut problems,
         );
         assert!(problems.is_empty(), "{problems:?}");
@@ -1066,6 +1566,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-api", "/console/ledger", &["GET"], Some(true)),
+            None,
             &mut problems,
         );
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1078,6 +1579,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-api", "/console/settings/theme", &["POST"], Some(true)),
+            None,
             &mut problems,
         );
         assert!(
@@ -1090,6 +1592,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-api", "/console/audit", &["GET"], Some(false)),
+            None,
             &mut problems,
         );
         assert!(
@@ -1101,6 +1604,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-control", "/console/audit", &["GET"], Some(true)),
+            None,
             &mut problems,
         );
         assert!(
@@ -1114,6 +1618,7 @@ mod tests {
         let mut problems = Vec::new();
         check_session_required(
             &surfaces("apex-api", "/healthz", &["GET"], Some(true)),
+            None,
             &mut problems,
         );
         assert!(
@@ -1143,7 +1648,7 @@ mod tests {
         );
         let mut declared: serde_json::Value = serde_json::from_str(&end_to_end_surfaces()).unwrap();
         declared["services"]["apex-api"]["routes"] = serde_json::json!([
-            {"path": "/console/audit", "methods": ["GET"], "session_required": true}
+            {"path": "/console/audit", "methods": ["GET"], "session_required": true, "sources": ["rust/crates/apex-api/src/routes.rs", "rust/crates/apex-api/src/html/"]}
         ]);
         declared["services"]["apex-api"]["required"] = serde_json::json!([
             {"surface": "GET /console/audit", "classes": ["surface-parity"]}
@@ -1161,7 +1666,7 @@ mod tests {
         // The same marker on the documented public access panel fails the
         // whole gate.
         declared["services"]["apex-api"]["routes"] = serde_json::json!([
-            {"path": "/console/ledger", "methods": ["GET"], "session_required": true}
+            {"path": "/console/ledger", "methods": ["GET"], "session_required": true, "sources": ["rust/crates/apex-api/src/routes.rs"]}
         ]);
         declared["services"]["apex-api"]["required"] = serde_json::json!([
             {"surface": "GET /console/ledger", "classes": ["surface-parity"]}
@@ -1184,7 +1689,7 @@ mod tests {
         // A typo'd marker field is a parse failure, never a silently ignored
         // declaration.
         declared["services"]["apex-api"]["routes"] = serde_json::json!([
-            {"path": "/console/audit", "methods": ["GET"], "session_require": true}
+            {"path": "/console/audit", "methods": ["GET"], "session_require": true, "sources": ["rust/crates/apex-api/src/routes.rs"]}
         ]);
         write(
             &root.join(SURFACES_REL),
@@ -1227,7 +1732,7 @@ mod tests {
     fn end_to_end_surfaces() -> String {
         let service = |path: &str| {
             format!(
-                "{{\"routes\":[{{\"path\":\"/{path}\",\"methods\":[\"GET\"]}}],\"fixture_pages\":7,\"required\":[{{\"surface\":\"GET /{path}\",\"classes\":[\"surface-parity\"]}}]}}"
+                "{{\"routes\":[{{\"path\":\"/{path}\",\"methods\":[\"GET\"],\"sources\":[\"rust/crates/{path}/src/routes.rs\"]}}],\"fixture_pages\":7,\"required\":[{{\"surface\":\"GET /{path}\",\"classes\":[\"surface-parity\"]}}]}}"
             )
         };
         surfaces_json(
@@ -1277,7 +1782,7 @@ mod tests {
 
         // Fixture count drift.
         declared["services"]["apex-api"]["routes"] = serde_json::json!([
-            {"path": "/apex-api", "methods": ["GET"]}
+            {"path": "/apex-api", "methods": ["GET"], "sources": ["rust/crates/apex-api/src/routes.rs"]}
         ]);
         declared["services"]["apex-control"]["fixture_pages"] = serde_json::json!(8);
         write(

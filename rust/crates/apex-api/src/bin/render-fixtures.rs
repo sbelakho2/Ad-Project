@@ -46,7 +46,7 @@ use apex_api::leads::{
 };
 use apex_api::proposals::{ApprovalDecision, ApprovalRecord, ConsoleProposal};
 use apex_api::settings::{AccountView, PolicyView, RegisteredPolicy};
-use apex_api::sources::{AuditSource, FileLedgerSource, JsonFileAuditSource, LedgerSource};
+use apex_api::sources::{FileLedgerSource, LedgerSource};
 use apex_api::vault::VaultEntryMeta;
 use apex_core::platform::ExperimentMetric;
 use apex_core::{
@@ -130,6 +130,28 @@ pub const PAGES: [&str; 62] = [
     "analytics-bad-view.html",
 ];
 
+/// Read the Northstar AdMob fixture.
+///
+/// The committed illustration keeps its historical `fixtures/admob.json`
+/// path (the autopilot crate includes those bytes in its own tests); the
+/// console's source layout is per publisher, so this renderer reads the one
+/// committed snapshot directly rather than pretending the flat fixture
+/// directory is a publisher-scoped root.
+fn load_fixture_snapshot(
+    fixtures: &std::path::Path,
+) -> Result<apex_audit::Snapshot, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(fixtures.join("admob.json"))?;
+    let snapshot: apex_audit::Snapshot = serde_json::from_slice(&bytes)?;
+    if snapshot.platform != PlatformId::Admob {
+        return Err(format!(
+            "the committed fixture declares {} but is rendered as AdMob",
+            snapshot.platform
+        )
+        .into());
+    }
+    Ok(snapshot)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -161,12 +183,8 @@ async fn run(
     let mut keys: HashMap<String, VerifyingKey> = HashMap::new();
     keys.insert(PUBLISHER.to_string(), keypair.verifying_key());
     let ledger_source = FileLedgerSource::new(fixtures.to_path_buf(), keys);
-    let audit_source = JsonFileAuditSource::new(fixtures.to_path_buf());
 
-    let snapshot = audit_source
-        .snapshot(PlatformId::Admob)
-        .await
-        .map_err(|error| std::io::Error::other(format!("admob snapshot read failed: {error}")))?;
+    let snapshot = load_fixture_snapshot(fixtures)?;
     let report = apex_audit::run(&snapshot);
     let records = ledger_source.records(PUBLISHER).await.map_err(|error| {
         std::io::Error::other(format!("{PUBLISHER} ledger read failed: {error}"))
@@ -1762,8 +1780,6 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use apex_api::sources::AuditSource;
-
     use super::*;
 
     fn fixtures_dir() -> PathBuf {
@@ -1813,11 +1829,7 @@ mod tests {
                 .expect("the committed fixture ledger verifies");
         assert_eq!(verified.len(), 24, "24 records");
 
-        let audit_source = JsonFileAuditSource::new(&fixtures);
-        let snapshot = audit_source
-            .snapshot(PlatformId::Admob)
-            .await
-            .expect("snapshot");
+        let snapshot = super::load_fixture_snapshot(&fixtures).expect("snapshot");
         let report = apex_audit::run(&snapshot);
         assert_eq!(report.findings.len(), 5, "5 findings");
         let critical = report

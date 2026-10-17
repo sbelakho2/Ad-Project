@@ -14,8 +14,10 @@
 //!   honest not-available state (page 97: "No healthy or zero-error claim
 //!   can be made from missing telemetry"). Nothing is fabricated.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use apex_analytics::queries::{
@@ -381,6 +383,13 @@ pub struct DurableReader {
     /// mtime and on Unix ctime and inode) is unchanged, so repeated page
     /// reads do not re-parse the whole directory.
     cache: Arc<Mutex<HashMap<PathBuf, CachedLedger>>>,
+    /// The parsed invoice register, reused while its file identity is
+    /// unchanged. One finance page can read the register several times (one
+    /// form per invoice capability), and the file rarely changes between the
+    /// monthly syncs.
+    invoice_cache: Arc<Mutex<Option<CachedInvoices>>>,
+    #[cfg(test)]
+    invoice_parses: Arc<AtomicU64>,
 }
 
 /// One parsed publisher ledger: the publisher name and its parsed lines.
@@ -432,6 +441,13 @@ struct CachedLedger {
     lines: Arc<Vec<serde_json::Value>>,
 }
 
+/// One cached invoice-register parse.
+#[derive(Debug, Clone)]
+struct CachedInvoices {
+    stamp: FileStamp,
+    invoices: Arc<Vec<InvoiceRecord>>,
+}
+
 impl DurableReader {
     /// A reader over the given roots.
     pub fn new(ledger_root: impl Into<PathBuf>, invoice_register: impl Into<PathBuf>) -> Self {
@@ -439,7 +455,24 @@ impl DurableReader {
             ledger_root: ledger_root.into(),
             invoice_register: invoice_register.into(),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            invoice_cache: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            invoice_parses: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// The number of invoice-register parses this reader performed (test seam
+    /// proving the cache is hit; a fresh reader counts from zero).
+    #[cfg(test)]
+    pub(crate) fn invoice_parse_count(&self) -> u64 {
+        self.invoice_parses.load(Ordering::SeqCst)
+    }
+
+    /// The number of cached ledger parses (test seam proving removed files
+    /// are pruned).
+    #[cfg(test)]
+    pub(crate) fn ledger_cache_len(&self) -> usize {
+        self.cache.lock().map(|cache| cache.len()).unwrap_or(0)
     }
 
     /// Every `<publisher>.jsonl` ledger file, as (publisher, lines).
@@ -460,6 +493,10 @@ impl DurableReader {
             }
         };
         let mut files = Vec::new();
+        // Files still present on this scan. Entries for removed ledgers are
+        // pruned below, so a rotating ledger directory cannot grow the cache
+        // without bound.
+        let mut seen: HashSet<PathBuf> = HashSet::new();
         for entry in entries {
             let entry = entry.map_err(|error| {
                 Unavailable::new(format!(
@@ -472,6 +509,7 @@ impl DurableReader {
                 continue;
             };
             let path = entry.path();
+            seen.insert(path.clone());
             let metadata = std::fs::metadata(&path).map_err(|error| {
                 Unavailable::new(format!("the ledger {name} could not be read: {error}"))
             })?;
@@ -522,6 +560,13 @@ impl DurableReader {
                 }
             };
             files.push((publisher.to_string(), lines));
+        }
+        {
+            let mut cache = self
+                .cache
+                .lock()
+                .map_err(|_| Unavailable::new("ledger cache lock poisoned"))?;
+            cache.retain(|path, _| seen.contains(path));
         }
         if files.is_empty() {
             return Err(Unavailable::new(format!(
@@ -633,7 +678,39 @@ impl DurableReader {
     }
 
     /// The invoice register, read-only.
+    ///
+    /// The parsed register is reused while its file identity (length, mtime
+    /// and on Unix ctime and inode) is unchanged, so the several reads one
+    /// finance page makes do not re-parse the whole file each time. A stale
+    /// cache is impossible: the same identity rules as the ledger cache apply.
     pub fn invoices(&self) -> Result<Vec<InvoiceRecord>, Unavailable> {
+        let stamp = match std::fs::metadata(&self.invoice_register) {
+            Ok(metadata) => Some(FileStamp::of(&metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Unavailable::new(format!(
+                    "no invoice register is present at {}",
+                    self.invoice_register.display()
+                )))
+            }
+            // A stat that fails for another reason is not fatal: the read
+            // below reports the real error (and the parse is not cached).
+            Err(_) => None,
+        };
+        if let Some(stamp) = stamp {
+            let cached = {
+                let cache = self
+                    .invoice_cache
+                    .lock()
+                    .map_err(|_| Unavailable::new("invoice cache lock poisoned"))?;
+                cache
+                    .as_ref()
+                    .filter(|cached| cached.stamp == stamp)
+                    .map(|cached| cached.invoices.clone())
+            };
+            if let Some(invoices) = cached {
+                return Ok((*invoices).clone());
+            }
+        }
         let raw = match std::fs::read_to_string(&self.invoice_register) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -662,7 +739,20 @@ impl DurableReader {
             })?);
         }
         invoices.sort_by_key(|invoice| invoice.id());
-        Ok(invoices)
+        #[cfg(test)]
+        self.invoice_parses.fetch_add(1, Ordering::SeqCst);
+        let invoices = Arc::new(invoices);
+        if let Some(stamp) = stamp {
+            let mut cache = self
+                .invoice_cache
+                .lock()
+                .map_err(|_| Unavailable::new("invoice cache lock poisoned"))?;
+            *cache = Some(CachedInvoices {
+                stamp,
+                invoices: invoices.clone(),
+            });
+        }
+        Ok((*invoices).clone())
     }
 }
 
@@ -1261,6 +1351,65 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("exp_2"),
             "the new content is parsed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invoice_parses_are_cached_until_the_register_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-invoice-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let register = dir.join("invoices.jsonl");
+        let line = |publisher: &str| {
+            format!(
+                "{{\"publisherId\":\"{publisher}\",\"period\":{{\"yearMonth\":\"2026-10\",\"startUnixMs\":1,\"endUnixMs\":2}},\"lineItems\":[],\"totalMicros\":0,\"vatRateBp\":0,\"vatMicros\":0,\"grossMicros\":0}}\n"
+            )
+        };
+        std::fs::write(&register, line("northstar")).expect("write");
+        let reader = DurableReader::new(dir.join("ledgers"), &register);
+
+        let first = reader.invoices().expect("first read");
+        assert_eq!(first.len(), 1);
+        let second = reader.invoices().expect("second read");
+        assert_eq!(second, first);
+        assert_eq!(reader.invoice_parse_count(), 1, "the register parsed once");
+
+        let mut changed = line("northstar");
+        changed.push_str(&line("rival"));
+        std::fs::write(&register, changed).expect("append");
+        let third = reader.invoices().expect("third read");
+        assert_eq!(third.len(), 2, "the changed register re-parses");
+        assert_eq!(reader.invoice_parse_count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ledger_cache_prunes_files_removed_from_the_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-ledger-prune-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let record = "{\"publisherId\":\"p\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n";
+        std::fs::write(dir.join("northstar.jsonl"), record).expect("first");
+        std::fs::write(dir.join("rival.jsonl"), record).expect("second");
+        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+
+        assert_eq!(reader.ledger_files().expect("read").len(), 2);
+        assert_eq!(reader.ledger_cache_len(), 2);
+        std::fs::remove_file(dir.join("rival.jsonl")).expect("remove");
+        assert_eq!(reader.ledger_files().expect("re-read").len(), 1);
+        assert_eq!(
+            reader.ledger_cache_len(),
+            1,
+            "the removed ledger's parse is pruned"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -79,6 +79,10 @@ pub enum StoreError {
     /// A response body could not be parsed.
     #[error("unexpected response payload: {0}")]
     Json(String),
+    /// A query was refused before it could return a misleading answer (for
+    /// example a read that would exceed its stated bound).
+    #[error("query refused: {0}")]
+    Query(String),
 }
 
 impl From<SchemaError> for StoreError {

@@ -309,6 +309,7 @@ fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
         gross_micros: total_micros,
         customer: None,
         vat_treatment: VatTreatment::NotApplied,
+        vies_evidence: None,
     }
 }
 

@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 apex-audit = { path = "../apex-audit" }
 apex-billing = { path = "../apex-billing" }
+apex-connectors = { path = "../apex-connectors" }
 apex-core.workspace = true
 apex-metrics = { path = "../apex-metrics" }
 apex-notify = { path = "../apex-notify" }
@@ -22,4 +23,5 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3"

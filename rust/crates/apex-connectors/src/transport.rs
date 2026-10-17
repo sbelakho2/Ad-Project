@@ -255,6 +255,9 @@ pub fn parse_retry_after(header: Option<&str>, now: std::time::SystemTime) -> Op
 /// - 5xx -> Http, retried with bounded exponential backoff (250ms, x2, cap 2s);
 /// - transport error -> Network/Timeout, retried only for retryable calls;
 /// - other 4xx -> Http, immediate;
+/// - 3xx -> the response passes through untouched (redirect-aware callers
+///   such as the app-ads.txt fetcher consume the status and `Location`; a
+///   redirect is never retried);
 /// - 2xx -> JSON body parsed; empty body -> Null; invalid JSON -> Schema (fail closed).
 pub struct RetryTransport {
     inner: Arc<dyn Transport>,
@@ -350,6 +353,15 @@ impl Transport for RetryTransport {
                     last_error = Some(net);
                 }
                 Ok(resp) if (200..300).contains(&resp.status) => {
+                    return Ok(resp);
+                }
+                // Redirects are not retryable transport errors: callers that
+                // follow them (the app-ads.txt fetcher) need the status and
+                // `Location` header intact. Every platform caller classifies a
+                // non-2xx answer itself, so passing the hop through preserves
+                // their behavior while making the wrapper composable with the
+                // redirect-aware fetchers.
+                Ok(resp) if (300..400).contains(&resp.status) => {
                     return Ok(resp);
                 }
                 Ok(resp) => {

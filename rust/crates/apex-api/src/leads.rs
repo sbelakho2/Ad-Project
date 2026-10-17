@@ -30,7 +30,7 @@
 //! public default constant is only a fallback for the analytics emitter, not
 //! a stored-lead salt.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -559,8 +559,35 @@ pub struct FileLeadStore {
 #[derive(Debug, Default)]
 struct LeadStoreState {
     hydrated: bool,
+    /// Request id -> the instant it was first recorded inside the dedup
+    /// window (never renewed, so an id's timestamp is immutable).
     recent: HashMap<String, i64>,
+    /// The same ids ordered by that instant. Expiry removes the expired
+    /// prefix, so a submit costs the expired entries rather than a rescan of
+    /// every live id at the 20k-lead reference size.
+    by_seen: BTreeMap<i64, Vec<String>>,
     salt: Option<String>,
+    /// Ids dropped by expiry (tests and diagnostics).
+    pruned: u64,
+}
+
+impl LeadStoreState {
+    /// Drop every id whose 24-hour window closed at `at_unix_ms`.
+    fn prune_recent(&mut self, at_unix_ms: i64) {
+        while let Some((seen, _)) = self.by_seen.first_key_value() {
+            if at_unix_ms.saturating_sub(*seen) <= DEDUP_WINDOW_MS {
+                break;
+            }
+            let Some((_, ids)) = self.by_seen.pop_first() else {
+                break;
+            };
+            for id in ids {
+                if self.recent.remove(&id).is_some() {
+                    self.pruned += 1;
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for FileLeadStore {
@@ -696,6 +723,10 @@ impl FileLeadStore {
             let entry = state.recent.entry(id).or_insert(stored.at_unix_ms);
             *entry = (*entry).max(stored.at_unix_ms);
         }
+        state.by_seen.clear();
+        for (id, seen) in &state.recent {
+            state.by_seen.entry(*seen).or_default().push(id.clone());
+        }
         state.hydrated = true;
         Ok(())
     }
@@ -722,9 +753,7 @@ impl FileLeadStore {
         let mut stored_lead = lead.clone();
         stored_lead.request_id = Some(request_id.clone());
 
-        state
-            .recent
-            .retain(|_, seen| at_unix_ms.saturating_sub(*seen) <= DEDUP_WINDOW_MS);
+        state.prune_recent(at_unix_ms);
         if state.recent.contains_key(&request_id) {
             return Ok((request_id, None, stored_lead));
         }
@@ -749,6 +778,11 @@ impl FileLeadStore {
         file.write_all(line.as_bytes())
             .map_err(|error| ApiError::Internal(format!("lead write: {error}")))?;
         state.recent.insert(request_id.clone(), at_unix_ms);
+        state
+            .by_seen
+            .entry(at_unix_ms)
+            .or_default()
+            .push(request_id.clone());
         Ok((request_id, Some(line), stored_lead))
     }
 }
@@ -1401,6 +1435,55 @@ mod tests {
                 .trim(),
             file_salt
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dedup index expires the ordered prefix instead of rescanning every
+    /// live id: a 100k-lead file prunes exactly the expired entries on the
+    /// first submit after the window, and the live entry count is exact.
+    #[test]
+    fn the_dedup_index_expires_the_prefix_at_one_hundred_thousand_leads() {
+        let dir = std::env::temp_dir().join(format!("apex-leads-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("leads.jsonl");
+        let at = 1_700_000_000_000i64;
+        let mut body = String::with_capacity(100_000 * 160);
+        for index in 0..100_000 {
+            let line = serde_json::json!({
+                "atUnixMs": at,
+                "lead": {
+                    "publisher": format!("p{index}"),
+                    "email": format!("lead{index}@studio.example"),
+                    "platforms": ["max"],
+                }
+            });
+            body.push_str(&serde_json::to_string(&line).expect("line"));
+            body.push('\n');
+        }
+        std::fs::write(&path, body).expect("seed leads");
+
+        let store = FileLeadStore::new(&path);
+        let mut warm = lead();
+        warm.publisher = "warm".into();
+        warm.email = "warm@studio.example".into();
+        store.append_if_new(&warm, at).expect("warm submit");
+        {
+            let state = store.lock.lock().expect("state");
+            assert_eq!(state.recent.len(), 100_001, "all hydrated ids are live");
+            assert_eq!(state.pruned, 0);
+        }
+
+        let mut fresh = lead();
+        fresh.publisher = "fresh".into();
+        fresh.email = "fresh@studio.example".into();
+        store
+            .append_if_new(&fresh, at + DEDUP_WINDOW_MS + 1)
+            .expect("fresh submit");
+        let state = store.lock.lock().expect("state");
+        assert_eq!(state.pruned, 100_001, "exactly the expired prefix");
+        assert_eq!(state.recent.len(), 1, "only the fresh id remains");
+        assert_eq!(state.by_seen.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

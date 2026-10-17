@@ -1,0 +1,14 @@
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+    path:
+      - monitoring/**
+      - infrastructure/**
+      - tools/coverage/**
+      - .woodpecker/**
+      - Makefile
+steps:
+  contract:
+    image: alpine:3.20
+    commands:
+      - echo contract-coverage

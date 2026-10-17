@@ -16,10 +16,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use apex_api::app_ads_proof::HttpAppAdsProof;
 use apex_api::signin::{SigninService, WarningLog, WorkspaceTokens};
 use apex_api::{
-    router, AppState, FileLeadStore, FixedClock, StaticAuditSource, StaticLedgerSource,
+    router, AppState, FileLeadStore, FixedClock, StaticAppAdsProof, StaticAuditSource,
+    StaticLedgerSource,
 };
+use apex_connectors::transport::Transport;
 use apex_notify::sink::{
     DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
 };
@@ -80,12 +83,13 @@ fn build_app(
     mailer: Option<Arc<CaptureMailer>>,
     warnings: &Arc<WarningLog>,
     with_operator_token: bool,
-) -> (axum::Router, Arc<SigninService>) {
+) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
     let leads = Arc::new(FileLeadStore::new(root.join("leads.jsonl")));
     let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
     let mut signin = SigninService::open(root)
         .with_ttl_hours(ttl_hours)
         .with_public_base("https://console.example")
+        .with_workspaces(Arc::clone(&workspaces))
         .with_warnings(Arc::clone(warnings));
     if let Some(mailer) = mailer {
         let mailer: Arc<dyn NotificationSink> = mailer;
@@ -98,12 +102,16 @@ fn build_app(
     )
     .with_clock(Arc::new(FixedClock::new(clock_secs)))
     .with_leads(leads)
-    .with_workspaces(workspaces)
-    .with_signin(Arc::clone(&signin));
+    .with_workspaces(Arc::clone(&workspaces))
+    .with_signin(Arc::clone(&signin))
+    .with_app_ads_proof(Arc::new(StaticAppAdsProof::accepting([
+        "studio.example",
+        "arcade.example",
+    ])));
     if with_operator_token {
         state = state.with_ledger_token("operator-pub", b"operator-token".to_vec());
     }
-    (router(state), signin)
+    (router(state), signin, workspaces)
 }
 
 /// A GET carrying `X-Forwarded-Proto: https` (the proxy's TLS signal).
@@ -204,7 +212,7 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     .expect("seed tokens");
     let warnings = Arc::new(WarningLog::default());
     let mailer = Arc::new(CaptureMailer::default());
-    let (app, signin) = build_app(
+    let (app, signin, _workspaces) = build_app(
         temp.path(),
         // 72 hours in: the default TTL window, and the exact expiry instant.
         1_700_000_000,
@@ -311,7 +319,7 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
     let temp = TempDir::new("signin-mint");
     let warnings = Arc::new(WarningLog::default());
     let mailer = Arc::new(CaptureMailer::default());
-    let (app, signin) = build_app(
+    let (app, signin, workspaces) = build_app(
         temp.path(),
         1_700_000_000,
         72,
@@ -381,6 +389,9 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
     // A second link consumed without the proxy's TLS signal mints the same
     // cookie without `Secure`: the flag follows the request, exactly as the
     // exchange's cookie does.
+    workspaces
+        .ensure("bright-arcade", "b@arcade.example", true)
+        .expect("record the second workspace");
     let second = signin
         .issue_link("bright-arcade", "b@arcade.example", 1_700_000_000_000)
         .await
@@ -402,7 +413,7 @@ async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
     let temp = TempDir::new("signin-single-use");
     let warnings = Arc::new(WarningLog::default());
     let mailer = Arc::new(CaptureMailer::default());
-    let (app, signin) = build_app(
+    let (app, signin, _workspaces) = build_app(
         temp.path(),
         1_700_000_000,
         72,
@@ -459,7 +470,7 @@ async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_tok
     let temp = TempDir::new("signin-refusals");
     let warnings = Arc::new(WarningLog::default());
     // "Now" is two hours past the issuance instant; the link lives one hour.
-    let (app, signin) = build_app(
+    let (app, signin, workspaces) = build_app(
         temp.path(),
         1_700_000_000 + 7_200,
         1,
@@ -467,6 +478,9 @@ async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_tok
         &warnings,
         false,
     );
+    workspaces
+        .ensure("northstar-studio", "you@studio.example", true)
+        .expect("record the workspace");
     let created = signin
         .issue_link("northstar-studio", "you@studio.example", 1_700_000_000_000)
         .await
@@ -526,7 +540,8 @@ async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_tok
 async fn without_an_email_sink_the_audit_succeeds_and_the_warning_is_recorded() {
     let temp = TempDir::new("signin-no-mailer");
     let warnings = Arc::new(WarningLog::default());
-    let (app, signin) = build_app(temp.path(), 1_700_000_000, 72, None, &warnings, false);
+    let (app, signin, _workspaces) =
+        build_app(temp.path(), 1_700_000_000, 72, None, &warnings, false);
 
     let reference = submit_audit(&app, FREE_AUDIT_BODY).await;
     assert!(reference.starts_with("req_"));
@@ -561,7 +576,7 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
     let mailer = Arc::new(CaptureMailer::default());
     // No boot-time operator token: the workspace gate must pass on the live
     // self-serve workspaces alone.
-    let (app, signin) = build_app(
+    let (app, signin, _workspaces) = build_app(
         temp.path(),
         1_700_000_000,
         72,
@@ -647,6 +662,223 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
 }
 
 #[tokio::test]
+async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_private() {
+    let temp = TempDir::new("signin-workspace-takeover");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, _workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+    submit_audit(&app, FREE_AUDIT_BODY).await;
+    let leads_before = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
+    let rows_before = signin.store().read_rows().expect("rows").len();
+    assert_eq!(mailer.texts().len(), 1);
+
+    // The same studio slug, a different address: the workspace exists, the
+    // address is not recorded, so nothing is stored or sent.
+    let response = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=attacker%40evil.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::SEE_OTHER,
+        "the saved lead is the contract; the link is refused, not the request: {}",
+        response.body
+    );
+    assert_eq!(mailer.texts().len(), 1, "no second link was delivered");
+    assert_eq!(signin.store().read_rows().expect("rows").len(), rows_before);
+    let leads_after = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
+    assert!(
+        leads_after.lines().count() > leads_before.lines().count(),
+        "the refused workspace still keeps the lead"
+    );
+    assert!(
+        !warnings.lines().join(" ").contains("attacker"),
+        "the refusal never echoes the address"
+    );
+    let lines = warnings.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("northstar-studio") && line.contains("recorded contact")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("attacker@evil.example")),
+        "the refusal log never echoes the address: {lines:?}"
+    );
+
+    // The recorded contact still receives a fresh one-time link.
+    submit_audit(&app, FREE_AUDIT_BODY).await;
+    assert_eq!(
+        mailer.texts().len(),
+        2,
+        "the recorded contact is delivered to"
+    );
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows.len(), rows_before + 1);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.publisher == "northstar-studio")
+            .count(),
+        rows_before + 1
+    );
+}
+
+/// The ownership proof is fetched exactly once, and only when a new
+/// workspace actually needs it: an invalid form and an existing workspace
+/// (accepted or refused) never trigger a second guarded fetch.
+#[tokio::test]
+async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
+    const APP_ADS: &str = "OWNERDOMAIN=studio.example\n\
+                           google.com, pub-1, DIRECT\n";
+    let temp = TempDir::new("signin-proof-fetch");
+    let counter = Arc::new(CountingAppAdsTransport::new(APP_ADS));
+    let proof = HttpAppAdsProof::new(Arc::clone(&counter) as Arc<dyn Transport>)
+        .with_resolver(Arc::new(PublicResolver));
+    let workspaces = Arc::new(WorkspaceTokens::open(temp.path().join("tokens.json")));
+    let signin = Arc::new(
+        SigninService::open(temp.path())
+            .with_workspaces(Arc::clone(&workspaces))
+            .with_public_base("https://console.example"),
+    );
+    let state = AppState::new(
+        Arc::new(StaticAuditSource::default()),
+        Arc::new(StaticLedgerSource::default()),
+    )
+    .with_clock(Arc::new(FixedClock::new(1_700_000_000)))
+    .with_leads(Arc::new(FileLeadStore::new(
+        temp.path().join("leads.jsonl"),
+    )))
+    .with_workspaces(Arc::clone(&workspaces))
+    .with_signin(signin)
+    .with_app_ads_proof(Arc::new(proof));
+    let app = router(state);
+
+    // Invalid form: no store write, no proof fetch.
+    let invalid = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=not-an-email&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(counter.calls(), 0, "validation refuses before the fetch");
+    assert!(!workspaces.has_workspace("northstar-studio"));
+
+    // A new workspace needs the domain's app-ads.txt: exactly one fetch.
+    let created = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=you%40studio.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+    assert_eq!(
+        counter.calls(),
+        1,
+        "one guarded fetch for the new workspace"
+    );
+    assert!(workspaces.has_workspace("northstar-studio"));
+    assert!(workspaces.contact_recorded("northstar-studio", "you@studio.example"));
+
+    // An existing workspace refuses an unrecorded address before any proof
+    // work: the recorded contact list is the whole decision.
+    let refused = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=attacker%40evil.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER, "{}", refused.body);
+    assert_eq!(
+        counter.calls(),
+        1,
+        "a refused existing workspace never fetches app-ads.txt"
+    );
+    assert!(!workspaces.contact_recorded("northstar-studio", "attacker@evil.example"));
+
+    // The recorded contact is accepted from the existing record, also with
+    // no fetch.
+    let accepted = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=you%40studio.example&studio=Northstar+Studio&platforms=max",
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::SEE_OTHER, "{}", accepted.body);
+    assert_eq!(counter.calls(), 1, "an existing workspace never re-proves");
+}
+
+#[tokio::test]
+async fn a_new_workspace_without_an_app_ads_proof_gets_no_link() {
+    let temp = TempDir::new("signin-unproven");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    let response = send(
+        &app,
+        post_form(
+            "/free-audit",
+            "email=founder%40unproven.example&studio=Shadow+Studio&platforms=admob",
+        ),
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::SEE_OTHER,
+        "the saved lead is the contract; the unproven workspace gets no link: {}",
+        response.body
+    );
+    assert!(mailer.texts().is_empty(), "no link is sent");
+    assert!(
+        signin.store().read_rows().expect("rows").is_empty(),
+        "no link row is created"
+    );
+    assert!(
+        temp.path().join("leads.jsonl").exists(),
+        "the lead is still stored"
+    );
+    assert!(!workspaces.has_workspace("shadow-studio"));
+    assert!(
+        warnings
+            .lines()
+            .iter()
+            .any(|line| line.contains("shadow-studio") && line.contains("app-ads.txt")),
+        "{:?}",
+        warnings.lines()
+    );
+}
+
+#[tokio::test]
 async fn signin_fails_closed_without_a_leads_root_or_when_the_store_is_unavailable() {
     // (a) No leads root: the route answers the documented `503` panel.
     let temp = TempDir::new("signin-unconfigured");
@@ -670,7 +902,8 @@ async fn signin_fails_closed_without_a_leads_root_or_when_the_store_is_unavailab
     let broken = TempDir::new("signin-broken-store");
     std::fs::create_dir_all(broken.path().join("signin.jsonl")).expect("squat");
     let warnings = Arc::new(WarningLog::default());
-    let (app, _signin) = build_app(broken.path(), 1_700_000_000, 72, None, &warnings, false);
+    let (app, _signin, _workspaces) =
+        build_app(broken.path(), 1_700_000_000, 72, None, &warnings, false);
     let response = send(
         &app,
         get("/console/signin?token=0123456789abcdef0123456789abcdef"),

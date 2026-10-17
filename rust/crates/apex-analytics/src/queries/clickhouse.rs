@@ -39,6 +39,43 @@ use super::dto::{
 use super::model;
 use super::AnalyticsReader;
 
+/// The raw events one operator-queue read may fold. The event types the
+/// queues need are filtered server-side, and the bound keeps an
+/// operator-wide read from silently materializing an unbounded history: past
+/// it the read fails with the honest reason instead of truncating.
+pub const OPERATOR_QUEUE_EVENT_LIMIT: usize = 250_000;
+
+/// The event types `compute_operator_queues` reads. Everything else is
+/// filtered server-side, so the queue read no longer ships unrelated rows.
+const OPERATOR_QUEUE_EVENT_TYPES: &str = "'incident_changed', \
+     'experiment_registered', 'experiment_started', 'experiment_decided', \
+     'job_run', 'fee_held', 'fee_invoice_issued', 'fee_credited'";
+
+/// The scoped operator-queue event select. The `LIMIT` carries one extra row
+/// so an over-bound read is detectable, never silently cut.
+fn operator_queue_select(database: &str) -> String {
+    format!(
+        "SELECT * FROM {database}.domain_events FINAL\n\
+         WHERE ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
+         \x20 AND event_type IN ({OPERATOR_QUEUE_EVENT_TYPES})\n\
+         ORDER BY occurred_at_utc, source, event_id\n\
+         LIMIT {}",
+        OPERATOR_QUEUE_EVENT_LIMIT + 1
+    )
+}
+
+/// Refuse an operator-queue read that reached the bound. The caller either
+/// narrows the scope (a publisher or day range) or relies on the published
+/// projections; it never receives a silently truncated queue.
+fn enforce_queue_event_bound(count: usize, limit: usize) -> Result<(), StoreError> {
+    if count > limit {
+        return Err(StoreError::Query(format!(
+            "the operator queue read covered more than {limit} events; narrow the scope or read the published queues"
+        )));
+    }
+    Ok(())
+}
+
 /// A reader over a [`ClickHouseStore`].
 #[derive(Debug, Clone)]
 pub struct ClickHouseReader {
@@ -429,15 +466,13 @@ impl AnalyticsReader for ClickHouseReader {
         // Recompute membership and ages from the stored facts against the
         // covered-data anchor: the identical pure computation the memory
         // reader runs over its facts, so both readers answer identically.
-        let select = format!(
-            "SELECT * FROM {database}.domain_events FINAL\n\
-             WHERE ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
-             ORDER BY occurred_at_utc, source, event_id"
-        );
+        // Only the queue event types are fetched, and the read is bounded.
+        let select = operator_queue_select(database);
         let rows = self
             .store
             .fetch_rows(&select, &[("publisher", scope.publisher_id.as_str())])
             .await?;
+        enforce_queue_event_bound(rows.len(), OPERATOR_QUEUE_EVENT_LIMIT)?;
         let events: Vec<DomainEvent> = rows
             .iter()
             .map(domain_event_from_row)
@@ -713,6 +748,21 @@ mod tests {
                 "{to:String} = '' OR toDate(occurred_at_utc) <= toDateOrZero({to:String})"
             ),
             "{sql}"
+        );
+    }
+
+    #[test]
+    fn the_operator_queue_read_filters_types_and_carries_the_bound() {
+        let sql = operator_queue_select("apex");
+        assert!(sql.contains("event_type IN ('incident_changed'"), "{sql}");
+        assert!(sql.contains("LIMIT 250001"), "{sql}");
+        assert!(sql.contains("publisher_id = {publisher:String}"), "{sql}");
+        // One extra row makes an over-bound read detectable.
+        assert!(enforce_queue_event_bound(250_000, 250_000).is_ok());
+        let error = enforce_queue_event_bound(250_001, 250_000).expect_err("over bound");
+        assert!(
+            error.to_string().contains("more than 250000 events"),
+            "{error}"
         );
     }
 

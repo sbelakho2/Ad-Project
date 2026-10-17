@@ -2,10 +2,13 @@
 //!
 //! Two real file-backed implementations ship here:
 //!
-//! - [`JsonFileAuditSource`] reads `<root>/<platform>.json` into an
-//!   `apex_audit::Snapshot`. A missing file is `404`; an unparseable or
-//!   mismatched file is a logged internal error (an operator problem, not a
-//!   client one).
+//! - [`JsonFileAuditSource`] reads `<root>/<publisher>/<platform>.json` into
+//!   an `apex_audit::Snapshot`: one snapshot per publisher and platform, the
+//!   same layout the runner's `apex_autopilot::registry::snapshot_path`
+//!   writes. A missing file is `404`; an unparseable or mismatched file is a
+//!   logged internal error (an operator problem, not a client one). A snapshot
+//!   is only ever served for the publisher whose own directory holds it, so one
+//!   publisher can never read another's data.
 //! - [`FileLedgerSource`] reads `<root>/<publisher>.jsonl` through
 //!   [`apex_proof::Ledger::read_verified`], the single read that both verifies
 //!   and returns the records. There is deliberately no second whole-file read:
@@ -44,7 +47,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use apex_audit::Snapshot;
+use apex_audit::{AuditReport, Snapshot};
 use apex_core::PlatformId;
 use apex_proof::{Ledger, LedgerError, LedgerRecord, VerifyingKey};
 use async_trait::async_trait;
@@ -147,18 +150,38 @@ pub(crate) fn canonical_root(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
-/// An audit snapshot provider (one snapshot per platform).
+/// An audit snapshot provider (one snapshot per publisher and platform).
 #[async_trait]
 pub trait AuditSource: Send + Sync + std::fmt::Debug {
-    /// Fetch the current snapshot for `platform`, or the typed error that
-    /// prevents serving one.
-    async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError>;
+    /// Fetch `publisher`'s current snapshot for `platform`, or the typed error
+    /// that prevents serving one. The publisher is validated before any path
+    /// is built, so a source is safe even when called directly.
+    async fn snapshot(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError>;
 
-    /// Persist a freshly built snapshot. The file source writes it beside the
-    /// reads (atomically); a static source refuses.
-    async fn write(&self, platform: PlatformId, _snapshot: &Snapshot) -> Result<(), ApiError> {
+    /// The snapshot and the audit report computed from it. The default runs
+    /// the engine on every call; the file source caches the report beside its
+    /// parsed snapshot, keyed by the same hardened file stamp, so the
+    /// overview, report, finding and CSV pages do not recompute it per render.
+    async fn snapshot_report(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Snapshot, AuditReport), ApiError> {
+        let snapshot = self.snapshot(publisher, platform).await?;
+        let report = apex_audit::run(&snapshot);
+        Ok((snapshot, report))
+    }
+
+    /// Persist a freshly built snapshot for `publisher`. The file source
+    /// writes it beside the reads (atomically); a static source refuses.
+    async fn write(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+        _snapshot: &Snapshot,
+    ) -> Result<(), ApiError> {
         Err(ApiError::Internal(format!(
-            "snapshot writing is not supported for {platform}"
+            "snapshot writing for publisher {publisher} on {platform} is not supported"
         )))
     }
 }
@@ -188,11 +211,106 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Reads `<root>/<platform>.json` as an `apex_audit::Snapshot`.
+/// One parsed snapshot held in memory: the file identity it was parsed at and
+/// (once requested) the audit report computed from it. The report is cached
+/// beside the snapshot because the console renders it on overview, report,
+/// finding and CSV pages; recomputing the engine per page is the dominant cost
+/// at large snapshots.
+#[derive(Debug)]
+struct CachedSnapshot {
+    stamp: FileStamp,
+    snapshot: Snapshot,
+    report: std::sync::OnceLock<AuditReport>,
+}
+
+/// Observable counters of [`JsonFileAuditSource`]'s parse cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotCacheStats {
+    /// File reads (one per cache miss).
+    pub reads: u64,
+    /// JSON parses (one per cache miss with a usable file stamp).
+    pub parses: u64,
+    /// Cache hits (a stat plus a lookup, no read or parse).
+    pub hits: u64,
+    /// Audit-report computations (one per snapshot per file identity).
+    pub report_builds: u64,
+}
+
+/// The in-process parsed-snapshot cache of [`JsonFileAuditSource`]. A read is
+/// served from the cache only while the file's size, modification time and
+/// (on Unix) ctime and inode are unchanged, the same hardened identity the
+/// verified-ledger cache uses. Console pages load one publisher's snapshots
+/// on every request, so the unchanged-file path is a stat plus a clone
+/// instead of a re-read and re-parse of the JSON.
+#[derive(Debug, Default)]
+struct SnapshotCache {
+    entries: Mutex<HashMap<PathBuf, CachedSnapshot>>,
+    reads: AtomicU64,
+    parses: AtomicU64,
+    hits: AtomicU64,
+    report_builds: AtomicU64,
+}
+
+impl SnapshotCache {
+    fn get(&self, path: &Path, stamp: FileStamp) -> Option<(Snapshot, Option<AuditReport>)> {
+        let entries = self.entries.lock().ok()?;
+        entries.get(path).and_then(|cached| {
+            (cached.stamp == stamp).then(|| {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                (cached.snapshot.clone(), cached.report.get().cloned())
+            })
+        })
+    }
+
+    fn put(&self, path: &Path, stamp: FileStamp, snapshot: &Snapshot) {
+        if let Ok(mut entries) = self.entries.lock() {
+            // A concurrent request may have completed this entry (including
+            // its report) while this one was reading; never replace it.
+            if entries
+                .get(path)
+                .is_some_and(|cached| cached.stamp == stamp)
+            {
+                return;
+            }
+            entries.insert(
+                path.to_path_buf(),
+                CachedSnapshot {
+                    stamp,
+                    snapshot: snapshot.clone(),
+                    report: std::sync::OnceLock::new(),
+                },
+            );
+        }
+    }
+
+    /// Attach `report` to the entry at `stamp`, unless another request already
+    /// did or the file changed underneath this one.
+    fn put_report(&self, path: &Path, stamp: FileStamp, report: &AuditReport) {
+        if let Ok(entries) = self.entries.lock() {
+            if let Some(cached) = entries.get(path) {
+                if cached.stamp == stamp {
+                    let _ = cached.report.set(report.clone());
+                }
+            }
+        }
+    }
+
+    fn stats(&self) -> SnapshotCacheStats {
+        SnapshotCacheStats {
+            reads: self.reads.load(Ordering::Relaxed),
+            parses: self.parses.load(Ordering::Relaxed),
+            hits: self.hits.load(Ordering::Relaxed),
+            report_builds: self.report_builds.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Reads `<root>/<publisher>/<platform>.json` as an `apex_audit::Snapshot`.
 #[derive(Debug, Clone)]
 pub struct JsonFileAuditSource {
     root: PathBuf,
     canonical_root: PathBuf,
+    cache: Arc<SnapshotCache>,
 }
 
 impl JsonFileAuditSource {
@@ -203,7 +321,13 @@ impl JsonFileAuditSource {
         Self {
             root,
             canonical_root,
+            cache: Arc::new(SnapshotCache::default()),
         }
+    }
+
+    /// This source's parse-cache counters (tests and the performance harness).
+    pub fn cache_stats(&self) -> SnapshotCacheStats {
+        self.cache.stats()
     }
 
     /// The directory snapshots are read from.
@@ -211,13 +335,46 @@ impl JsonFileAuditSource {
         &self.root
     }
 
-    /// The file a platform's snapshot lives in.
-    pub fn path_for(&self, platform: PlatformId) -> PathBuf {
-        self.root.join(format!("{}.json", platform.as_str()))
+    /// The file one publisher's platform snapshot lives in:
+    /// `<root>/<publisher>/<platform>.json`. The rule is the runner's own
+    /// [`apex_autopilot::registry::snapshot_path`], the single writer of this
+    /// layout, so the reader and the writer can never drift apart. Only call
+    /// with a valid publisher name; [`Self::load`] re-checks it before
+    /// building any path.
+    pub fn path_for(&self, publisher: &str, platform: PlatformId) -> PathBuf {
+        apex_autopilot::registry::snapshot_path(&self.root, publisher, platform.as_str())
     }
 
-    fn load(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
-        let path = contained_in(&self.canonical_root, self.path_for(platform))?;
+    /// The snapshot plus (when already computed for this file identity) its
+    /// cached report, the resolved path and the stamp under which it may be
+    /// cached. A cache miss reads and parses once and stores the snapshot with
+    /// no report yet.
+    fn read(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Snapshot, Option<AuditReport>, PathBuf, Option<FileStamp>), ApiError> {
+        if !is_valid_publisher(publisher) {
+            return Err(ApiError::BadRequest("invalid_publisher"));
+        }
+        let path = contained_in(&self.canonical_root, self.path_for(publisher, platform))?;
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
+            Err(error) => {
+                return Err(ApiError::Internal(format!(
+                    "stat snapshot {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        let stamp = FileStamp::read(&metadata);
+        if let Some(stamp) = stamp {
+            if let Some((snapshot, report)) = self.cache.get(&path, stamp) {
+                return Ok((snapshot, report, path, Some(stamp)));
+            }
+        }
+        self.cache.reads.fetch_add(1, Ordering::Relaxed);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
@@ -228,6 +385,7 @@ impl JsonFileAuditSource {
                 )));
             }
         };
+        self.cache.parses.fetch_add(1, Ordering::Relaxed);
         let snapshot: Snapshot = serde_json::from_slice(&bytes).map_err(|error| {
             ApiError::Internal(format!("parse snapshot {}: {error}", path.display()))
         })?;
@@ -239,14 +397,47 @@ impl JsonFileAuditSource {
                 platform
             )));
         }
-        Ok(snapshot)
+        if let Some(stamp) = stamp {
+            self.cache.put(&path, stamp, &snapshot);
+        }
+        Ok((snapshot, None, path, stamp))
+    }
+
+    fn load(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError> {
+        self.read(publisher, platform)
+            .map(|(snapshot, _, _, _)| snapshot)
+    }
+
+    fn load_report(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Snapshot, AuditReport), ApiError> {
+        let (snapshot, report, path, stamp) = self.read(publisher, platform)?;
+        if let Some(report) = report {
+            return Ok((snapshot, report));
+        }
+        let report = apex_audit::run(&snapshot);
+        self.cache.report_builds.fetch_add(1, Ordering::Relaxed);
+        if let Some(stamp) = stamp {
+            self.cache.put_report(&path, stamp, &report);
+        }
+        Ok((snapshot, report))
     }
 }
 
 #[async_trait]
 impl AuditSource for JsonFileAuditSource {
-    async fn write(&self, platform: PlatformId, snapshot: &Snapshot) -> Result<(), ApiError> {
-        let path = self.path_for(platform);
+    async fn write(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+        snapshot: &Snapshot,
+    ) -> Result<(), ApiError> {
+        if !is_valid_publisher(publisher) {
+            return Err(ApiError::BadRequest("invalid_publisher"));
+        }
+        let path = self.path_for(publisher, platform);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| ApiError::Internal(format!("snapshot directory: {error}")))?;
@@ -262,37 +453,60 @@ impl AuditSource for JsonFileAuditSource {
         Ok(())
     }
 
-    async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
+    async fn snapshot(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError> {
+        let publisher = publisher.to_string();
         let source = self.clone();
-        tokio::task::spawn_blocking(move || source.load(platform))
+        tokio::task::spawn_blocking(move || source.load(&publisher, platform))
+            .await
+            .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
+    }
+
+    async fn snapshot_report(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Snapshot, AuditReport), ApiError> {
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load_report(&publisher, platform))
             .await
             .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
     }
 }
 
-/// An in-process snapshot map (used by embedders, tests and benchmarks).
+/// An in-process snapshot map keyed by `(publisher, platform)` (used by
+/// embedders, tests and benchmarks).
 #[derive(Debug, Clone, Default)]
 pub struct StaticAuditSource {
-    snapshots: HashMap<PlatformId, Snapshot>,
+    snapshots: HashMap<(String, PlatformId), Snapshot>,
 }
 
 impl StaticAuditSource {
-    /// Build from a platform -> snapshot map.
-    pub fn new(snapshots: HashMap<PlatformId, Snapshot>) -> Self {
+    /// Build from a `(publisher, platform) -> snapshot` map.
+    pub fn new(snapshots: HashMap<(String, PlatformId), Snapshot>) -> Self {
         Self { snapshots }
     }
 
-    /// Add or replace one platform's snapshot.
-    pub fn insert(&mut self, platform: PlatformId, snapshot: Snapshot) {
-        self.snapshots.insert(platform, snapshot);
+    /// Add or replace one publisher's platform snapshot.
+    pub fn insert(
+        &mut self,
+        publisher: impl Into<String>,
+        platform: PlatformId,
+        snapshot: Snapshot,
+    ) {
+        self.snapshots
+            .insert((publisher.into(), platform), snapshot);
     }
 }
 
 #[async_trait]
 impl AuditSource for StaticAuditSource {
-    async fn snapshot(&self, platform: PlatformId) -> Result<Snapshot, ApiError> {
+    async fn snapshot(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError> {
+        if !is_valid_publisher(publisher) {
+            return Err(ApiError::BadRequest("invalid_publisher"));
+        }
         self.snapshots
-            .get(&platform)
+            .get(&(publisher.to_string(), platform))
             .cloned()
             .ok_or(ApiError::NotFound)
     }
@@ -358,6 +572,15 @@ struct LedgerCache {
     entries: Mutex<HashMap<PathBuf, CachedLedger>>,
     verifications: AtomicU64,
     materializations: AtomicU64,
+}
+
+/// Observable counters of [`FileLedgerSource`]'s verified-record cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LedgerCacheStats {
+    /// Full chain verifications (one per cache miss).
+    pub verifications: u64,
+    /// Cached record clones handed to a reader.
+    pub materializations: u64,
 }
 
 impl LedgerCache {
@@ -430,6 +653,15 @@ impl FileLedgerSource {
     /// The file a publisher's ledger lives in (only call with a valid name).
     pub fn path_for(&self, publisher: &str) -> PathBuf {
         self.root.join(format!("{publisher}.jsonl"))
+    }
+
+    /// This source's verified-record cache counters (tests and the
+    /// performance harness).
+    pub fn cache_stats(&self) -> LedgerCacheStats {
+        LedgerCacheStats {
+            verifications: self.cache.verifications.load(Ordering::Relaxed),
+            materializations: self.cache.materializations.load(Ordering::Relaxed),
+        }
     }
 
     fn load(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError> {
@@ -617,7 +849,13 @@ mod tests {
 
         let audit = JsonFileAuditSource::new("/tmp/apex");
         assert_eq!(audit.root(), std::path::Path::new("/tmp/apex"));
-        assert!(audit.path_for(PlatformId::Admob).ends_with("admob.json"));
+        assert!(audit
+            .path_for("pub1", PlatformId::Admob)
+            .ends_with("pub1/admob.json"));
+        assert_eq!(
+            audit.path_for("pub1", PlatformId::Admob),
+            std::path::Path::new("/tmp/apex/pub1/admob.json")
+        );
 
         let mut keys = HashMap::new();
         keys.insert(
@@ -658,19 +896,257 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let source = JsonFileAuditSource::new(&dir);
         assert!(
-            source.snapshot(PlatformId::AppLovinMax).await.is_err(),
+            source
+                .snapshot("pub1", PlatformId::AppLovinMax)
+                .await
+                .is_err(),
             "nothing yet"
         );
         source
-            .write(PlatformId::AppLovinMax, &snapshot)
+            .write("pub1", PlatformId::AppLovinMax, &snapshot)
             .await
             .expect("write");
-        assert!(source.path_for(PlatformId::AppLovinMax).exists(), "written");
+        assert!(
+            source.path_for("pub1", PlatformId::AppLovinMax).exists(),
+            "written"
+        );
         let read = source
-            .snapshot(PlatformId::AppLovinMax)
+            .snapshot("pub1", PlatformId::AppLovinMax)
             .await
             .expect("read");
         assert_eq!(read.fetched_at_unix_ms, 7);
+        // A second publisher has no file even though one exists for pub1:
+        // snapshots never leak across publishers.
+        assert!(matches!(
+            source.snapshot("pub2", PlatformId::AppLovinMax).await,
+            Err(ApiError::NotFound)
+        ));
+        // A hostile publisher name is refused before any path is built.
+        assert!(matches!(
+            source.snapshot("../etc", PlatformId::AppLovinMax).await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
+        assert!(matches!(
+            source
+                .write("a/b", PlatformId::AppLovinMax, &snapshot)
+                .await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn empty_snapshot(platform: PlatformId, fetched_at_unix_ms: i64) -> Snapshot {
+        Snapshot {
+            platform,
+            fetched_at_unix_ms,
+            ad_units: vec![],
+            waterfall: vec![],
+            mediation_groups: vec![],
+            bidder_accounts: vec![],
+            country_revenue: vec![],
+            app_ads_txt: apex_audit::AppAdsTxt {
+                present: false,
+                lines: vec![],
+                expected_networks: vec![],
+            },
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+        }
+    }
+
+    /// A console page loads one publisher's snapshot on every request. The
+    /// unchanged file must be read and parsed once, then answered from the
+    /// cache (including across clones of the source, which share the cache).
+    #[tokio::test]
+    async fn snapshots_are_parsed_once_per_unchanged_file() {
+        let dir = std::env::temp_dir().join(format!("apex-snapshot-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = JsonFileAuditSource::new(&dir);
+        source
+            .write(
+                "pub1",
+                PlatformId::Admob,
+                &empty_snapshot(PlatformId::Admob, 7),
+            )
+            .await
+            .expect("write");
+
+        let first = source
+            .snapshot("pub1", PlatformId::Admob)
+            .await
+            .expect("first read");
+        assert_eq!(first.fetched_at_unix_ms, 7);
+        let stats = source.cache_stats();
+        assert_eq!(stats.reads, 1, "the first read reads and parses");
+        assert_eq!(stats.parses, 1);
+        assert_eq!(stats.hits, 0);
+
+        // Repeated loads (and a clone, as every request handler holds one) are
+        // cache hits: no read, no parse.
+        let clone = source.clone();
+        for _ in 0..3 {
+            let again = clone
+                .snapshot("pub1", PlatformId::Admob)
+                .await
+                .expect("cached read");
+            assert_eq!(again.fetched_at_unix_ms, 7);
+        }
+        let stats = source.cache_stats();
+        assert_eq!(stats.reads, 1, "no file read on a cache hit");
+        assert_eq!(stats.parses, 1, "no JSON parse on a cache hit");
+        assert_eq!(stats.hits, 3);
+
+        // A rewrite changes the hardened stamp, so the next read parses again.
+        source
+            .write(
+                "pub1",
+                PlatformId::Admob,
+                &empty_snapshot(PlatformId::Admob, 8),
+            )
+            .await
+            .expect("rewrite");
+        let changed = source
+            .snapshot("pub1", PlatformId::Admob)
+            .await
+            .expect("changed read");
+        assert_eq!(changed.fetched_at_unix_ms, 8);
+        let stats = source.cache_stats();
+        assert_eq!(stats.reads, 2);
+        assert_eq!(stats.parses, 2);
+        assert_eq!(stats.hits, 3, "only a stamp change re-parses");
+
+        // A missing snapshot and an invalid publisher never touch the cache.
+        assert!(matches!(
+            source.snapshot("pub2", PlatformId::Admob).await,
+            Err(ApiError::NotFound)
+        ));
+        assert!(matches!(
+            source.snapshot("../etc", PlatformId::Admob).await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
+        let unchanged = source.cache_stats();
+        assert_eq!(unchanged.reads, 2);
+        assert_eq!(unchanged.parses, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The console renders the report on the overview, report, finding and
+    /// CSV pages. The engine runs once per file identity, not once per page.
+    #[tokio::test]
+    async fn audit_reports_are_computed_once_per_unchanged_snapshot() {
+        let dir = std::env::temp_dir().join(format!("apex-report-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = JsonFileAuditSource::new(&dir);
+        source
+            .write(
+                "pub1",
+                PlatformId::Admob,
+                &empty_snapshot(PlatformId::Admob, 7),
+            )
+            .await
+            .expect("write");
+
+        let (snapshot, report) = source
+            .snapshot_report("pub1", PlatformId::Admob)
+            .await
+            .expect("first report");
+        assert_eq!(snapshot.fetched_at_unix_ms, 7);
+        assert_eq!(source.cache_stats().parses, 1);
+        assert_eq!(source.cache_stats().report_builds, 1);
+
+        // A second page (and a clone, as the handlers hold) reuses both the
+        // parsed snapshot and the computed report.
+        for _ in 0..3 {
+            let (_, again) = source
+                .clone()
+                .snapshot_report("pub1", PlatformId::Admob)
+                .await
+                .expect("cached report");
+            assert_eq!(again.findings.len(), report.findings.len());
+        }
+        let stats = source.cache_stats();
+        assert_eq!(stats.parses, 1, "no re-parse for the report");
+        assert_eq!(stats.report_builds, 1, "no re-run of the audit engine");
+        assert_eq!(stats.hits, 3);
+
+        // A plain snapshot read shares the same entry.
+        source
+            .snapshot("pub1", PlatformId::Admob)
+            .await
+            .expect("snapshot");
+        assert_eq!(source.cache_stats().hits, 4);
+        assert_eq!(source.cache_stats().report_builds, 1);
+
+        // A changed file invalidates both.
+        source
+            .write(
+                "pub1",
+                PlatformId::Admob,
+                &empty_snapshot(PlatformId::Admob, 8),
+            )
+            .await
+            .expect("rewrite");
+        source
+            .snapshot_report("pub1", PlatformId::Admob)
+            .await
+            .expect("changed report");
+        let stats = source.cache_stats();
+        assert_eq!(stats.parses, 2, "the changed file re-parses");
+        assert_eq!(stats.report_builds, 2, "and the report is rebuilt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A same-length rewrite whose mtime is restored must still re-parse:
+    /// the Unix ctime is part of the cache key. A size+mtime pair cache would
+    /// serve the stale snapshot here.
+    #[tokio::test]
+    async fn snapshot_cache_detects_a_restored_mtime_rewrite() {
+        let dir = std::env::temp_dir().join(format!("apex-snapshot-ctime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = JsonFileAuditSource::new(&dir);
+        let first = empty_snapshot(PlatformId::Admob, 7);
+        let second = empty_snapshot(PlatformId::Admob, 8);
+        source
+            .write("pub1", PlatformId::Admob, &first)
+            .await
+            .expect("write");
+        source
+            .snapshot("pub1", PlatformId::Admob)
+            .await
+            .expect("first read");
+
+        let path = source.path_for("pub1", PlatformId::Admob);
+        let metadata = std::fs::metadata(&path).expect("stat");
+        let modified = metadata.modified().expect("mtime");
+        let replacement = serde_json::to_vec_pretty(&second).expect("serialize");
+        assert_eq!(
+            metadata.len(),
+            replacement.len() as u64,
+            "the rewrite keeps the length"
+        );
+        std::fs::write(&path, &replacement).expect("rewrite");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(modified)
+            .expect("restore mtime");
+
+        let rewritten = source
+            .snapshot("pub1", PlatformId::Admob)
+            .await
+            .expect("second read");
+        assert_eq!(rewritten.fetched_at_unix_ms, 8, "the new bytes are served");
+        assert_eq!(source.cache_stats().parses, 2, "the rewrite re-parses");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -854,8 +1330,12 @@ mod tests {
     async fn static_sources_report_missing_entries_as_not_found() {
         let audit = StaticAuditSource::default();
         assert!(matches!(
-            audit.snapshot(PlatformId::Admob).await,
+            audit.snapshot("pub1", PlatformId::Admob).await,
             Err(ApiError::NotFound)
+        ));
+        assert!(matches!(
+            audit.snapshot("a/b", PlatformId::Admob).await,
+            Err(ApiError::BadRequest("invalid_publisher"))
         ));
         let ledger = StaticLedgerSource::default();
         assert!(matches!(

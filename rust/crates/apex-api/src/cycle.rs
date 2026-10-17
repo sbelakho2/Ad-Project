@@ -127,7 +127,7 @@ impl CycleRunner for LedgerOnlyRunner {
         if let Some(policy) = &request.policy {
             Self::validate_policy(policy)?;
         }
-        let snapshot = self.audit.snapshot(platform).await?;
+        let snapshot = self.audit.snapshot(publisher, platform).await?;
         let report = apex_audit::run(&snapshot);
         let critical_findings = report
             .findings

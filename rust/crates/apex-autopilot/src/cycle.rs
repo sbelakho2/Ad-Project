@@ -7,8 +7,6 @@
 //! enforced by the loop itself, so a new publisher's first thirty days
 //! produce proposals without writing anything.
 
-use std::path::Path;
-
 use apex_audit::Snapshot;
 use apex_proof::LedgerLog;
 
@@ -30,99 +28,107 @@ pub struct CycleJobReport {
     pub awaiting_verification: Vec<String>,
 }
 
-/// Run one write cycle from `snapshot_path`: load the audit snapshot, load
+/// Run one write cycle from `snapshot_paths`: load each audit snapshot, load
 /// the persisted bucket model when present, generate the ranked floor
-/// proposals, and run the gated loop.
+/// proposals per snapshot, and run the gated loop. A publisher with several
+/// platforms is handed several files (its own per-platform snapshots); the
+/// default single-file call is the one-element list. Proposals from every
+/// snapshot are accumulated, so a MAX snapshot yields floor moves while a
+/// LevelPlay or AdMob snapshot (which carry no ad units) yields none.
 pub async fn run(
     runner: &Runner,
     ledger: &mut dyn LedgerLog,
-    snapshot_path: &Path,
+    snapshot_paths: &[std::path::PathBuf],
     now_unix_ms: i64,
 ) -> Result<CycleJobReport, crate::model::PlanError> {
-    let raw = std::fs::read_to_string(snapshot_path).map_err(|error| {
-        crate::model::PlanError::Validation(format!(
-            "snapshot {}: {error}",
-            snapshot_path.display()
-        ))
-    })?;
-    let snapshot: Snapshot = serde_json::from_str(&raw)
-        .map_err(|error| crate::model::PlanError::Validation(format!("snapshot json: {error}")))?;
     let priors = runner.runner_priors().cloned().unwrap_or_default();
-    // The cycle's timestamp seeds the Thompson draws, so a replay of the same
-    // cycle reproduces the same plan (the same seam `settle` seeds its
-    // bootstrap with).
-    let proposals = crate::proposals::floor_proposals(
-        &snapshot,
-        &priors,
-        runner.policy(),
-        now_unix_ms.max(0) as u64,
-    );
-    let mut report = CycleJobReport {
-        proposed: proposals.len(),
-        ..CycleJobReport::default()
-    };
-    if proposals.is_empty() {
-        return Ok(report);
-    }
-    let outcome = crate::plan::run_cycle_observed(
-        runner.platform_ops(),
-        ledger,
-        runner.policy(),
-        &[],
-        proposals.clone(),
-        runner.events().map(AsRef::as_ref),
-        now_unix_ms,
-    )
-    .await?;
-    report.applied = outcome.applied;
-    report.skipped = outcome.skipped;
-    report.awaiting_approval = outcome.awaiting_approval;
-    report.awaiting_verification = outcome.awaiting_verification.clone();
-
-    // A proposal held for approval is a durable fact and a customer message:
-    // `proposal_created` lands in analytics and the approval request goes to
-    // the authorized contacts. The message states it does not grant approval.
-    let snapshot = apex_audit::snapshot_digest(&snapshot);
-    let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
-    for outcome in &outcome.outcomes {
-        let ActionOutcome::AwaitingApproval { idempotency_key } = outcome else {
+    let mut report = CycleJobReport::default();
+    for snapshot_path in snapshot_paths {
+        let raw = std::fs::read_to_string(snapshot_path).map_err(|error| {
+            crate::model::PlanError::Validation(format!(
+                "snapshot {}: {error}",
+                snapshot_path.display()
+            ))
+        })?;
+        let snapshot: Snapshot = serde_json::from_str(&raw).map_err(|error| {
+            crate::model::PlanError::Validation(format!("snapshot json: {error}"))
+        })?;
+        // The cycle's timestamp seeds the Thompson draws, so a replay of the
+        // same cycle reproduces the same plan (the same seam `settle` seeds
+        // its bootstrap with).
+        let proposals = crate::proposals::floor_proposals(
+            &snapshot,
+            &priors,
+            runner.policy(),
+            now_unix_ms.max(0) as u64,
+        );
+        report.proposed += proposals.len();
+        if proposals.is_empty() {
             continue;
-        };
-        let proposal = proposals.iter().find(|proposal| {
-            crate::keys::idempotency_key(&proposal.action)
-                .ok()
-                .as_deref()
-                == Some(idempotency_key.as_str())
-        });
-        let (test_label, country) = proposal
-            .map(|proposal| crate::notify::proposal_label(&proposal.action))
-            .unwrap_or_else(|| ("Change".to_string(), "all countries".to_string()));
-        let proposal_id = crate::notify::proposal_id_for(idempotency_key);
-        let change_hash = proposal
-            .and_then(|proposal| serde_json::to_string(&proposal.action).ok())
-            .map(|json| crate::notify::change_hash(&json))
-            .unwrap_or_else(|| crate::notify::change_hash(idempotency_key));
-        if let Some(events) = runner.events() {
-            events
-                .proposal_created(
-                    &proposal_id,
-                    &snapshot,
-                    &change_hash,
-                    &policy_version,
-                    now_unix_ms,
-                )
-                .await;
         }
-        if let (Some(notify), false) = (runner.notify(), runner.publisher_id().is_empty()) {
-            notify
-                .approval_requested(
-                    runner.publisher_id(),
-                    &proposal_id,
-                    &test_label,
-                    &country,
-                    now_unix_ms,
-                )
-                .await;
+        let outcome = crate::plan::run_cycle_observed(
+            runner.platform_ops(),
+            ledger,
+            runner.policy(),
+            &[],
+            proposals.clone(),
+            runner.events().map(AsRef::as_ref),
+            now_unix_ms,
+        )
+        .await?;
+        report.applied += outcome.applied;
+        report.skipped += outcome.skipped;
+        report.awaiting_approval += outcome.awaiting_approval;
+        report
+            .awaiting_verification
+            .extend(outcome.awaiting_verification.iter().cloned());
+
+        // A proposal held for approval is a durable fact and a customer
+        // message: `proposal_created` lands in analytics and the approval
+        // request goes to the authorized contacts. The message states it does
+        // not grant approval.
+        let snapshot_digest = apex_audit::snapshot_digest(&snapshot);
+        let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
+        for outcome in &outcome.outcomes {
+            let ActionOutcome::AwaitingApproval { idempotency_key } = outcome else {
+                continue;
+            };
+            let proposal = proposals.iter().find(|proposal| {
+                crate::keys::idempotency_key(&proposal.action)
+                    .ok()
+                    .as_deref()
+                    == Some(idempotency_key.as_str())
+            });
+            let (test_label, country) = proposal
+                .map(|proposal| crate::notify::proposal_label(&proposal.action))
+                .unwrap_or_else(|| ("Change".to_string(), "all countries".to_string()));
+            let proposal_id = crate::notify::proposal_id_for(idempotency_key);
+            let change_hash = proposal
+                .and_then(|proposal| serde_json::to_string(&proposal.action).ok())
+                .map(|json| crate::notify::change_hash(&json))
+                .unwrap_or_else(|| crate::notify::change_hash(idempotency_key));
+            if let Some(events) = runner.events() {
+                events
+                    .proposal_created(
+                        &proposal_id,
+                        &snapshot_digest,
+                        &change_hash,
+                        &policy_version,
+                        now_unix_ms,
+                    )
+                    .await;
+            }
+            if let (Some(notify), false) = (runner.notify(), runner.publisher_id().is_empty()) {
+                notify
+                    .approval_requested(
+                        runner.publisher_id(),
+                        &proposal_id,
+                        &test_label,
+                        &country,
+                        now_unix_ms,
+                    )
+                    .await;
+            }
         }
     }
     Ok(report)
@@ -251,9 +257,14 @@ mod tests {
         .with_priors(seeded_priors(), dir.join("priors.json"));
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[1u8; 32]));
 
-        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
-            .await
-            .expect("cycle");
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
         assert!(report.proposed > 0, "the model proposes a floor move");
         assert!(report.applied >= 1, "the write loop started experiments");
         assert!(
@@ -281,9 +292,14 @@ mod tests {
             apex_lift::guardrails::FillFormat::Rewarded,
         );
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[2u8; 32]));
-        let report = run(&runner, &mut ledger, &snapshot_path, 1)
-            .await
-            .expect("cycle");
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1,
+        )
+        .await
+        .expect("cycle");
         assert!(
             report.proposed > 0,
             "the skeptical prior now proposes via the Thompson draw"
@@ -319,9 +335,14 @@ mod tests {
         );
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[5u8; 32]));
 
-        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
-            .await
-            .expect("the cycle continues past unverified operations");
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("the cycle continues past unverified operations");
         assert!(report.proposed > 0, "the fixture proposes floor moves");
         assert_eq!(report.applied, 0, "nothing is written unverified");
         assert_eq!(report.skipped, report.proposed as u32);
@@ -374,9 +395,14 @@ mod tests {
         .with_events(events);
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[3u8; 32]));
 
-        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
-            .await
-            .expect("cycle");
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
         assert!(report.applied >= 1);
         let stored = store.load_events().await.expect("events");
         let types: Vec<&str> = stored
@@ -440,9 +466,14 @@ mod tests {
         .with_events(events);
         let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[4u8; 32]));
 
-        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
-            .await
-            .expect("cycle");
+        let report = run(
+            &runner,
+            &mut ledger,
+            std::slice::from_ref(&snapshot_path),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("cycle");
         assert!(report.applied == 0);
         let types: Vec<String> = store
             .load_events()

@@ -420,76 +420,40 @@ impl From<SchemaError> for ProjectionError {
     }
 }
 
-/// Compute the customer daily projection.
+/// The two report-day projections, computed together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportDayProjections {
+    /// The customer daily rows.
+    pub customer_daily: Vec<CustomerDailyRow>,
+    /// The platform daily rows.
+    pub platform_daily: Vec<PlatformDailyRow>,
+}
+
+/// Fold both report-day projections in ONE pass over the source rows.
 ///
-/// Only report days with a known revenue **and** a known currency become
-/// money rows: a missing amount is never folded into a zero. Days whose rows
-/// lack an amount stay visible as gaps in the data-quality read model.
-/// Impressions are summed only when every contributing row supplied them;
-/// otherwise the aggregate is `None` (unknown), never zero.
-pub fn compute_customer_daily(report_days: &[ReportDayRow]) -> Vec<CustomerDailyRow> {
-    struct Accumulator {
+/// A rebuild needs both and loads the report days once; before this fold the
+/// same slice was walked twice. The per-row rules are unchanged:
+///
+/// - Only report days with a known revenue **and** a known currency become
+///   money rows: a missing amount is never folded into a zero. Days whose rows
+///   lack an amount stay visible as gaps in the data-quality read model.
+/// - Impressions are summed only when every contributing row supplied them;
+///   otherwise the aggregate is `None` (unknown), never zero.
+/// - Platform distinct-account counts fold through sets: a linear `contains`
+///   over the accumulated account list would make one day cell quadratic in
+///   its account count.
+///
+/// The separate [`compute_customer_daily`] and [`compute_platform_daily`]
+/// helpers delegate here, so every caller shares the exact same fold.
+pub fn compute_report_day_projections(report_days: &[ReportDayRow]) -> ReportDayProjections {
+    struct CustomerAccumulator {
         revenue_micros: i64,
         impressions: Option<u64>,
         source_days: u32,
         final_days: u32,
         provisional_days: u32,
     }
-    let mut map: BTreeMap<(String, String, String, String), Accumulator> = BTreeMap::new();
-    for row in report_days {
-        let (Some(revenue_micros), Some(currency)) = (row.revenue_micros, row.currency.as_deref())
-        else {
-            continue;
-        };
-        let key = (
-            row.publisher_id.clone(),
-            row.day.clone(),
-            row.platform.clone(),
-            currency.to_string(),
-        );
-        let accumulator = map.entry(key).or_insert_with(|| Accumulator {
-            revenue_micros: 0,
-            impressions: Some(0),
-            source_days: 0,
-            final_days: 0,
-            provisional_days: 0,
-        });
-        accumulator.revenue_micros = accumulator.revenue_micros.saturating_add(revenue_micros);
-        accumulator.impressions = match (accumulator.impressions, row.impressions) {
-            (Some(sum), Some(value)) => sum.checked_add(value),
-            _ => None,
-        };
-        accumulator.source_days += 1;
-        match row.finality.as_str() {
-            "final" => accumulator.final_days += 1,
-            "provisional" => accumulator.provisional_days += 1,
-            _ => {}
-        }
-    }
-    map.into_iter()
-        .map(
-            |((publisher_id, day, platform, currency), accumulator)| CustomerDailyRow {
-                publisher_id,
-                day,
-                platform,
-                currency,
-                revenue_micros: accumulator.revenue_micros,
-                impressions: accumulator.impressions,
-                source_days: accumulator.source_days,
-                final_days: accumulator.final_days,
-                provisional_days: accumulator.provisional_days,
-            },
-        )
-        .collect()
-}
-
-/// Compute the platform daily projection.
-///
-/// The distinct-account counts fold through sets: a linear `contains` over
-/// the accumulated account list would make one day cell quadratic in its
-/// account count, and a rebuild folds every day of the 90-day window at once.
-pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDailyRow> {
-    struct Accumulator {
+    struct PlatformAccumulator {
         revenue_micros: i64,
         impressions: Option<u64>,
         // Only the distinct counts are read, so hashing suffices; the
@@ -497,46 +461,105 @@ pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDaily
         final_accounts: std::collections::HashSet<String>,
         provisional_accounts: std::collections::HashSet<String>,
     }
-    let mut map: BTreeMap<(String, String, String), Accumulator> = BTreeMap::new();
+    let mut customers: BTreeMap<(String, String, String, String), CustomerAccumulator> =
+        BTreeMap::new();
+    let mut platforms: BTreeMap<(String, String, String), PlatformAccumulator> = BTreeMap::new();
     for row in report_days {
         let (Some(revenue_micros), Some(currency)) = (row.revenue_micros, row.currency.as_deref())
         else {
             continue;
         };
-        let key = (row.platform.clone(), row.day.clone(), currency.to_string());
-        let accumulator = map.entry(key).or_insert_with(|| Accumulator {
-            revenue_micros: 0,
-            impressions: Some(0),
-            final_accounts: std::collections::HashSet::new(),
-            provisional_accounts: std::collections::HashSet::new(),
-        });
-        accumulator.revenue_micros = accumulator.revenue_micros.saturating_add(revenue_micros);
-        accumulator.impressions = match (accumulator.impressions, row.impressions) {
+        let currency = currency.to_string();
+        let customer = customers
+            .entry((
+                row.publisher_id.clone(),
+                row.day.clone(),
+                row.platform.clone(),
+                currency.clone(),
+            ))
+            .or_insert_with(|| CustomerAccumulator {
+                revenue_micros: 0,
+                impressions: Some(0),
+                source_days: 0,
+                final_days: 0,
+                provisional_days: 0,
+            });
+        customer.revenue_micros = customer.revenue_micros.saturating_add(revenue_micros);
+        customer.impressions = match (customer.impressions, row.impressions) {
+            (Some(sum), Some(value)) => sum.checked_add(value),
+            _ => None,
+        };
+        customer.source_days += 1;
+        match row.finality.as_str() {
+            "final" => customer.final_days += 1,
+            "provisional" => customer.provisional_days += 1,
+            _ => {}
+        }
+
+        let platform = platforms
+            .entry((row.platform.clone(), row.day.clone(), currency))
+            .or_insert_with(|| PlatformAccumulator {
+                revenue_micros: 0,
+                impressions: Some(0),
+                final_accounts: std::collections::HashSet::new(),
+                provisional_accounts: std::collections::HashSet::new(),
+            });
+        platform.revenue_micros = platform.revenue_micros.saturating_add(revenue_micros);
+        platform.impressions = match (platform.impressions, row.impressions) {
             (Some(sum), Some(value)) => sum.checked_add(value),
             _ => None,
         };
         let accounts = if row.finality == "final" {
-            &mut accumulator.final_accounts
+            &mut platform.final_accounts
         } else if row.finality == "provisional" {
-            &mut accumulator.provisional_accounts
+            &mut platform.provisional_accounts
         } else {
             continue;
         };
         accounts.insert(row.platform_account_id.clone());
     }
-    map.into_iter()
-        .map(
-            |((platform, day, currency), accumulator)| PlatformDailyRow {
-                platform,
-                day,
-                currency,
-                revenue_micros: accumulator.revenue_micros,
-                impressions: accumulator.impressions,
-                final_accounts: accumulator.final_accounts.len() as u32,
-                provisional_accounts: accumulator.provisional_accounts.len() as u32,
-            },
-        )
-        .collect()
+    ReportDayProjections {
+        customer_daily: customers
+            .into_iter()
+            .map(
+                |((publisher_id, day, platform, currency), accumulator)| CustomerDailyRow {
+                    publisher_id,
+                    day,
+                    platform,
+                    currency,
+                    revenue_micros: accumulator.revenue_micros,
+                    impressions: accumulator.impressions,
+                    source_days: accumulator.source_days,
+                    final_days: accumulator.final_days,
+                    provisional_days: accumulator.provisional_days,
+                },
+            )
+            .collect(),
+        platform_daily: platforms
+            .into_iter()
+            .map(
+                |((platform, day, currency), accumulator)| PlatformDailyRow {
+                    platform,
+                    day,
+                    currency,
+                    revenue_micros: accumulator.revenue_micros,
+                    impressions: accumulator.impressions,
+                    final_accounts: accumulator.final_accounts.len() as u32,
+                    provisional_accounts: accumulator.provisional_accounts.len() as u32,
+                },
+            )
+            .collect(),
+    }
+}
+
+/// Compute the customer daily projection.
+pub fn compute_customer_daily(report_days: &[ReportDayRow]) -> Vec<CustomerDailyRow> {
+    compute_report_day_projections(report_days).customer_daily
+}
+
+/// Compute the platform daily projection.
+pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDailyRow> {
+    compute_report_day_projections(report_days).platform_daily
 }
 
 /// Compute the lifecycle cohort projection: accounts grouped by stage and by
@@ -582,44 +605,39 @@ pub fn compute_operator_queues(
     };
     let publisher_of = |event: &DomainEvent| event.publisher_id.clone().unwrap_or_default();
 
+    // One pass over the events collects every fact the five queues need.
+    // Before this fold each queue re-scanned the whole slice, so a rebuild
+    // walked the same 100k-event history five times.
+    let fee_key = |event: &DomainEvent| -> Option<(String, String)> {
+        Some((
+            event.payload.change_id.clone()?,
+            event.payload.period.clone()?,
+        ))
+    };
     // Incidents: latest state per incident identity.
     let mut incidents: BTreeMap<String, &DomainEvent> = BTreeMap::new();
-    for event in events {
-        if event.event_type != EventType::IncidentChanged {
-            continue;
-        }
-        let Some(incident_id) = event.payload.incident_id.clone() else {
-            continue;
-        };
-        match incidents.get(&incident_id) {
-            Some(existing) if existing.occurred_at_utc >= event.occurred_at_utc => {}
-            _ => {
-                incidents.insert(incident_id, event);
-            }
-        }
-    }
-    for (incident_id, event) in &incidents {
-        if event.payload.state.as_deref() == Some("resolved") {
-            continue;
-        }
-        rows.push(OperatorQueueRow {
-            queue: "incidents".into(),
-            object_id: incident_id.clone(),
-            publisher_id: publisher_of(event),
-            severity: event.outcome.clone().unwrap_or_else(|| "unknown".into()),
-            age_seconds: age_seconds(event.occurred_at_utc),
-            owner: event.payload.owner.clone(),
-            next_action: "review_incident".into(),
-        });
-    }
-
-    // Due decisions: a started experiment whose registered window completed
-    // with no decision recorded.
+    // Due decisions: window registration, start and decision facts.
     let mut window_days: BTreeMap<String, u32> = BTreeMap::new();
     let mut started: BTreeMap<String, &DomainEvent> = BTreeMap::new();
     let mut decided: BTreeMap<String, UtcMillis> = BTreeMap::new();
+    // Overdue jobs and held fees keep their source event until emission, so
+    // the final row order is exactly the pre-fold order.
+    let mut job_events: Vec<&DomainEvent> = Vec::new();
+    let mut fee_held_events: Vec<&DomainEvent> = Vec::new();
+    let mut released: BTreeMap<(String, String), UtcMillis> = BTreeMap::new();
     for event in events {
         match event.event_type {
+            EventType::IncidentChanged => {
+                let Some(incident_id) = event.payload.incident_id.clone() else {
+                    continue;
+                };
+                match incidents.get(&incident_id) {
+                    Some(existing) if existing.occurred_at_utc >= event.occurred_at_utc => {}
+                    _ => {
+                        incidents.insert(incident_id, event);
+                    }
+                }
+            }
             EventType::ExperimentRegistered => {
                 if let (Some(experiment_id), Some(days)) = (
                     event.payload.experiment_id.clone(),
@@ -646,9 +664,45 @@ pub fn compute_operator_queues(
                         .or_insert(decided_at);
                 }
             }
+            EventType::JobRun => {
+                let outcome = event.outcome.as_deref().unwrap_or("");
+                if matches!(outcome, "failed" | "missed") {
+                    job_events.push(event);
+                }
+            }
+            EventType::FeeInvoiceIssued | EventType::FeeCredited => {
+                if let Some(key) = fee_key(event) {
+                    released
+                        .entry(key)
+                        .and_modify(|existing| {
+                            if event.occurred_at_utc > *existing {
+                                *existing = event.occurred_at_utc;
+                            }
+                        })
+                        .or_insert(event.occurred_at_utc);
+                }
+            }
+            EventType::FeeHeld => fee_held_events.push(event),
             _ => {}
         }
     }
+    for (incident_id, event) in &incidents {
+        if event.payload.state.as_deref() == Some("resolved") {
+            continue;
+        }
+        rows.push(OperatorQueueRow {
+            queue: "incidents".into(),
+            object_id: incident_id.clone(),
+            publisher_id: publisher_of(event),
+            severity: event.outcome.clone().unwrap_or_else(|| "unknown".into()),
+            age_seconds: age_seconds(event.occurred_at_utc),
+            owner: event.payload.owner.clone(),
+            next_action: "review_incident".into(),
+        });
+    }
+
+    // Due decisions: a started experiment whose registered window completed
+    // with no decision recorded.
     for (experiment_id, start) in &started {
         if decided.contains_key(experiment_id) {
             continue;
@@ -703,14 +757,7 @@ pub fn compute_operator_queues(
     }
 
     // Overdue jobs: a job run whose durable outcome is failed or missed.
-    for event in events {
-        if event.event_type != EventType::JobRun {
-            continue;
-        }
-        let outcome = event.outcome.as_deref().unwrap_or("");
-        if !matches!(outcome, "failed" | "missed") {
-            continue;
-        }
+    for event in job_events {
         rows.push(OperatorQueueRow {
             queue: "overdue_jobs".into(),
             object_id: event.payload.job_id.clone().unwrap_or_default(),
@@ -724,35 +771,7 @@ pub fn compute_operator_queues(
 
     // Held fees: a hold without a later invoice or credit for the same
     // change and period.
-    let fee_key = |event: &DomainEvent| -> Option<(String, String)> {
-        Some((
-            event.payload.change_id.clone()?,
-            event.payload.period.clone()?,
-        ))
-    };
-    let mut released: BTreeMap<(String, String), UtcMillis> = BTreeMap::new();
-    for event in events {
-        if !matches!(
-            event.event_type,
-            EventType::FeeInvoiceIssued | EventType::FeeCredited
-        ) {
-            continue;
-        }
-        if let Some(key) = fee_key(event) {
-            released
-                .entry(key)
-                .and_modify(|existing| {
-                    if event.occurred_at_utc > *existing {
-                        *existing = event.occurred_at_utc;
-                    }
-                })
-                .or_insert(event.occurred_at_utc);
-        }
-    }
-    for event in events {
-        if event.event_type != EventType::FeeHeld {
-            continue;
-        }
+    for event in fee_held_events {
         let Some(key) = fee_key(event) else {
             continue;
         };
@@ -1019,17 +1038,22 @@ async fn compute_all<S: ProjectionStore + ?Sized>(
     let report_days = store.load_report_days().await?;
     let accounts = store.load_accounts().await?;
     let horizon = data_horizon(&events)?;
+    // Both report-day projections share one fold over the source rows.
+    let ReportDayProjections {
+        customer_daily,
+        platform_daily,
+    } = compute_report_day_projections(&report_days);
     let rows = vec![
         (
             ProjectionName::CustomerDaily,
-            compute_customer_daily(&report_days)
+            customer_daily
                 .into_iter()
                 .map(ProjectionRow::CustomerDaily)
                 .collect(),
         ),
         (
             ProjectionName::PlatformDaily,
-            compute_platform_daily(&report_days)
+            platform_daily
                 .into_iter()
                 .map(ProjectionRow::PlatformDaily)
                 .collect(),
@@ -2022,5 +2046,17 @@ mod tests {
             optimized[0].final_accounts + optimized[0].provisional_accounts,
             10_000
         );
+    }
+
+    #[test]
+    fn the_combined_fold_answers_like_both_public_helpers() {
+        let mut days = known_value_report_days();
+        let mut provisional = days[0].clone();
+        provisional.platform_account_id = "max_acct_2".into();
+        provisional.finality = "provisional".into();
+        days.push(provisional);
+        let folded = compute_report_day_projections(&days);
+        assert_eq!(folded.customer_daily, compute_customer_daily(&days));
+        assert_eq!(folded.platform_daily, compute_platform_daily(&days));
     }
 }

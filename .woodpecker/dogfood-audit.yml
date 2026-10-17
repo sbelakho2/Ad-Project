@@ -7,9 +7,17 @@
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so a bare `cd` persists and a second `cd rust` would fail. Every
 # command below is absolute and idempotent for that reason.
+# Path relevance: every gate here reads the Rust tree, the coverage tooling,
+# the dogfood catalog, the manifest or the Makefile, so the lane watches them.
 when:
   - event: [push, pull_request]
     branch: [main, master]
+    path:
+      - rust/**
+      - tools/coverage/**
+      - tools/dogfood/**
+      - coverage-manifest.json
+      - Makefile
 
 steps:
   build-apex-tools:

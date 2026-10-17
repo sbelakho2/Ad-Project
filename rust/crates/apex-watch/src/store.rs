@@ -2,8 +2,9 @@
 //!
 //! One JSONL file ([`SubscriberStore::subscribers_path`], `subscribers.jsonl`
 //! under the watch root) holds every version of every subscriber row. The
-//! newest row per `id` wins, so `subscribe`, `cancel` and the daily or
-//! monthly field updates all append a full row instead of editing in place.
+//! newest row per `id` wins, so `subscribe_pending`, `confirm_email`,
+//! `activate`, `cancel` and the daily or monthly field updates all append a
+//! full row instead of editing in place.
 //! A malformed line is a typed refusal: a store that cannot prove its rows
 //! must not fabricate a subscriber.
 //!
@@ -12,15 +13,18 @@
 //! the log once instead of once per signup. A successful append advances the
 //! cached fold in place; an append from another process (a changed stamp)
 //! refreshes it exactly once. The cached fold also carries hash indexes
-//! (subscriber id, dedup identity, cancel-token hash) into the ordered rows,
-//! so deduplication, cancellation and in-place updates do not scan the
-//! growing vector.
+//! (subscriber id, dedup identity, cancel-token hash, confirmation-token
+//! hash) into the ordered rows, so deduplication, cancellation, confirmation
+//! and in-place updates do not scan the growing vector.
 //!
-//! `subscribe` deduplicates repeat submissions with the same `(domain,
-//! email)` inside [`DEDUP_WINDOW_MS`], exactly like the free-audit lead
-//! store: the duplicate returns the existing row and appends nothing. Each
-//! new subscription mints a 32-hex-character cancel token; only its SHA-256
-//! hash is stored, and the token is returned exactly once.
+//! `subscribe_pending` deduplicates repeat submissions with the same
+//! `(domain, email)` inside [`DEDUP_WINDOW_MS`], exactly like the free-audit
+//! lead store: the duplicate keeps the reference and gets a freshly minted
+//! confirmation token. The token is 32 lowercase hex characters (the same
+//! shape as the console sign-in token), valid for
+//! [`CONFIRMATION_TTL_MS`](crate::model::CONFIRMATION_TTL_MS), single-use, and only its
+//! SHA-256 hash is stored. The legacy `subscribe` keeps the older immediate
+//! activation used by tools and older tests and mints a cancel token.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -33,8 +37,9 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::model::{
-    publisher_slug_for_domain, validate_watch_signup, Status, SubscribeOutcome, Subscriber,
-    WatchFieldError, WatchSignup,
+    publisher_slug_for_domain, tier_from_evidence, validate_watch_signup, ActivateOutcome,
+    ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome, SubscribeRequest, Subscriber,
+    WatchFieldError, WatchSignup, CONFIRMATION_TOKEN_HEX_LEN, CONFIRMATION_TTL_MS,
 };
 
 /// Environment variable naming the watch root directory.
@@ -71,6 +76,32 @@ pub enum WatchError {
     /// A billing operation failed.
     #[error("billing: {0}")]
     Billing(#[from] apex_billing::BillingError),
+    /// No subscriber row carries the presented reference/id.
+    #[error("no subscriber matches reference '{reference}'")]
+    UnknownSubscriber {
+        /// The reference that matched nothing.
+        reference: String,
+    },
+    /// Activation was asked of a row that is not pending (canceled).
+    #[error("subscriber '{reference}' is {status}, not pending")]
+    NotPending {
+        /// The row's id.
+        reference: String,
+        /// The row's current status.
+        status: Status,
+    },
+    /// The confirmation token is unknown.
+    #[error("the confirmation token is not recognised")]
+    ConfirmationUnknown,
+    /// The confirmation token has expired.
+    #[error("the confirmation token has expired")]
+    ConfirmationExpired,
+    /// The confirmation token was already used (single use).
+    #[error("the confirmation token was already used")]
+    ConfirmationUsed,
+    /// The email was already confirmed by an earlier token.
+    #[error("the email address is already confirmed")]
+    AlreadyConfirmed,
 }
 
 /// The append-only subscriber store.
@@ -171,6 +202,7 @@ struct Folded {
     by_id: HashMap<String, usize>,
     by_dedup: HashMap<DedupKey, Vec<usize>>,
     by_cancel_token: HashMap<String, Vec<usize>>,
+    by_confirmation_token: HashMap<String, Vec<usize>>,
 }
 
 impl Folded {
@@ -179,6 +211,7 @@ impl Folded {
         let mut by_id = HashMap::with_capacity(subscribers.len());
         let mut by_dedup: HashMap<DedupKey, Vec<usize>> = HashMap::new();
         let mut by_cancel_token: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_confirmation_token: HashMap<String, Vec<usize>> = HashMap::new();
         for (index, subscriber) in subscribers.iter().enumerate() {
             by_id.insert(subscriber.id.clone(), index);
             insert_sorted(by_dedup.entry(DedupKey::of(subscriber)).or_default(), index);
@@ -188,6 +221,12 @@ impl Folded {
                     .or_default(),
                 index,
             );
+            if let Some(hash) = &subscriber.confirmation_token_hash {
+                insert_sorted(
+                    by_confirmation_token.entry(hash.clone()).or_default(),
+                    index,
+                );
+            }
         }
         Self {
             stamp,
@@ -195,9 +234,34 @@ impl Folded {
             by_id,
             by_dedup,
             by_cancel_token,
+            by_confirmation_token,
         }
     }
 
+    /// The first row carrying the confirmation `hash`, and how many rows the
+    /// indexed lookup examined.
+    fn find_confirmation(&self, hash: &str) -> (Option<usize>, u64) {
+        let Some(indexes) = self.by_confirmation_token.get(hash) else {
+            return (None, 0);
+        };
+        let mut probes = 0;
+        for &index in indexes {
+            probes += 1;
+            let subscriber = &self.subscribers[index];
+            if subscriber.confirmation_token_hash.as_deref() == Some(hash) {
+                return (Some(index), probes);
+            }
+        }
+        (None, probes)
+    }
+
+    /// The row with `id`, and how many rows the indexed lookup examined.
+    fn find_id(&self, id: &str) -> (Option<usize>, u64) {
+        match self.by_id.get(id) {
+            Some(&index) => (Some(index), 1),
+            None => (None, 0),
+        }
+    }
     /// The first row for `key` inside the repeat-submission window, and how
     /// many rows the indexed lookup examined.
     fn find_dedup(&self, key: &DedupKey, now_ms: i64) -> (Option<usize>, u64) {
@@ -257,6 +321,12 @@ impl Folded {
                     .or_default(),
                 index,
             );
+            if let Some(hash) = &subscriber.confirmation_token_hash {
+                insert_sorted(
+                    self.by_confirmation_token.entry(hash.clone()).or_default(),
+                    index,
+                );
+            }
             0
         }
     }
@@ -282,6 +352,19 @@ impl Folded {
                     .or_default(),
                 index,
             );
+        }
+        if replaced.confirmation_token_hash != subscriber.confirmation_token_hash {
+            if let Some(old_hash) = &replaced.confirmation_token_hash {
+                remove_sorted(&mut self.by_confirmation_token, old_hash, index);
+            }
+            if let Some(new_hash) = &subscriber.confirmation_token_hash {
+                insert_sorted(
+                    self.by_confirmation_token
+                        .entry(new_hash.clone())
+                        .or_default(),
+                    index,
+                );
+            }
         }
     }
 }
@@ -501,6 +584,15 @@ impl SubscriberStore {
             created_ms: now_ms,
             status: Status::Active,
             canceled_ms: None,
+            confirmed: true,
+            confirmation_token_hash: None,
+            confirmation_expires_at: None,
+            confirmation_used_at: None,
+            email_confirmed_at: Some(now_ms),
+            paid_at: Some(now_ms),
+            payment_link: None,
+            shopper_reference: None,
+            stored_payment_method_id: None,
             last_check_at: None,
             last_findings_hash: None,
             last_findings: None,
@@ -508,6 +600,11 @@ impl SubscriberStore {
             cancel_token_hash: sha256_hex(&cancel_token),
             billing: None,
             last_billed_month: None,
+            last_paid_month: None,
+            last_invoice_number: None,
+            last_charge_reference: None,
+            last_charge_amount_micros: None,
+            last_charge_error: None,
         };
         self.append(&mut cached, &subscriber)?;
         Ok(SubscribeOutcome {
@@ -515,6 +612,229 @@ impl SubscriberStore {
             created: true,
             cancel_token: Some(cancel_token),
         })
+    }
+
+    /// Create one pending sign-up: no check runs until the payment is
+    /// accepted and the creating email is confirmed. The tier is derived
+    /// from `request.app_count` (never a checkbox), the subscriber id is the
+    /// durable reference, and the plaintext one-time confirmation token is
+    /// returned exactly once.
+    ///
+    /// A repeat submission for the same `(domain, email)` inside
+    /// [`DEDUP_WINDOW_MS`] is the same subscription: it keeps the reference
+    /// and receives a freshly minted confirmation token instead of a second
+    /// row.
+    pub fn subscribe_pending(
+        &self,
+        now_ms: i64,
+        request: &SubscribeRequest,
+    ) -> Result<PendingOutcome, WatchError> {
+        let signup: WatchSignup =
+            validate_watch_signup(&request.domain, &request.email, &request.accounts, false)
+                .map_err(WatchError::Validation)?;
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let tier = tier_from_evidence(request.app_count);
+        let token = random_hex(CONFIRMATION_TOKEN_HEX_LEN / 2);
+        let token_hash = sha256_hex(&token);
+        let expires_at = now_ms.saturating_add(CONFIRMATION_TTL_MS);
+        let dedup = DedupKey::of_signup(&signup.domain, &signup.email);
+        let existing = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_dedup(&dedup, now_ms);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        if let Some(mut existing) = existing {
+            existing.tier = tier;
+            existing.confirmation_token_hash = Some(token_hash);
+            existing.confirmation_expires_at = Some(expires_at);
+            existing.confirmation_used_at = None;
+            existing.shopper_reference = Some(existing.id.clone());
+            self.append(&mut cached, &existing)?;
+            return Ok(PendingOutcome {
+                reference: existing.id,
+                tier,
+                confirmation_token: token,
+            });
+        }
+        let id = format!("sub_{}", random_hex(5));
+        let subscriber = Subscriber {
+            id: id.clone(),
+            publisher: publisher_slug_for_domain(&signup.domain),
+            domain: signup.domain,
+            email: signup.email,
+            tier,
+            account_ids: signup.account_ids,
+            created_ms: now_ms,
+            status: Status::Pending,
+            canceled_ms: None,
+            confirmed: false,
+            confirmation_token_hash: Some(token_hash),
+            confirmation_expires_at: Some(expires_at),
+            confirmation_used_at: None,
+            email_confirmed_at: None,
+            paid_at: None,
+            payment_link: None,
+            shopper_reference: Some(id.clone()),
+            stored_payment_method_id: None,
+            last_check_at: None,
+            last_findings_hash: None,
+            last_findings: None,
+            last_alert_at: None,
+            cancel_token_hash: sha256_hex(&random_hex(16)),
+            billing: None,
+            last_billed_month: None,
+            last_paid_month: None,
+            last_invoice_number: None,
+            last_charge_reference: None,
+            last_charge_amount_micros: None,
+            last_charge_error: None,
+        };
+        self.append(&mut cached, &subscriber)?;
+        Ok(PendingOutcome {
+            reference: id,
+            tier,
+            confirmation_token: token,
+        })
+    }
+
+    /// Consume the one-time confirmation token: the matching row is marked
+    /// confirmed, the token is marked used, and the outcome names the
+    /// subscriber. A second use, an expired token or an unknown token is a
+    /// typed refusal; nothing else is written.
+    pub fn confirm_email(&self, now_ms: i64, token: &str) -> Result<ConfirmOutcome, WatchError> {
+        let token = token.trim();
+        if !is_confirmation_token(token) {
+            return Err(WatchError::ConfirmationUnknown);
+        }
+        let hash = sha256_hex(token);
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_confirmation(&hash);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::ConfirmationUnknown);
+        };
+        if subscriber.confirmation_used_at.is_some() {
+            return Err(WatchError::ConfirmationUsed);
+        }
+        if subscriber.confirmed {
+            return Err(WatchError::AlreadyConfirmed);
+        }
+        if subscriber
+            .confirmation_expires_at
+            .is_none_or(|expires| now_ms >= expires)
+        {
+            return Err(WatchError::ConfirmationExpired);
+        }
+        subscriber.confirmed = true;
+        subscriber.confirmation_used_at = Some(now_ms);
+        subscriber.email_confirmed_at = Some(now_ms);
+        self.append(&mut cached, &subscriber)?;
+        Ok(ConfirmOutcome {
+            reference: subscriber.id,
+            email: subscriber.email,
+            confirmed_at: now_ms,
+        })
+    }
+
+    /// Switch the matching pending subscriber on: the payment was accepted.
+    /// Only a pending row can be activated; an already-active row is a typed
+    /// idempotent no-op (`already_active: true`) and appends nothing, and a
+    /// canceled row or an unknown reference is a typed refusal.
+    pub fn activate(&self, now_ms: i64, reference: &str) -> Result<ActivateOutcome, WatchError> {
+        let reference = reference.trim();
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_id(reference);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::UnknownSubscriber {
+                reference: reference.to_string(),
+            });
+        };
+        match subscriber.status {
+            Status::Active => Ok(ActivateOutcome {
+                reference: subscriber.id,
+                paid_at: subscriber.paid_at.unwrap_or(now_ms),
+                already_active: true,
+            }),
+            Status::Canceled => Err(WatchError::NotPending {
+                reference: subscriber.id,
+                status: Status::Canceled,
+            }),
+            Status::Pending => {
+                subscriber.status = Status::Active;
+                subscriber.paid_at = Some(now_ms);
+                self.append(&mut cached, &subscriber)?;
+                Ok(ActivateOutcome {
+                    reference: subscriber.id,
+                    paid_at: now_ms,
+                    already_active: false,
+                })
+            }
+        }
+    }
+
+    /// Record the Adyen payment link created for a pending sign-up. The
+    /// subscriber id is recorded as the `shopperReference`, the same identity
+    /// the webhook settles against.
+    pub fn record_payment_link(
+        &self,
+        reference: &str,
+        payment_link: &str,
+    ) -> Result<(), WatchError> {
+        self.update_by_reference(reference, |subscriber| {
+            subscriber.payment_link = Some(payment_link.to_string());
+            subscriber.shopper_reference = Some(subscriber.id.clone());
+        })
+    }
+
+    /// Record the stored card (Adyen stored payment method id) the first
+    /// payment produced, so the monthly bill can charge it. The activation
+    /// itself stays [`Self::activate`].
+    pub fn record_stored_payment_method(
+        &self,
+        reference: &str,
+        stored_payment_method_id: &str,
+    ) -> Result<(), WatchError> {
+        self.update_by_reference(reference, |subscriber| {
+            subscriber.stored_payment_method_id = Some(stored_payment_method_id.to_string());
+        })
+    }
+
+    /// Read-modify-append one row by reference. An unknown reference is a
+    /// typed refusal, never a silent no-op.
+    fn update_by_reference(
+        &self,
+        reference: &str,
+        update: impl FnOnce(&mut Subscriber),
+    ) -> Result<(), WatchError> {
+        let reference = reference.trim();
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_id(reference);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::UnknownSubscriber {
+                reference: reference.to_string(),
+            });
+        };
+        update(&mut subscriber);
+        self.append(&mut cached, &subscriber)
     }
 
     /// Cancel with a presented plaintext token: the first active subscriber
@@ -691,6 +1011,15 @@ pub fn sha256_hex(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     hex_encode(&hasher.finalize())
+}
+
+/// The exact shape of a confirmation token: 32 lowercase hex characters,
+/// the same shape as the console sign-in token.
+pub fn is_confirmation_token(value: &str) -> bool {
+    value.len() == CONFIRMATION_TOKEN_HEX_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Constant-time equality over byte slices of equal intent; differing
@@ -985,6 +1314,15 @@ mod tests {
             created_ms,
             status: Status::Active,
             canceled_ms: None,
+            confirmed: true,
+            confirmation_token_hash: None,
+            confirmation_expires_at: None,
+            confirmation_used_at: None,
+            email_confirmed_at: Some(created_ms),
+            paid_at: Some(created_ms),
+            payment_link: None,
+            shopper_reference: None,
+            stored_payment_method_id: None,
             last_check_at: None,
             last_findings_hash: None,
             last_findings: None,
@@ -992,6 +1330,11 @@ mod tests {
             cancel_token_hash: sha256_hex(id),
             billing: None,
             last_billed_month: None,
+            last_paid_month: None,
+            last_invoice_number: None,
+            last_charge_reference: None,
+            last_charge_amount_micros: None,
+            last_charge_error: None,
         }
     }
 
@@ -1405,5 +1748,132 @@ mod tests {
             .expect("delta");
         assert!(delta.created);
         assert_eq!(store.list().unwrap(), naive_fold(&path));
+    }
+
+    fn pending_request(domain: &str, email: &str, app_count: u32) -> SubscribeRequest {
+        SubscribeRequest {
+            domain: domain.to_string(),
+            email: email.to_string(),
+            accounts: "admob.com = pub-1".to_string(),
+            app_count,
+        }
+    }
+
+    #[test]
+    fn pending_signup_records_no_check_and_derives_the_tier_from_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let normal = store
+            .subscribe_pending(10, &pending_request("normal.example", "a@x.example", 9))
+            .expect("pending");
+        assert_eq!(normal.tier, crate::model::Tier::Normal);
+        let core = store
+            .subscribe_pending(11, &pending_request("core.example", "b@x.example", 10))
+            .expect("pending");
+        assert_eq!(core.tier, crate::model::Tier::Core);
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(row.status, Status::Pending);
+            assert!(!row.confirmed);
+            assert_eq!(row.paid_at, None);
+            assert_eq!(row.last_check_at, None);
+            assert!(row.confirmation_token_hash.is_some());
+            assert!(row.confirmation_expires_at.is_some());
+            // Only the hash is stored, never the token.
+            assert!(!row
+                .confirmation_token_hash
+                .as_deref()
+                .unwrap()
+                .contains(&normal.confirmation_token));
+        }
+        assert_eq!(normal.confirmation_token.len(), CONFIRMATION_TOKEN_HEX_LEN);
+        assert!(is_confirmation_token(&normal.confirmation_token));
+        assert!(!is_confirmation_token("NOT-A-TOKEN"));
+        assert!(!is_confirmation_token("ABCDEF0123456789ABCDEF0123456789"));
+    }
+
+    #[test]
+    fn activation_needs_the_matching_reference_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let pending = store
+            .subscribe_pending(10, &pending_request("activate.example", "a@x.example", 1))
+            .expect("pending");
+        assert!(matches!(
+            store.activate(11, "sub_nope"),
+            Err(WatchError::UnknownSubscriber { .. })
+        ));
+        let activated = store.activate(12, &pending.reference).expect("activate");
+        assert_eq!(activated.reference, pending.reference);
+        assert_eq!(activated.paid_at, 12);
+        assert!(!activated.already_active);
+        let row = store.list().unwrap().remove(0);
+        assert_eq!(row.status, Status::Active);
+        assert_eq!(row.paid_at, Some(12));
+        let rows_before = std::fs::read_to_string(store.subscribers_path())
+            .unwrap()
+            .lines()
+            .count();
+
+        // A replay is a typed no-op and appends no second row.
+        let replay = store.activate(13, &pending.reference).expect("replay");
+        assert!(replay.already_active);
+        assert_eq!(replay.paid_at, 12);
+        assert_eq!(
+            std::fs::read_to_string(store.subscribers_path())
+                .unwrap()
+                .lines()
+                .count(),
+            rows_before,
+            "a replay appends nothing"
+        );
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn confirmation_is_single_use_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let pending = store
+            .subscribe_pending(10, &pending_request("confirm.example", "a@x.example", 1))
+            .expect("pending");
+        let confirmed = store
+            .confirm_email(11, &pending.confirmation_token)
+            .expect("confirm");
+        assert_eq!(confirmed.reference, pending.reference);
+        assert_eq!(confirmed.confirmed_at, 11);
+        let row = store.list().unwrap().remove(0);
+        assert!(row.confirmed);
+        assert_eq!(row.email_confirmed_at, Some(11));
+        assert_eq!(row.confirmation_used_at, Some(11));
+
+        // The same token is refused typed and never confirms a second row.
+        assert!(matches!(
+            store.confirm_email(12, &pending.confirmation_token),
+            Err(WatchError::ConfirmationUsed)
+        ));
+        assert!(matches!(
+            store.confirm_email(12, "ffffffffffffffffffffffffffffffff"),
+            Err(WatchError::ConfirmationUnknown)
+        ));
+
+        // Expiry is refused too, and a malformed token never looks up.
+        let expiring = store
+            .subscribe_pending(20, &pending_request("late.example", "b@x.example", 1))
+            .expect("pending");
+        assert!(matches!(
+            store.confirm_email(20 + CONFIRMATION_TTL_MS, &expiring.confirmation_token),
+            Err(WatchError::ConfirmationExpired)
+        ));
+        assert!(matches!(
+            store.confirm_email(21, "short"),
+            Err(WatchError::ConfirmationUnknown)
+        ));
+        assert!(!store
+            .list()
+            .unwrap()
+            .iter()
+            .any(|row| row.domain == "late.example" && row.confirmed));
     }
 }

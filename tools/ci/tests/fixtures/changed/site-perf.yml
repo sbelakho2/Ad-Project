@@ -1,0 +1,11 @@
+when:
+  - event: [push, pull_request]
+    branch: [main, master]
+    path:
+      - site/**
+      - .woodpecker/site-perf.yml
+steps:
+  perf:
+    image: alpine:3.20
+    commands:
+      - echo site-perf

@@ -21,9 +21,11 @@
 use std::path::Path;
 
 use apex_billing::{
-    compute_invoice, watch_plan, BillingPeriod, BillingProfile, InvoiceRegister,
-    WATCH_CORE_PRICE_MICROS, WATCH_PRICE_MICROS,
+    compute_invoice, watch_plan, AdyenClient, BillingPeriod, BillingProfile, InvoiceLineItem,
+    InvoiceRegister, ViesClient, MICROS_PER_MINOR_UNIT, PLAN_CURRENCY, WATCH_CORE_PRICE_MICROS,
+    WATCH_PRICE_MICROS,
 };
+use apex_connectors::transport::Transport;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Subscriber, Tier};
@@ -45,6 +47,35 @@ pub struct IssuedInvoice {
     pub gross_micros: i64,
     /// The rendered VAT document.
     pub document: String,
+    /// Whether the stored card was charged for this invoice.
+    pub charged: bool,
+    /// The deterministic charge reference, when a charge was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge_reference: Option<String>,
+    /// The Adyen PSP reference of an accepted charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psp_reference: Option<String>,
+    /// Why the charge did not land, when it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge_error: Option<String>,
+}
+
+/// One successful stored-card charge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChargedInvoice {
+    /// The publisher slug.
+    pub publisher: String,
+    /// The month billed (`YYYY-MM`).
+    pub month: String,
+    /// The gross amount charged, in micros.
+    pub amount_micros: i64,
+    /// The deterministic Adyen reference (idempotency key).
+    pub reference: String,
+    /// The Adyen PSP reference.
+    pub psp_reference: String,
+    /// The accepted result code (`Authorised` / `Received`).
+    pub result_code: String,
 }
 
 /// One refused subscriber.
@@ -73,6 +104,9 @@ pub struct SkippedInvoice {
 pub struct BillReport {
     /// Invoices issued, oldest subscriber first.
     pub issued: Vec<IssuedInvoice>,
+    /// Stored-card charges accepted this run (including retries of an
+    /// invoice issued by an earlier run).
+    pub charged: Vec<ChargedInvoice>,
     /// Subscribers refused this month.
     pub refused: Vec<RefusedInvoice>,
     /// Subscribers skipped as already billed.
@@ -80,12 +114,30 @@ pub struct BillReport {
 }
 
 /// The injected dependencies of one monthly run.
-#[derive(Debug)]
 pub struct BillDeps<'a> {
     /// The seller profile the VAT treatment loads.
     pub seller: &'a BillingProfile,
     /// The invoice register path the runner also writes.
     pub register_path: &'a Path,
+    /// The EU VAT register seam reverse charge is decided through.
+    pub vies: &'a dyn ViesClient,
+    /// The Adyen client that charges the stored card, when configured.
+    pub adyen: Option<&'a AdyenClient>,
+    /// The transport the Adyen client speaks through, when configured.
+    pub transport: Option<&'a dyn Transport>,
+}
+
+impl std::fmt::Debug for BillDeps<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BillDeps")
+            .field("seller", &self.seller)
+            .field("register_path", &self.register_path)
+            .field("vies", &self.vies)
+            .field("adyen", &self.adyen)
+            .field("transport_configured", &self.transport.is_some())
+            .finish()
+    }
 }
 
 /// The exact UTC bounds of one `YYYY-MM` calendar month, in unix
@@ -149,8 +201,15 @@ fn civil_month_from_days(days: i64) -> (i64, u32) {
     (year, month as u32)
 }
 
-/// Issue the month's setup-watch lines for every active subscriber.
-pub fn run_bill(
+/// Issue the month's setup-watch lines for every active subscriber and charge
+/// the stored card.
+///
+/// An invoice is issued exactly once per month: the register number and the
+/// charge facts are recorded on the subscriber row before the charge is
+/// attempted. An issued-but-unpaid invoice is retried on the next run with
+/// the same deterministic reference (the Adyen idempotency key), never
+/// re-issued. Cancelled subscribers are not walked at all.
+pub async fn run_bill(
     store: &SubscriberStore,
     month: &str,
     deps: &BillDeps<'_>,
@@ -162,6 +221,17 @@ pub fn run_bill(
     };
     let register = InvoiceRegister::open(deps.register_path)?;
     let mut report = BillReport::default();
+    // Several subscribers may be the same legal customer. One register
+    // question per canonical (country, number) per run is enough; each
+    // invoice still persists the answer it was decided from.
+    let vies = apex_billing::CachedVies::new(deps.vies);
+    let deps = BillDeps {
+        seller: deps.seller,
+        register_path: deps.register_path,
+        vies: &vies,
+        adyen: deps.adyen,
+        transport: deps.transport,
+    };
     for subscriber in store.list_active()? {
         bill_one(
             store,
@@ -169,10 +239,11 @@ pub fn run_bill(
             month,
             start_unix_ms,
             end_unix_ms,
-            deps,
+            &deps,
             &register,
             &mut report,
-        )?;
+        )
+        .await?;
     }
     Ok(report)
 }
@@ -184,8 +255,98 @@ fn refuse(report: &mut BillReport, publisher: &str, reason: String) {
     });
 }
 
+/// The deterministic charge reference for one subscriber-month. It is the
+/// Adyen idempotency key, so a retry can never double-charge.
+fn charge_reference(subscriber: &Subscriber, month: &str) -> String {
+    format!("watch:{}:{month}", subscriber.id)
+}
+
+/// The outcome of one charge attempt.
+struct ChargeOutcome {
+    reference: String,
+    charged: Option<(String, String)>,
+    error: Option<String>,
+}
+
+/// Charge `amount_micros` to the subscriber's stored card. A missing card or
+/// a missing Adyen configuration is a typed refusal: the invoice stays
+/// issued and the reason is recorded, never silently skipped.
+async fn charge_stored_card(
+    subscriber: &Subscriber,
+    month: &str,
+    amount_micros: i64,
+    reference: String,
+    deps: &BillDeps<'_>,
+) -> ChargeOutcome {
+    let Some(card) = subscriber
+        .stored_payment_method_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|card| !card.is_empty())
+    else {
+        return ChargeOutcome {
+            reference,
+            charged: None,
+            error: Some(
+                "no stored payment method is recorded; the invoice is issued and its charge is refused until a card is stored"
+                    .to_string(),
+            ),
+        };
+    };
+    let (Some(client), Some(transport)) = (deps.adyen, deps.transport) else {
+        return ChargeOutcome {
+            reference,
+            charged: None,
+            error: Some(
+                "no Adyen client is configured; the invoice is issued and its charge is refused until checkout credentials are configured"
+                    .to_string(),
+            ),
+        };
+    };
+    if amount_micros <= 0 || amount_micros.checked_rem(MICROS_PER_MINOR_UNIT) != Some(0) {
+        return ChargeOutcome {
+            reference,
+            charged: None,
+            error: Some(format!(
+                "the invoiced amount {amount_micros} micros is not a positive exact cent amount"
+            )),
+        };
+    }
+    let item = InvoiceLineItem {
+        seq: 1,
+        experiment_id: "setup-watch".to_string(),
+        amount_minor_units: amount_micros / MICROS_PER_MINOR_UNIT,
+        currency: PLAN_CURRENCY.to_string(),
+        shopper_reference: subscriber.id.clone(),
+        reference: reference.clone(),
+        description: format!("Apex setup watch: {month}"),
+    };
+    match client
+        .charge_stored_payment_method(transport, &item, card)
+        .await
+    {
+        Ok(receipt) => ChargeOutcome {
+            reference,
+            charged: Some((receipt.psp_reference, receipt.result_code)),
+            error: None,
+        },
+        Err(error) => ChargeOutcome {
+            reference,
+            charged: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Record an accepted charge on the subscriber row.
+fn record_charge(subscriber: &mut Subscriber, month: &str, reference: &str) {
+    subscriber.last_paid_month = Some(month.to_string());
+    subscriber.last_charge_reference = Some(reference.to_string());
+    subscriber.last_charge_error = None;
+}
+
 #[allow(clippy::too_many_arguments)]
-fn bill_one(
+async fn bill_one(
     store: &SubscriberStore,
     subscriber: &Subscriber,
     month: &str,
@@ -196,11 +357,14 @@ fn bill_one(
     report: &mut BillReport,
 ) -> Result<(), WatchError> {
     if subscriber.last_billed_month.as_deref() == Some(month) {
-        report.skipped.push(SkippedInvoice {
-            publisher: subscriber.publisher.clone(),
-            month: month.to_string(),
-        });
-        return Ok(());
+        if subscriber.last_paid_month.as_deref() == Some(month) {
+            report.skipped.push(SkippedInvoice {
+                publisher: subscriber.publisher.clone(),
+                month: month.to_string(),
+            });
+            return Ok(());
+        }
+        return retry_charge(store, subscriber, month, deps, report).await;
     }
     let publisher = subscriber.publisher.as_str();
     let customer = match subscriber.billing.clone() {
@@ -237,7 +401,7 @@ fn bill_one(
         Tier::Core => WATCH_CORE_PRICE_MICROS,
         Tier::Normal => WATCH_PRICE_MICROS,
     };
-    let plan = watch_plan(move || price, apex_billing::PLAN_CURRENCY);
+    let plan = watch_plan(move || price, PLAN_CURRENCY);
     let period = BillingPeriod {
         year_month: month.to_string(),
         start_unix_ms,
@@ -264,7 +428,7 @@ fn bill_one(
     }
     let mut prepared = match invoice
         .with_customer(customer)
-        .apply_vat_treatment(deps.seller)
+        .apply_vat_treatment_with_vies(deps.seller, deps.vies)
     {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -301,17 +465,121 @@ fn bill_one(
             return Ok(());
         }
     };
+    let reference = charge_reference(subscriber, month);
     let mut updated = subscriber.clone();
     updated.last_billed_month = Some(month.to_string());
+    updated.last_invoice_number = Some(number);
+    updated.last_charge_reference = Some(reference.clone());
+    updated.last_charge_amount_micros = Some(prepared.gross_micros);
+    updated.last_charge_error = None;
+    // Record the issued invoice and its charge facts before the PSP call:
+    // if the charge lands but the post-charge row write fails, the next run
+    // sees the month as issued and retries the same idempotent reference
+    // instead of issuing a second invoice.
     store.update(&updated)?;
-    report.issued.push(IssuedInvoice {
+    let outcome =
+        charge_stored_card(subscriber, month, prepared.gross_micros, reference, deps).await;
+    let mut issued = IssuedInvoice {
         publisher: subscriber.publisher.clone(),
         tier: subscriber.tier,
         number,
         net_micros: prepared.total_micros,
         gross_micros: prepared.gross_micros,
         document,
-    });
+        charged: false,
+        charge_reference: Some(outcome.reference.clone()),
+        psp_reference: None,
+        charge_error: None,
+    };
+    match outcome.charged {
+        Some(charged) => {
+            issued.charged = true;
+            issued.psp_reference = Some(charged.0.clone());
+            record_charge(&mut updated, month, &outcome.reference);
+            report.charged.push(ChargedInvoice {
+                publisher: subscriber.publisher.clone(),
+                month: month.to_string(),
+                amount_micros: prepared.gross_micros,
+                reference: outcome.reference,
+                psp_reference: charged.0,
+                result_code: charged.1,
+            });
+        }
+        None => {
+            let reason = outcome.error.unwrap_or_else(|| {
+                "the stored-card charge did not land; the invoice stays unpaid".to_string()
+            });
+            updated.last_charge_error = Some(reason.clone());
+            issued.charge_error = Some(reason.clone());
+            refuse(
+                report,
+                publisher,
+                format!("invoice {number} was issued but not charged: {reason}"),
+            );
+        }
+    }
+    store.update(&updated)?;
+    report.issued.push(issued);
+    Ok(())
+}
+
+/// Retry the stored-card charge of an invoice an earlier run issued for the
+/// same month. The invoice is never re-issued and the same deterministic
+/// reference is reused, so a retry is idempotent at Adyen.
+async fn retry_charge(
+    store: &SubscriberStore,
+    subscriber: &Subscriber,
+    month: &str,
+    deps: &BillDeps<'_>,
+    report: &mut BillReport,
+) -> Result<(), WatchError> {
+    let publisher = subscriber.publisher.as_str();
+    let (Some(reference), Some(amount_micros)) = (
+        subscriber.last_charge_reference.clone(),
+        subscriber.last_charge_amount_micros,
+    ) else {
+        refuse(
+            report,
+            publisher,
+            format!(
+                "invoice {month} is recorded as issued but its charge facts are not recorded; it cannot be retried safely"
+            ),
+        );
+        return Ok(());
+    };
+    let outcome = charge_stored_card(subscriber, month, amount_micros, reference, deps).await;
+    let mut updated = subscriber.clone();
+    match outcome.charged {
+        Some(charged) => {
+            record_charge(&mut updated, month, &outcome.reference);
+            report.charged.push(ChargedInvoice {
+                publisher: subscriber.publisher.clone(),
+                month: month.to_string(),
+                amount_micros,
+                reference: outcome.reference,
+                psp_reference: charged.0,
+                result_code: charged.1,
+            });
+        }
+        None => {
+            let reason = outcome.error.unwrap_or_else(|| {
+                "the stored-card charge did not land; the invoice stays unpaid".to_string()
+            });
+            updated.last_charge_error = Some(reason.clone());
+            refuse(
+                report,
+                publisher,
+                format!(
+                    "invoice {} for {month} was issued earlier but is still unpaid: {reason}",
+                    updated
+                        .last_invoice_number
+                        .map(|number| number.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ),
+            );
+        }
+    }
+    store.update(&updated)?;
     Ok(())
 }
 
@@ -320,8 +588,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
-    use apex_billing::CustomerProfile;
+    use apex_billing::{CustomerProfile, ViesCheck, ViesClient, ViesError};
+    use apex_connectors::transport::{
+        HttpBody, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
+    };
 
     use super::*;
 
@@ -346,15 +618,135 @@ mod tests {
         }
     }
 
+    fn cross_border_customer(legal_name: &str) -> CustomerProfile {
+        CustomerProfile {
+            legal_name: legal_name.into(),
+            address_lines: vec!["Friedrichstrasse 1".into()],
+            country: "DE".into(),
+            vat_number: Some("DE123456789".into()),
+        }
+    }
+
     fn register_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("billing").join("invoices.jsonl")
     }
 
-    fn bill_deps<'a>(seller: &'a BillingProfile, register_path: &'a Path) -> BillDeps<'a> {
-        BillDeps {
-            seller,
-            register_path,
+    /// The tests always inject a VAT-register stub; no test reaches the network.
+    #[derive(Debug)]
+    struct DomesticVies;
+
+    impl ViesClient for DomesticVies {
+        fn check_vat_number(&self, country: &str, number: &str) -> Result<ViesCheck, ViesError> {
+            Ok(ViesCheck::Valid {
+                evidence: format!("VIES confirmation: {country}{number} is valid"),
+                vat_number: number.to_string(),
+            })
         }
+    }
+
+    /// A VAT-register stub that counts the register questions.
+    #[derive(Debug, Default)]
+    struct CountingVies {
+        calls: Mutex<u32>,
+    }
+
+    impl CountingVies {
+        fn calls(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    impl ViesClient for CountingVies {
+        fn check_vat_number(&self, country: &str, number: &str) -> Result<ViesCheck, ViesError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(ViesCheck::Valid {
+                evidence: format!("VIES confirmation: {country}{number} is valid"),
+                vat_number: number.to_string(),
+            })
+        }
+    }
+
+    /// A scripted Adyen transport: every request is recorded and answered
+    /// from a queue.
+    #[derive(Debug)]
+    struct ScriptedTransport {
+        responses: Mutex<std::collections::VecDeque<HttpResponse>>,
+        requests: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: Vec<HttpResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<HttpRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ScriptedTransport {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.requests.lock().unwrap().push(req);
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| TransportError::Network("no scripted response".to_string()))
+        }
+    }
+
+    /// A transport that makes the subscriber log read-only at the moment the
+    /// charge request is made, so the post-charge row write fails.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct ReadOnlyAfterCharge {
+        subscribers: PathBuf,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Transport for ReadOnlyAfterCharge {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.subscribers, std::fs::Permissions::from_mode(0o444))
+                .map_err(|error| TransportError::Network(error.to_string()))?;
+            Ok(accepted())
+        }
+    }
+
+    fn response(result_code: &str, psp_reference: &str) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&serde_json::json!({
+                "pspReference": psp_reference,
+                "resultCode": result_code,
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn accepted() -> HttpResponse {
+        response("Authorised", "PSP-ACCEPTED")
+    }
+
+    fn adyen() -> AdyenClient {
+        AdyenClient::new(
+            "key",
+            "DogfoodECOM",
+            b"hmac".to_vec(),
+            "https://checkout.test",
+        )
+        .expect("test client")
+    }
+
+    fn with_billing(subscriber: &mut Subscriber) {
+        subscriber.billing = Some(customer("Buyer OÜ"));
+        subscriber.stored_payment_method_id = Some("card-1".to_string());
     }
 
     #[test]
@@ -374,8 +766,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn golden_invoices_for_normal_and_core_share_gapless_numbers() {
+    #[tokio::test]
+    async fn golden_invoices_for_normal_and_core_share_gapless_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         let normal = store
@@ -387,18 +779,36 @@ mod tests {
             .expect("subscribe")
             .subscriber;
         let mut normal = normal;
-        normal.billing = Some(customer("Northstar OÜ"));
+        with_billing(&mut normal);
+        let normal_id = normal.id.clone();
         store.update(&normal).expect("update");
         let mut core = core;
-        core.billing = Some(customer("Bigport OÜ"));
+        with_billing(&mut core);
         store.update(&core).expect("update");
 
         let seller = seller();
         let register_path = register_path(&dir);
-        let report = run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(vec![accepted(), accepted()]);
+        let adyen = adyen();
+        let report = run_bill(
+            &store,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&transport),
+            },
+        )
+        .await
+        .expect("run");
         assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
         assert_eq!(report.skipped.len(), 0);
         assert_eq!(report.issued.len(), 2);
+        assert_eq!(report.charged.len(), 2);
+        assert!(report.issued.iter().all(|row| row.charged));
         let numbers: Vec<u64> = report.issued.iter().map(|row| row.number).collect();
         assert_eq!(numbers, vec![1, 2], "consecutive and gap-free");
         let normal_row = report
@@ -421,6 +831,29 @@ mod tests {
         assert_eq!(core_row.gross_micros, 238_800_000);
         assert!(core_row.document.contains("VAT invoice No. 2"));
 
+        // The stored-method charge has the exact audited shape: the
+        // subscriber is the shopperReference, the card is charged ContAuth
+        // for a Subscription, and the reference is the deterministic key.
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        let request = &requests[0];
+        assert_eq!(request.method, HttpMethod::Post);
+        assert_eq!(request.url, "https://checkout.test/v71/payments");
+        let body = match request.body.as_ref() {
+            Some(HttpBody::Json(body)) => body,
+            other => panic!("expected a JSON body, got {other:?}"),
+        };
+        assert_eq!(body["shopperReference"], normal_id.as_str());
+        assert_eq!(body["storedPaymentMethodId"], "card-1");
+        assert_eq!(body["shopperInteraction"], "ContAuth");
+        assert_eq!(body["recurringProcessingModel"], "Subscription");
+        assert_eq!(
+            body["reference"],
+            format!("watch:{normal_id}:2026-10").as_str()
+        );
+        assert_eq!(body["amount"]["value"], 11_880);
+        assert_eq!(body["amount"]["currency"], "USD");
+
         // The register holds exactly the two numbered invoices.
         let raw = std::fs::read_to_string(&register_path).unwrap();
         let lines: Vec<serde_json::Value> = raw
@@ -432,14 +865,70 @@ mod tests {
         assert_eq!(lines[1]["number"], 2);
         assert_eq!(lines[0]["publisherId"], "northstar-example");
 
-        // Both rows remember the billed month.
+        // Both rows remember the billed and paid month.
         for subscriber in store.list().expect("list") {
             assert_eq!(subscriber.last_billed_month.as_deref(), Some("2026-10"));
+            assert_eq!(subscriber.last_paid_month.as_deref(), Some("2026-10"));
+            assert_eq!(subscriber.last_charge_error, None);
         }
     }
 
-    #[test]
-    fn a_missing_profile_refuses_without_consuming_a_number() {
+    #[tokio::test]
+    async fn one_customer_vat_number_is_confirmed_once_per_billing_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        for (port, domain) in [(10, "alpha.example"), (11, "beta.example")] {
+            let mut subscriber = store
+                .subscribe(port, domain, &format!("ops@{domain}"), "", false)
+                .expect("subscribe")
+                .subscriber;
+            subscriber.billing = Some(cross_border_customer("Shared Buyer GmbH"));
+            subscriber.stored_payment_method_id = Some("card-1".to_string());
+            store.update(&subscriber).expect("update");
+        }
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = CountingVies::default();
+        let transport = ScriptedTransport::new(vec![accepted(), accepted()]);
+        let adyen = adyen();
+        let report = run_bill(
+            &store,
+            "2026-10",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&transport),
+            },
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.issued.len(), 2);
+        assert_eq!(report.charged.len(), 2);
+        assert_eq!(
+            vies.calls(),
+            1,
+            "two invoices for the same legal customer query VIES once per run"
+        );
+        // The evidence is still persisted on both invoices.
+        let raw = std::fs::read_to_string(&register_path).unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            assert_eq!(line["vatTreatment"], "reverseCharge");
+            assert!(line["viesEvidence"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("confirmation"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_profile_refuses_without_consuming_a_number() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         store
@@ -447,7 +936,17 @@ mod tests {
             .expect("subscribe");
         let seller = seller();
         let register_path = register_path(&dir);
-        let report = run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(Vec::new());
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let report = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(report.issued.len(), 0);
         assert_eq!(report.refused.len(), 1);
         assert!(report.refused[0]
@@ -472,36 +971,229 @@ mod tests {
             vat_number: None,
         });
         store.update(&broken).expect("update");
-        let report = run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        let report = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(report.refused.len(), 1);
         assert!(report.refused[0].reason.contains("unusable"));
         assert!(!register_path.exists());
     }
 
-    #[test]
-    fn a_rerun_of_the_same_month_bills_nothing_twice() {
+    #[tokio::test]
+    async fn a_subscriber_without_a_stored_card_gets_the_line_and_a_typed_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         let mut subscriber = store
             .subscribe(10, "northstar.example", "ops@northstar.example", "", false)
             .expect("subscribe")
             .subscriber;
-        subscriber.billing = Some(customer("Northstar OÜ"));
+        subscriber.billing = Some(customer("Buyer OÜ"));
+        subscriber.stored_payment_method_id = None;
         store.update(&subscriber).expect("update");
         let seller = seller();
         let register_path = register_path(&dir);
-        let first = run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(Vec::new());
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let report = run_bill(&store, "2026-10", &deps).await.expect("run");
+        assert_eq!(report.issued.len(), 1, "the plan line is written");
+        assert!(!report.issued[0].charged);
+        assert_eq!(report.charged.len(), 0);
+        assert!(transport.requests().is_empty(), "no card, no charge");
+        assert_eq!(report.refused.len(), 1);
+        assert!(
+            report.refused[0]
+                .reason
+                .contains("no stored payment method"),
+            "{}",
+            report.refused[0].reason
+        );
+        let raw = std::fs::read_to_string(&register_path).unwrap();
+        assert!(raw.contains("setup-watch:2026-10"), "{raw}");
+        let row = store.list().expect("list").remove(0);
+        assert_eq!(row.last_billed_month.as_deref(), Some("2026-10"));
+        assert_eq!(row.last_paid_month, None);
+        assert!(row
+            .last_charge_error
+            .unwrap()
+            .contains("no stored payment method"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_charge_that_lands_before_a_failed_row_write_never_reissues_the_invoice() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let mut subscriber = store
+            .subscribe(10, "northstar.example", "ops@northstar.example", "", false)
+            .expect("subscribe")
+            .subscriber;
+        with_billing(&mut subscriber);
+        store.update(&subscriber).expect("update");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let subscribers_path = store.subscribers_path();
+        let transport = ReadOnlyAfterCharge {
+            subscribers: subscribers_path.clone(),
+        };
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        assert!(
+            run_bill(&store, "2026-10", &deps).await.is_err(),
+            "the post-charge row write fails"
+        );
+        // The issued invoice and its charge facts were recorded before the
+        // charge, so the next run retries the same reference.
+        let row = store.list().expect("list").remove(0);
+        assert_eq!(row.last_billed_month.as_deref(), Some("2026-10"));
+        assert_eq!(row.last_paid_month, None);
+        assert!(row.last_charge_reference.is_some());
+        assert!(row.last_charge_amount_micros.is_some());
+        std::fs::set_permissions(&subscribers_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        let retry_transport = ScriptedTransport::new(vec![accepted()]);
+        let retry_deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&retry_transport),
+        };
+        let report = run_bill(&store, "2026-10", &retry_deps)
+            .await
+            .expect("retry");
+        assert_eq!(report.issued.len(), 0, "the invoice is not re-issued");
+        assert_eq!(report.charged.len(), 1, "the same charge is retried");
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "one invoice, not two"
+        );
+        let row = store.list().expect("list").remove(0);
+        assert_eq!(row.last_paid_month.as_deref(), Some("2026-10"));
+    }
+
+    #[tokio::test]
+    async fn a_rerun_of_the_same_month_bills_nothing_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let mut subscriber = store
+            .subscribe(10, "northstar.example", "ops@northstar.example", "", false)
+            .expect("subscribe")
+            .subscriber;
+        with_billing(&mut subscriber);
+        store.update(&subscriber).expect("update");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let first = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(first.issued.len(), 1);
-        let second = run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        assert_eq!(first.charged.len(), 1);
+        let second = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(second.issued.len(), 0);
+        assert_eq!(second.charged.len(), 0);
         assert_eq!(second.skipped.len(), 1);
         assert_eq!(second.skipped[0].month, "2026-10");
+        assert_eq!(transport.requests().len(), 1, "charged once");
         let raw = std::fs::read_to_string(&register_path).unwrap();
         assert_eq!(raw.lines().count(), 1, "still exactly one invoice");
     }
 
-    #[test]
-    fn canceled_subscribers_are_not_billed_next_month() {
+    #[tokio::test]
+    async fn an_unpaid_invoice_retries_the_same_charge_without_reissuing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let mut subscriber = store
+            .subscribe(10, "northstar.example", "ops@northstar.example", "", false)
+            .expect("subscribe")
+            .subscriber;
+        with_billing(&mut subscriber);
+        store.update(&subscriber).expect("update");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport =
+            ScriptedTransport::new(vec![response("Refused", "PSP-REFUSED"), accepted()]);
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let first = run_bill(&store, "2026-10", &deps).await.expect("run");
+        assert_eq!(first.issued.len(), 1);
+        assert_eq!(first.charged.len(), 0);
+        assert_eq!(first.refused.len(), 1);
+        let row = store.list().expect("list").remove(0);
+        assert_eq!(row.last_billed_month.as_deref(), Some("2026-10"));
+        assert_eq!(row.last_paid_month, None);
+        assert!(row.last_charge_error.unwrap().contains("refused"));
+
+        let second = run_bill(&store, "2026-10", &deps).await.expect("retry");
+        assert_eq!(second.issued.len(), 0, "the invoice is not re-issued");
+        assert_eq!(second.charged.len(), 1, "the charge is retried");
+        assert_eq!(
+            second.charged[0].reference,
+            format!("watch:{}:2026-10", row.id)
+        );
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .body
+                .as_ref()
+                .and_then(HttpBody::as_json)
+                .unwrap()["reference"],
+            requests[1]
+                .body
+                .as_ref()
+                .and_then(HttpBody::as_json)
+                .unwrap()["reference"],
+            "the retry reuses the deterministic reference"
+        );
+        let row = store.list().expect("list").remove(0);
+        assert_eq!(row.last_paid_month.as_deref(), Some("2026-10"));
+        assert_eq!(row.last_charge_error, None);
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_subscribers_are_not_billed_next_month() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         let first = store
@@ -511,21 +1203,29 @@ mod tests {
             .subscribe(11, "bigport.example", "ops@bigport.example", "", true)
             .expect("subscribe");
         for mut subscriber in [first.subscriber.clone(), second.subscriber.clone()] {
-            subscriber.billing = Some(customer("Buyer OÜ"));
+            with_billing(&mut subscriber);
             store.update(&subscriber).expect("update");
         }
         let seller = seller();
         let register_path = register_path(&dir);
-        let october =
-            run_bill(&store, "2026-10", &bill_deps(&seller, &register_path)).expect("run");
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(vec![accepted(), accepted(), accepted()]);
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let october = run_bill(&store, "2026-10", &deps).await.expect("run");
         assert_eq!(october.issued.len(), 2);
 
         // Cancel the first subscriber with its token, then bill November.
         let token = first.cancel_token.clone().expect("token");
         let canceled = store.cancel(&token, 20).expect("cancel").expect("match");
         assert!(!canceled.is_active());
-        let november =
-            run_bill(&store, "2026-11", &bill_deps(&seller, &register_path)).expect("run");
+        let november = run_bill(&store, "2026-11", &deps).await.expect("run");
         assert_eq!(november.issued.len(), 1, "the canceled row is skipped");
         assert_eq!(november.issued[0].publisher, "bigport-example");
         assert_eq!(november.issued[0].number, 3, "numbering continues");
@@ -549,14 +1249,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_invalid_month_is_a_typed_refusal() {
+    #[tokio::test]
+    async fn an_invalid_month_is_a_typed_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let store = SubscriberStore::open(dir.path());
         let seller = seller();
         let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let transport = ScriptedTransport::new(Vec::new());
         assert!(matches!(
-            run_bill(&store, "2026-13", &bill_deps(&seller, &register_path)),
+            run_bill(
+                &store,
+                "2026-13",
+                &BillDeps {
+                    seller: &seller,
+                    register_path: &register_path,
+                    vies: &vies,
+                    adyen: Some(&adyen),
+                    transport: Some(&transport),
+                }
+            )
+            .await,
             Err(WatchError::Malformed(_))
         ));
         assert!(!register_path.exists());

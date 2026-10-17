@@ -1589,7 +1589,7 @@ npx playwright test --config=playwright.droplet.config.ts
 
 ### 12.1 From DigitalOcean
 
-The platform migrated from DigitalOcean (164.90.232.151) to Hetzner in December 2025.
+The platform migrated from DigitalOcean (203.0.113.9) to Hetzner in December 2025.
 
 Key differences:
 | Aspect | DigitalOcean | Hetzner |
@@ -1597,7 +1597,7 @@ Key differences:
 | Servers | 1 droplet | 2 servers (App + DB) |
 | Database | DO Managed Postgres | Self-hosted PostgreSQL 16 |
 | TLS | Nginx + Certbot | Caddy (auto Let's Encrypt) |
-| SSH | `deploy@164.90.232.151` | `root@203.0.113.10` / `root@203.0.113.12` |
+| SSH | `deploy@203.0.113.9` | `root@203.0.113.10` / `root@203.0.113.12` |
 
 ### 12.2 Deprecated Files
 

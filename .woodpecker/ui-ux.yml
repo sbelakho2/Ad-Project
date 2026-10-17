@@ -7,9 +7,19 @@
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so a bare `cd` persists across the step; each command below is
 # absolute and idempotent for that reason.
+# Path relevance: only the crates and lockfile that feed the rendered console,
+# control and sales pages wake this lane.
 when:
   - event: [push, pull_request]
     branch: [main, master]
+    path:
+      - rust/crates/apex-api/**
+      - rust/crates/apex-control/**
+      - rust/crates/apex-sales-web/**
+      - rust/crates/apex-ui/**
+      - rust/crates/apex-metrics/**
+      - rust/Cargo.toml
+      - rust/Cargo.lock
 
 steps:
   render-console-pages:

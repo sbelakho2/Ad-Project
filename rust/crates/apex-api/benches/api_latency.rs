@@ -66,7 +66,10 @@ fn synthetic_snapshot(findings: usize) -> apex_audit::Snapshot {
 
 fn bench_http(c: &mut Criterion) {
     let mut snapshots = HashMap::new();
-    snapshots.insert(PlatformId::Admob, synthetic_snapshot(500));
+    snapshots.insert(
+        ("northstar-studio".to_string(), PlatformId::Admob),
+        synthetic_snapshot(500),
+    );
     let state = AppState::new(
         Arc::new(StaticAuditSource::new(snapshots)),
         Arc::new(StaticLedgerSource::default()),

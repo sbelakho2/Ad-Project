@@ -27,12 +27,13 @@
 //! platform clients: pass a retry-wrapped transport when the caller wants
 //! retries.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use apex_audit::AppAdsTxt;
 use apex_core::{PlatformError, PlatformId};
 
-use crate::transport::{HttpMethod, HttpRequest, Transport, TransportError};
+use crate::transport::{HttpMethod, HttpRequest, HttpResponse, Transport, TransportError};
 
 /// Fetch path, rooted at the developer website.
 pub const APP_ADS_PATH: &str = "/app-ads.txt";
@@ -46,6 +47,121 @@ pub const MAX_REDIRECTS: usize = 5;
 
 /// Suffixes that never name a public developer website.
 const RESERVED_SUFFIXES: [&str; 6] = [".local", ".internal", ".home", ".lan", ".test", ".invalid"];
+
+/// The operation label every app-ads.txt fetch carries; the cache below only
+/// intercepts requests with this label.
+const APP_ADS_OPERATION: &str = "fetchAppAdsTxt";
+
+/// One cached app-ads.txt transport answer. Both shapes are what the fetcher
+/// would have seen without the cache, so replays map to the same result.
+#[derive(Debug, Clone)]
+enum CachedAppAds {
+    /// The transport answered (2xx, a redirect hop, or 404/410).
+    Response(HttpResponse),
+    /// A wrapping transport classified 404/410 as an HTTP error.
+    Absent(u16),
+}
+
+impl CachedAppAds {
+    fn into_result(self, request: &HttpRequest) -> Result<HttpResponse, TransportError> {
+        match self {
+            Self::Response(response) => Ok(response),
+            Self::Absent(status) => Err(TransportError::Platform(PlatformError::Http {
+                platform: request.platform,
+                operation: request.operation.clone(),
+                status,
+            })),
+        }
+    }
+}
+
+/// A per-run cache of `app-ads.txt` fetches, keyed by the exact URL.
+///
+/// The fleet audit asks every platform for the same publisher's developer
+/// site. That is one public file, so it is fetched once per distinct URL per
+/// run and replayed to the other platform builders, including the 404/410
+/// "no file" verdict. Only app-ads.txt operations are intercepted; every
+/// other request passes straight through. A 5xx or transport failure is never
+/// cached, so a transient failure is not replayed as a verdict.
+#[derive(Debug, Default)]
+pub struct AppAdsCache {
+    entries: Mutex<HashMap<String, CachedAppAds>>,
+}
+
+impl AppAdsCache {
+    /// An empty cache for one audit run.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wrap `inner` so app-ads.txt reads are served from this cache.
+    #[must_use]
+    pub fn wrap(self: &Arc<Self>, inner: Arc<dyn Transport>) -> Arc<dyn Transport> {
+        Arc::new(CachedAppAdsTransport {
+            inner,
+            cache: Arc::clone(self),
+        })
+    }
+
+    fn get(&self, url: &str) -> Option<CachedAppAds> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(url).cloned())
+    }
+
+    fn insert(&self, url: String, answer: CachedAppAds) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(url, answer);
+        }
+    }
+}
+
+/// The transport decorator behind [`AppAdsCache::wrap`].
+struct CachedAppAdsTransport {
+    inner: Arc<dyn Transport>,
+    cache: Arc<AppAdsCache>,
+}
+
+impl std::fmt::Debug for CachedAppAdsTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CachedAppAdsTransport")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl Transport for CachedAppAdsTransport {
+    async fn request(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        if request.operation != APP_ADS_OPERATION {
+            return self.inner.request(request).await;
+        }
+        if let Some(answer) = self.cache.get(&request.url) {
+            return answer.into_result(&request);
+        }
+        let result = self.inner.request(request.clone()).await;
+        let cacheable = match &result {
+            Ok(response) if (200..400).contains(&response.status) => {
+                Some(CachedAppAds::Response(response.clone()))
+            }
+            Ok(response) if matches!(response.status, 404 | 410) => {
+                Some(CachedAppAds::Absent(response.status))
+            }
+            Err(TransportError::Platform(PlatformError::Http { status, .. }))
+                if matches!(status, 404 | 410) =>
+            {
+                Some(CachedAppAds::Absent(*status))
+            }
+            _ => None,
+        };
+        if let Some(answer) = cacheable {
+            self.cache.insert(request.url, answer);
+        }
+        result
+    }
+}
 
 /// Fetch and parse app-ads.txt for one platform audit.
 pub struct AppAdsTxtFetcher {
@@ -115,6 +231,20 @@ impl AppAdsTxtFetcher {
                         platform,
                         operation: "fetchAppAdsTxt".to_string(),
                         detail: format!("timeout: {detail}"),
+                    });
+                }
+                // A wrapping transport (RetryTransport) converts any
+                // non-2xx answer into PlatformError::Http before this
+                // fetcher sees the response. A missing file is a legitimate
+                // publisher state, not a failed audit: 404/410 mean absent,
+                // exactly as the response arm below documents.
+                Err(TransportError::Platform(PlatformError::Http {
+                    status: 404 | 410, ..
+                })) => {
+                    return Ok(AppAdsTxt {
+                        present: false,
+                        lines: Vec::new(),
+                        expected_networks,
                     });
                 }
                 Err(TransportError::Platform(error)) => return Err(error),
@@ -363,6 +493,152 @@ mod tests {
             headers: vec![("Location".into(), location.to_string())],
             body: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_wrapped_transports_404_means_absent_not_a_failed_fetch() {
+        let transport =
+            ScriptedTransport::new(vec![Err(TransportError::Platform(PlatformError::Http {
+                platform: PlatformId::Admob,
+                operation: "fetchAppAdsTxt".to_string(),
+                status: 404,
+            }))]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let txt = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec!["admob.com".into()])
+            .await
+            .expect("a missing app-ads.txt is absent, not an error");
+        assert!(!txt.present);
+        assert!(txt.lines.is_empty());
+        assert_eq!(txt.expected_networks, vec!["admob.com".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_shared_cache_fetches_one_file_for_every_platform() {
+        let inner = ScriptedTransport::new(vec![
+            Ok(ok(200, b"google.com, pub-1, DIRECT\n")),
+            Ok(ok(200, b"metaads.com, pub-2, DIRECT\n")),
+        ]);
+        let cache = Arc::new(AppAdsCache::new());
+        let transport = cache.wrap(inner.clone());
+        let max = AppAdsTxtFetcher::new(transport.clone());
+        let levelplay = AppAdsTxtFetcher::new(transport);
+        let max_txt = max
+            .fetch(
+                PlatformId::AppLovinMax,
+                "example.com",
+                vec!["google.com".to_string()],
+            )
+            .await
+            .expect("first fetch");
+        let levelplay_txt = levelplay
+            .fetch(
+                PlatformId::LevelPlay,
+                "https://Example.com/any/path",
+                vec!["admob.com".to_string()],
+            )
+            .await
+            .expect("replayed fetch");
+        assert!(max_txt.present);
+        assert_eq!(max_txt.lines, levelplay_txt.lines);
+        // The expected networks stay platform-specific; only the file bytes
+        // are shared.
+        assert_eq!(max_txt.expected_networks, vec!["google.com".to_string()]);
+        assert_eq!(
+            levelplay_txt.expected_networks,
+            vec!["admob.com".to_string()]
+        );
+        assert_eq!(
+            inner.calls().len(),
+            1,
+            "one app-ads.txt fetch for both platforms"
+        );
+
+        // A different developer site is a different file and is fetched.
+        let other = levelplay
+            .fetch(
+                PlatformId::LevelPlay,
+                "other.example.com",
+                vec!["metaads.com".to_string()],
+            )
+            .await
+            .expect("other domain");
+        assert_eq!(other.lines, vec!["metaads.com, pub-2, DIRECT".to_string()]);
+        assert_eq!(
+            inner.calls().len(),
+            2,
+            "distinct domains are distinct files"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cached_404_is_absent_for_every_platform_without_refetching() {
+        let inner =
+            ScriptedTransport::new(vec![Err(TransportError::Platform(PlatformError::Http {
+                platform: PlatformId::Admob,
+                operation: "fetchAppAdsTxt".to_string(),
+                status: 404,
+            }))]);
+        let cache = Arc::new(AppAdsCache::new());
+        let transport = cache.wrap(inner.clone());
+        for platform in [PlatformId::Admob, PlatformId::LevelPlay] {
+            let txt = AppAdsTxtFetcher::new(transport.clone())
+                .fetch(platform, "example.com", Vec::new())
+                .await
+                .expect("absent");
+            assert!(!txt.present);
+            assert!(txt.lines.is_empty());
+        }
+        assert_eq!(inner.calls().len(), 1, "the absent verdict is cached");
+    }
+
+    #[tokio::test]
+    async fn transient_failures_are_not_cached_as_a_verdict() {
+        let inner = ScriptedTransport::new(vec![
+            Err(TransportError::Platform(PlatformError::Http {
+                platform: PlatformId::Admob,
+                operation: "fetchAppAdsTxt".to_string(),
+                status: 500,
+            })),
+            Err(TransportError::Platform(PlatformError::Http {
+                platform: PlatformId::Admob,
+                operation: "fetchAppAdsTxt".to_string(),
+                status: 500,
+            })),
+        ]);
+        let cache = Arc::new(AppAdsCache::new());
+        let transport = cache.wrap(inner.clone());
+        for _ in 0..2 {
+            let error = AppAdsTxtFetcher::new(transport.clone())
+                .fetch(PlatformId::Admob, "example.com", Vec::new())
+                .await
+                .expect_err("500 stays an error");
+            assert!(matches!(error, PlatformError::Http { status: 500, .. }));
+        }
+        assert_eq!(
+            inner.calls().len(),
+            2,
+            "a transient failure is retried by the next platform"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_wrapped_transport_statuses_still_fail_typed() {
+        let transport =
+            ScriptedTransport::new(vec![Err(TransportError::Platform(PlatformError::Http {
+                platform: PlatformId::Admob,
+                operation: "fetchAppAdsTxt".to_string(),
+                status: 500,
+            }))]);
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let error = fetcher
+            .fetch(PlatformId::Admob, "example.com", vec![])
+            .await
+            .expect_err("500 stays a failed fetch");
+        assert!(
+            matches!(error, PlatformError::Http { status: 500, .. }),
+            "{error}"
+        );
     }
 
     #[tokio::test]

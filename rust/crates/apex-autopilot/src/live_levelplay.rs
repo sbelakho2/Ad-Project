@@ -11,29 +11,27 @@
 //!   refused when the target is not among that group's instances — the
 //!   control group A is never mutated;
 //! - it reads A against B per day through the reporting v1 call with the
-//!   `abTest` breakdown and the `activeUsers` metric, one call per day (the
-//!   connector row carries no date), oldest first;
+//!   `date` and `abTest` breakdowns and the `revenue` and `activeUsers`
+//!   metrics, one call over the trailing window, oldest first;
 //! - it never promotes or deprecates through the API: the winning variant is
 //!   chosen in the dashboard, and the adapter refuses the promotion typed
-//!   instead of fabricating it. It also has no revenue metric to bill from
-//!   (the monthly pass refuses the scope revenue read rather than guessing).
+//!   instead of fabricating it. The reporting revenue is also the scope
+//!   revenue the monthly pass bills from.
 //!
 //! # The daily fold
 //!
-//! The v1 call exposes the `activeUsers` count per arm; no revenue (or any
-//! other per-arm quantity) is reported. The adapter therefore carries each
-//! arm's daily active-user count as the arm's value (`ArmDay.revenue`),
-//! leaving `users` unset so the window scales the count by the arm's
-//! pre-registered allocation exactly like the userless MAX path. Setting
-//! `users` would divide the value by the same count and flatten every day to
-//! a constant ratio, so the convention here is the count-as-value fold. The
-//! window's `levelplay_values_use_active_users` users-branch stays the rule
-//! for arm pulls that report both revenue and users.
+//! Each reporting row carries a day, an arm, revenue (micros) and active
+//! users. The adapter carries the arm's daily revenue as the arm's value
+//! (`ArmDay.revenue`) and the arm's active users as `ArmDay.users`, so the
+//! lift window's existing users branch computes revenue per user — the same
+//! measured quantity the pre-registered `revenue_per_user` metric names. A
+//! row missing either field is already a typed connector refusal; this layer
+//! only folds rows it has.
 //!
 //! Rows split strictly: `A` is the control arm, `B` the test arm, and any
 //! other label fails the pull typed, naming it. A day is final once it is
-//! strictly before the pull day (so the second pull is the same count), and a
-//! day where only one arm reported gets the other arm zero-filled — both
+//! strictly before the pull day (so the second pull is the same measurement),
+//! and a day where only one arm reported gets the other arm zero-filled — both
 //! exactly the MAX conventions.
 //!
 //! Every write is gated by a caller-supplied allow-list (the verify-live
@@ -43,7 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use apex_connectors::levelplay::{AbTestActiveUsersRow, LevelPlayClient};
+use apex_connectors::levelplay::{AbTestReportRow, LevelPlayClient};
 use apex_connectors::transport::Transport;
 use apex_core::{ExperimentResult, ExperimentState, PlatformError, PlatformId};
 use apex_proof::ChangeKind;
@@ -342,20 +340,29 @@ impl PlatformOps for LevelPlayPlatformOps {
         })
     }
 
-    /// One reporting v1 call per trailing day (the connector row carries no
-    /// date), oldest first; a day with no rows is simply absent, exactly like
-    /// the MAX pull's row union.
+    /// One reporting v1 call over the trailing window (the connector rows
+    /// carry their own `date`), oldest first. The window ends yesterday, so
+    /// every pulled day is strictly before the pull day, exactly like the MAX
+    /// pull.
     async fn experiment_days(&self, _experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
         let today = self.wall.now_unix_s().div_euclid(DAY_SECS);
-        let mut pulls: Vec<(String, Vec<AbTestActiveUsersRow>)> = Vec::new();
-        for offset in (1..=LOOKBACK_DAYS).rev() {
-            let day = crate::calendar::format_day(today - offset);
-            let rows = self.management.ab_test_active_users(&day, &day).await?;
-            if !rows.is_empty() {
-                pulls.push((day, rows));
-            }
-        }
-        arms_from_days(&pulls, today)
+        let start = crate::calendar::format_day(today - LOOKBACK_DAYS);
+        let end = crate::calendar::format_day(today - 1);
+        let rows = self.management.ab_test_report(&start, &end).await?;
+        arms_from_rows(&rows, today)
+    }
+
+    /// The scope's reported revenue over `[start, end]`, in micros. The
+    /// connector is bound to one app key, so this is the app-level revenue the
+    /// monthly pass bills on like MAX's per-unit report; the scope id is the
+    /// pre-registered ad unit the pass grouped the kept change under.
+    async fn scope_revenue(
+        &self,
+        _ad_unit_id: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<apex_core::Micros, PlatformError> {
+        self.management.app_revenue(start, end).await
     }
 
     /// The groups list, canonically encoded: any publisher change to the A/B
@@ -408,56 +415,60 @@ impl PlatformOps for LevelPlayPlatformOps {
     }
 }
 
-/// Fold the per-day pulls into the two arms: `A` is control, `B` is test, any
+/// Fold the reporting rows into the two arms: `A` is control, `B` is test, any
 /// other label fails typed; a day where only one arm reported zero-fills the
 /// other; a day strictly before the pull day is final (second pull equals the
-/// first) — the MAX conventions.
-fn arms_from_days(
-    pulls: &[(String, Vec<AbTestActiveUsersRow>)],
+/// first) — the MAX conventions. Each arm-day sums its rows' revenue (checked
+/// micros) and active users independently, so the window's users branch sees
+/// revenue per user.
+fn arms_from_rows(
+    rows: &[AbTestReportRow],
     today_day: i64,
 ) -> Result<ExperimentDays, PlatformError> {
-    let mut control: BTreeMap<String, i64> = BTreeMap::new();
-    let mut test: BTreeMap<String, i64> = BTreeMap::new();
-    for (day, rows) in pulls {
-        for row in rows {
-            let label = row.ab_test.trim();
-            let is_control = label.eq_ignore_ascii_case("A");
-            let is_test = label.eq_ignore_ascii_case("B");
-            if !is_control && !is_test {
-                return Err(PlatformError::Schema {
-                    platform: PlatformId::LevelPlay,
-                    operation: "experiment_days".into(),
-                    detail: format!(
-                        "abTest reports arm '{label}' but the experiment's groups are A and B"
-                    ),
-                });
-            }
-            let count = i64::try_from(row.active_users).map_err(|_| PlatformError::Schema {
+    let mut control: BTreeMap<String, (i64, u64)> = BTreeMap::new();
+    let mut test: BTreeMap<String, (i64, u64)> = BTreeMap::new();
+    for row in rows {
+        let label = row.ab_test.trim();
+        let is_control = label.eq_ignore_ascii_case("A");
+        let is_test = label.eq_ignore_ascii_case("B");
+        if !is_control && !is_test {
+            return Err(PlatformError::Schema {
                 platform: PlatformId::LevelPlay,
                 operation: "experiment_days".into(),
-                detail: format!("activeUsers for {day} exceeds i64"),
-            })?;
-            let map = if is_control { &mut control } else { &mut test };
-            let total = map.entry(day.clone()).or_default();
-            *total = total
-                .checked_add(count)
-                .ok_or_else(|| PlatformError::Schema {
-                    platform: PlatformId::LevelPlay,
-                    operation: "experiment_days".into(),
-                    detail: format!("activeUsers rows for {day} overflow i64"),
-                })?;
+                detail: format!(
+                    "abTest reports arm '{label}' but the experiment's groups are A and B"
+                ),
+            });
         }
+        let map = if is_control { &mut control } else { &mut test };
+        let total = map.entry(row.day.clone()).or_default();
+        total.0 = total
+            .0
+            .checked_add(row.revenue)
+            .ok_or_else(|| PlatformError::Schema {
+                platform: PlatformId::LevelPlay,
+                operation: "experiment_days".into(),
+                detail: format!("revenue rows for {} overflow i64 micros", row.day),
+            })?;
+        total.1 = total
+            .1
+            .checked_add(row.active_users)
+            .ok_or_else(|| PlatformError::Schema {
+                platform: PlatformId::LevelPlay,
+                operation: "experiment_days".into(),
+                detail: format!("activeUsers rows for {} overflow u64", row.day),
+            })?;
     }
     let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
-    let arm = |map: &BTreeMap<String, i64>, day: &str| -> apex_lift::window::ArmDay {
-        let value = map.get(day).copied().unwrap_or(0);
+    let arm = |map: &BTreeMap<String, (i64, u64)>, day: &str| -> apex_lift::window::ArmDay {
+        let (revenue, users) = map.get(day).copied().unwrap_or((0, 0));
         let final_day = crate::calendar::day_number(day).is_some_and(|n| n < today_day);
         apex_lift::window::ArmDay {
             day: day.to_string(),
-            revenue: value,
-            users: None,
-            second_pull_revenue: final_day.then_some(value),
-            second_pull_users: None,
+            revenue,
+            users: Some(users),
+            second_pull_revenue: final_day.then_some(revenue),
+            second_pull_users: final_day.then_some(users),
             fill: None,
         }
     };
@@ -540,15 +551,56 @@ mod tests {
         serde_json::json!("bearer")
     }
 
-    fn day_report(rows: &[(&str, u64)]) -> serde_json::Value {
+    /// One reporting row fixture: `(date, arm, revenue units, activeUsers)`.
+    /// Revenue is written as a decimal currency string so the exact
+    /// units-to-micros conversion is exercised end to end.
+    fn report(rows: &[(&str, &str, &str, u64)]) -> serde_json::Value {
         serde_json::json!({
             "code": 200,
             "count": rows.len(),
             "results": rows
                 .iter()
-                .map(|(arm, users)| serde_json::json!({"abTest": arm, "activeUsers": users}))
+                .map(|(date, arm, revenue, users)| serde_json::json!({
+                    "date": date,
+                    "abTest": arm,
+                    "revenue": revenue,
+                    "activeUsers": users
+                }))
                 .collect::<Vec<_>>()
         })
+    }
+
+    /// `days` trailing days (yesterday back), both arms on every day, oldest
+    /// first — the shape the one-window reporting pull returns.
+    fn trailing_report(
+        days: i64,
+        control_revenue: &str,
+        test_revenue: &str,
+        users: u64,
+    ) -> serde_json::Value {
+        let today = today_day();
+        let mut results = Vec::new();
+        for offset in (1..=days).rev() {
+            let day = crate::calendar::format_day(today - offset);
+            for (arm, revenue) in [("A", control_revenue), ("B", test_revenue)] {
+                results.push(serde_json::json!({
+                    "date": day,
+                    "abTest": arm,
+                    "revenue": revenue,
+                    "activeUsers": users
+                }));
+            }
+        }
+        serde_json::json!({"code": 200, "count": results.len(), "results": results})
+    }
+
+    fn typed_row(day: &str, arm: &str, revenue: i64, users: u64) -> AbTestReportRow {
+        AbTestReportRow {
+            day: day.to_string(),
+            ab_test: arm.to_string(),
+            revenue,
+            active_users: users,
+        }
     }
 
     fn groups_report(variant_instances: serde_json::Value) -> serde_json::Value {
@@ -621,13 +673,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_aa_read_folds_to_exactly_zero_lift_through_the_window() {
+    async fn an_aa_read_with_equal_revenue_and_users_folds_to_zero_revenue_lift() {
         let transport = Arc::new(FakeTransport::default());
         transport.push(200, auth());
-        // Ten equal-arm days; the fold maps every one to the same value.
-        for _ in 0..10 {
-            transport.push(200, day_report(&[("A", 100), ("B", 100)]));
-        }
+        // Ten equal-arm days; both the revenue and the active-user fields are
+        // identical, so the users branch sees the same revenue per user. An
+        // A/A can never manufacture revenue lift.
+        transport.push(200, trailing_report(10, "100.00", "100.00", 5_000));
         let adapter = ops(Arc::clone(&transport), true);
         let days = adapter.experiment_days("g-b").await.expect("days");
         assert_eq!(days.control.len(), 10);
@@ -635,12 +687,18 @@ mod tests {
         for (control, test) in days.control.iter().zip(&days.test) {
             assert_eq!(control.day, test.day);
             assert_eq!(control.revenue, test.revenue);
-            assert_eq!(control.revenue, 100, "the active-user count is the value");
+            assert_eq!(
+                control.revenue, 100_000_000,
+                "$100.00 parses to 100_000_000 micros"
+            );
+            assert_eq!(control.users, Some(5_000));
+            assert_eq!(test.users, Some(5_000));
             assert_eq!(
                 control.second_pull_revenue,
-                Some(100),
+                Some(100_000_000),
                 "strictly before today"
             );
+            assert_eq!(control.second_pull_users, Some(5_000));
         }
         // The full fold: the window completes and the estimate is exactly zero.
         let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
@@ -664,58 +722,39 @@ mod tests {
         // Fold-level: the day the pull runs is not final, everything strictly
         // before it is — the MAX finality convention.
         let today = today_day();
-        let pulls = vec![
-            (
-                crate::calendar::format_day(today - 1),
-                vec![
-                    AbTestActiveUsersRow {
-                        ab_test: "A".into(),
-                        active_users: 700,
-                    },
-                    AbTestActiveUsersRow {
-                        ab_test: "B".into(),
-                        active_users: 900,
-                    },
-                ],
-            ),
-            (
-                crate::calendar::format_day(today),
-                vec![AbTestActiveUsersRow {
-                    ab_test: "A".into(),
-                    active_users: 100,
-                }],
-            ),
+        let yesterday = crate::calendar::format_day(today - 1);
+        let pull_day = crate::calendar::format_day(today);
+        let rows = vec![
+            typed_row(&yesterday, "A", 700_000_000, 700),
+            typed_row(&yesterday, "B", 900_000_000, 900),
+            typed_row(&pull_day, "A", 100_000_000, 100),
         ];
-        let days = arms_from_days(&pulls, today).expect("fold");
+        let days = arms_from_rows(&rows, today).expect("fold");
         assert_eq!(days.control.len(), 2);
         assert_eq!(days.test.len(), 2, "a shared day shape");
-        assert_eq!(days.control[0].revenue, 700);
-        assert_eq!(days.control[0].second_pull_revenue, Some(700));
-        assert_eq!(days.test[0].revenue, 900);
+        assert_eq!(days.control[0].revenue, 700_000_000);
+        assert_eq!(days.control[0].users, Some(700));
+        assert_eq!(days.control[0].second_pull_revenue, Some(700_000_000));
+        assert_eq!(days.test[0].revenue, 900_000_000);
+        assert_eq!(days.test[0].users, Some(900));
         // The pull day itself is not final.
         assert_eq!(days.control[1].second_pull_revenue, None);
-        // The missing B row zero-fills, final exactly when the day is final.
+        assert_eq!(days.control[1].second_pull_users, None);
+        // The missing B row zero-fills both fields, final exactly when the day
+        // is final.
         assert_eq!(days.test[1].revenue, 0);
+        assert_eq!(days.test[1].users, Some(0));
         assert_eq!(days.test[1].second_pull_revenue, None);
-        assert!(days.control.iter().all(|day| day.users.is_none()));
+        assert_eq!(days.test[1].second_pull_users, None);
     }
 
     #[test]
     fn a_third_arm_label_fails_the_fold_typed() {
-        let pulls = vec![(
-            "2027-01-13".to_string(),
-            vec![
-                AbTestActiveUsersRow {
-                    ab_test: "A".into(),
-                    active_users: 10,
-                },
-                AbTestActiveUsersRow {
-                    ab_test: "NULL".into(),
-                    active_users: 10,
-                },
-            ],
-        )];
-        let error = arms_from_days(&pulls, 20_000).expect_err("third label");
+        let rows = vec![
+            typed_row("2027-01-13", "A", 1_000_000, 10),
+            typed_row("2027-01-13", "NULL", 1_000_000, 10),
+        ];
+        let error = arms_from_rows(&rows, 20_000).expect_err("third label");
         assert_typed_schema(&error, "experiment_days");
         assert!(error.to_string().contains("NULL"), "{error}");
     }
@@ -953,7 +992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_settings_encode_the_groups_and_scope_revenue_refuses() {
+    async fn current_settings_encode_the_groups_and_scope_revenue_reads_the_app_report() {
         let transport = Arc::new(FakeTransport::default());
         transport.push(200, auth());
         transport.push(
@@ -970,13 +1009,25 @@ mod tests {
             groups_report(serde_json::json!([{"instanceId": "i1"}])),
         );
         assert_eq!(settings, settings_from(&adapter).await);
-        // LevelPlay's reporting call exposes only activeUsers; there is no
-        // revenue read, so billing refuses instead of guessing.
-        let error = adapter
+        // The monthly pass's scope revenue is the app-level revenue report,
+        // summed exactly into micros.
+        transport.push(
+            200,
+            report(&[
+                ("2027-01-01", "A", "10.50", 100),
+                ("2027-01-02", "B", "4.25", 40),
+            ]),
+        );
+        let revenue = adapter
             .scope_revenue("u1", "2027-01-01", "2027-01-31")
             .await
-            .expect_err("refuse");
-        assert!(error.to_string().contains("not supported"), "{error}");
+            .expect("revenue");
+        assert_eq!(revenue, 14_750_000, "$14.75 in micros");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(
+            seen.last().expect("revenue request").url,
+            "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date&metrics=revenue&startDate=2027-01-01&endDate=2027-01-31"
+        );
     }
 
     async fn settings_from(adapter: &LevelPlayPlatformOps) -> String {
@@ -1048,14 +1099,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experiment_days_pulls_each_trailing_day_oldest_first() {
+    async fn experiment_days_pulls_one_reporting_window_oldest_first() {
         let transport = Arc::new(FakeTransport::default());
         transport.push(200, auth());
-        transport.push(200, day_report(&[("A", 10), ("B", 12)]));
+        let day = crate::calendar::format_day(today_day() - 1);
+        transport.push(
+            200,
+            report(&[(&day, "A", "10.00", 10), (&day, "B", "12.00", 12)]),
+        );
         let adapter = ops(Arc::clone(&transport), true);
         let days = adapter.experiment_days("g-b").await.expect("days");
         assert_eq!(days.control.len(), 1);
         assert_eq!(days.test.len(), 1);
+        assert_eq!(days.control[0].revenue, 10_000_000);
+        assert_eq!(days.control[0].users, Some(10));
+        assert_eq!(days.test[0].revenue, 12_000_000);
+        assert_eq!(days.test[0].users, Some(12));
         let seen = transport.seen.lock().unwrap();
         let first_day = crate::calendar::format_day(today_day() - LOOKBACK_DAYS);
         assert_eq!(seen[0].url, "https://lp.test/partners/publisher/auth");
@@ -1063,9 +1122,153 @@ mod tests {
         assert_eq!(
             seen[1].url,
             format!(
-                "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=abTest&metrics=activeUsers&startDate={first_day}&endDate={first_day}"
+                "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate={first_day}&endDate={day}"
             )
         );
-        assert_eq!(seen.len(), 1 + LOOKBACK_DAYS as usize, "one call per day");
+        assert_eq!(seen.len(), 2, "one reporting window, not one call per day");
+    }
+
+    fn kept_change(lambda: f64) -> apex_lift::billing::KeptChange {
+        apex_lift::billing::KeptChange {
+            change_id: "autopilot-levelplay-u1-2-5".into(),
+            lambda,
+            rate_bp: 2_000,
+            kept_day: "2026-12-15".into(),
+            overridden_day: None,
+            pre_registration_hash: "pre-levelplay".into(),
+            result_hash: "result-levelplay".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_levelplay_change_bills_the_revenue_lift_like_max() {
+        // Ten days of equal users and a constant 3% revenue lift: the measured
+        // value is revenue per user, so the conservative bound is a revenue
+        // lift, not a user count. The active-user count is deliberately large
+        // and constant; a fold that billed users would produce a wildly
+        // different increment.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(200, trailing_report(10, "10.00", "10.30", 1_000_000));
+        // The monthly scope revenue the pass bills against: $1,000.00.
+        transport.push(200, report(&[("2027-01-31", "A", "1000.00", 1_000_000)]));
+        let adapter = ops(Arc::clone(&transport), true);
+
+        let days = adapter.experiment_days("g-b").await.expect("days");
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        assert!(window.complete, "problems: {:?}", window.problems);
+        let estimate = apex_lift::estimate(
+            &window
+                .days
+                .iter()
+                .map(|day| day.log_ratio)
+                .collect::<Vec<_>>(),
+        )
+        .expect("estimate");
+        assert!(
+            (estimate.lift - 0.03).abs() < 1e-9,
+            "the value is the 3% revenue lift, got {}",
+            estimate.lift
+        );
+        let lambda = estimate.lower_90.max(0.0);
+        assert!(lambda > 0.0, "a measured revenue lift is billable");
+        assert!(lambda <= estimate.lift + 1e-12);
+
+        let scope_revenue = adapter
+            .scope_revenue("u1", "2027-01-01", "2027-01-31")
+            .await
+            .expect("scope revenue");
+        assert_eq!(scope_revenue, 1_000_000_000, "$1,000.00 in micros");
+
+        let change = kept_change(lambda);
+        let run = apex_lift::run::run_month(
+            "2027-01",
+            "2027-01-01",
+            31,
+            scope_revenue,
+            std::slice::from_ref(&change),
+        )
+        .expect("monthly run");
+        assert_eq!(run.fees.len(), 1);
+        let fee = &run.fees[0];
+        let expected_incremental =
+            (scope_revenue as f64 * (1.0 - 1.0 / (1.0 + lambda))).round() as i64;
+        assert_eq!(
+            fee.incremental, expected_incremental,
+            "the conservative increment derives from scope revenue, not users"
+        );
+        assert_eq!(
+            fee.fee_micros,
+            (0.20 * fee.incremental as f64).round() as i64,
+            "a single change bills its full log share at the 20% rate"
+        );
+
+        // The billable record has exactly the MAX monthly-billing shape and
+        // carries the revenue basis the invoice re-derives from.
+        let record = apex_lift::emit::monthly_billing(fee, "2027-01").expect("record");
+        let json = record.record.canonical_json().expect("canonical");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["type"], "monthlyBilling");
+        assert_eq!(value["scopeRevenue"], 1_000_000_000);
+        assert_eq!(value["incremental"], expected_incremental);
+        assert_eq!(value["feeMicros"], fee.fee_micros);
+        assert_eq!(value["billedDays"], 31);
+        assert_eq!(value["monthDays"], 31);
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "billedDays",
+                "changeId",
+                "factor",
+                "feeMicros",
+                "incremental",
+                "lambda",
+                "logShare",
+                "month",
+                "monthDays",
+                "rateBp",
+                "scopeRevenue",
+                "type",
+            ],
+            "the same signed billable record shape MAX produces"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aa_levelplay_read_bills_nothing() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        // Equal revenue and equal users on every day, so the measured revenue
+        // lift is zero.
+        transport.push(200, trailing_report(10, "10.00", "10.00", 5_000));
+        let adapter = ops(Arc::clone(&transport), true);
+        let days = adapter.experiment_days("g-b").await.expect("days");
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        assert!(window.complete, "problems: {:?}", window.problems);
+        let estimate = apex_lift::estimate(
+            &window
+                .days
+                .iter()
+                .map(|day| day.log_ratio)
+                .collect::<Vec<_>>(),
+        )
+        .expect("estimate");
+        assert_eq!(estimate.lift, 0.0, "an A/A cannot manufacture revenue lift");
+        assert_eq!(estimate.lower_90, 0.0);
+        let lambda = estimate.lower_90.max(0.0);
+        assert_eq!(lambda, 0.0, "no positive billable lift");
+        // The keep scan only forms a KeptChange for lambda > 0, so the monthly
+        // pass sees no active change and bills nothing even with revenue.
+        let run = apex_lift::run::run_month("2027-01", "2027-01-01", 31, 1_000_000_000, &[])
+            .expect("monthly run");
+        assert!(run.fees.is_empty(), "an A/A change bills nothing");
+        assert_eq!(run.scope_revenue, 1_000_000_000);
     }
 }

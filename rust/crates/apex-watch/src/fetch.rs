@@ -19,6 +19,7 @@
 //! text, 404 and 410 answer "no file" and every other status or failure is
 //! an [`AppAdsUnreachable`] with a typed reason.
 
+use std::net::IpAddr;
 use std::process::{Command, Stdio};
 
 use crate::guard::HostResolver;
@@ -92,9 +93,11 @@ impl std::fmt::Display for FetchError {
 
 /// Fetches one URL.
 pub trait Fetcher: Send + Sync + std::fmt::Debug {
-    /// GET `url`. The caller has already validated the shape and guarded the
-    /// host; the transport still refuses anything exotic.
-    fn get(&self, url: &str) -> Result<Fetched, FetchError>;
+    /// GET `url` pinned to `approved`, the address the resolve-time guard
+    /// already approved. The transport must not resolve the host name again:
+    /// `curl` is given `--resolve host:port:address`, so a DNS answer that
+    /// changes between the guard and the fetch cannot redirect the request.
+    fn get(&self, url: &str, approved: IpAddr) -> Result<Fetched, FetchError>;
 }
 
 /// Normalize caller input into the hostname to fetch. Accepts
@@ -211,9 +214,13 @@ impl Default for CurlFetcher {
 }
 
 impl Fetcher for CurlFetcher {
-    fn get(&self, url: &str) -> Result<Fetched, FetchError> {
+    fn get(&self, url: &str, approved: IpAddr) -> Result<Fetched, FetchError> {
         validate_url(url)?;
         let scheme = url.split(':').next().unwrap_or("https");
+        let host = host_of(url);
+        let resolve = resolve_entry(host, default_port(scheme), approved);
+        let timeout = self.timeout_secs.to_string();
+        let max_bytes = self.max_bytes.to_string();
         let output = Command::new(&self.binary)
             .args([
                 "--silent",
@@ -221,9 +228,13 @@ impl Fetcher for CurlFetcher {
                 "--proto",
                 &format!("={scheme}"),
                 "--max-time",
-                &self.timeout_secs.to_string(),
+                &timeout,
                 "--max-filesize",
-                &self.max_bytes.to_string(),
+                &max_bytes,
+                // The guard already approved `approved`; pin curl to exactly
+                // that address so it never resolves the name a second time.
+                "--resolve",
+                &resolve,
                 "--user-agent",
                 &self.user_agent,
                 "--write-out",
@@ -247,6 +258,25 @@ impl Fetcher for CurlFetcher {
             }));
         }
         parse_curl_output(&output.stdout, self.max_bytes)
+    }
+}
+
+/// The port a validated http(s) URL fetches from. [`validate_url`] refuses an
+/// explicit port, so the scheme's default is the only possible port.
+fn default_port(scheme: &str) -> u16 {
+    if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        443
+    }
+}
+
+/// One `curl --resolve` entry. IPv6 literals are bracketed, as curl's
+/// `--resolve host:port:addr` grammar requires.
+fn resolve_entry(host: &str, port: u16, approved: IpAddr) -> String {
+    match approved {
+        IpAddr::V4(address) => format!("{host}:{port}:{address}"),
+        IpAddr::V6(address) => format!("{host}:{port}:[{address}]"),
     }
 }
 
@@ -302,15 +332,18 @@ pub fn fetch_app_ads(
     domain: &str,
     fetcher: &dyn Fetcher,
     resolver: &dyn HostResolver,
+    approved: IpAddr,
 ) -> Result<AppAdsFetch, AppAdsUnreachable> {
     let https_url = format!("https://{domain}{APP_ADS_PATH}");
-    match fetch_hop_chain(&https_url, true, fetcher, resolver) {
+    match fetch_hop_chain(&https_url, true, approved, fetcher, resolver) {
         Ok(fetched) => classify(fetched),
         Err(FetchError::Transport(detail)) => {
             // Only a transport-level HTTPS failure earns the plain HTTP
-            // attempt; an HTTP status answer is a verdict on its own.
+            // attempt; an HTTP status answer is a verdict on its own. The
+            // same guard-approved address is used: the host name is never
+            // re-resolved.
             let http_url = format!("http://{domain}{APP_ADS_PATH}");
-            match fetch_hop_chain(&http_url, false, fetcher, resolver) {
+            match fetch_hop_chain(&http_url, false, approved, fetcher, resolver) {
                 Ok(fetched) => classify(fetched),
                 Err(error) => Err(unreachable(&format!("https failed ({detail}); {error}"))),
             }
@@ -347,12 +380,14 @@ fn classify(fetched: Fetched) -> Result<AppAdsFetch, AppAdsUnreachable> {
 fn fetch_hop_chain(
     start_url: &str,
     https_only: bool,
+    approved: IpAddr,
     fetcher: &dyn Fetcher,
     resolver: &dyn HostResolver,
 ) -> Result<Fetched, FetchError> {
     let mut current = start_url.to_string();
+    let mut current_approved = approved;
     for _ in 0..MAX_REDIRECTS {
-        let response = fetcher.get(&current)?;
+        let response = fetcher.get(&current, current_approved)?;
         if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }
@@ -362,14 +397,15 @@ fn fetch_hop_chain(
         let next = resolve_redirect(&current, &location, https_only).map_err(|detail| {
             FetchError::Redirect(format!("a redirect to {location} is refused: {detail}"))
         })?;
-        guard_hop(&next, resolver)?;
+        current_approved = guard_hop(&next, resolver)?;
         current = next;
     }
     Err(FetchError::TooManyRedirects(MAX_REDIRECTS))
 }
 
-/// Guard one redirect hop's host before the next request.
-fn guard_hop(url: &str, resolver: &dyn HostResolver) -> Result<(), FetchError> {
+/// Guard one redirect hop's host before the next request, returning the
+/// first approved address to pin the request to.
+fn guard_hop(url: &str, resolver: &dyn HostResolver) -> Result<IpAddr, FetchError> {
     let host = host_of(url);
     let addresses = resolver.resolve(host).map_err(|detail| {
         FetchError::Redirect(format!("the hop host {host} did not resolve: {detail}"))
@@ -379,7 +415,11 @@ fn guard_hop(url: &str, resolver: &dyn HostResolver) -> Result<(), FetchError> {
             "the hop host {host} resolves to a {} address",
             refusal.class
         ))
-    })
+    })?;
+    addresses
+        .first()
+        .copied()
+        .ok_or_else(|| FetchError::Redirect(format!("the hop host {host} returned no addresses")))
 }
 
 fn host_of(url: &str) -> &str {
@@ -458,7 +498,7 @@ pub struct MapFetcher {
 }
 
 impl Fetcher for MapFetcher {
-    fn get(&self, url: &str) -> Result<Fetched, FetchError> {
+    fn get(&self, url: &str, _approved: IpAddr) -> Result<Fetched, FetchError> {
         self.calls
             .lock()
             .map_err(|_| FetchError::Transport("map fetcher lock poisoned".into()))?
@@ -531,6 +571,10 @@ mod tests {
             ("cdn.example.net", "93.184.216.35"),
             ("private.example", "10.0.0.9"),
         ])
+    }
+
+    fn approved() -> IpAddr {
+        "93.184.216.34".parse().expect("test address")
     }
 
     #[test]
@@ -614,7 +658,7 @@ mod tests {
             )],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let read = fetch_app_ads("example.com", &fetcher, &public()).expect("read");
+        let read = fetch_app_ads("example.com", &fetcher, &public(), approved()).expect("read");
         assert_eq!(
             read,
             AppAdsFetch::Text(vec![
@@ -633,7 +677,7 @@ mod tests {
                 calls: std::sync::Mutex::new(Vec::new()),
             };
             assert_eq!(
-                fetch_app_ads("example.com", &fetcher, &public()).expect("read"),
+                fetch_app_ads("example.com", &fetcher, &public(), approved()).expect("read"),
                 AppAdsFetch::Missing,
                 "status {status}"
             );
@@ -650,7 +694,7 @@ mod tests {
             )],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let read = fetch_app_ads("example.com", &fetcher, &public()).expect("read");
+        let read = fetch_app_ads("example.com", &fetcher, &public(), approved()).expect("read");
         assert!(matches!(read, AppAdsFetch::Text(_)));
         let calls = fetcher.calls.lock().unwrap().clone();
         assert_eq!(
@@ -668,7 +712,8 @@ mod tests {
             pages: vec![page("https://example.com/app-ads.txt", 500, b"")],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let error = fetch_app_ads("example.com", &fetcher, &public()).expect_err("unreachable");
+        let error =
+            fetch_app_ads("example.com", &fetcher, &public(), approved()).expect_err("unreachable");
         assert!(error.reason.contains("HTTP 500"), "{}", error.reason);
         assert_eq!(fetcher.calls.lock().unwrap().len(), 1);
     }
@@ -683,7 +728,7 @@ mod tests {
             calls: std::sync::Mutex::new(Vec::new()),
         };
         let resolver = public();
-        let read = fetch_app_ads("example.com", &fetcher, &resolver).expect("read");
+        let read = fetch_app_ads("example.com", &fetcher, &resolver, approved()).expect("read");
         assert_eq!(read, AppAdsFetch::Missing);
         let calls = fetcher.calls.lock().unwrap().clone();
         assert_eq!(
@@ -720,7 +765,7 @@ mod tests {
             ],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let read = fetch_app_ads("example.com", &fetcher, &public()).expect("read");
+        let read = fetch_app_ads("example.com", &fetcher, &public(), approved()).expect("read");
         assert!(matches!(read, AppAdsFetch::Text(_)));
     }
 
@@ -733,7 +778,8 @@ mod tests {
             )],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let error = fetch_app_ads("example.com", &fetcher, &public()).expect_err("refused");
+        let error =
+            fetch_app_ads("example.com", &fetcher, &public(), approved()).expect_err("refused");
         assert!(error.reason.contains("private"), "{}", error.reason);
         let calls = fetcher.calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1, "no fallback and no private request");
@@ -752,7 +798,8 @@ mod tests {
             )],
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let error = fetch_app_ads("example.com", &fetcher, &public()).expect_err("refused");
+        let error =
+            fetch_app_ads("example.com", &fetcher, &public(), approved()).expect_err("refused");
         assert!(
             error.reason.contains("leave the current scheme"),
             "{}",
@@ -770,9 +817,110 @@ mod tests {
             pages,
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        let error = fetch_app_ads("example.com", &fetcher, &public()).expect_err("chain");
+        let error =
+            fetch_app_ads("example.com", &fetcher, &public(), approved()).expect_err("chain");
         assert!(error.reason.contains("redirect chain"), "{}", error.reason);
         assert_eq!(fetcher.calls.lock().unwrap().len(), MAX_REDIRECTS);
+    }
+
+    /// A resolver whose answer changes per call: the first call (the guard)
+    /// answers a public address, a second call (a naive fetch-time
+    /// resolution) would answer loopback.
+    #[derive(Debug)]
+    struct SwappingResolver {
+        answers: std::sync::Mutex<Vec<IpAddr>>,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    impl HostResolver for SwappingResolver {
+        fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let answers = self.answers.lock().unwrap();
+            answers
+                .get((*calls - 1).min(answers.len().saturating_sub(1)))
+                .copied()
+                .map(|address| vec![address])
+                .ok_or_else(|| format!("no answer for {host}"))
+        }
+    }
+
+    /// A fetcher that records the address it was pinned to and answers a
+    /// body derived from it: a loopback pin is the rebinding canary.
+    #[derive(Debug, Default)]
+    struct RecordingFetcher {
+        pins: std::sync::Mutex<Vec<(String, IpAddr)>>,
+    }
+
+    impl Fetcher for RecordingFetcher {
+        fn get(&self, url: &str, approved: IpAddr) -> Result<Fetched, FetchError> {
+            self.pins.lock().unwrap().push((url.to_string(), approved));
+            let body = if approved.is_loopback() {
+                b"REBOUND-TO-LOOPBACK.example, pub-evil, DIRECT\n".to_vec()
+            } else {
+                b"admob.com, pub-1, DIRECT\n".to_vec()
+            };
+            Ok(Fetched {
+                status: 200,
+                body,
+                redirect: None,
+            })
+        }
+    }
+
+    #[test]
+    fn a_dns_swap_between_guard_and_fetch_cannot_redirect_the_request() {
+        let resolver = SwappingResolver {
+            answers: std::sync::Mutex::new(vec![
+                "93.184.216.34".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+            ]),
+            calls: std::sync::Mutex::new(0),
+        };
+        // The guard's one resolution approves the public address.
+        let addresses = resolver.resolve("example.com").expect("guard answer");
+        assert_eq!(*resolver.calls.lock().unwrap(), 1);
+        assert!(crate::guard::guard_hosts(&addresses).is_ok());
+
+        let fetcher = RecordingFetcher::default();
+        let read = fetch_app_ads("example.com", &fetcher, &resolver, addresses[0]).expect("read");
+        assert_eq!(
+            read,
+            AppAdsFetch::Text(vec!["admob.com, pub-1, DIRECT".to_string()])
+        );
+        assert_eq!(
+            *resolver.calls.lock().unwrap(),
+            1,
+            "the fetch must not resolve the host a second time"
+        );
+        let pins = fetcher.pins.lock().unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].0, "https://example.com/app-ads.txt");
+        assert_eq!(pins[0].1, addresses[0]);
+        assert!(
+            !pins.iter().any(|(_, address)| address.is_loopback()),
+            "the swapped-in loopback answer never reaches the fetch"
+        );
+    }
+
+    #[test]
+    fn resolve_entries_bracket_ipv6_and_keep_the_scheme_port() {
+        assert_eq!(
+            resolve_entry("example.com", 443, "93.184.216.34".parse().unwrap()),
+            "example.com:443:93.184.216.34"
+        );
+        assert_eq!(
+            resolve_entry("example.com", 80, "93.184.216.34".parse().unwrap()),
+            "example.com:80:93.184.216.34"
+        );
+        assert_eq!(
+            resolve_entry(
+                "example.com",
+                443,
+                "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()
+            ),
+            "example.com:443:[2606:2800:220:1:248:1893:25c8:1946]"
+        );
     }
 
     #[test]
@@ -781,9 +929,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("curl.sh");
+        let argv_path = dir.join("argv.txt");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\nprintf 'hello{STATUS_MARKER}200|'\n"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'hello{STATUS_MARKER}200|'\n",
+                argv_path.display()
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -796,10 +948,24 @@ mod tests {
             ..CurlFetcher::default()
         };
         let fetched = fetcher
-            .get("https://example.com/app-ads.txt")
+            .get("https://example.com/app-ads.txt", approved())
             .expect("fetch");
         assert_eq!(fetched.status, 200);
         assert_eq!(fetched.body, b"hello");
+
+        // The exact argv pins the guard-approved address: host:443 because
+        // `validate_url` refuses an explicit port and the URL is HTTPS.
+        let argv = std::fs::read_to_string(&argv_path).expect("argv");
+        let args: Vec<&str> = argv.lines().collect();
+        let resolve = args
+            .iter()
+            .position(|arg| *arg == "--resolve")
+            .expect("--resolve is passed");
+        assert_eq!(args[resolve + 1], "example.com:443:93.184.216.34");
+        assert!(
+            args.contains(&"https://example.com/app-ads.txt"),
+            "{args:?}"
+        );
 
         let failing = dir.join("fail.sh");
         std::fs::write(
@@ -817,7 +983,7 @@ mod tests {
             ..CurlFetcher::default()
         };
         let error = fetcher
-            .get("https://example.com/app-ads.txt")
+            .get("https://example.com/app-ads.txt", approved())
             .expect_err("fail");
         assert!(matches!(error, FetchError::Transport(ref detail) if detail.contains("resolve")));
         let _ = std::fs::remove_dir_all(&dir);

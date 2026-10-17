@@ -514,38 +514,62 @@ pub fn render_audit_csv(view: &AuditReportView<'_>, currency: &str) -> String {
         "snapshot_digest",
         "generated_by",
     ];
-    let mut out = String::new();
-    let header_line: Vec<String> = headers
-        .iter()
-        .map(|field| format::csv_field(field))
-        .collect();
-    out.push_str(&header_line.join(","));
+    // One reservation for the whole export: the old shape built a 12-entry
+    // Vec and a joined String per finding, so a 20k-row export paid 260k
+    // temporary allocations. Fields now append straight into the output.
+    let mut out = String::with_capacity(256 + view.report.findings.len() * 256);
+    for (index, field) in headers.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        format::push_csv_field(&mut out, field);
+    }
     out.push_str("\r\n");
     let captured = utc_datetime(view.snapshot.fetched_at_unix_ms);
     for finding in &view.report.findings {
-        let line = vec![
-            format::csv_text_field(&severity_label(finding.severity).to_lowercase()),
-            format::csv_text_field(finding.rule.as_str()),
-            format::csv_text_field(finding.platform.as_str()),
-            format::csv_text_field(&finding.subject),
-            format::csv_text_field(&finding_id(
+        format::push_csv_text_field(&mut out, severity_csv_label(finding.severity));
+        out.push(',');
+        format::push_csv_text_field(&mut out, finding.rule.as_str());
+        out.push(',');
+        format::push_csv_text_field(&mut out, finding.platform.as_str());
+        out.push(',');
+        format::push_csv_text_field(&mut out, &finding.subject);
+        out.push(',');
+        format::push_csv_text_field(
+            &mut out,
+            &finding_id(
                 finding.rule.as_str(),
                 finding.platform.as_str(),
                 &finding.subject,
-            )),
-            format::csv_text_field(&finding.message),
-            format::csv_text_field(recovery_model(finding).unwrap_or("missing")),
-            // Numeric: never prefixed, so the number stays machine-readable.
-            format::csv_field(&finding.estimated_monthly_recovery.to_string()),
-            format::csv_text_field(currency),
-            format::csv_text_field(&captured),
-            format::csv_text_field(&view.report.snapshot_digest),
-            format::csv_text_field(view.report.generated_by),
-        ];
-        out.push_str(&line.join(","));
+            ),
+        );
+        out.push(',');
+        format::push_csv_text_field(&mut out, &finding.message);
+        out.push(',');
+        format::push_csv_text_field(&mut out, recovery_model(finding).unwrap_or("missing"));
+        out.push(',');
+        // Numeric: never prefixed, so the number stays machine-readable.
+        format::push_csv_field(&mut out, &finding.estimated_monthly_recovery.to_string());
+        out.push(',');
+        format::push_csv_text_field(&mut out, currency);
+        out.push(',');
+        format::push_csv_text_field(&mut out, &captured);
+        out.push(',');
+        format::push_csv_text_field(&mut out, &view.report.snapshot_digest);
+        out.push(',');
+        format::push_csv_text_field(&mut out, view.report.generated_by);
         out.push_str("\r\n");
     }
     out
+}
+
+/// The lowercase CSV spelling of a severity (no per-row allocation).
+fn severity_csv_label(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical => "critical",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+    }
 }
 
 #[cfg(test)]
@@ -911,6 +935,58 @@ mod tests {
         assert!(csv.contains("420000000"));
         assert!(csv.ends_with("\r\n"));
         assert_eq!(csv.lines().count(), 2);
+    }
+
+    /// The export is linear at the console's 20k-row reference size and
+    /// reserves its buffer once (no per-row `Vec`/`join` temporaries).
+    #[test]
+    fn csv_renders_twenty_thousand_findings_linearly() {
+        let snapshot = snapshot();
+        let render = |count: usize| {
+            let findings = (0..count)
+                .map(|index| {
+                    finding(
+                        RuleId::StaleFloor,
+                        Severity::Warning,
+                        &format!("unit{index}"),
+                        "floor_blocks_fill",
+                        1,
+                    )
+                })
+                .collect();
+            let report = report(findings);
+            render_audit_csv(
+                &AuditReportView {
+                    platform: PlatformId::Admob,
+                    snapshot: &snapshot,
+                    report: &report,
+                },
+                "USD",
+            )
+        };
+        let five = render(5_000);
+        let ten = render(10_000);
+        let twenty = render(20_000);
+        assert_eq!(twenty.lines().count(), 20_001, "one line per finding");
+        let per_row = |csv: &str, rows: usize| csv.len() / rows;
+        assert!(
+            per_row(&ten, 10_000) <= per_row(&five, 5_000) + 8,
+            "5k -> 10k rows is linear per row"
+        );
+        assert!(
+            per_row(&twenty, 20_000) <= per_row(&ten, 10_000) + 8,
+            "10k -> 20k rows is linear per row"
+        );
+        assert!(
+            twenty.capacity() >= twenty.len(),
+            "the reservation covers the export"
+        );
+        assert!(
+            twenty.capacity() <= 256 + 20_000 * 256 + 4096,
+            "one reserve sized from the row count (capacity {}, len {})",
+            twenty.capacity(),
+            twenty.len()
+        );
     }
 
     #[test]

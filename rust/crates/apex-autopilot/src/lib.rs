@@ -45,7 +45,10 @@ pub mod text;
 pub mod verify;
 
 pub use alerts::{Alert, AlertSink, FileAlertSink, NoopAlertSink, RecordingAlertSink};
-pub use audit_job::{audited_snapshot, max_account_snapshot, write_snapshot};
+pub use audit_job::{
+    account_snapshot, admob_account_snapshot, audited_platform_snapshot, audited_snapshot,
+    levelplay_account_snapshot, max_account_snapshot, write_snapshot, SnapshotAccount,
+};
 pub use cycle::CycleJobReport;
 pub use events::RunnerEvents;
 pub use keys::{experiment_name, idempotency_key, platform_of};

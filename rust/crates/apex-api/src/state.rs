@@ -21,6 +21,25 @@ use crate::session::{LedgerSessions, DEFAULT_SESSION_CAPACITY, SESSION_IDLE_MS};
 use crate::sources::{AuditSource, LedgerSource};
 use apex_billing::CollectionStore;
 
+/// A debug-printable holder for the Adyen checkout transport. The transport
+/// trait itself is not `Debug`, and the binary's endpoint must never appear in
+/// a state debug line anyway.
+#[derive(Clone)]
+pub struct BillingTransport(Arc<dyn apex_connectors::transport::Transport>);
+
+impl std::fmt::Debug for BillingTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BillingTransport")
+    }
+}
+
+impl BillingTransport {
+    /// The underlying transport.
+    pub fn get(&self) -> &dyn apex_connectors::transport::Transport {
+        self.0.as_ref()
+    }
+}
+
 /// The complete dependency set of the HTTP surface.
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -32,6 +51,11 @@ pub struct AppState {
     /// from it; the state's explicit `adyen_hmac_key` is the fallback for
     /// deployments that hold only the key.
     pub adyen: Option<Arc<AdyenClient>>,
+    /// The transport Adyen Checkout calls travel through (payment-link
+    /// creation for the setup watch). `None` means no checkout call can be
+    /// made: the watch page then shows the honest "we will email a payment
+    /// link" state instead of inventing one.
+    pub billing_transport: Option<Arc<BillingTransport>>,
     /// Explicit webhook HMAC key, used only when no Adyen client is
     /// configured.
     pub adyen_hmac_key: Option<Vec<u8>>,
@@ -56,6 +80,11 @@ pub struct AppState {
     /// root). `None` makes `GET /console/signin` answer the `503`
     /// not-configured panel: without a leads root the path fails closed.
     pub signin: Option<Arc<crate::signin::SigninService>>,
+    /// The new-workspace ownership proof (the creating email domain's public
+    /// `app-ads.txt`). `None` makes every new workspace unprovable, so a
+    /// free-audit submission for an unknown workspace is refused typed
+    /// rather than creating one.
+    pub app_ads_proof: Option<Arc<dyn crate::signin::WorkspaceProofSource>>,
     /// Lead capture behind `POST /v1/leads`. `None` makes the route answer
     /// `503 lead_capture_not_configured`.
     pub leads: Option<Arc<dyn LeadStore>>,
@@ -111,6 +140,7 @@ impl AppState {
             audit_source,
             ledger_source,
             adyen: None,
+            billing_transport: None,
             adyen_hmac_key: None,
             clock: Arc::new(SystemClock),
             cycle_runner,
@@ -118,6 +148,7 @@ impl AppState {
             ledger_tokens: Arc::new(HashMap::new()),
             workspaces: None,
             signin: None,
+            app_ads_proof: None,
             leads: None,
             watch: None,
             outcomes: None,
@@ -262,6 +293,16 @@ impl AppState {
         self
     }
 
+    /// Attach the new-workspace ownership proof source.
+    #[must_use]
+    pub fn with_app_ads_proof(
+        mut self,
+        proof: Arc<dyn crate::signin::WorkspaceProofSource>,
+    ) -> Self {
+        self.app_ads_proof = Some(proof);
+        self
+    }
+
     /// Authorize a read of `publisher`'s ledger. Fails closed: a publisher
     /// with no configured token is refused (`503`), and a missing or wrong
     /// token is `401`. The comparison is constant-time. Tokens come from the
@@ -304,6 +345,16 @@ impl AppState {
     #[must_use]
     pub fn with_adyen(mut self, adyen: Arc<AdyenClient>) -> Self {
         self.adyen = Some(adyen);
+        self
+    }
+
+    /// Attach the transport Adyen Checkout calls travel through.
+    #[must_use]
+    pub fn with_billing_transport(
+        mut self,
+        transport: Arc<dyn apex_connectors::transport::Transport>,
+    ) -> Self {
+        self.billing_transport = Some(Arc::new(BillingTransport(transport)));
         self
     }
 

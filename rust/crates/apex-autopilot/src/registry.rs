@@ -41,6 +41,17 @@ pub const VAULT_KEY_ENV: &str = "APEX_VAULT_KEY_HEX";
 /// `<APEX_RUNNER_LEDGER_ROOT>/<publisher>.jsonl`, the same naming apex-api and
 /// apex-control read.
 pub const LEDGER_ROOT_ENV: &str = "APEX_RUNNER_LEDGER_ROOT";
+/// The runner's name for the snapshot root in fleet mode: each snapshot lands
+/// at `<root>/<publisher>/<platform>.json`, the path rule the console's
+/// `JsonFileAuditSource` reads.
+pub const SNAPSHOT_ROOT_ENV: &str = "APEX_RUNNER_SNAPSHOT";
+/// The console's spelling of the same snapshot root (`apex-api`'s
+/// `DEFAULT_SNAPSHOT_ROOT` default), read as a fallback so one deployment
+/// variable serves both processes.
+pub const SNAPSHOT_ROOT_APEX_API_ENV: &str = "APEX_SNAPSHOT_ROOT";
+/// The relative snapshot root the console defaults to; the runner falls back
+/// to it when neither spelling is configured.
+pub const DEFAULT_SNAPSHOT_ROOT: &str = ".apex/snapshots";
 /// The plain connection-metadata file suffix (written by apex-api).
 pub const META_SUFFIX: &str = ".connections.json";
 /// The encrypted account-bundle file suffix (written by apex-api).
@@ -72,6 +83,29 @@ pub fn vault_root_from_env(lookup: &impl Fn(&str) -> Option<String>) -> Option<P
         }
     }
     None
+}
+
+/// Resolve the snapshot root from a configuration lookup: the runner spelling
+/// first, then the console spelling, then the console's relative default. The
+/// fleet audit writes every snapshot under it and the fleet cycle reads each
+/// publisher's own files back.
+pub fn snapshot_root_from_env(lookup: &impl Fn(&str) -> Option<String>) -> PathBuf {
+    for name in [SNAPSHOT_ROOT_ENV, SNAPSHOT_ROOT_APEX_API_ENV] {
+        if let Some(root) = lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return PathBuf::from(root);
+        }
+    }
+    PathBuf::from(DEFAULT_SNAPSHOT_ROOT)
+}
+
+/// The path one platform's snapshot lives at:
+/// `<root>/<publisher>/<platform>.json`, the layout the console's
+/// `JsonFileAuditSource` reads (one snapshot per publisher and platform).
+pub fn snapshot_path(root: &Path, publisher: &str, platform_wire: &str) -> PathBuf {
+    root.join(publisher).join(format!("{platform_wire}.json"))
 }
 
 /// Why one publisher is not served by this runner.
@@ -153,6 +187,15 @@ pub struct VaultedAccount {
     /// The validated developer site (informational for the runner).
     #[serde(default)]
     pub developer_site: String,
+    /// Networks the publisher should authorize in app-ads.txt.
+    #[serde(default)]
+    pub expected_networks: Vec<String>,
+    /// Ad unit ids to audit on platforms with a per-unit waterfall.
+    #[serde(default)]
+    pub ad_unit_ids: Vec<String>,
+    /// Bidder accounts as apex knows them, copied into every snapshot.
+    #[serde(default)]
+    pub bidder_accounts: Vec<apex_audit::BidderAccount>,
     /// Key sets keyed by platform wire name.
     #[serde(default)]
     pub platforms: BTreeMap<String, VaultedCredentials>,
@@ -167,6 +210,32 @@ pub struct RunnablePublisher {
     pub platform: String,
     /// The vaulted key set for that platform.
     pub credentials: VaultedCredentials,
+    /// Every supported platform whose key set the vault holds, keyed by wire
+    /// name. The audit builds one snapshot per entry; the primary `platform`
+    /// is always present.
+    pub vaulted_platforms: BTreeMap<String, VaultedCredentials>,
+    /// The developer site the app-ads.txt check reads.
+    pub developer_site: String,
+    /// Networks the publisher should authorize in app-ads.txt.
+    pub expected_networks: Vec<String>,
+    /// Ad unit ids the LevelPlay builder enumerates.
+    pub ad_unit_ids: Vec<String>,
+    /// Bidder accounts copied into every snapshot the audit builds.
+    pub bidder_accounts: Vec<apex_audit::BidderAccount>,
+}
+
+impl RunnablePublisher {
+    /// The platform wire names this publisher has vaulted snapshots for: the
+    /// primary adapter platform first (so monitoring activation reads the
+    /// adapter's own snapshot), then the rest in sorted order.
+    pub fn snapshot_platforms(&self) -> Vec<String> {
+        let mut wires: Vec<String> = self.vaulted_platforms.keys().cloned().collect();
+        if let Some(index) = wires.iter().position(|wire| wire == &self.platform) {
+            let primary = wires.remove(index);
+            wires.insert(0, primary);
+        }
+        wires
+    }
 }
 
 /// A publisher that failed registration, with its typed reason.
@@ -181,8 +250,10 @@ pub struct SkippedPublisher {
 /// One registry entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryEntry {
-    /// Runnable: validated connection plus decryptable keys.
-    Runnable(RunnablePublisher),
+    /// Runnable: validated connection plus decryptable keys. Boxed because a
+    /// runnable publisher carries every vaulted key set and the account
+    /// context, well beyond the skipped variant's size.
+    Runnable(Box<RunnablePublisher>),
     /// Skipped, with a typed reason.
     Skipped(SkippedPublisher),
 }
@@ -242,7 +313,7 @@ impl PublisherRegistry {
     /// The runnable publishers in sorted order.
     pub fn runnable(&self) -> impl Iterator<Item = &RunnablePublisher> {
         self.entries.iter().filter_map(|entry| match entry {
-            RegistryEntry::Runnable(publisher) => Some(publisher),
+            RegistryEntry::Runnable(publisher) => Some(publisher.as_ref()),
             RegistryEntry::Skipped(_) => None,
         })
     }
@@ -386,15 +457,53 @@ fn register_one(root: &Path, publisher: &str, vault: &Vault) -> RegistryEntry {
     let Some(credentials) = account.platforms.get(platform.as_str()) else {
         return skip(publisher, SkipReason::NoVaultedCredentials);
     };
-    match platform.as_str() {
+    if let Err(reason) = validate_platform_keys(platform, credentials) {
+        return skip(publisher, reason);
+    }
+    // Every supported platform whose key set the vault holds gets its own
+    // audit snapshot; the primary adapter platform is always among them. A
+    // secondary key set that fails its own validation is simply not served a
+    // snapshot rather than refusing the whole publisher.
+    let mut vaulted_platforms: BTreeMap<String, VaultedCredentials> = BTreeMap::new();
+    for wire in SUPPORTED_WIRES {
+        if wire != platform.as_str() && !validated.iter().any(|validated| validated == wire) {
+            continue;
+        }
+        let Some(key_set) = account.platforms.get(wire) else {
+            continue;
+        };
+        if validate_platform_keys(wire, key_set).is_ok() {
+            vaulted_platforms.insert(wire.to_string(), key_set.clone());
+        }
+    }
+    // The primary key set is validated above, so it is always present; keeping
+    // the insert unconditional makes that invariant explicit.
+    vaulted_platforms.insert(platform.clone(), credentials.clone());
+    RegistryEntry::Runnable(Box::new(RunnablePublisher {
+        publisher: publisher.to_string(),
+        platform: platform.clone(),
+        credentials: credentials.clone(),
+        vaulted_platforms,
+        developer_site: account.developer_site.clone(),
+        expected_networks: account.expected_networks.clone(),
+        ad_unit_ids: account.ad_unit_ids.clone(),
+        bidder_accounts: account.bidder_accounts.clone(),
+    }))
+}
+
+/// Validate one platform's vaulted key set. The refusals are the typed skip
+/// reasons the runner has always published; they are computed per platform so
+/// a publisher with several key sets is judged on each of them.
+fn validate_platform_keys(
+    platform: &str,
+    credentials: &VaultedCredentials,
+) -> Result<(), SkipReason> {
+    match platform {
         MAX_WIRE => {
             if credentials.api_key.trim().is_empty() || credentials.base_url.trim().is_empty() {
-                return skip(
-                    publisher,
-                    SkipReason::CredentialMalformed(
-                        "the MAX key set misses api_key or base_url".to_string(),
-                    ),
-                );
+                return Err(SkipReason::CredentialMalformed(
+                    "the MAX key set misses api_key or base_url".to_string(),
+                ));
             }
             if credentials
                 .report_key
@@ -403,7 +512,7 @@ fn register_one(root: &Path, publisher: &str, vault: &Vault) -> RegistryEntry {
                 .unwrap_or_default()
                 .is_empty()
             {
-                return skip(publisher, SkipReason::MissingReportKey);
+                return Err(SkipReason::MissingReportKey);
             }
         }
         LEVELPLAY_WIRE => {
@@ -420,47 +529,33 @@ fn register_one(root: &Path, publisher: &str, vault: &Vault) -> RegistryEntry {
                     .unwrap_or_default()
                     .is_empty()
             {
-                return skip(
-                    publisher,
-                    SkipReason::CredentialMalformed(
-                        "the LevelPlay key set misses the secret key, refresh token, app key or base url"
-                            .to_string(),
-                    ),
-                );
+                return Err(SkipReason::CredentialMalformed(
+                    "the LevelPlay key set misses the secret key, refresh token, app key or base url"
+                        .to_string(),
+                ));
             }
         }
         ADMOB_WIRE => {
             if credentials.api_key.trim().is_empty() || credentials.base_url.trim().is_empty() {
-                return skip(
-                    publisher,
-                    SkipReason::CredentialMalformed(
-                        "the AdMob key set misses the access token or base url".to_string(),
-                    ),
-                );
+                return Err(SkipReason::CredentialMalformed(
+                    "the AdMob key set misses the access token or base url".to_string(),
+                ));
             }
             if let Err(error) =
                 apex_connectors::admob::normalize_account_id(&credentials.account_id)
             {
-                return skip(
-                    publisher,
-                    SkipReason::CredentialMalformed(format!("the AdMob key set {error}")),
-                );
+                return Err(SkipReason::CredentialMalformed(format!(
+                    "the AdMob key set {error}"
+                )));
             }
         }
         other => {
-            return skip(
-                publisher,
-                SkipReason::NoRunnerAdapter {
-                    platform: other.to_string(),
-                },
-            )
+            return Err(SkipReason::NoRunnerAdapter {
+                platform: other.to_string(),
+            })
         }
     }
-    RegistryEntry::Runnable(RunnablePublisher {
-        publisher: publisher.to_string(),
-        platform: platform.clone(),
-        credentials: credentials.clone(),
-    })
+    Ok(())
 }
 
 fn skip(publisher: &str, reason: SkipReason) -> RegistryEntry {
@@ -553,6 +648,62 @@ mod tests {
             serde_json::to_string_pretty(&meta).expect("meta json"),
         )
         .expect("meta");
+    }
+
+    #[test]
+    fn a_publisher_with_two_validated_platforms_carries_both_key_sets() {
+        let root = dir("multi-platform");
+        let vault = Vault::from_hex_key(KEY).expect("key");
+        let account = serde_json::json!({
+            "developer_site": "studio.example.com",
+            "expected_networks": ["google.com"],
+            "ad_unit_ids": ["u1"],
+            "bidder_accounts": [],
+            "platforms": {
+                "applovin_max": {
+                    "api_key": "management-key",
+                    "account_id": "acct-1",
+                    "base_url": "https://api.example.test",
+                    "report_key": "report-key",
+                    "reporting_base_url": null,
+                    "refresh_token": null
+                },
+                "levelplay": {
+                    "api_key": "secret-key",
+                    "account_id": "app-key-1",
+                    "base_url": "https://platform.ironsrc.com",
+                    "refresh_token": "refresh-token"
+                }
+            }
+        });
+        write_blob(&root, "studio", KEY, &account.to_string());
+        let meta = serde_json::json!({
+            "platforms": {
+                "applovin_max": { "state": "validated" },
+                "levelplay": { "state": "validated" }
+            }
+        });
+        std::fs::write(root.join("studio.connections.json"), meta.to_string()).expect("meta");
+
+        let registry = PublisherRegistry::load(&root, &vault).expect("load");
+        let runnable: Vec<&RunnablePublisher> = registry.runnable().collect();
+        assert_eq!(runnable.len(), 1);
+        // Alphabetical validated order picks applovin_max first.
+        assert_eq!(runnable[0].platform, MAX_WIRE);
+        let platforms: Vec<String> = runnable[0].snapshot_platforms();
+        assert_eq!(
+            platforms,
+            vec![MAX_WIRE.to_string(), LEVELPLAY_WIRE.to_string()],
+            "the primary platform leads"
+        );
+        assert_eq!(runnable[0].vaulted_platforms.len(), 2);
+        assert_eq!(runnable[0].developer_site, "studio.example.com");
+        assert_eq!(
+            runnable[0].expected_networks,
+            vec!["google.com".to_string()]
+        );
+        assert_eq!(runnable[0].ad_unit_ids, vec!["u1".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

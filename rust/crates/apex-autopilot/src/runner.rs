@@ -127,6 +127,9 @@ pub struct Runner {
     /// The seller's billing profile; when absent the monthly pass loads it
     /// from the environment (`APEX_BILLING_PROFILE`).
     billing_profile: Option<apex_billing::BillingProfile>,
+    /// The VIES seam reverse charge is confirmed through; `None` uses the
+    /// production client. Tests inject a stub so no test reaches the network.
+    vies: Option<Arc<dyn apex_billing::ViesClient>>,
     /// The vault root holding the per-publisher customer billing profiles
     /// (`<root>/<publisher>.billing.json`).
     connections_root: Option<std::path::PathBuf>,
@@ -193,6 +196,7 @@ impl Runner {
             publisher_id: String::new(),
             vat_rate_bp: 0,
             billing_profile: None,
+            vies: None,
             connections_root: None,
             register_path: None,
             owner_scoped_operator_jobs: false,
@@ -236,6 +240,14 @@ impl Runner {
     #[must_use]
     pub fn with_billing_profile(mut self, profile: apex_billing::BillingProfile) -> Self {
         self.billing_profile = Some(profile);
+        self
+    }
+
+    /// Inject the VIES register seam instead of the production client. Tests
+    /// use this with a stub so no test reaches the network.
+    #[must_use]
+    pub fn with_vies(mut self, vies: Arc<dyn apex_billing::ViesClient>) -> Self {
+        self.vies = Some(vies);
         self
     }
 
@@ -1636,10 +1648,11 @@ impl Runner {
                 ))
             })?;
         customer.validate()?;
-        let mut prepared = invoice
-            .clone()
-            .with_customer(customer)
-            .apply_vat_treatment(profile)?;
+        let prepared = invoice.clone().with_customer(customer);
+        let mut prepared = match &self.vies {
+            Some(vies) => prepared.apply_vat_treatment_with_vies(profile, vies.as_ref())?,
+            None => prepared.apply_vat_treatment(profile)?,
+        };
         let register_path = self
             .register_path
             .clone()
@@ -2485,6 +2498,23 @@ mod tests {
         ops
     }
 
+    /// The test VIES stub: every shape-valid customer number is confirmed.
+    #[derive(Debug)]
+    struct ValidVies;
+
+    impl apex_billing::ViesClient for ValidVies {
+        fn check_vat_number(
+            &self,
+            _country: &str,
+            number: &str,
+        ) -> Result<apex_billing::ViesCheck, apex_billing::ViesError> {
+            Ok(apex_billing::ViesCheck::Valid {
+                evidence: format!("VIES confirmation: {number} is valid (test stub)"),
+                vat_number: number.to_string(),
+            })
+        }
+    }
+
     /// The seller profile the monthly tests bill against (domestic EE).
     fn seller_profile() -> apex_billing::BillingProfile {
         apex_billing::BillingProfile {
@@ -2877,6 +2907,7 @@ Line items:
   #6 max-experiment:autopilot-floor-u1-ee-2-5:u1: net 10300000 micros, VAT 0 micros, gross 10300000 micros
 Net total: 10300000 micros
 VAT: reverse charge
+VIES: VIES confirmation: DE123456789 is valid (test stub)
 Gross total: 10300000 micros
 ";
 
@@ -2909,6 +2940,7 @@ Gross total: 10300000 micros
         );
         let runner = Runner::new(ops1.clone(), policy(), FillFormat::Rewarded)
             .with_billing_profile(seller_profile())
+            .with_vies(Arc::new(ValidVies))
             .with_connections_root(&dir)
             .with_register_path(dir.join("invoices.jsonl"));
 

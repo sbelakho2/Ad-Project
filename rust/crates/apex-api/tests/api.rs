@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use apex_api::{router, AppState, MAX_BODY_BYTES};
@@ -50,8 +51,12 @@ async fn healthz_rejects_post_with_405() {
 async fn audit_returns_report_json() {
     let temp = TempDir::new("audit");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/v1/audit/admob")).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/audit/admob?publisher={PUBLISHER}"), API_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 200);
     assert!(response.content_type().starts_with(JSON));
     let report = response.json();
@@ -70,9 +75,16 @@ async fn audit_returns_report_json() {
 #[tokio::test]
 async fn audit_unknown_platform_is_400() {
     let temp = TempDir::new("audit-400");
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     for platform in ["tiktok", "AdMob", "applovin", "max", "%3Cscript%3E"] {
-        let response = send(&app, get(&format!("/v1/audit/{platform}"))).await;
+        let response = send(
+            &app,
+            get_with_bearer(
+                &format!("/v1/audit/{platform}?publisher={PUBLISHER}"),
+                API_TOKEN,
+            ),
+        )
+        .await;
         assert_eq!(response.status, 400, "platform {platform:?}");
         assert_eq!(response.json()["error"], "unknown_platform");
     }
@@ -87,8 +99,15 @@ async fn audit_unknown_platform_is_400() {
 async fn audit_missing_snapshot_is_404() {
     let temp = TempDir::new("audit-404");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/v1/audit/levelplay")).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        get_with_bearer(
+            &format!("/v1/audit/levelplay?publisher={PUBLISHER}"),
+            API_TOKEN,
+        ),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert_eq!(response.json(), json!({"error": "not_found"}));
 }
@@ -99,10 +118,116 @@ async fn audit_snapshot_declaring_another_platform_is_internal_error() {
     let mut snapshot = minimal_snapshot(&["u1"]);
     snapshot["platform"] = json!("levelplay");
     write_snapshot(temp.path(), "admob", &snapshot);
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/v1/audit/admob")).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        get_with_bearer(&format!("/v1/audit/admob?publisher={PUBLISHER}"), API_TOKEN),
+    )
+    .await;
     assert_eq!(response.status, 500);
     assert_eq!(response.json()["error"], "internal");
+}
+
+#[tokio::test]
+async fn audit_report_requires_the_bearer_and_names_one_publisher() {
+    let temp = TempDir::new("audit-auth");
+    write_standard_fixture(temp.path());
+
+    // No configured auditor: the read path refuses instead of serving an
+    // unauthenticated snapshot.
+    let no_auditor = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &no_auditor,
+        get(&format!("/v1/audit/admob?publisher={PUBLISHER}")),
+    )
+    .await;
+    assert_eq!(response.status, 503);
+    assert_eq!(response.json()["error"], "live_audit_not_configured");
+
+    let app = router(token_state(&temp));
+    // Missing and wrong bearers are both refused before any snapshot read.
+    for request in [
+        get(&format!("/v1/audit/admob?publisher={PUBLISHER}")),
+        get_with_bearer(
+            &format!("/v1/audit/admob?publisher={PUBLISHER}"),
+            "not-the-token",
+        ),
+    ] {
+        let response = send(&app, request).await;
+        assert_eq!(response.status, 401);
+        assert_eq!(response.json()["error"], "unauthorized");
+    }
+    // The publisher parameter is required, and a hostile one is the typed
+    // path refusal, not a lookup.
+    let missing = send(&app, get_with_bearer("/v1/audit/admob", API_TOKEN)).await;
+    assert_eq!(missing.status, 400);
+    assert_eq!(missing.json()["error"], "publisher_required");
+    for publisher in ["%2E%2E", "a%2Fb", "a%5Cb", "p%C3%BCb", &"a".repeat(65)] {
+        let response = send(
+            &app,
+            get_with_bearer(&format!("/v1/audit/admob?publisher={publisher}"), API_TOKEN),
+        )
+        .await;
+        assert_eq!(response.status, 400, "publisher {publisher:?}");
+        assert_eq!(response.json()["error"], "invalid_publisher");
+    }
+    let allowed = send(
+        &app,
+        get_with_bearer(&format!("/v1/audit/admob?publisher={PUBLISHER}"), API_TOKEN),
+    )
+    .await;
+    assert_eq!(allowed.status, 200, "{}", allowed.body);
+}
+
+#[tokio::test]
+async fn audit_report_never_reads_another_publishers_snapshot() {
+    let temp = TempDir::new("audit-isolation");
+    write_snapshot_for(
+        temp.path(),
+        PUBLISHER,
+        "admob",
+        &minimal_snapshot(&["pub1-unit"]),
+    );
+    write_snapshot_for(
+        temp.path(),
+        PUBLISHER2,
+        "admob",
+        &minimal_snapshot(&["pub2-secret-unit"]),
+    );
+    let state = file_state(
+        temp.path(),
+        HashMap::from([
+            (PUBLISHER.to_string(), seed_keypair(7).verifying_key()),
+            (PUBLISHER2.to_string(), seed_keypair(9).verifying_key()),
+        ]),
+    )
+    .with_live_auditor(token_auditor(API_TOKEN));
+    let app = router(state);
+
+    let own = send(
+        &app,
+        get_with_bearer(&format!("/v1/audit/admob?publisher={PUBLISHER}"), API_TOKEN),
+    )
+    .await;
+    assert_eq!(own.status, 200, "{}", own.body);
+    assert!(own.body.contains("pub1-unit"), "{}", own.body);
+    assert!(
+        !own.body.contains("pub2-secret-unit"),
+        "another publisher's unit leaked: {}",
+        own.body
+    );
+
+    let other = send(
+        &app,
+        get_with_bearer(
+            &format!("/v1/audit/admob?publisher={PUBLISHER2}"),
+            API_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(other.status, 200, "{}", other.body);
+    assert!(other.body.contains("pub2-secret-unit"), "{}", other.body);
+    assert!(!other.body.contains("pub1-unit"), "{}", other.body);
 }
 
 #[tokio::test]
@@ -737,7 +862,7 @@ async fn every_api_success_carries_application_json() {
     let app = router(state);
     let requests = [
         get("/healthz"),
-        get("/v1/audit/admob"),
+        get_with_bearer(&format!("/v1/audit/admob?publisher={PUBLISHER}"), API_TOKEN),
         get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
         post_with_bearer(
             &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
@@ -811,9 +936,12 @@ async fn invalid_utf8_path_segments_are_json_bad_request() {
     // with the pinned JSON refusal instead of axum's plain-text PathRejection.
     let temp = TempDir::new("invalid-utf8-path");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    for uri in ["/v1/audit/%FF", "/v1/ledger/%FF"] {
-        let response = send(&app, get(uri)).await;
+    let app = router(token_state(&temp));
+    for (uri, request) in [
+        ("/v1/audit/%FF", get_with_bearer("/v1/audit/%FF", API_TOKEN)),
+        ("/v1/ledger/%FF", get("/v1/ledger/%FF")),
+    ] {
+        let response = send(&app, request).await;
         assert_eq!(response.status, 400, "{uri}");
         assert!(
             response.content_type().starts_with(JSON),

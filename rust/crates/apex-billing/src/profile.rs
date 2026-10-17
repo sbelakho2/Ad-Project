@@ -32,8 +32,10 @@
 //! ([`crate::invoice::Invoice::with_customer`]); today's caller may not have
 //! them yet, so the invoice field is optional and the renderer refuses with a
 //! typed error rather than printing blanks. The VAT number is required only
-//! when the reverse-charge wording will be stated; if present it must always
-//! pass the minimal shape check of [`crate::vat::is_valid_vat_number`].
+//! when the reverse-charge wording may be stated; if present it must always
+//! pass the minimal shape check of [`crate::vat::is_valid_vat_number`], and
+//! reverse charge additionally requires a matching VIES confirmation
+//! ([`crate::vat::treatment_for_with_vies`]).
 
 use std::path::Path;
 
@@ -60,7 +62,8 @@ pub struct BillingProfile {
     pub address_lines: Vec<String>,
     /// Country, canonicalised to an uppercase two-letter code.
     pub country: String,
-    /// VAT number (shape-checked only; no VIES call).
+    /// VAT number (shape-checked; the customer number, not the seller's, is
+    /// the one VIES confirms before reverse charge).
     pub vat_number: String,
     /// Domestic VAT rate in basis points (`0..=10000`).
     pub vat_rate_bp: u16,

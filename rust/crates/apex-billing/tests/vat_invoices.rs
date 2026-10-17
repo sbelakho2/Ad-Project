@@ -9,7 +9,7 @@ use std::path::Path;
 
 use apex_billing::{
     compute_invoice, BillingError, BillingPeriod, BillingProfile, BillingProofRecord,
-    CustomerProfile, Invoice, InvoiceRegister, VatTreatment,
+    CustomerProfile, Invoice, InvoiceRegister, VatTreatment, ViesCheck, ViesClient, ViesError,
 };
 
 const PUBLISHER: &str = "pub-1";
@@ -79,13 +79,26 @@ fn proofs() -> Vec<BillingProofRecord> {
     ]
 }
 
+/// A stub VIES client: the integration tests never reach the network.
+#[derive(Debug)]
+struct StubVies;
+
+impl ViesClient for StubVies {
+    fn check_vat_number(&self, _country: &str, number: &str) -> Result<ViesCheck, ViesError> {
+        Ok(ViesCheck::Valid {
+            evidence: format!("VIES confirmation: {number} is valid (test stub)"),
+            vat_number: number.to_string(),
+        })
+    }
+}
+
 /// A fully prepared invoice: verified lines, attached customer, decided
 /// treatment — but no register number yet.
 fn ready(customer: CustomerProfile) -> Invoice {
     compute_invoice(PUBLISHER, period(), &proofs())
         .expect("verified proofs")
         .with_customer(customer)
-        .apply_vat_treatment(&seller())
+        .apply_vat_treatment_with_vies(&seller(), &StubVies)
         .expect("complete profiles")
 }
 
@@ -159,6 +172,7 @@ Line items:
   #2 exp-b: net 150000 micros, VAT 0 micros, gross 150000 micros
 Net total: 650000 micros
 VAT: reverse charge
+VIES: VIES confirmation: DE123456789 is valid (test stub)
 Gross total: 650000 micros
 ";
 
@@ -524,7 +538,9 @@ fn register_issue_refuses_drafts_before_persisting_anything() {
     // A draft without a customer cannot even decide a treatment...
     let mut draft = compute_invoice(PUBLISHER, period(), &proofs()).unwrap();
     assert_eq!(
-        draft.clone().apply_vat_treatment(&seller()),
+        draft
+            .clone()
+            .apply_vat_treatment_with_vies(&seller(), &StubVies),
         Err(BillingError::MissingCustomerProfile)
     );
     // ...and the register refuses the same draft.

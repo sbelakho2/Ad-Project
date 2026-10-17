@@ -587,6 +587,112 @@ async fn two_sessions_see_their_own_publishers_data() {
     assert!(!billing1.body.contains("$300.00"), "{}", billing1.body);
 }
 
+#[tokio::test]
+async fn console_audit_surfaces_are_scoped_to_the_session_publisher() {
+    let temp = TempDir::new("console-audit-isolation");
+    write_standard_fixture(temp.path());
+    write_snapshot_for(
+        temp.path(),
+        PUBLISHER2,
+        "admob",
+        &minimal_snapshot(&["pub2-secret-unit", "pub2-second-unit"]),
+    );
+    write_ledger(
+        temp.path(),
+        PUBLISHER2,
+        &seed_keypair(9),
+        vec![billing_record()],
+    );
+    let state = file_state(temp.path(), two_publisher_keys())
+        .with_ledger_token(PUBLISHER2, LEDGER_TOKEN2.as_bytes().to_vec());
+    let app = router(state);
+    let cookie1 = open_ledger_session(&app).await;
+    let exchange = send(
+        &app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER2}&token={LEDGER_TOKEN2}"),
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, 303, "second publisher exchange");
+    let cookie2 = set_cookie(&exchange)
+        .expect("second session cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // The overview's newest-audit card is built only from the session's own
+    // snapshots: pub1's one-unit snapshot and pub2's two-unit snapshot have
+    // different finding counts, and neither page renders the other's data.
+    let overview1 = send(&app, get_with_cookie("/", &cookie1)).await;
+    assert_eq!(overview1.status, 200, "{}", overview1.body);
+    assert!(overview1.body.contains("2 findings"), "{}", overview1.body);
+    assert!(
+        !overview1.body.contains("pub2-secret-unit"),
+        "{}",
+        overview1.body
+    );
+    let overview2 = send(&app, get_with_cookie("/", &cookie2)).await;
+    assert_eq!(overview2.status, 200, "{}", overview2.body);
+    assert!(overview2.body.contains("3 findings"), "{}", overview2.body);
+    assert!(!overview2.body.contains("unit u1"), "{}", overview2.body);
+
+    // Every audit surface reads the session's own snapshot only.
+    for (cookie, own, other) in [
+        (&cookie1, "u1", "pub2-secret-unit"),
+        (&cookie2, "pub2-secret-unit", "u1"),
+    ] {
+        let report = send(
+            &app,
+            get_with_cookie("/console/audit?platform=admob", cookie),
+        )
+        .await;
+        assert_eq!(report.status, 200, "{}", report.body);
+        assert!(report.body.contains(own), "missing {own}: {}", report.body);
+        assert!(
+            !report.body.contains(other),
+            "another publisher's finding leaked into the audit page: {}",
+            report.body
+        );
+        let csv = send(
+            &app,
+            get_with_cookie("/console/audit/export.csv?platform=admob", cookie),
+        )
+        .await;
+        assert_eq!(csv.status, 200, "{}", csv.body);
+        assert!(csv.body.contains(own), "missing {own}: {}", csv.body);
+        assert!(
+            !csv.body.contains(other),
+            "another publisher's data leaked into the CSV: {}",
+            csv.body
+        );
+    }
+
+    // A finding id belonging to pub2 is not found for pub1's session, and is
+    // found for pub2's own session.
+    let pub2_finding = finding_id(
+        "stale_floor",
+        "admob",
+        "ad_unit:pub2-secret-unit:country:EE",
+    );
+    let leaked = send(
+        &app,
+        get_with_cookie(&format!("/console/audit/findings/{pub2_finding}"), &cookie1),
+    )
+    .await;
+    assert_eq!(leaked.status, 404, "{}", leaked.body);
+    assert!(!leaked.body.contains("pub2-secret-unit"));
+    let own = send(
+        &app,
+        get_with_cookie(&format!("/console/audit/findings/{pub2_finding}"), &cookie2),
+    )
+    .await;
+    assert_eq!(own.status, 200, "{}", own.body);
+    assert!(own.body.contains("pub2-secret-unit"));
+}
+
 // --- change-log access and session ------------------------------------------
 
 #[tokio::test]
@@ -1309,7 +1415,6 @@ async fn watch_get_redirects_and_the_page_renders_the_sign_up_form() {
         ">Domain</label>",
         ">Email</label>",
         ">Network account ids (optional)</label>",
-        ">Tier</label>",
         ">Start the setup watch</button>",
         "No platform keys are needed for the watch.",
         "Read the privacy notice",
@@ -1362,9 +1467,14 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
     let state = file_state(temp.path(), pub1_keys())
         .with_watch(Arc::new(apex_watch::SubscriberStore::open(&watch_root)))
-        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
+        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)))
+        .with_app_ads_proof(Arc::new(
+            apex_api::app_ads_proof::StaticAppAdsProof::accepting(Vec::<String>::new())
+                .with_app_count("northstar.example", 12),
+        ));
     let app = router(state);
-    let body = "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1&tier=core";
+    let body =
+        "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1";
     let first = send(&app, post_form("/watch", body)).await;
     assert_eq!(first.status, 303, "{}", first.body);
     let location = first
@@ -1393,8 +1503,9 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("row");
     assert_eq!(row["domain"], "northstar.example");
     assert_eq!(row["email"], "Founder@northstar.example");
-    assert_eq!(row["tier"], "core");
-    assert_eq!(row["status"], "active");
+    assert_eq!(row["tier"], "core", "the app-count evidence chose the tier");
+    assert_eq!(row["status"], "pending", "no check runs before payment");
+    assert_eq!(row["confirmed"], false);
     assert_eq!(row["accountIds"]["admob.com"], "pub-1");
     assert_eq!(row["id"], reference);
 
@@ -1416,12 +1527,16 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
             .and_then(|value| value.to_str().ok()),
         Some(location.as_str())
     );
+    // The repeat is the same subscription: one folded subscriber row and one
+    // write-once outcome line. The confirmation token is refreshed, so the
+    // append-only log carries a newer row for the same id.
     assert_eq!(
-        std::fs::read_to_string(watch_root.join("subscribers.jsonl"))
-            .expect("rows")
-            .lines()
-            .count(),
-        1
+        apex_watch::SubscriberStore::open(&watch_root)
+            .list()
+            .expect("list")
+            .len(),
+        1,
+        "a repeat inside the window is the same subscription"
     );
     assert_eq!(
         std::fs::read_to_string(&outcomes_path)

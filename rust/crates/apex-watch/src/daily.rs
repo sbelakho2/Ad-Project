@@ -20,6 +20,11 @@
 //! instead of losing it. An unreadable file is recorded as the finding kind
 //! `unreachable` with the typed reason; a check never panics.
 //!
+//! Subscribers that watch the same domain share one resolve-guard-fetch-rule for
+//! the run: the first worker computes the verdict and the others reuse it, so
+//! the public file is read and parsed once per distinct domain, not once per
+//! subscriber.
+//!
 //! A worker that panics anyway is contained: every worker handle of a wave
 //! is joined, the panic is converted to a typed [`WatchError::Malformed`]
 //! naming the subscriber, and the wave's results are applied in subscriber
@@ -32,6 +37,9 @@
 //! watched domain, one line per changed finding, the watch page link (from
 //! `APEX_WATCH_PAGE_URL`, or `APEX_CONSOLE_URL` plus `/watch`) and the
 //! cancel line.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use apex_audit::{AppAdsTxt, Snapshot};
 use apex_core::PlatformId;
@@ -99,10 +107,29 @@ pub struct DailyEntry {
     pub unreachable: Option<String>,
 }
 
+/// The exact skip reasons recorded when the daily loop passes a subscriber.
+pub const SKIP_PENDING: &str = "the subscriber is pending payment; no check ran";
+/// The skip reason for a canceled subscriber.
+pub const SKIP_CANCELED: &str = "the subscriber is canceled; no check ran";
+/// The skip reason for an active subscriber whose email is unconfirmed.
+pub const SKIP_UNCONFIRMED: &str = "the subscriber's email is not confirmed; no check ran";
+
+/// The typed reason a subscriber was skipped instead of checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailySkip {
+    /// The publisher slug.
+    pub publisher: String,
+    /// The watched domain.
+    pub domain: String,
+    /// The stable skip reason (one of [`SKIP_PENDING`], [`SKIP_CANCELED`]
+    /// or [`SKIP_UNCONFIRMED`]).
+    pub reason: String,
+}
+
 /// The full daily report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DailyReport {
-    /// Active subscribers checked.
+    /// Active, confirmed subscribers checked.
     pub checked: usize,
     /// Alerts accepted by the sink.
     pub alerted: usize,
@@ -112,8 +139,21 @@ pub struct DailyReport {
     pub unreachable: usize,
     /// Per-subscriber lines, oldest subscriber first.
     pub entries: Vec<DailyEntry>,
+    /// Subscribers that ran no check, in subscriber order, with the typed
+    /// reason (pending, canceled or unconfirmed).
+    pub skipped: Vec<DailySkip>,
     /// Subscriber rows that could not be recorded back.
     pub failures: Vec<String>,
+}
+
+/// The skip reason for `subscriber`, or `None` when it may be checked.
+pub fn skip_reason(subscriber: &Subscriber) -> Option<&'static str> {
+    match subscriber.status {
+        crate::model::Status::Pending => Some(SKIP_PENDING),
+        crate::model::Status::Canceled => Some(SKIP_CANCELED),
+        crate::model::Status::Active if !subscriber.confirmed => Some(SKIP_UNCONFIRMED),
+        crate::model::Status::Active => None,
+    }
 }
 
 /// The injected dependencies of one daily run.
@@ -149,37 +189,89 @@ struct CheckFacts {
     unreachable: Option<String>,
 }
 
+/// The verdict one domain's resolve-guard-fetch-rule produced, before the
+/// per-subscriber diff is applied. The rule output depends only on the public
+/// file, so it is shared by every subscriber watching the domain.
+#[derive(Debug, Clone)]
+enum DomainOutcome {
+    /// The file was read (or absent) and the rule ran once.
+    Findings(Vec<StoredFinding>),
+    /// The domain could not be read, with the typed reason.
+    Unreachable(String),
+}
+
+/// One run's domain verdicts: every subscriber watching the same domain
+/// shares one resolve/guard/fetch. The first worker to ask computes the
+/// verdict; concurrent workers on the same domain wait on that `OnceLock`
+/// instead of issuing a second request. Distinct domains are independent.
+#[derive(Debug, Default)]
+struct DomainFetches {
+    entries: Mutex<HashMap<String, Arc<OnceLock<DomainOutcome>>>>,
+}
+
+impl DomainFetches {
+    fn outcome(&self, domain: &str, fetch: impl FnOnce() -> DomainOutcome) -> DomainOutcome {
+        let cell = {
+            let mut entries = match self.entries.lock() {
+                Ok(entries) => entries,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Arc::clone(entries.entry(domain.to_string()).or_default())
+        };
+        cell.get_or_init(fetch).clone()
+    }
+}
+
 /// The synchronous phase of one check: resolve, guard, fetch, run the rule
 /// and diff against the recorded baseline. Pure with respect to the run's
-/// shared state, so it can execute on a worker thread; a check never panics.
+/// shared state except for the domain fetch cache, so it can execute on a
+/// worker thread; a check never panics.
 fn check_facts(
     subscriber: &Subscriber,
     fetcher: &dyn Fetcher,
     resolver: &dyn HostResolver,
+    domains: &DomainFetches,
 ) -> CheckFacts {
-    let mut unreachable = None;
-    let current = match resolver.resolve(&subscriber.domain) {
-        Err(detail) => {
-            let reason = format!("the domain did not resolve: {detail}");
-            unreachable = Some(reason.clone());
-            vec![StoredFinding::unreachable(&reason)]
-        }
-        Ok(addresses) => match guard_hosts(&addresses) {
-            Err(refusal) => {
-                let class = refusal.class;
-                let reason = format!("{} ({class} {})", REFUSAL_MESSAGE, refusal.address);
-                unreachable = Some(reason.clone());
-                vec![StoredFinding::unreachable(&reason)]
+    let outcome = domains.outcome(&subscriber.domain, || {
+        match resolver.resolve(&subscriber.domain) {
+            Err(detail) => {
+                DomainOutcome::Unreachable(format!("the domain did not resolve: {detail}"))
             }
-            Ok(()) => match fetch_app_ads(&subscriber.domain, fetcher, resolver) {
-                Ok(AppAdsFetch::Text(lines)) => rule_findings(true, lines),
-                Ok(AppAdsFetch::Missing) => rule_findings(false, Vec::new()),
-                Err(unreachable_error) => {
-                    unreachable = Some(unreachable_error.reason.clone());
-                    vec![StoredFinding::unreachable(&unreachable_error.reason)]
+            Ok(addresses) => match guard_hosts(&addresses) {
+                Err(refusal) => {
+                    let class = refusal.class;
+                    DomainOutcome::Unreachable(format!(
+                        "{} ({class} {})",
+                        REFUSAL_MESSAGE, refusal.address
+                    ))
                 }
+                Ok(()) => match addresses.first().copied() {
+                    None => {
+                        DomainOutcome::Unreachable("the resolver returned no addresses".to_string())
+                    }
+                    Some(approved) => {
+                        match fetch_app_ads(&subscriber.domain, fetcher, resolver, approved) {
+                            Ok(AppAdsFetch::Text(lines)) => {
+                                DomainOutcome::Findings(rule_findings(true, lines))
+                            }
+                            Ok(AppAdsFetch::Missing) => {
+                                DomainOutcome::Findings(rule_findings(false, Vec::new()))
+                            }
+                            Err(unreachable_error) => {
+                                DomainOutcome::Unreachable(unreachable_error.reason)
+                            }
+                        }
+                    }
+                },
             },
-        },
+        }
+    });
+    let (current, unreachable) = match outcome {
+        DomainOutcome::Findings(findings) => (findings, None),
+        DomainOutcome::Unreachable(reason) => {
+            let findings = vec![StoredFinding::unreachable(&reason)];
+            (findings, Some(reason))
+        }
     };
     let previous = subscriber.last_findings.clone().unwrap_or_default();
     let changes = diff_findings(&previous, &current);
@@ -208,9 +300,23 @@ pub async fn run_daily(
     now_ms: i64,
     deps: &DailyDeps<'_>,
 ) -> Result<DailyReport, WatchError> {
-    let subscribers = store.list_active()?;
+    let subscribers = store.list()?;
     let mut report = DailyReport::default();
-    for wave in subscribers.chunks(DAILY_CONCURRENCY.max(1)) {
+    let mut checkable = Vec::with_capacity(subscribers.len());
+    for subscriber in subscribers {
+        match skip_reason(&subscriber) {
+            Some(reason) => report.skipped.push(DailySkip {
+                publisher: subscriber.publisher.clone(),
+                domain: subscriber.domain.clone(),
+                reason: reason.to_string(),
+            }),
+            None => checkable.push(subscriber),
+        }
+    }
+    // One domain verdict per distinct watched domain for the whole run, so a
+    // domain watched by several subscribers is resolved and fetched once.
+    let domains = DomainFetches::default();
+    for wave in checkable.chunks(DAILY_CONCURRENCY.max(1)) {
         // Only the synchronous check runs on worker threads; the shared
         // sink and the store stay on this thread.
         let outcomes: Vec<Result<CheckFacts, WatchError>> = std::thread::scope(|scope| {
@@ -219,9 +325,10 @@ pub async fn run_daily(
                 .map(|subscriber| {
                     let fetcher = deps.fetcher;
                     let resolver = deps.resolver;
+                    let domains = &domains;
                     (
                         subscriber,
-                        scope.spawn(move || check_facts(subscriber, fetcher, resolver)),
+                        scope.spawn(move || check_facts(subscriber, fetcher, resolver, domains)),
                     )
                 })
                 .collect();
@@ -855,6 +962,104 @@ mod tests {
         assert!(!outbox.exists(), "no alert file is created");
     }
 
+    #[tokio::test]
+    async fn pending_and_unconfirmed_subscribers_run_no_checks_with_typed_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let pending = store
+            .subscribe_pending(
+                10,
+                &crate::model::SubscribeRequest {
+                    domain: "example.com".into(),
+                    email: "ops@x.example".into(),
+                    accounts: "admob.com = pub-1".into(),
+                    app_count: 1,
+                },
+            )
+            .expect("pending signup");
+        let clean = fetcher(vec![route(
+            "https://example.com/app-ads.txt",
+            200,
+            b"admob.com, pub-1, DIRECT\n",
+        )]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+
+        let report = run_daily(
+            &store,
+            1_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 0);
+        assert!(report.entries.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].domain, "example.com");
+        assert_eq!(report.skipped[0].reason, SKIP_PENDING);
+        assert!(clean.calls.lock().unwrap().is_empty(), "no check ran");
+        assert_eq!(store.list().unwrap()[0].last_check_at, None);
+
+        // Payment alone is not enough: the email must be confirmed too.
+        let activated = store.activate(2_000, &pending.reference).expect("activate");
+        assert!(!activated.already_active);
+        let report = run_daily(
+            &store,
+            3_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 0);
+        assert_eq!(report.skipped[0].reason, SKIP_UNCONFIRMED);
+        assert!(clean.calls.lock().unwrap().is_empty(), "still no check");
+
+        store
+            .confirm_email(4_000, &pending.confirmation_token)
+            .expect("confirm");
+        let report = run_daily(
+            &store,
+            5_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 1, "active and confirmed runs the check");
+        assert!(report.skipped.is_empty());
+        assert_eq!(clean.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_canceled_subscriber_is_skipped_with_the_canceled_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let signup = store
+            .subscribe(10, "example.com", "ops@x.example", "", false)
+            .expect("subscribe");
+        store
+            .cancel(signup.cancel_token.as_deref().unwrap(), 11)
+            .expect("cancel")
+            .expect("match");
+        let clean = fetcher(vec![route(
+            "https://example.com/app-ads.txt",
+            200,
+            b"admob.com, pub-1, DIRECT\n",
+        )]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+        let report = run_daily(
+            &store,
+            12,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].reason, SKIP_CANCELED);
+        assert!(clean.calls.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn the_watch_page_url_prefers_the_dedicated_variable() {
         assert_eq!(watch_page_url(&|_| None), None);
@@ -907,7 +1112,11 @@ mod tests {
     }
 
     impl Fetcher for RendezvousFetcher {
-        fn get(&self, _url: &str) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
+        fn get(
+            &self,
+            _url: &str,
+            _approved: IpAddr,
+        ) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut count = self
                 .state
@@ -993,6 +1202,43 @@ mod tests {
         assert_eq!(
             fetcher.calls.load(std::sync::atomic::Ordering::SeqCst),
             WAVE
+        );
+    }
+
+    #[tokio::test]
+    async fn one_domain_is_resolved_and_fetched_once_for_every_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        for (created, email) in [(10, "alpha@x.example"), (11, "beta@x.example")] {
+            store
+                .subscribe(created, "example.com", email, "", false)
+                .expect("subscribe");
+        }
+        let clean = fetcher(vec![route(
+            "https://example.com/app-ads.txt",
+            200,
+            b"admob.com, pub-1, DIRECT\n",
+        )]);
+        let resolver = public_resolver();
+        let outbox = dir.path().join("alerts.jsonl");
+        let report = run_daily(
+            &store,
+            1_000,
+            &deps(&clean, &resolver, &FileSink::new(&outbox)),
+        )
+        .await
+        .expect("run");
+        assert_eq!(report.checked, 2, "both subscribers are checked");
+        assert_eq!(report.entries.len(), 2);
+        assert_eq!(
+            clean.calls.lock().unwrap().len(),
+            1,
+            "the shared domain is fetched once"
+        );
+        assert_eq!(
+            resolver.calls.lock().unwrap().len(),
+            1,
+            "the shared domain is resolved once"
         );
     }
 
@@ -1091,7 +1337,11 @@ mod tests {
     }
 
     impl Fetcher for ScriptedPanicFetcher {
-        fn get(&self, url: &str) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
+        fn get(
+            &self,
+            url: &str,
+            _approved: IpAddr,
+        ) -> Result<crate::fetch::Fetched, crate::fetch::FetchError> {
             if self.panic_domains.iter().any(|domain| url.contains(domain)) {
                 panic!("scripted worker panic for {url}");
             }

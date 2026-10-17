@@ -1,9 +1,9 @@
 //! `apex-watch` — the scheduled setup watch jobs.
 //!
-//! Commands: `daily` (fetch, rule, diff, alert), `bill [YYYY-MM]` (issue the
-//! month's setup-watch lines; the month defaults to the current UTC month),
-//! `list` (print the current subscriber rows) and `cancel <token>` (record
-//! the cancellation the token names).
+//! Commands: `daily` (fetch, rule, diff, alert), `bill [YYYY-MM]` (issue and
+//! charge the month's setup-watch lines; the month defaults to the current
+//! UTC month), `list` (print the current subscriber rows) and `cancel
+//! <token>` (record the cancellation the token names).
 //!
 //! Configuration (environment):
 //!
@@ -19,16 +19,28 @@
 //! - `APEX_BILLING_PROFILE` — the seller profile the monthly VAT treatment
 //!   loads; `APEX_BILLING_VAT_RATE_BP` overrides its domestic rate. The
 //!   invoice register defaults to the runner's `.apex/billing/invoices.jsonl`.
+//! - `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`,
+//!   `APEX_ADYEN_CHECKOUT_BASE` and `APEX_ADYEN_HMAC_KEY` — together they
+//!   configure the Adyen client the monthly bill calls with `ContAuth` +
+//!   `Subscription` for the stored card. Without them the invoice is still
+//!   issued and the charge is refused with the typed reason; a partial set is
+//!   a startup error, never a silently skipped charge.
+//! - VIES: reverse charge is confirmed through the real VIES REST API over
+//!   TLS with a bounded timeout. A register that cannot answer refuses reverse
+//!   charge (a typed refusal) instead of guessing.
 //!
-//! The crate holds no platform keys and no runner state: the fetch uses the
-//! system `curl`, and the only credentials any command needs live in the
-//! environment file named by the unit.
+//! The fetch uses the system `curl` pinned with `--resolve
+//! host:port:address` to the address the resolve-time guard approved, so the
+//! host name is never resolved a second time. The crate holds no runner state:
+//! the only credentials any command needs live in the environment.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper, Transport};
 use apex_watch::{
     current_month, now_unix_ms, run_bill, run_daily, watch_page_url, BillDeps, CurlFetcher,
     DailyDeps, StdResolver, SubscriberStore,
@@ -48,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("daily") => daily().await,
-        Some("bill") => bill(args.get(1).map(String::as_str)),
+        Some("bill") => bill(args.get(1).map(String::as_str)).await,
         Some("list") => list(),
         Some("cancel") => cancel(args.get(1).map(String::as_str)),
         _ => Err(USAGE.into()),
@@ -75,9 +87,19 @@ async fn daily() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|error| format!("the setup watch check failed: {error}"))?;
     println!(
-        "setup watch daily: {} checked, {} alerted, {} unchanged, {} unreachable",
-        report.checked, report.alerted, report.unchanged, report.unreachable
+        "setup watch daily: {} checked, {} alerted, {} unchanged, {} unreachable, {} skipped",
+        report.checked,
+        report.alerted,
+        report.unchanged,
+        report.unreachable,
+        report.skipped.len()
     );
+    for skip in &report.skipped {
+        println!(
+            "  {} ({}): skipped: {}",
+            skip.publisher, skip.domain, skip.reason
+        );
+    }
     for entry in &report.entries {
         if let Some(reason) = &entry.unreachable {
             println!("  {}: unreachable ({reason})", entry.publisher);
@@ -108,7 +130,7 @@ async fn daily() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let month = month_arg
         .map(str::to_string)
         .unwrap_or_else(|| current_month(now_unix_ms()));
@@ -117,28 +139,81 @@ fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         format!("the seller billing profile (APEX_BILLING_PROFILE) could not be loaded: {error}")
     })?;
     let register_path = PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH);
+    // Checkout credentials are optional: without them the invoice is still
+    // issued and the charge is refused with the typed reason (a card cannot
+    // be charged without a client).
+    let adyen = match (
+        env_value("APEX_ADYEN_API_KEY"),
+        env_value("APEX_ADYEN_MERCHANT_ACCOUNT"),
+        env_value("APEX_ADYEN_CHECKOUT_BASE"),
+        env_value("APEX_ADYEN_HMAC_KEY"),
+    ) {
+        (Some(api_key), Some(merchant), Some(checkout_base), Some(hmac_hex)) => {
+            let hmac = decode_hex(&hmac_hex).map_err(|detail| {
+                format!("APEX_ADYEN_HMAC_KEY is not a hex key: {detail}")
+            })?;
+            Some(apex_billing::AdyenClient::new(
+                api_key,
+                merchant,
+                hmac,
+                checkout_base,
+            )?)
+        }
+        (None, None, None, None) => None,
+        _ => {
+            return Err(
+                "APEX_ADYEN_API_KEY, APEX_ADYEN_MERCHANT_ACCOUNT, APEX_ADYEN_CHECKOUT_BASE and APEX_ADYEN_HMAC_KEY must be set together; the bill cannot charge the stored card without them"
+                    .into(),
+            )
+        }
+    };
+    let transport = match &adyen {
+        Some(_) => {
+            let inner = ReqwestTransport::new()
+                .map_err(|error| format!("the Adyen transport could not be built: {error}"))?;
+            Some(RetryTransport::new(
+                Arc::new(inner),
+                2,
+                Arc::new(TokioSleeper),
+            ))
+        }
+        None => None,
+    };
+    let vies = apex_billing::HttpViesClient::default();
     let report = run_bill(
         &store,
         &month,
         &BillDeps {
             seller: &seller,
             register_path: &register_path,
+            vies: &vies,
+            adyen: adyen.as_ref(),
+            transport: transport
+                .as_ref()
+                .map(|transport| transport as &dyn Transport),
         },
     )
+    .await
     .map_err(|error| format!("the setup watch bill failed: {error}"))?;
     println!(
-        "setup watch bill {month}: {} issued, {} refused, {} skipped",
+        "setup watch bill {month}: {} issued, {} refused, {} skipped, {} charged",
         report.issued.len(),
         report.refused.len(),
-        report.skipped.len()
+        report.skipped.len(),
+        report.charged.len()
     );
     for issued in &report.issued {
         println!(
-            "  invoice {} for {} ({}): {} micros gross",
+            "  invoice {} for {} ({}): {} micros gross{}",
             issued.number,
             issued.publisher,
             issued.tier.as_str(),
-            issued.gross_micros
+            issued.gross_micros,
+            if issued.charged {
+                " (charged to the stored card)"
+            } else {
+                " (unpaid)"
+            }
         );
     }
     for refused in &report.refused {
@@ -148,6 +223,21 @@ fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("{} subscriber(s) could not be billed", report.refused.len()).into());
     }
     Ok(())
+}
+
+/// Decode an even-length hex string (the Adyen HMAC key).
+fn decode_hex(raw: &str) -> Result<Vec<u8>, String> {
+    let raw = raw.trim();
+    if !raw.len().is_multiple_of(2) {
+        return Err("odd number of hex characters".to_string());
+    }
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    for pair in raw.as_bytes().chunks(2) {
+        let text = std::str::from_utf8(pair).map_err(|_| "not ASCII".to_string())?;
+        let byte = u8::from_str_radix(text, 16).map_err(|_| format!("not hex: {text:?}"))?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 fn list() -> Result<(), Box<dyn std::error::Error>> {

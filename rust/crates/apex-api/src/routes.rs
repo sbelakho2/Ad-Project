@@ -7,11 +7,11 @@
 //! |---|---|---|
 //! | `GET /healthz` | `200 {"status":"ok"}` | — |
 //! | `GET /metrics` | `200` Prometheus text (`text/plain`, scraped on the loopback bind; the public edge refuses the path) | — |
-//! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
+//! | `GET /v1/audit/{platform}?publisher=` | `200` `AuditReport` for exactly that publisher's own snapshot (bearer-gated; the query parameter is required) | `400 unknown_platform / publisher_required / invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `503 live_audit_not_configured` |
 //! | `POST /v1/audit/{platform}` | `200` live read-only `AuditReport` | `400 bad_request / unknown_platform / invalid_publisher`, `401 unauthorized`, `502 platform_unavailable`, `503 live_audit_not_configured` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
 //! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
-//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n,"new":m}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` or `collection_store_not_configured` |
+//! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n,"new":m}` (a successful setup-watch payment activates its pending subscriber; the canonical merchant reference is `apex-watch:<reference>` and a bare subscriber id is also accepted; replay is a no-op) | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
 //! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
 //! | `GET /v1/operator/jobs/{job_id}` | `200` frozen job JSON | `400 bad_request`, `401 unauthorized`, `404 not_found`, `503 operator_jobs_not_configured` |
@@ -79,14 +79,15 @@
 //! | `GET /console/settings/policy` | `200` recorded policy | — |
 //! | `GET /console/settings/monitoring` | `200` health and plan | `500` connection store read failure |
 //! | `GET /console/analytics?view=&format=csv` | `200` tab, or CSV | `400` unknown view or platform filter, `503` store not configured (CSV exports answer `503 text/plain` with the reason) |
-//! | `POST /free-audit` | `303` to `/audit-requested/?ref=` (workspace and one-time sign-in link ensured; mail is best effort) | `400` field errors, `500`/`503` storage failure |
+//! | `POST /free-audit` | `303` to `/audit-requested/?ref=` (workspace recorded; a new one needs its email domain's app-ads.txt proof, an existing one accepts only recorded contacts; the one-time sign-in link is mailed to that contact, best effort) | `400` field errors or a typed workspace refusal (unknown contact / unproven domain), `500`/`503` storage failure |
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
 //! | `GET /audit-requested/` | `200` confirmation | — |
-//! | `POST /watch` | `303` to `/watch/requested?ref=` (repeat submissions inside 24 h deduplicate; the outcomes line is best effort) | `400` field errors, `500`/`503` store unavailable |
+//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber + Adyen payment link; tier from the reported app count; confirmation link mailed best effort; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
-//! | `GET /watch/requested` | `200` confirmation | — |
+//! | `GET /watch/requested` | `200` confirmation with the checkout link when one exists, otherwise the honest "we will email a payment link" state | — |
+//! | `GET /watch/confirm?token=` | `200` confirmed or refused page | `400` missing or malformed token, `503` watch store not configured |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
 //! a malformed path segment or duplicated query key on `/v1/*` is
@@ -219,6 +220,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch", get(watch_redirect).post(watch_submit))
         .route("/watch/", get(watch_page))
         .route("/watch/requested", get(watch_requested))
+        .route("/watch/confirm", get(watch_confirm))
         .method_not_allowed_fallback(console_method_not_allowed)
         .route("/healthz", get(healthz))
         .route("/favicon.ico", get(crate::favicon::ico))
@@ -297,16 +299,56 @@ async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Query parameters of `GET /v1/audit/{platform}`.
+#[derive(Debug, Deserialize, Default)]
+struct AuditReportParams {
+    /// The publisher whose own snapshot is reported. Required: there is no
+    /// deployment-wide default, so every read names exactly one publisher.
+    #[serde(default)]
+    publisher: Option<String>,
+}
+
+/// `GET /v1/audit/{platform}`: the read-only report for one publisher's own
+/// snapshot.
+///
+/// This route carries the same bearer-token gate as `POST
+/// /v1/audit/{platform}` and `/v1/cycle`: no configured auditor is `503
+/// live_audit_not_configured`, a missing or wrong bearer is `401`. The
+/// publisher is named by `?publisher=` (there is no deployment-wide default),
+/// so an operator reads exactly one publisher's snapshot — never the whole
+/// deployment's.
 async fn audit_report(
     State(state): State<AppState>,
+    headers: HeaderMap,
     platform: Result<Path<String>, PathRejection>,
+    params: Result<Query<AuditReportParams>, QueryRejection>,
 ) -> Result<Json<apex_audit::AuditReport>, ApiError> {
+    let Some(auditor) = &state.live_auditor else {
+        return Err(ApiError::LiveAuditNotConfigured);
+    };
+    auditor.authorize(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )?;
     let Ok(Path(platform)) = platform else {
         return Err(ApiError::BadRequest("bad_request"));
     };
     let platform = parse_platform(&platform).ok_or(ApiError::BadRequest("unknown_platform"))?;
-    let snapshot = state.audit_source.snapshot(platform).await?;
-    Ok(Json(apex_audit::run(&snapshot)))
+    let Ok(Query(params)) = params else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
+    let publisher = params
+        .publisher
+        .ok_or(ApiError::BadRequest("publisher_required"))?;
+    if !is_valid_publisher(&publisher) {
+        return Err(ApiError::BadRequest("invalid_publisher"));
+    }
+    let (_, report) = state
+        .audit_source
+        .snapshot_report(&publisher, platform)
+        .await?;
+    Ok(Json(report))
 }
 
 /// Request body of `POST /v1/audit/{platform}`.
@@ -358,8 +400,13 @@ async fn live_audit(
         }
     };
     // Persist the snapshot so the read-only audit source and the write cycle
-    // can consume the same bytes the live audit just built.
-    if let Err(error) = state.audit_source.write(platform, &snapshot).await {
+    // can consume the same bytes the live audit just built, keyed to the
+    // publisher whose keys produced it.
+    if let Err(error) = state
+        .audit_source
+        .write(&body.publisher, platform, &snapshot)
+        .await
+    {
         tracing::warn!(%error, "live audit snapshot could not be persisted");
     }
     emit_audit_completed(&state, &body.publisher, platform, &snapshot, &report).await;
@@ -817,10 +864,110 @@ async fn adyen_webhook(
                 return Err(ApiError::Internal("collection_record_failed".into()));
             }
         }
+        // A successful watch payment switches the pending subscriber on.
+        // `activate` is idempotent, so a replayed notification (the collection
+        // store already answers `Ok(false)`) never appends a second row.
+        if item.success.eq_ignore_ascii_case("true") {
+            activate_watch_subscriber(&state, item, now_unix_ms);
+        }
     }
     Ok(Json(
         json!({ "received": true, "items": items.len(), "new": new_items }),
     ))
+}
+
+/// The subscriber reference an accepted watch payment names.
+///
+/// The canonical form written into the Adyen payment link is
+/// `apex-watch:<subscriber id>` (the same id the link used as
+/// `shopperReference`). The live dogfood harness posts the bare subscriber id
+/// as `merchantReference`, so both forms are accepted; a bare value must be a
+/// subscriber-id shape, which keeps unrelated merchant references out of the
+/// watch path. The prefix wins when both could match.
+fn watch_reference_from_merchant(merchant_reference: &str) -> Option<&str> {
+    let merchant_reference = merchant_reference.trim();
+    if let Some(reference) = merchant_reference.strip_prefix(WATCH_REFERENCE_PREFIX) {
+        let reference = reference.trim();
+        return (!reference.is_empty() && is_subscriber_id(reference)).then_some(reference);
+    }
+    is_subscriber_id(merchant_reference).then_some(merchant_reference)
+}
+
+/// Activate the pending setup-watch subscriber named by a successful Adyen
+/// notification. The notification's stored payment method (the card) is
+/// recorded for the monthly charge. A replay finds the row already active and
+/// appends nothing. Both the canonical `apex-watch:<reference>` and the bare
+/// subscriber reference are matched (see [`watch_reference_from_merchant`]).
+fn activate_watch_subscriber(
+    state: &AppState,
+    item: &apex_billing::adyen::NotificationItem,
+    now_unix_ms: i64,
+) {
+    let Some(reference) = watch_reference_from_merchant(&item.merchant_reference) else {
+        return;
+    };
+    let Some(store) = &state.watch else {
+        tracing::warn!(
+            reference,
+            "watch payment accepted but no subscriber store is configured"
+        );
+        return;
+    };
+    // One fold read serves both the stored-card check and the outcome
+    // publisher; the store's list clones every subscriber row.
+    let recorded = find_subscriber(store, reference);
+    let recorded_card = recorded
+        .as_ref()
+        .and_then(|subscriber| subscriber.stored_payment_method_id.clone());
+    match store.activate(now_unix_ms, reference) {
+        Ok(outcome) => {
+            // A replay is already active and already has the card: append
+            // nothing. A card that arrived with a later notification is still
+            // recorded once.
+            let needs_card = !outcome.already_active || recorded_card.is_none();
+            if needs_card && !item.stored_payment_method_id.trim().is_empty() {
+                if let Err(error) =
+                    store.record_stored_payment_method(reference, &item.stored_payment_method_id)
+                {
+                    tracing::warn!(%error, reference, "stored payment method could not be recorded");
+                }
+            }
+            if !outcome.already_active {
+                // The pre-activation row normally names the publisher; if a
+                // concurrent append raced the read, fall back to one lookup
+                // rather than dropping the paid outcome.
+                let publisher = recorded
+                    .as_ref()
+                    .map(|subscriber| subscriber.publisher.clone())
+                    .or_else(|| {
+                        find_subscriber(store, &outcome.reference)
+                            .map(|subscriber| subscriber.publisher)
+                    });
+                if let Some(publisher) = publisher {
+                    append_outcome(state, &publisher, "paid", &item.psp_reference);
+                }
+                tracing::info!(reference = %outcome.reference, "setup watch activated by payment");
+            } else if !needs_card {
+                tracing::info!(
+                    reference,
+                    "setup watch payment replayed; the subscriber was already active"
+                );
+            }
+        }
+        Err(apex_watch::WatchError::UnknownSubscriber { .. }) => {
+            tracing::warn!(reference, "watch payment named no known subscriber");
+        }
+        Err(apex_watch::WatchError::NotPending { status, .. }) => {
+            tracing::warn!(
+                reference,
+                status = status.as_str(),
+                "watch payment named a non-pending subscriber"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, reference, "watch payment could not activate the subscriber");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,11 +988,12 @@ fn console_reference(state: &AppState, route: &str) -> String {
 }
 
 async fn console_overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_session(&state, &headers) {
-        return *response;
-    }
+    let view = match require_session(&state, &headers) {
+        Ok(view) => view,
+        Err(response) => return *response,
+    };
     let ctx = ConsoleCtx::from_env();
-    let data = collect_overview(&state).await;
+    let data = collect_overview(&state, &view.publisher).await;
     page(StatusCode::OK, overview::render(&ctx, &data))
 }
 
@@ -856,24 +1004,44 @@ async fn console_bare() -> Response {
     Redirect::to("/console/ledger").into_response()
 }
 
-/// Read the real overview inputs: the newest snapshot across the three
-/// platforms and the verified record totals of every configured publisher
-/// ledger. Source failures never fabricate numbers; they surface as the
-/// documented unavailable states.
-async fn collect_overview(state: &AppState) -> OverviewData {
+/// Read the real overview inputs for one publisher: the newest of *that
+/// publisher's own* snapshots across the three platforms and the verified
+/// record total of *that publisher's own* ledger. Source failures never
+/// fabricate numbers; they surface as the documented unavailable states. No
+/// page ever aggregates across publishers, so one session can never observe
+/// another publisher's snapshot or history totals.
+async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
     let mut latest: Option<LatestAudit> = None;
     for (name, label) in PLATFORM_NAMES {
         let Some(platform) = parse_platform(name) else {
             continue;
         };
-        match state.audit_source.snapshot(platform).await {
+        match state.audit_source.snapshot(publisher, platform).await {
             Ok(snapshot) => {
                 if latest.as_ref().is_some_and(|current| {
                     current.captured_at_unix_ms >= snapshot.fetched_at_unix_ms
                 }) {
                     continue;
                 }
-                let report = apex_audit::run(&snapshot);
+                // The report is cached beside the parsed snapshot, so the
+                // engine runs once per unchanged snapshot rather than on
+                // every console page load.
+                let (reported, report) = match state
+                    .audit_source
+                    .snapshot_report(publisher, platform)
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::warn!(%error, platform = name, "overview report failed");
+                        continue;
+                    }
+                };
+                if latest.as_ref().is_some_and(|current| {
+                    current.captured_at_unix_ms >= reported.fetched_at_unix_ms
+                }) {
+                    continue;
+                }
                 let mut critical = 0usize;
                 let mut warning = 0usize;
                 let mut info = 0usize;
@@ -886,7 +1054,7 @@ async fn collect_overview(state: &AppState) -> OverviewData {
                 }
                 latest = Some(LatestAudit {
                     platform_label: label.to_string(),
-                    captured_at_unix_ms: snapshot.fetched_at_unix_ms,
+                    captured_at_unix_ms: reported.fetched_at_unix_ms,
                     findings: report.findings.len(),
                     critical,
                     warning,
@@ -899,33 +1067,18 @@ async fn collect_overview(state: &AppState) -> OverviewData {
             }
         }
     }
-    let publishers = state.ledger_source.publishers();
-    let ledger = if publishers.is_empty() {
+    let any_ledger = !state.ledger_source.publishers().is_empty();
+    let ledger = if !any_ledger {
         LedgerState::NotConfigured
     } else {
-        let mut records = 0u64;
-        let mut unavailable = 0usize;
-        let mut first_reason: Option<String> = None;
-        for publisher in &publishers {
-            match state.ledger_source.record_count(publisher).await {
-                Ok(count) => records += count,
-                Err(error) => {
-                    unavailable += 1;
-                    if first_reason.is_none() {
-                        first_reason = Some(overview_reason(&error));
-                    }
-                }
-            }
-        }
-        if unavailable == publishers.len() {
-            LedgerState::Unavailable {
-                reason: first_reason.unwrap_or_else(|| "history unavailable".to_string()),
-            }
-        } else {
-            LedgerState::Verified {
+        match state.ledger_source.record_count(publisher).await {
+            Ok(records) => LedgerState::Verified {
                 records,
-                unavailable,
-            }
+                unavailable: 0,
+            },
+            Err(error) => LedgerState::Unavailable {
+                reason: overview_reason(&error),
+            },
         }
     };
     OverviewData {
@@ -954,9 +1107,10 @@ async fn console_audit(
     headers: HeaderMap,
     params: Result<Query<AuditConsoleParams>, QueryRejection>,
 ) -> Response {
-    if let Err(response) = require_session(&state, &headers) {
-        return *response;
-    }
+    let view = match require_session(&state, &headers) {
+        Ok(view) => view,
+        Err(response) => return *response,
+    };
     let ctx = ConsoleCtx::from_env();
     let Ok(Query(params)) = params else {
         return page(
@@ -981,21 +1135,22 @@ async fn console_audit(
             ),
         );
     };
-    match state.audit_source.snapshot(platform).await {
-        Ok(snapshot) => {
-            let report = apex_audit::run(&snapshot);
-            page(
-                StatusCode::OK,
-                audit::render_audit_report(
-                    &ctx,
-                    &AuditReportView {
-                        platform,
-                        snapshot: &snapshot,
-                        report: &report,
-                    },
-                ),
-            )
-        }
+    match state
+        .audit_source
+        .snapshot_report(&view.publisher, platform)
+        .await
+    {
+        Ok((snapshot, report)) => page(
+            StatusCode::OK,
+            audit::render_audit_report(
+                &ctx,
+                &AuditReportView {
+                    platform,
+                    snapshot: &snapshot,
+                    report: &report,
+                },
+            ),
+        ),
         Err(ApiError::NotFound) => page(
             StatusCode::NOT_FOUND,
             audit::render_audit_form(&ctx, Some(&AuditFormProblem::NoSnapshot(platform_name))),
@@ -1016,9 +1171,10 @@ async fn console_finding(
     headers: HeaderMap,
     id: Result<Path<String>, PathRejection>,
 ) -> Response {
-    if let Err(response) = require_session(&state, &headers) {
-        return *response;
-    }
+    let view = match require_session(&state, &headers) {
+        Ok(view) => view,
+        Err(response) => return *response,
+    };
     let ctx = ConsoleCtx::from_env();
     let Ok(Path(id)) = id else {
         return page(StatusCode::NOT_FOUND, errors::finding_not_found(&ctx));
@@ -1031,9 +1187,12 @@ async fn console_finding(
         let Some(platform) = parse_platform(name) else {
             continue;
         };
-        match state.audit_source.snapshot(platform).await {
-            Ok(snapshot) => {
-                let report = apex_audit::run(&snapshot);
+        match state
+            .audit_source
+            .snapshot_report(&view.publisher, platform)
+            .await
+        {
+            Ok((snapshot, report)) => {
                 if let Some(finding) = report.findings.iter().find(|finding| {
                     audit::finding_id(
                         finding.rule.as_str(),
@@ -1076,9 +1235,10 @@ async fn console_audit_csv(
     headers: HeaderMap,
     params: Result<Query<AuditConsoleParams>, QueryRejection>,
 ) -> Response {
-    if let Err(response) = require_session(&state, &headers) {
-        return *response;
-    }
+    let view = match require_session(&state, &headers) {
+        Ok(view) => view,
+        Err(response) => return *response,
+    };
     let ctx = ConsoleCtx::from_env();
     let Ok(Query(params)) = params else {
         return page(
@@ -1104,9 +1264,12 @@ async fn console_audit_csv(
             errors::bad_request_with_detail(&ctx, "The platform is not one of the supported ones."),
         );
     };
-    match state.audit_source.snapshot(platform).await {
-        Ok(snapshot) => {
-            let report = apex_audit::run(&snapshot);
+    match state
+        .audit_source
+        .snapshot_report(&view.publisher, platform)
+        .await
+    {
+        Ok((snapshot, report)) => {
             let csv = audit::render_audit_csv(
                 &AuditReportView {
                     platform,
@@ -1553,7 +1716,7 @@ async fn console_connections(State(state): State<AppState>, headers: HeaderMap) 
         };
         let last_report = state
             .audit_source
-            .snapshot(platform)
+            .snapshot(&publisher, platform)
             .await
             .ok()
             .map(|snapshot| snapshot.fetched_at_unix_ms);
@@ -1650,7 +1813,7 @@ async fn connection_detail_response(
     let running_work = running_experiments(state, publisher, Some(platform)).await;
     let last_report = state
         .audit_source
-        .snapshot(platform)
+        .snapshot(publisher, platform)
         .await
         .ok()
         .map(|snapshot| snapshot.fetched_at_unix_ms);
@@ -2876,7 +3039,7 @@ async fn console_settings_monitoring(
         let Some(platform) = parse_platform(capability.wire) else {
             continue;
         };
-        if let Ok(snapshot) = state.audit_source.snapshot(platform).await {
+        if let Ok(snapshot) = state.audit_source.snapshot(&publisher, platform).await {
             snapshots.push((platform, snapshot.fetched_at_unix_ms));
         }
     }
@@ -3366,6 +3529,17 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
     };
     match store.store(&lead, now_unix_ms(&state)).await {
         Ok(request_id) => {
+            // The saved lead is the contract: the self-serve workspace and
+            // its one-time link are best effort and never gate acceptance.
+            // An existing workspace only accepts its recorded contacts, and
+            // a new one needs the creating email domain's app-ads.txt proof;
+            // a refusal is recorded and no link is issued.
+            match record_workspace(&state, &lead.publisher, &lead.email).await {
+                Ok(()) => issue_signin_link(&state, &lead.publisher, lead.email.trim()).await,
+                Err(refusal) => {
+                    record_workspace_refusal(&state, &lead.publisher, &refusal);
+                }
+            }
             let (from_day, to_day) = default_audit_window(now_unix_ms(&state));
             state
                 .analytics
@@ -3378,11 +3552,6 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
                     "free-audit",
                 )
                 .await;
-            // The workspace exists before the confirmation, and the one-time
-            // sign-in link goes out (both best effort: a saved lead is
-            // success even when either fails).
-            ensure_workspace(&state, &lead.publisher);
-            issue_signin_link(&state, &lead.publisher, lead.email.trim()).await;
             Redirect::to(&format!("/audit-requested/?ref={request_id}")).into_response()
         }
         Err(error) => {
@@ -3403,22 +3572,61 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
     }
 }
 
-/// The workspace seam of an accepted audit request: create or extend the
-/// submission publisher's entry in the deployment's ledger-token file
-/// (`APEX_LEDGER_TOKENS_FILE`). The studio-to-slug mapping itself lives in
-/// the stored lead row; this adds the publisher's credential entry only. A
-/// deployment without the token file, or a failing write, leaves the lead
-/// saved and is logged — the confirmation is never withheld over it.
-fn ensure_workspace(state: &AppState, publisher: &str) {
+/// Record (or confirm) the submission's workspace before anything is stored.
+///
+/// - Existing workspace: only a recorded contact is accepted. The contact
+///   list is never extended by a submission.
+/// - New workspace: the creating email's domain must prove ownership through
+///   its public `app-ads.txt` (`OWNERDOMAIN=` or `CONTACT=`) before the
+///   workspace and its owner are recorded.
+/// - No token file configured: the lead flow keeps working as before, but no
+///   workspace or self-serve link can be recorded (logged, not fabricated).
+async fn record_workspace(
+    state: &AppState,
+    publisher: &str,
+    email: &str,
+) -> Result<(), crate::signin::WorkspaceRefusal> {
     let Some(workspaces) = &state.workspaces else {
         tracing::warn!(
             publisher,
             "workspace not recorded: APEX_LEDGER_TOKENS_FILE is not configured"
         );
-        return;
+        return Ok(());
     };
-    if let Err(error) = workspaces.ensure(publisher) {
-        tracing::warn!(%error, publisher, "workspace could not be recorded");
+    if workspaces.has_workspace(publisher) {
+        // Existing workspace: `ensure` refuses any address that is not
+        // already recorded and never adds a contact.
+        return workspaces.ensure(publisher, email, false).map(|_| ());
+    }
+    let Some(proof) = &state.app_ads_proof else {
+        return Err(crate::signin::WorkspaceRefusal::UnprovenDomain {
+            domain: email
+                .split_once('@')
+                .map(|(_, domain)| domain.to_string())
+                .unwrap_or_default(),
+            reason: "no app-ads.txt proof source is configured".to_string(),
+        });
+    };
+    proof.prove_owner(email).await?;
+    workspaces.ensure(publisher, email, true).map(|_| ())
+}
+
+/// Record the refusal reason on the operator channel (and the sign-in warning
+/// log when configured). The message names the publisher and the rule but
+/// never echoes the submitted address.
+fn record_workspace_refusal(
+    state: &AppState,
+    publisher: &str,
+    refusal: &crate::signin::WorkspaceRefusal,
+) {
+    let message = format!(
+        "workspace for '{publisher}' refused: {} ({})",
+        refusal.reason(),
+        refusal
+    );
+    tracing::warn!("{message}");
+    if let Some(signin) = &state.signin {
+        signin.record_warning(message);
     }
 }
 
@@ -3467,6 +3675,14 @@ fn is_request_id(value: &str) -> bool {
 
 // --- setup watch ------------------------------------------------------------
 
+/// The deterministic Adyen reference prefix of a setup-watch payment. The
+/// suffix is the subscriber id, which is also the `shopperReference`; the
+/// webhook matches this prefix back to the pending subscriber.
+pub const WATCH_REFERENCE_PREFIX: &str = "apex-watch:";
+/// Micros per Adyen minor unit (USD cent): the watch price is a whole number
+/// of dollars, so the conversion is exact.
+const MICROS_PER_ADYEN_MINOR_UNIT: i64 = 10_000;
+
 /// `GET /watch` is only the recipient of the form POST; the page lives at
 /// the canonical trailing-slash address.
 async fn watch_redirect() -> Redirect {
@@ -3481,12 +3697,15 @@ async fn watch_page() -> Html<String> {
     ))
 }
 
-/// `POST /watch`: validate the form fields, deduplicate repeat submissions
-/// inside the store's 24-hour window, store the subscriber through
-/// `apex-watch` and redirect to the confirmation. Validation failures
-/// re-render the request page with the exact field copy and the safe values
-/// preserved; storage failures re-render it with the submission-failure copy
-/// and the retry action.
+/// `POST /watch`: validate the form fields, create a pending subscriber and
+/// an Adyen payment link, email the one-time email-confirmation link and
+/// redirect to the confirmation. Nothing is switched on here: the watch has
+/// no active checks until the payment webhook activates the pending row.
+///
+/// The tier is derived from the reported app count (the evidence), never from
+/// a form checkbox. Validation failures re-render the request page with the
+/// exact field copy and the safe values preserved; storage failures re-render
+/// it with the submission-failure copy and the retry action.
 async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
     let ctx = ConsoleCtx::from_env();
     let Ok(fields) = leads::parse_form(&body) else {
@@ -3496,21 +3715,20 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
         domain: fields.get("domain").cloned().unwrap_or_default(),
         email: fields.get("email").cloned().unwrap_or_default(),
         accounts: fields.get("accounts").cloned().unwrap_or_default(),
-        core: fields
-            .get("tier")
-            .is_some_and(|value| value.split(',').any(|part| part.trim() == "core")),
     };
-    if let Err(errors) = apex_watch::validate_watch_signup(
-        &values.domain,
-        &values.email,
-        &values.accounts,
-        values.core,
-    ) {
+    let errors =
+        apex_watch::validate_watch_signup(&values.domain, &values.email, &values.accounts, false)
+            .err()
+            .unwrap_or_default();
+    if !errors.is_empty() {
         return page(
             StatusCode::BAD_REQUEST,
             watch_html::render_request_page(&ctx, &WatchPageState::Invalid { values, errors }),
         );
     }
+    // Refuse before any network work when the store that would receive the
+    // subscriber is not configured: a form that can never be stored must not
+    // fetch the tier evidence first.
     let Some(store) = &state.watch else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3520,21 +3738,45 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             ),
         );
     };
-    match store.subscribe(
-        now_unix_ms(&state),
-        &values.domain,
-        &values.email,
-        &values.accounts,
-        values.core,
-    ) {
+    // The tier is evidence, not a form field: the domain's public app-ads.txt
+    // is fetched behind the guarded proof source and the distinct publisher
+    // account ids count the portfolio. Unavailable evidence records the
+    // normal tier with a warning and never blocks the pending sign-up. This
+    // is the request's only guarded fetch.
+    let app_count = match &state.app_ads_proof {
+        Some(proof) => match proof.app_count(&values.domain).await {
+            Ok(count) => count,
+            Err(refusal) => {
+                tracing::warn!(
+                    domain = %values.domain,
+                    ?refusal,
+                    "watch tier evidence unavailable; recording the normal tier"
+                );
+                0
+            }
+        },
+        None => 0,
+    };
+    let now = now_unix_ms(&state);
+    let request = apex_watch::model::SubscribeRequest {
+        domain: values.domain.clone(),
+        email: values.email.clone(),
+        accounts: values.accounts.clone(),
+        app_count,
+    };
+    match store.subscribe_pending(now, &request) {
         Ok(outcome) => {
-            append_outcome(
-                &state,
-                &outcome.subscriber.publisher,
-                "watch_signup",
-                &outcome.subscriber.id,
-            );
-            Redirect::to(&format!("/watch/requested?ref={}", outcome.subscriber.id)).into_response()
+            // The payment link is created before the redirect so the
+            // confirmation can show it. Every failure leaves the pending row
+            // intact and the page honest: "we will email a payment link".
+            let checkout = create_watch_payment_link(&state, &outcome).await;
+            // The subscriber row derives its publisher slug from the same
+            // domain, so the outcome line does not need to clone the whole
+            // subscriber log just to look the row up again.
+            let publisher = watch_publisher_for_domain(&values.domain);
+            append_outcome(&state, &publisher, "watch_signup", &outcome.reference);
+            send_watch_confirmation(&state, &values.email, &outcome, checkout.as_deref()).await;
+            Redirect::to(&format!("/watch/requested?ref={}", outcome.reference)).into_response()
         }
         Err(error) => {
             tracing::error!(%error, "watch sign-up could not be stored");
@@ -3543,34 +3785,207 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            page(
-                status,
-                watch_html::render_request_page(
-                    &ctx,
-                    &WatchPageState::SubmissionFailed(Box::new(values)),
-                ),
-            )
+            let page_state = match &error {
+                apex_watch::WatchError::Validation(errors) if !errors.is_empty() => {
+                    WatchPageState::Invalid {
+                        values,
+                        errors: errors.clone(),
+                    }
+                }
+                _ => WatchPageState::SubmissionFailed(Box::new(values)),
+            };
+            page(status, watch_html::render_request_page(&ctx, &page_state))
         }
     }
 }
 
-async fn watch_requested(params: Result<Query<RequestedParams>, QueryRejection>) -> Html<String> {
+/// One recorded subscriber row by reference.
+fn find_subscriber(
+    store: &apex_watch::SubscriberStore,
+    reference: &str,
+) -> Option<apex_watch::model::Subscriber> {
+    store
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|subscriber| subscriber.id == reference)
+}
+
+/// The publisher slug the subscriber store derives for `domain` (its one
+/// normalization rule). The sign-up path uses this instead of re-reading the
+/// subscriber log it just appended to.
+fn watch_publisher_for_domain(domain: &str) -> String {
+    apex_watch::normalize_domain(domain)
+        .map(|normalized| apex_watch::model::publisher_slug_for_domain(&normalized))
+        .unwrap_or_else(|_| apex_watch::model::publisher_slug_for_domain(domain))
+}
+
+/// Create the Adyen payment link for a pending sign-up.
+///
+/// The subscriber id is the `shopperReference` (the identity the stored card
+/// and the webhook share), the tier price is the frozen watch price, and the
+/// deterministic `apex-watch:<reference>` is the idempotency key. No Adyen
+/// client or transport means no link; the caller then shows the honest
+/// "we will email a payment link" state instead of inventing one.
+async fn create_watch_payment_link(
+    state: &AppState,
+    outcome: &apex_watch::model::PendingOutcome,
+) -> Option<String> {
+    let (Some(adyen), Some(transport)) = (&state.adyen, &state.billing_transport) else {
+        tracing::warn!(
+            reference = %outcome.reference,
+            "watch payment link not created: Adyen checkout is not configured"
+        );
+        return None;
+    };
+    let micros = match outcome.tier {
+        apex_watch::model::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
+        apex_watch::model::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
+    };
+    let item = apex_billing::adyen::InvoiceLineItem {
+        seq: 0,
+        experiment_id: "setup-watch".to_string(),
+        amount_minor_units: micros / MICROS_PER_ADYEN_MINOR_UNIT,
+        currency: apex_billing::PLAN_CURRENCY.to_string(),
+        shopper_reference: outcome.reference.clone(),
+        reference: format!("{WATCH_REFERENCE_PREFIX}{}", outcome.reference),
+        description: format!("Apex setup watch ({})", outcome.tier.as_str()),
+    };
+    match adyen.create_payment_link(transport.get(), &item).await {
+        Ok(link) => {
+            if let Some(store) = &state.watch {
+                if let Err(error) = store.record_payment_link(&outcome.reference, &link.url) {
+                    tracing::warn!(%error, reference = %outcome.reference, "payment link could not be recorded");
+                }
+            }
+            Some(link.url)
+        }
+        Err(error) => {
+            tracing::warn!(%error, reference = %outcome.reference, "watch payment link could not be created");
+            None
+        }
+    }
+}
+
+/// Best-effort confirmation email for a pending sign-up.
+async fn send_watch_confirmation(
+    state: &AppState,
+    email: &str,
+    outcome: &apex_watch::model::PendingOutcome,
+    checkout_url: Option<&str>,
+) {
+    let Some(signin) = &state.signin else {
+        tracing::warn!(
+            reference = %outcome.reference,
+            "setup-watch confirmation not sent: the leads root is not configured"
+        );
+        return;
+    };
+    let expires = now_unix_ms(state).saturating_add(apex_watch::model::CONFIRMATION_TTL_MS);
+    signin
+        .send_watch_confirmation(
+            email,
+            &outcome.reference,
+            &outcome.confirmation_token,
+            checkout_url,
+            expires,
+        )
+        .await;
+}
+
+async fn watch_requested(
+    State(state): State<AppState>,
+    params: Result<Query<RequestedParams>, QueryRejection>,
+) -> Html<String> {
     let ctx = ConsoleCtx::from_env();
     let reference = match params {
         Ok(Query(params)) => params.reference,
         Err(_) => None,
     };
     let reference = reference.filter(|value| is_subscriber_id(value));
-    let checkout = crate::config::env_value(watch_html::WATCH_CHECKOUT_ENV);
-    let checkout = checkout
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let subscriber = reference.as_deref().and_then(|reference| {
+        state.watch.as_ref().and_then(|store| {
+            store
+                .list()
+                .ok()?
+                .into_iter()
+                .find(|subscriber| subscriber.id == reference)
+        })
+    });
+    let checkout = subscriber
+        .as_ref()
+        .and_then(|subscriber| subscriber.payment_link.clone())
+        .or_else(|| {
+            // The operator-configured link remains a documented fallback for
+            // deployments that collect outside this API.
+            crate::config::env_value(watch_html::WATCH_CHECKOUT_ENV)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    let tier = subscriber.as_ref().map(|subscriber| match subscriber.tier {
+        apex_watch::model::Tier::Normal => "standard ($99 per month)",
+        apex_watch::model::Tier::Core => "core ($199 per month)",
+    });
     Html(watch_html::render_confirmation(
         &ctx,
         reference.as_deref(),
-        checkout,
+        checkout.as_deref(),
+        tier,
     ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WatchConfirmParams {
+    #[serde(default, rename = "token")]
+    token: Option<String>,
+}
+
+/// `GET /watch/confirm?token=`: consume the one-time email confirmation.
+/// Single use, expiry and unknown tokens are typed refusals; nothing mints a
+/// session or switches a watch on (payment does that).
+async fn watch_confirm(
+    State(state): State<AppState>,
+    params: Result<Query<WatchConfirmParams>, QueryRejection>,
+) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let token = match params {
+        Ok(Query(params)) => params.token,
+        Err(_) => None,
+    };
+    let Some(token) = token.filter(|token| apex_watch::store::is_confirmation_token(token)) else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_email_confirmation_refused(&ctx),
+        );
+    };
+    match store.confirm_email(now_unix_ms(&state), &token) {
+        Ok(outcome) => page(
+            StatusCode::OK,
+            watch_html::render_email_confirmed(&ctx, &outcome.email),
+        ),
+        Err(
+            apex_watch::WatchError::ConfirmationUsed
+            | apex_watch::WatchError::ConfirmationExpired
+            | apex_watch::WatchError::ConfirmationUnknown
+            | apex_watch::WatchError::AlreadyConfirmed,
+        ) => page(
+            StatusCode::OK,
+            watch_html::render_email_confirmation_refused(&ctx),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "watch confirmation failed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errors::internal(&ctx, &console_reference(&state, "/watch/confirm")),
+            )
+        }
+    }
 }
 
 /// `sub_` plus 10 hex characters, the subscriber-id shape.
@@ -3843,7 +4258,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         // An unparseable snapshot makes the audit console take its real 500
         // path.
-        std::fs::write(dir.join("admob.json"), "{not a snapshot}").expect("snapshot file");
+        std::fs::create_dir_all(dir.join("pub1")).expect("snapshot directory");
+        std::fs::write(dir.join("pub1").join("admob.json"), "{not a snapshot}")
+            .expect("snapshot file");
         let state = AppState::new(
             Arc::new(crate::sources::JsonFileAuditSource::new(&dir)),
             Arc::new(StaticLedgerSource::default()),

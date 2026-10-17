@@ -158,10 +158,24 @@ pub fn or_not_available(reason: &str) -> String {
 /// carriage return or line feed are wrapped in double quotes with inner
 /// quotes doubled; everything else passes through unchanged.
 pub fn csv_field(value: &str) -> String {
+    let mut out = String::new();
+    push_csv_field(&mut out, value);
+    out
+}
+
+/// Append `value` as one RFC 4180 field, without a per-field `String`.
+pub fn push_csv_field(out: &mut String, value: &str) {
     if value.contains(['"', ',', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+        out.push('"');
+        for ch in value.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
     } else {
-        value.to_string()
+        out.push_str(value);
     }
 }
 
@@ -174,15 +188,38 @@ pub fn csv_field(value: &str) -> String {
 /// negative numbers keep their natural form. The result then goes through
 /// the same quoting as [`csv_field`].
 pub fn csv_text_field(value: &str) -> String {
+    let mut out = String::new();
+    push_csv_text_field(&mut out, value);
+    out
+}
+
+/// Append `value` as one neutralised text field, without a per-field
+/// `String`. Equivalent to [`csv_text_field`].
+pub fn push_csv_text_field(out: &mut String, value: &str) {
     let needs_apostrophe = match value.chars().next() {
         Some('=' | '+' | '@' | '\t' | '\r') => true,
         Some('-') => !is_plain_number(value),
         _ => false,
     };
-    if needs_apostrophe {
-        csv_field(&format!("'{value}"))
-    } else {
-        csv_field(value)
+    if !needs_apostrophe {
+        push_csv_field(out, value);
+        return;
+    }
+    // The apostrophe is part of the field, so it goes inside the quotes that
+    // a comma/newline/quote in the value requires.
+    let quoted = value.contains(['"', ',', '\n', '\r']);
+    if quoted {
+        out.push('"');
+    }
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    if quoted {
+        out.push('"');
     }
 }
 

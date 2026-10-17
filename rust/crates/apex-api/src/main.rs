@@ -59,9 +59,14 @@
 //!   them, so ids stay stable across restarts and per deployment;
 //! - `APEX_WATCH_ROOT` — the setup-watch subscriber root behind the public
 //!   `GET`/`POST /watch` sign-up, default `.apex/watch`; the store is the
-//!   JSONL file `subscribers.jsonl` there. `APEX_WATCH_CHECKOUT_URL`
-//!   (optional) is the payment link the `/watch/requested` confirmation
-//!   shows; without it the page says a payment link will be emailed;
+//!   JSONL file `subscribers.jsonl` there. Each accepted sign-up creates a
+//!   pending subscriber and, when Adyen checkout is configured, its own
+//!   payment link (shown on `/watch/requested`); `APEX_WATCH_CHECKOUT_URL`
+//!   (optional) remains a fallback link for deployments that collect
+//!   outside this API. The payment webhook activates the subscriber once its
+//!   notification arrives; the confirmation page shows the per-subscriber
+//!   checkout link when one was created, and otherwise says a payment link
+//!   will be emailed;
 //! - `APEX_SALES_OUTCOMES_FILE` — the frozen sales-outcomes appender's file
 //!   (default `.apex/sales/outcomes.jsonl`), one JSON object per line in the
 //!   shape `{"atUnixMs":…,"publisher":…,"kind":"connected"|"paid"|"watch_signup","ref":…}`
@@ -173,7 +178,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let adyen =
                 apex_billing::AdyenClient::new(api_key, merchant_account, hmac_key, checkout_base)
                     .map_err(|error| format!("adyen credentials are invalid: {error}"))?;
-            state = state.with_adyen(Arc::new(adyen));
+            let checkout_transport = ReqwestTransport::new().map_err(|error| {
+                format!("the Adyen checkout transport could not be built: {error}")
+            })?;
+            state = state
+                .with_adyen(Arc::new(adyen))
+                .with_billing_transport(Arc::new(checkout_transport));
         }
         (None, None, None) => {}
         _ => {
@@ -280,7 +290,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(mailer) = apex_api::email_sink_from_env(env_value) {
                 signin = signin.with_mailer(mailer);
             }
+            if let Some(workspaces) = &state.workspaces {
+                signin = signin.with_workspaces(Arc::clone(workspaces));
+            }
             state = state.with_signin(Arc::new(signin));
+
+            // New workspaces prove ownership through the creating email
+            // domain's public app-ads.txt, fetched through the guarded,
+            // no-redirect transport and resolved with the standard library.
+            match ReqwestTransport::new() {
+                Ok(transport) => {
+                    state = state.with_app_ads_proof(Arc::new(apex_api::HttpAppAdsProof::new(
+                        Arc::new(transport),
+                    )));
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "the app-ads.txt proof transport could not be built; new workspaces will be refused"
+                ),
+            }
         }
         None => {
             tracing::warn!(

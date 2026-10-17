@@ -11,6 +11,7 @@ LOCAL="$ROOT/tools/ci/local.sh"
 SHIP="$ROOT/tools/ci/ship.sh"
 FAKEBIN="$TEST_DIR/fakebin"
 FIXTURES="$TEST_DIR/fixtures/lanes"
+CHANGED_FIXTURES="$TEST_DIR/fixtures/changed"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/apex-ci-tests.XXXXXX")
 CAP="$WORK/cap"
@@ -115,7 +116,7 @@ reset_cap
 capture env FAKE_UNAME_M=arm64 sh "$LOCAL" --list
 eq "T1 --list exits 0" "$RC" 0
 eq "T1 lane count" "$(count_prefix "lane " "$WORK/out.txt")" 7
-eq "T1 step count (matrix expanded)" "$(count_prefix "  step " "$WORK/out.txt")" 48
+eq "T1 step count (matrix expanded)" "$(count_prefix "  step " "$WORK/out.txt")" 49
 eq "T1 service count" "$(count_prefix "  service " "$WORK/out.txt")" 1
 eq "T1 every step row has an image" "$(step_rows_without_image "$WORK/out.txt")" 0
 contains "T1 dogfood-live clickhouse service" "$WORK/out.txt" "  service clickhouse image=clickhouse/clickhouse-server:26.8 env=CLICKHOUSE_SKIP_USER_SETUP=1"
@@ -200,6 +201,63 @@ eq "T7 failing step exit code propagates" "$RC" 7
 contains "T7 step name in the failure" "$WORK/out.txt" "FAILED lane 'zz-ordering' step 'first' (exit 7)"
 contains "T7 output tail printed" "$WORK/out.txt" "tail of the step output"
 
+printf '%s\n' "== local.sh: --changed relevance selection (fixtures) =="
+reset_cap
+capture env FAKE_UNAME_M=arm64 APEX_CI_LANES_DIR="$CHANGED_FIXTURES" sh "$LOCAL" --list --changed rust/crates/apex-core/src/lib.rs
+eq "T16 changed rust exits 0" "$RC" 0
+contains "T16 changed rust runs apex-rs-coverage" "$WORK/out.txt" "lane apex-rs-coverage"
+contains "T16 changed rust lists the crate step" "$WORK/out.txt" "  step cov image=alpine:3.20"
+not_contains "T16 changed rust skips site-perf" "$WORK/out.txt" "lane site-perf"
+not_contains "T16 changed rust skips contract-coverage" "$WORK/out.txt" "lane contract-coverage"
+if [ ! -f "$CAP/docker.argv" ]; then pass "T16 --list --changed never invokes docker"; else fail "T16 --list --changed invoked docker"; fi
+
+reset_cap
+capture env FAKE_UNAME_M=arm64 APEX_CI_LANES_DIR="$CHANGED_FIXTURES" sh "$LOCAL" --list --changed site/guide/index.html
+eq "T17 changed site exits 0" "$RC" 0
+contains "T17 changed site runs site-perf" "$WORK/out.txt" "lane site-perf"
+contains "T17 changed site lists the perf step" "$WORK/out.txt" "  step perf image=alpine:3.20"
+not_contains "T17 changed site skips apex-rs-coverage" "$WORK/out.txt" "lane apex-rs-coverage"
+not_contains "T17 changed site skips contract-coverage" "$WORK/out.txt" "lane contract-coverage"
+
+reset_cap
+capture env FAKE_UNAME_M=arm64 APEX_CI_LANES_DIR="$CHANGED_FIXTURES" sh "$LOCAL" --list --changed .woodpecker/dogfood-live.yml
+eq "T18 changed .woodpecker exits 0" "$RC" 0
+contains "T18 changed .woodpecker runs contract-coverage" "$WORK/out.txt" "lane contract-coverage"
+not_contains "T18 changed .woodpecker skips apex-rs-coverage" "$WORK/out.txt" "lane apex-rs-coverage"
+not_contains "T18 changed .woodpecker skips site-perf" "$WORK/out.txt" "lane site-perf"
+
+reset_cap
+capture env FAKE_UNAME_M=arm64 APEX_CI_LANES_DIR="$CHANGED_FIXTURES" sh "$LOCAL" --list --changed docs/only.md
+eq "T19 unmatchable change exits 0" "$RC" 0
+eq "T19 unmatchable change runs no lane" "$(count_prefix "lane " "$WORK/out.txt")" 0
+eq "T19 unmatchable change runs no step" "$(count_prefix "  step " "$WORK/out.txt")" 0
+
+reset_cap
+capture env FAKE_UNAME_M=arm64 APEX_CI_LANES_DIR="$CHANGED_FIXTURES" sh "$LOCAL" --list --changed rust/crates/apex-ui/src/lib.rs --changed site/index.html
+eq "T20 union exits 0" "$RC" 0
+contains "T20 union runs apex-rs-coverage" "$WORK/out.txt" "lane apex-rs-coverage"
+contains "T20 union runs site-perf" "$WORK/out.txt" "lane site-perf"
+not_contains "T20 union skips contract-coverage" "$WORK/out.txt" "lane contract-coverage"
+eq "T20 union runs two lanes" "$(count_prefix "lane " "$WORK/out.txt")" 2
+
+printf '%s\n' "== local.sh: --changed step-level filters (real dogfood-live) =="
+reset_cap
+capture env FAKE_UNAME_M=arm64 sh "$LOCAL" --list --changed .woodpecker/dogfood-live.yml
+eq "T21 real lane-file change exits 0" "$RC" 0
+contains "T21 dogfood-live wakes on its own file" "$WORK/out.txt" "lane dogfood-live"
+contains "T21 subset step runs after the build" "$WORK/out.txt" "  step dogfood subset image=rust:1.88-bookworm depends_on=build"
+not_contains "T21 full run-harness step is gated out" "$WORK/out.txt" "  step run-harness image="
+not_contains "T21 full dogfood-plan step is gated out" "$WORK/out.txt" "  step dogfood-plan image="
+contains "T21 contract-coverage wakes on .woodpecker/**" "$WORK/out.txt" "lane contract-coverage"
+
+reset_cap
+capture env FAKE_UNAME_M=arm64 sh "$LOCAL" --list --changed rust/crates/apex-billing/src/lib.rs
+eq "T22 real rust change exits 0" "$RC" 0
+contains "T22 rust change runs apex-rs-coverage" "$WORK/out.txt" "lane apex-rs-coverage"
+contains "T22 rust change runs dogfood-audit" "$WORK/out.txt" "lane dogfood-audit"
+contains "T22 rust change keeps the full run-harness step" "$WORK/out.txt" "  step run-harness image="
+not_contains "T22 unrelated-crate change skips ui-ux" "$WORK/out.txt" "lane ui-ux"
+
 printf '%s\n' "== ship.sh: pre-flight refusal paths =="
 reset_cap
 capture env APEX_SHIP_ARTIFACT_DIR="$WORK/empty-art" APEX_SHIP_ENV="$NO_ENV" sh "$SHIP" --no-build --service apex-api --host fake@deploy
@@ -268,10 +326,12 @@ if [ ! -f "$CAP/rsync.argv" ]; then pass "T14 no rsync executed"; else fail "T14
 printf '%s\n' "== live.py bookkeeping: equivalence and n vs 2n benchmark =="
 capture python3 "$TEST_DIR/live-bookkeeping.py"
 eq "T15 live bookkeeping check exits 0" "$RC" 0
-contains "T15 259-cell equivalence vs the pre-fix scan" "$WORK/out.txt" "cells_of matches the pre-fix scan for 48 class/service pairs"
-contains "T15 n=259 benchmark printed" "$WORK/out.txt" "cells_of cells=259"
-contains "T15 n=518 benchmark printed" "$WORK/out.txt" "cells_of cells=518"
-contains "T15 response-contract table cache evidence" "$WORK/out.txt" "response-contract tables (68 cells x 200 rounds)"
+contains "T15 287-cell equivalence vs the pre-fix scan" "$WORK/out.txt" "cells_of matches the pre-fix scan for 64 class/service pairs"
+contains "T15 n=287 benchmark printed" "$WORK/out.txt" "cells_of cells=287"
+contains "T15 n=574 benchmark printed" "$WORK/out.txt" "cells_of cells=574"
+contains "T15 response-contract table cache evidence" "$WORK/out.txt" "response-contract tables (69 cells x 200 rounds)"
+contains "T15 one parity process, not one per cell" "$WORK/out.txt" "one dogfood-plan process for"
+contains "T15 macOS ClickHouse restart env" "$WORK/out.txt" "the restart carries the macOS fork-safety switch"
 
 printf '\nrun-tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then

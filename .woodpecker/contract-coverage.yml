@@ -5,9 +5,17 @@
 #
 # Note on shell semantics: Woodpecker runs a step's commands as one `set -e`
 # script, so each command below is absolute and idempotent.
+# Path relevance: the lane reads monitoring rules, the edge and unit config,
+# the CI files themselves and the coverage tooling, so it watches those trees.
 when:
   - event: [push, pull_request]
     branch: [main, master]
+    path:
+      - monitoring/**
+      - infrastructure/**
+      - tools/coverage/**
+      - .woodpecker/**
+      - Makefile
 
 steps:
   build-apex-tools:

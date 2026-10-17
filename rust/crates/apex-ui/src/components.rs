@@ -11,7 +11,7 @@
 //! (`javascript:`, `data:`) renders its label as plain text instead of a
 //! live link.
 
-use crate::escape::{attr, html_escape};
+use crate::escape::{attr, html_escape, push_escaped};
 use crate::status::{chip, StatusKind};
 
 /// A KPI card: a small label, a large value, a note and an optional link.
@@ -122,41 +122,91 @@ pub fn data_table(
     empty: Option<EmptyState>,
     count_note: Option<&str>,
 ) -> String {
-    let mut out = String::new();
     if rows.is_empty() {
         if let Some(empty) = empty {
             return empty_table(caption, headers, &empty, count_note);
         }
     }
+    // One reservation sized from the cells themselves. A 20k-row table would
+    // otherwise grow the buffer by repeated doubling (and build a temporary
+    // String per cell); this keeps the render linear and allocation-light.
+    let mut out = String::with_capacity(table_capacity(caption, headers, rows, count_note));
     out.push_str("<div class=\"table-wrap\"><table class=\"data-table\">");
     if let Some(caption) = caption {
-        out.push_str(&format!(
-            "<caption class=\"table-caption\">{}</caption>",
-            html_escape(caption)
-        ));
+        out.push_str("<caption class=\"table-caption\">");
+        push_escaped(&mut out, caption);
+        out.push_str("</caption>");
     }
     out.push_str("<thead><tr>");
     for header in headers {
-        out.push_str(&format!("<th scope=\"col\">{}</th>", html_escape(header)));
+        out.push_str("<th scope=\"col\">");
+        push_escaped(&mut out, header);
+        out.push_str("</th>");
     }
     out.push_str("</tr></thead><tbody>");
     if rows.is_empty() {
-        out.push_str(&format!(
-            "<tr><td colspan=\"{}\" class=\"cell-muted\">{}</td></tr>",
-            headers.len(),
-            html_escape(&crate::format::or_not_available("no rows"))
-        ));
+        out.push_str("<tr><td colspan=\"");
+        out.push_str(&headers.len().to_string());
+        out.push_str("\" class=\"cell-muted\">");
+        out.push_str(&html_escape(&crate::format::or_not_available("no rows")));
+        out.push_str("</td></tr>");
     }
     for row in rows {
         out.push_str("<tr>");
         for cell in row {
-            out.push_str(&cell_html(cell));
+            push_cell(&mut out, cell);
         }
         out.push_str("</tr>");
     }
     out.push_str("</tbody></table></div>");
     out.push_str(&note_line(count_note));
     out
+}
+
+/// The bytes [`data_table`] will emit (fixed markup plus the cells' text),
+/// used to reserve the output once. Escaped characters can add bytes, so the
+/// callers that need the exact bound pass plain text; the reserve is a lower
+/// bound, never a truncation.
+fn table_capacity(
+    caption: Option<&str>,
+    headers: &[&str],
+    rows: &[Vec<Cell>],
+    count_note: Option<&str>,
+) -> usize {
+    let mut capacity = 49 + 30 + 21;
+    capacity += caption.map_or(0, |caption| 41 + caption.len());
+    capacity += headers
+        .iter()
+        .map(|header| 22 + header.len())
+        .sum::<usize>();
+    capacity += count_note.map_or(0, |note| 26 + note.len());
+    for row in rows {
+        capacity += 9;
+        for cell in row {
+            capacity += cell_capacity(cell);
+        }
+    }
+    if rows.is_empty() {
+        capacity += 64;
+    }
+    capacity
+}
+
+fn cell_capacity(cell: &Cell) -> usize {
+    match cell {
+        Cell::Text(text) => 9 + text.len(),
+        Cell::Mono(text) => 40 + text.len(),
+        Cell::Num(text) => 26 + text.len(),
+        Cell::Status(label, kind) => 51 + kind.class().len() + label.len(),
+        Cell::Link(text, href) => {
+            if safe_href(href) {
+                24 + href.len() + text.len()
+            } else {
+                9 + text.len()
+            }
+        }
+        Cell::Muted(text) => 28 + text.len(),
+    }
 }
 
 fn table_head(caption: Option<&str>, headers: &[&str]) -> String {
@@ -204,30 +254,54 @@ fn note_line(note: Option<&str>) -> String {
     }
 }
 
-fn cell_html(cell: &Cell) -> String {
+fn push_cell(out: &mut String, cell: &Cell) {
     match cell {
-        Cell::Text(text) => format!("<td>{}</td>", html_escape(text)),
-        Cell::Mono(text) => format!(
-            "<td class=\"cell-mono\"><code>{}</code></td>",
-            html_escape(text)
-        ),
-        Cell::Num(text) => format!("<td class=\"cell-num\">{}</td>", html_escape(text)),
+        Cell::Text(text) => {
+            out.push_str("<td>");
+            push_escaped(out, text);
+            out.push_str("</td>");
+        }
+        Cell::Mono(text) => {
+            out.push_str("<td class=\"cell-mono\"><code>");
+            push_escaped(out, text);
+            out.push_str("</code></td>");
+        }
+        Cell::Num(text) => {
+            out.push_str("<td class=\"cell-num\">");
+            push_escaped(out, text);
+            out.push_str("</td>");
+        }
         Cell::Status(label, kind) => {
-            format!("<td class=\"cell-status\">{}</td>", chip(label, *kind))
+            out.push_str("<td class=\"cell-status\">");
+            out.push_str(&chip(label, *kind));
+            out.push_str("</td>");
         }
         Cell::Link(text, href) => {
             if safe_href(href) {
-                format!(
-                    "<td><a href=\"{}\">{}</a></td>",
-                    attr(href),
-                    html_escape(text)
-                )
+                out.push_str("<td><a href=\"");
+                push_escaped(out, href);
+                out.push_str("\">");
+                push_escaped(out, text);
+                out.push_str("</a></td>");
             } else {
-                format!("<td>{}</td>", html_escape(text))
+                out.push_str("<td>");
+                push_escaped(out, text);
+                out.push_str("</td>");
             }
         }
-        Cell::Muted(text) => format!("<td class=\"cell-muted\">{}</td>", html_escape(text)),
+        Cell::Muted(text) => {
+            out.push_str("<td class=\"cell-muted\">");
+            push_escaped(out, text);
+            out.push_str("</td>");
+        }
     }
+}
+
+#[cfg(test)]
+fn cell_html(cell: &Cell) -> String {
+    let mut out = String::new();
+    push_cell(&mut out, cell);
+    out
 }
 
 /// A form field: persistent label, optional help and error text, and the
@@ -613,8 +687,9 @@ fn safe_href(href: &str) -> bool {
     {
         return true;
     }
-    let lower = href.to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+    if has_prefix_ignore_ascii_case(href, "https://")
+        || has_prefix_ignore_ascii_case(href, "http://")
+        || has_prefix_ignore_ascii_case(href, "mailto:")
     {
         return true;
     }
@@ -624,6 +699,15 @@ fn safe_href(href: &str) -> bool {
         (Some(_), None) => false,
         (None, _) => true,
     }
+}
+
+/// Whether `value` starts with `prefix`, ignoring ASCII case, without
+/// allocating a lowercase copy (called once per link cell).
+fn has_prefix_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 /// An id-safe slug for a filter field's derived element id.
@@ -698,6 +782,61 @@ mod tests {
                 "{probe} must appear exactly once"
             );
         }
+    }
+
+    /// The 10k-row render reserves its output once: the buffer's capacity is
+    /// the table's own estimate (plus allocator slack), not the power-of-two
+    /// growth a `String::new()` builder would show. The same test pins output
+    /// bytes at n/2n/4n as linear.
+    #[test]
+    fn data_table_reserves_once_and_stays_linear_at_twenty_thousand_rows() {
+        fn rows(count: usize) -> Vec<Vec<Cell>> {
+            (0..count)
+                .map(|i| {
+                    vec![
+                        Cell::Mono(format!("t{i:016x}")),
+                        Cell::Text(format!("lead{i}@p{i}.example")),
+                        Cell::Num(format!("{i}")),
+                        Cell::Status("Verified".to_string(), StatusKind::Verified),
+                    ]
+                })
+                .collect()
+        }
+        let headers = ["Touch", "Contact", "N", "Status"];
+        let render = |count: usize| {
+            let rows = rows(count);
+            let estimate = table_capacity(Some("Rows"), &headers, &rows, Some("count"));
+            let html = data_table(Some("Rows"), &headers, &rows, None, Some("count"));
+            (html, estimate)
+        };
+
+        let (five, _) = render(5_000);
+        let (ten, estimate) = render(10_000);
+        let (twenty, _) = render(20_000);
+        assert_eq!(twenty.matches("<tr").count(), 20_001);
+        assert_eq!(twenty.matches("<td").count(), 80_000);
+        assert!(
+            ten.capacity() >= ten.len(),
+            "the reserve covers the rendered markup"
+        );
+        assert!(
+            ten.capacity() <= estimate + 4096,
+            "one reserve sized from the cells (capacity {}, estimate {}, len {})",
+            ten.capacity(),
+            estimate,
+            ten.len()
+        );
+        // Per-row bytes stay bounded as the row count doubles (the row text
+        // itself grows with the index, so compare per row rather than total).
+        let per_row = |html: &str, rows: usize| html.len() / rows;
+        assert!(
+            per_row(&ten, 10_000) <= per_row(&five, 5_000) + 8,
+            "5k -> 10k rows is linear per row"
+        );
+        assert!(
+            per_row(&twenty, 20_000) <= per_row(&ten, 10_000) + 8,
+            "10k -> 20k rows is linear per row"
+        );
     }
 
     #[test]
@@ -804,6 +943,27 @@ mod tests {
         assert!(html.contains("<td><a href=\"/console/audit\">Open</a></td>"));
         assert!(html.contains("<td class=\"cell-muted\">snapshot</td>"));
         assert!(html.contains("class=\"table-note\">2 findings"));
+    }
+
+    #[test]
+    fn data_table_keeps_mixed_case_safe_schemes_and_refuses_unsafe_ones() {
+        let rows = vec![
+            vec![Cell::Link(
+                "Upper".to_string(),
+                "HTTPS://example.com/x".to_string(),
+            )],
+            vec![Cell::Link(
+                "Hostile".to_string(),
+                "JAVASCRIPT:alert(1)".to_string(),
+            )],
+        ];
+        let html = data_table(None, &["Link"], &rows, None, None);
+        assert!(
+            html.contains("<a href=\"HTTPS://example.com/x\">Upper</a>"),
+            "{html}"
+        );
+        assert!(!html.contains("href=\"JAVASCRIPT"), "{html}");
+        assert!(html.contains("<td>Hostile</td>"), "{html}");
     }
 
     #[test]

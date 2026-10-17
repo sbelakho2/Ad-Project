@@ -11,7 +11,11 @@
     "escaping",
     "concurrency",
     "failure-injection",
-    "differential-truth"
+    "differential-truth",
+    "tenant-isolation",
+    "auth-surface",
+    "signin-ownership",
+    "payment-activation"
   ],
   "site": {
     "pages_min": 39
@@ -24,18 +28,30 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/overview.rs",
+            "rust/crates/apex-api/src/sources.rs"
+          ]
         },
         {
           "path": "/console",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs"
           ]
         },
         {
           "path": "/console/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs"
           ]
         },
         {
@@ -43,27 +59,52 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/audit.rs",
+            "rust/crates/apex-api/src/sources.rs"
+          ]
         },
         {
           "path": "/console/audit/export.csv",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/audit.rs",
+            "rust/crates/apex-api/src/sources.rs"
+          ]
         },
         {
           "path": "/console/audit/findings/{id}",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/audit.rs",
+            "rust/crates/apex-api/src/sources.rs"
+          ]
         },
         {
           "path": "/console/ledger",
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/ledger.rs",
+            "rust/crates/apex-api/src/session.rs",
+            "rust/crates/apex-api/src/sources.rs"
           ]
         },
         {
@@ -71,18 +112,37 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/ledger.rs",
+            "rust/crates/apex-api/src/session.rs",
+            "rust/crates/apex-api/src/sources.rs"
+          ]
         },
         {
           "path": "/console/ledger/session/end",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/ledger.rs",
+            "rust/crates/apex-api/src/session.rs",
+            "rust/crates/apex-api/src/sources.rs"
           ]
         },
         {
           "path": "/console/signin",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/signin.rs",
+            "rust/crates/apex-api/src/session.rs"
           ]
         },
         {
@@ -90,31 +150,61 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/connections.rs",
+            "rust/crates/apex-api/src/connections.rs"
+          ]
         },
         {
           "path": "/console/connections/{platform}",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/connections.rs",
+            "rust/crates/apex-api/src/connections.rs"
+          ]
         },
         {
           "path": "/console/connections/{platform}/submit",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/connections.rs",
+            "rust/crates/apex-api/src/connections.rs"
           ]
         },
         {
           "path": "/console/connections/{platform}/rotate",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/connections.rs",
+            "rust/crates/apex-api/src/connections.rs"
           ]
         },
         {
           "path": "/console/connections/{platform}/disconnect",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/connections.rs",
+            "rust/crates/apex-api/src/connections.rs"
           ]
         },
         {
@@ -122,19 +212,37 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/proposals.rs",
+            "rust/crates/apex-api/src/proposals.rs"
+          ]
         },
         {
           "path": "/console/proposals/{id}",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/proposals.rs",
+            "rust/crates/apex-api/src/proposals.rs"
+          ]
         },
         {
           "path": "/console/proposals/{id}/decision",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/proposals.rs",
+            "rust/crates/apex-api/src/proposals.rs"
           ]
         },
         {
@@ -142,47 +250,89 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/experiments.rs",
+            "rust/crates/apex-api/src/experiments.rs"
+          ]
         },
         {
           "path": "/console/experiments/{id}",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/experiments.rs",
+            "rust/crates/apex-api/src/experiments.rs"
+          ]
         },
         {
           "path": "/console/experiments/{id}/incident",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/experiments.rs",
+            "rust/crates/apex-api/src/experiments.rs"
+          ]
         },
         {
           "path": "/console/billing",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/billing.rs",
+            "rust/crates/apex-api/src/billing_view.rs"
+          ]
         },
         {
           "path": "/console/billing/invoices/{period}",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/billing.rs",
+            "rust/crates/apex-api/src/billing_view.rs"
+          ]
         },
         {
           "path": "/console/settings",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
+          ]
         },
         {
           "path": "/console/settings/theme",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
           ]
         },
         {
@@ -190,12 +340,24 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
+          ]
         },
         {
           "path": "/console/settings/access/revoke",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
           ]
         },
         {
@@ -203,19 +365,37 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
+          ]
         },
         {
           "path": "/console/settings/monitoring",
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
+          ]
         },
         {
           "path": "/console/settings/monitoring/cancel",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
           ]
         },
         {
@@ -223,12 +403,24 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
+          ]
         },
         {
           "path": "/console/settings/billing/managed/cancel",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/settings.rs",
+            "rust/crates/apex-api/src/settings.rs"
           ]
         },
         {
@@ -236,25 +428,52 @@
           "methods": [
             "GET"
           ],
-          "session_required": true
+          "session_required": true,
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/analytics.rs",
+            "rust/crates/apex-api/src/analytics.rs"
+          ]
         },
         {
           "path": "/free-audit",
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/leads.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/leads_html.rs",
+            "rust/crates/apex-api/src/signin.rs"
           ]
         },
         {
           "path": "/free-audit/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/leads.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/leads_html.rs",
+            "rust/crates/apex-api/src/signin.rs"
           ]
         },
         {
           "path": "/audit-requested/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/leads.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/leads_html.rs",
+            "rust/crates/apex-api/src/signin.rs"
           ]
         },
         {
@@ -262,48 +481,108 @@
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/watch_html.rs",
+            "rust/crates/apex-watch/src/model.rs",
+            "rust/crates/apex-watch/src/store.rs",
+            "rust/crates/apex-watch/src/daily.rs",
+            "rust/crates/apex-watch/src/fetch.rs",
+            "rust/crates/apex-watch/src/guard.rs"
           ]
         },
         {
           "path": "/watch/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/watch_html.rs",
+            "rust/crates/apex-watch/src/model.rs",
+            "rust/crates/apex-watch/src/store.rs",
+            "rust/crates/apex-watch/src/daily.rs",
+            "rust/crates/apex-watch/src/fetch.rs",
+            "rust/crates/apex-watch/src/guard.rs"
+          ]
+        },
+        {
+          "path": "/watch/confirm",
+          "methods": [
+            "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/watch_html.rs",
+            "rust/crates/apex-watch/src/store.rs"
           ]
         },
         {
           "path": "/watch/requested",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/",
+            "rust/crates/apex-api/src/html/watch_html.rs",
+            "rust/crates/apex-watch/src/model.rs",
+            "rust/crates/apex-watch/src/store.rs",
+            "rust/crates/apex-watch/src/daily.rs",
+            "rust/crates/apex-watch/src/fetch.rs",
+            "rust/crates/apex-watch/src/guard.rs"
           ]
         },
         {
           "path": "/healthz",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs"
           ]
         },
         {
           "path": "/favicon.ico",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/favicon.rs"
           ]
         },
         {
           "path": "/favicon.svg",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/favicon.rs"
           ]
         },
         {
           "path": "/assets/fonts/{name}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/fonts.rs"
           ]
         },
         {
           "path": "/metrics",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/metrics.rs"
           ]
         },
         {
@@ -311,42 +590,81 @@
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/sources.rs",
+            "rust/crates/apex-connectors/src/snapshot.rs",
+            "rust/crates/apex-connectors/src/levelplay.rs",
+            "rust/crates/apex-autopilot/src/live_levelplay.rs",
+            "rust/crates/apex-audit/src/lib.rs"
           ]
         },
         {
           "path": "/v1/ledger/{publisher}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/sources.rs",
+            "rust/crates/apex-proof/src/lib.rs"
           ]
         },
         {
           "path": "/v1/cycle/{publisher}",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/cycle.rs",
+            "rust/crates/apex-autopilot/src/runner.rs",
+            "rust/crates/apex-autopilot/src/live_levelplay.rs",
+            "rust/crates/apex-connectors/src/levelplay.rs",
+            "rust/crates/apex-billing/src/vat.rs"
           ]
         },
         {
           "path": "/v1/adyen/webhook",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-watch/src/store.rs",
+            "rust/crates/apex-watch/src/bill.rs",
+            "rust/crates/apex-billing/src/vat.rs"
           ]
         },
         {
           "path": "/v1/leads",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/leads.rs"
           ]
         },
         {
           "path": "/v1/operator/jobs",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/live.rs"
           ]
         },
         {
           "path": "/v1/operator/jobs/{job_id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/live.rs"
           ]
         }
       ],
@@ -357,7 +675,8 @@
           "classes": [
             "response-contract",
             "no-inline",
-            "differential-truth"
+            "differential-truth",
+            "tenant-isolation"
           ]
         },
         {
@@ -379,7 +698,9 @@
             "no-inline",
             "input-corpus",
             "differential-truth",
-            "escaping"
+            "escaping",
+            "tenant-isolation",
+            "auth-surface"
           ]
         },
         {
@@ -388,7 +709,8 @@
             "response-contract",
             "input-corpus",
             "escaping",
-            "differential-truth"
+            "differential-truth",
+            "tenant-isolation"
           ]
         },
         {
@@ -405,7 +727,9 @@
             "response-contract",
             "no-inline",
             "auth-authority",
-            "differential-truth"
+            "differential-truth",
+            "tenant-isolation",
+            "auth-surface"
           ]
         },
         {
@@ -595,7 +919,8 @@
           "classes": [
             "csrf-idempotency",
             "input-corpus",
-            "concurrency"
+            "concurrency",
+            "signin-ownership"
           ]
         },
         {
@@ -651,7 +976,9 @@
           "classes": [
             "response-contract",
             "traversal",
-            "differential-truth"
+            "differential-truth",
+            "auth-surface",
+            "tenant-isolation"
           ]
         },
         {
@@ -659,7 +986,9 @@
           "classes": [
             "csrf-idempotency",
             "traversal",
-            "auth-authority"
+            "auth-authority",
+            "auth-surface",
+            "differential-truth"
           ]
         },
         {
@@ -668,7 +997,9 @@
             "response-contract",
             "auth-authority",
             "traversal",
-            "differential-truth"
+            "differential-truth",
+            "auth-surface",
+            "tenant-isolation"
           ]
         },
         {
@@ -677,14 +1008,16 @@
             "csrf-idempotency",
             "traversal",
             "auth-authority",
-            "differential-truth"
+            "differential-truth",
+            "auth-surface"
           ]
         },
         {
           "surface": "POST /v1/adyen/webhook",
           "classes": [
             "csrf-idempotency",
-            "auth-authority"
+            "auth-authority",
+            "payment-activation"
           ]
         },
         {
@@ -697,13 +1030,15 @@
           "surface": "GET /console/signin",
           "classes": [
             "response-contract",
-            "auth-authority"
+            "auth-authority",
+            "signin-ownership"
           ]
         },
         {
           "surface": "GET /watch",
           "classes": [
-            "response-contract"
+            "response-contract",
+            "failure-injection"
           ]
         },
         {
@@ -711,20 +1046,34 @@
           "classes": [
             "input-corpus",
             "csrf-idempotency",
-            "differential-truth"
+            "differential-truth",
+            "payment-activation",
+            "failure-injection"
+          ]
+        },
+        {
+          "surface": "GET /watch/confirm",
+          "classes": [
+            "response-contract",
+            "no-inline",
+            "traversal",
+            "input-corpus",
+            "payment-activation"
           ]
         },
         {
           "surface": "GET /watch/requested",
           "classes": [
-            "response-contract"
+            "response-contract",
+            "payment-activation"
           ]
         },
         {
           "surface": "GET /console/settings/billing",
           "classes": [
             "response-contract",
-            "no-inline"
+            "no-inline",
+            "differential-truth"
           ]
         },
         {
@@ -745,14 +1094,16 @@
           "surface": "POST /v1/operator/jobs",
           "classes": [
             "auth-authority",
-            "csrf-idempotency"
+            "csrf-idempotency",
+            "auth-surface"
           ]
         },
         {
           "surface": "GET /v1/operator/jobs/{job_id}",
           "classes": [
             "response-contract",
-            "auth-authority"
+            "auth-authority",
+            "auth-surface"
           ]
         }
       ]
@@ -763,126 +1114,228 @@
           "path": "/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/customers",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/customers/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/ingestion",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/audits",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/experiments",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/experiments/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/incidents",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/incidents/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/finance",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/finance/invoices/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/finance/exports/{register}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/growth",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/system",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/system/policies",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/control/access",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/data.rs"
           ]
         },
         {
           "path": "/favicon.ico",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/favicon.rs"
           ]
         },
         {
           "path": "/favicon.svg",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/favicon.rs"
           ]
         },
         {
           "path": "/assets/fonts/{name}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/fonts.rs"
           ]
         },
         {
@@ -890,6 +1343,13 @@
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/login.rs",
+            "rust/crates/apex-control/src/auth.rs",
+            "rust/crates/apex-control/src/session.rs"
           ]
         },
         {
@@ -897,24 +1357,48 @@
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/login.rs",
+            "rust/crates/apex-control/src/auth.rs",
+            "rust/crates/apex-control/src/session.rs"
           ]
         },
         {
           "path": "/control/logout",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/login.rs",
+            "rust/crates/apex-control/src/auth.rs",
+            "rust/crates/apex-control/src/session.rs"
           ]
         },
         {
           "path": "/control/actions/{kind}",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/actions.rs"
           ]
         },
         {
           "path": "/control/actions/{kind}/result/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-control/src/routes.rs",
+            "rust/crates/apex-control/src/pages/",
+            "rust/crates/apex-control/src/actions.rs"
           ]
         }
       ],
@@ -1142,90 +1626,172 @@
           "path": "/",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/leads",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/leads/export.csv",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/publishers/{domain}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/plan",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/sends",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/sends/preview/{file}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/replies",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/domains",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/models",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/healthz",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/pages/",
+            "rust/crates/apex-sales-web/src/data.rs",
+            "rust/crates/apex-sales-web/src/render.rs"
           ]
         },
         {
           "path": "/assets/apex.css",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/assets.rs"
           ]
         },
         {
           "path": "/assets/fonts/{name}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/assets.rs"
           ]
         },
         {
           "path": "/favicon.ico",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/favicon.rs"
           ]
         },
         {
           "path": "/favicon.svg",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/favicon.rs"
           ]
         },
         {
@@ -1233,24 +1799,44 @@
           "methods": [
             "GET",
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/session.rs",
+            "rust/crates/apex-sales-web/src/pages/"
           ]
         },
         {
           "path": "/logout",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/session.rs",
+            "rust/crates/apex-sales-web/src/pages/"
           ]
         },
         {
           "path": "/actions/{kind}",
           "methods": [
             "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/actions.rs",
+            "rust/crates/apex-sales-web/src/pages/"
           ]
         },
         {
           "path": "/actions/result/{id}",
           "methods": [
             "GET"
+          ],
+          "sources": [
+            "rust/crates/apex-sales-web/src/routes.rs",
+            "rust/crates/apex-sales-web/src/actions.rs",
+            "rust/crates/apex-sales-web/src/pages/"
           ]
         }
       ],

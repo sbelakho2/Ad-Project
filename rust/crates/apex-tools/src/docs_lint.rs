@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -96,13 +97,82 @@ impl CheckCounts {
     }
 }
 
+/// Every regex the per-file and per-line checks use, compiled once per
+/// process. `docs-lint` scans hundreds of files and every comment line; a
+/// fresh `Regex::new` per file (and per blockquote line) dominated the gate's
+/// runtime.
+struct Patterns {
+    fence: Regex,
+    table: Regex,
+    inline: Regex,
+    blockquote: Regex,
+    star: Regex,
+    em_dash: Regex,
+    sentence_break: Regex,
+    url: Regex,
+    paren_dot: Regex,
+    paren_caps: Regex,
+    caps_token: Regex,
+    filler_word: Regex,
+    hist_fix: Regex,
+    hist_fixed: Regex,
+    hist_audit: Regex,
+    contrast: Regex,
+    all_non_letters: Regex,
+    dup_sentence_break: Regex,
+    dup_edge: Regex,
+    dup_non_alnum: Regex,
+    dup_multi_space: Regex,
+    dup_digits: Regex,
+}
+
+fn patterns() -> Result<&'static Patterns, String> {
+    static PATTERNS: OnceLock<Result<Patterns, String>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            Ok(Patterns {
+                fence: re(r"^[ \t]*(```+|~~~+)")?,
+                table: re(r"^[ \t]*\|")?,
+                inline: re(r"`[^`]*`")?,
+                blockquote: re(r"^[ \t]*>+[ \t]*")?,
+                star: re(r"^[ \t]*\*")?,
+                em_dash: re(r"—")?,
+                sentence_break: re(r"[.!?] ")?,
+                url: re(r"https?://[^ )\t]+")?,
+                paren_dot: re(r"\([^()]*\.[A-Za-z0-9]+[^()]*\)")?,
+                paren_caps: re(r"\([A-Z][A-Z0-9_.-]{2,}\)")?,
+                caps_token: re(r"[A-Z][A-Z0-9-]{3,}")?,
+                filler_word: re(
+                    r"(^|[^A-Za-z0-9_-])(premium|seamless|robust|comprehensive|battle-tested|enterprise-grade|production-ready|best-in-class|powerful|flexible)([^A-Za-z0-9_-]|$)",
+                )?,
+                hist_fix: re(r"(^|[^a-z0-9_])(fix|fixes|fixing)([^a-z0-9_]|$)")?,
+                hist_fixed: re(
+                    r"(^|[^a-z0-9_])((was|were|gets|get|been) fixed|fixed (the|this|that|a|an) )",
+                )?,
+                hist_audit: re(
+                    r"(^|[^a-z0-9_])(audit's|pre-audit|audit[ -](finding|findings|round|rounds|item|items|fix|fixes|id|ids|number|no)|audit[- ]*[^a-z0-9_][0-9]+)([^a-z0-9_]|$)",
+                )?,
+                contrast: re(r"— never |, not |— and not | is not ")?,
+                all_non_letters: re(r"^[^A-Za-z]+|[^A-Za-z]+$")?,
+                dup_sentence_break: re(r"[.!?] ")?,
+                dup_edge: re(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$")?,
+                dup_non_alnum: re(r"[^A-Za-z0-9]+")?,
+                dup_multi_space: re(r"  +")?,
+                dup_digits: re(r"^[0-9]+$")?,
+            })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// Markdown prose stream: fenced code and table rows are dropped, inline code
 /// is masked, and each line carries its `**` count for the bold check.
 pub fn md_prose(markdown: &str) -> Result<Vec<Line>, String> {
-    let fence = re(r"^[ \t]*(```+|~~~+)")?;
-    let table = re(r"^[ \t]*\|")?;
-    let inline = re(r"`[^`]*`")?;
-    let blockquote = re(r"^[ \t]*>+[ \t]*")?;
+    let patterns = patterns()?;
+    let fence = &patterns.fence;
+    let table = &patterns.table;
+    let inline = &patterns.inline;
+    let blockquote = &patterns.blockquote;
     let mut out = Vec::new();
     let mut in_fence = false;
     for line in markdown.split('\n') {
@@ -160,7 +230,7 @@ fn find_pair(text: &str, first: char, second: char) -> Option<usize> {
 }
 
 fn strip_leading_star(seg: &str) -> Result<&str, String> {
-    let star = re(r"^[ \t]*\*")?;
+    let star = &patterns()?.star;
     match star.find(seg) {
         Some(m) => Ok(&seg[m.end()..]),
         None => Ok(seg),
@@ -324,44 +394,39 @@ struct Checker<'a> {
     file: &'a str,
     counts: CheckCounts,
     violations: Vec<String>,
-    em_dash: Regex,
-    sentence_break: Regex,
-    url: Regex,
-    paren_dot: Regex,
-    paren_caps: Regex,
-    caps_token: Regex,
-    filler_word: Regex,
-    hist_fix: Regex,
-    hist_fixed: Regex,
-    hist_audit: Regex,
-    contrast: Regex,
-    all_non_letters: Regex,
+    em_dash: &'static Regex,
+    sentence_break: &'static Regex,
+    url: &'static Regex,
+    paren_dot: &'static Regex,
+    paren_caps: &'static Regex,
+    caps_token: &'static Regex,
+    filler_word: &'static Regex,
+    hist_fix: &'static Regex,
+    hist_fixed: &'static Regex,
+    hist_audit: &'static Regex,
+    contrast: &'static Regex,
+    all_non_letters: &'static Regex,
 }
 
 impl<'a> Checker<'a> {
     fn new(file: &'a str) -> Result<Self, String> {
+        let patterns = patterns()?;
         Ok(Self {
             file,
             counts: CheckCounts::default(),
             violations: Vec::new(),
-            em_dash: re(r"—")?,
-            sentence_break: re(r"[.!?] ")?,
-            url: re(r"https?://[^ )\t]+")?,
-            paren_dot: re(r"\([^()]*\.[A-Za-z0-9]+[^()]*\)")?,
-            paren_caps: re(r"\([A-Z][A-Z0-9_.-]{2,}\)")?,
-            caps_token: re(r"[A-Z][A-Z0-9-]{3,}")?,
-            filler_word: re(
-                r"(^|[^A-Za-z0-9_-])(premium|seamless|robust|comprehensive|battle-tested|enterprise-grade|production-ready|best-in-class|powerful|flexible)([^A-Za-z0-9_-]|$)",
-            )?,
-            hist_fix: re(r"(^|[^a-z0-9_])(fix|fixes|fixing)([^a-z0-9_]|$)")?,
-            hist_fixed: re(
-                r"(^|[^a-z0-9_])((was|were|gets|get|been) fixed|fixed (the|this|that|a|an) )",
-            )?,
-            hist_audit: re(
-                r"(^|[^a-z0-9_])(audit's|pre-audit|audit[ -](finding|findings|round|rounds|item|items|fix|fixes|id|ids|number|no)|audit[- ]*[^a-z0-9_][0-9]+)([^a-z0-9_]|$)",
-            )?,
-            contrast: re(r"— never |, not |— and not | is not ")?,
-            all_non_letters: re(r"^[^A-Za-z]+|[^A-Za-z]+$")?,
+            em_dash: &patterns.em_dash,
+            sentence_break: &patterns.sentence_break,
+            url: &patterns.url,
+            paren_dot: &patterns.paren_dot,
+            paren_caps: &patterns.paren_caps,
+            caps_token: &patterns.caps_token,
+            filler_word: &patterns.filler_word,
+            hist_fix: &patterns.hist_fix,
+            hist_fixed: &patterns.hist_fixed,
+            hist_audit: &patterns.hist_audit,
+            contrast: &patterns.contrast,
+            all_non_letters: &patterns.all_non_letters,
         })
     }
 
@@ -523,11 +588,12 @@ pub fn run_checks(lines: &[Line], file: &str) -> Result<FileScan, String> {
 
 /// Normalized sentences for the duplicate pass.
 pub fn dup_sentences(lines: &[Line]) -> Result<Vec<String>, String> {
-    let sentence_break = re(r"[.!?] ")?;
-    let edge = re(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$")?;
-    let non_alnum = re(r"[^A-Za-z0-9]+")?;
-    let multi_space = re(r"  +")?;
-    let digits = re(r"^[0-9]+$")?;
+    let patterns = patterns()?;
+    let sentence_break = &patterns.dup_sentence_break;
+    let edge = &patterns.dup_edge;
+    let non_alnum = &patterns.dup_non_alnum;
+    let multi_space = &patterns.dup_multi_space;
+    let digits = &patterns.dup_digits;
     let mut out = Vec::new();
     let mut pbuf = String::new();
     let mut flush = |pbuf: &mut String| -> Result<(), String> {
@@ -639,26 +705,31 @@ pub fn parse_args(args: &[String]) -> Result<DocsLintArgs, String> {
     Ok(out)
 }
 
-fn scan_files(repo: &Repo, extensions: &[&str]) -> Vec<PathBuf> {
+/// Directories the scan never descends into. Their paths are already
+/// excluded by [`EXCLUDED_FRAGMENTS`], so skipping the subtree changes no
+/// result; it avoids walking `rust/target` and tool caches on every gate run.
+const SCAN_SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "vendor",
+    "pkg",
+    ".venv",
+    ".pytest_cache",
+    ".git",
+    "test-results",
+];
+
+/// One walk over every scan root (excluding the skipped subtrees and the
+/// excluded path fragments). Both the markdown and the source selection come
+/// from this list instead of walking the same roots twice.
+fn scan_candidates(repo: &Repo) -> Vec<PathBuf> {
     let mut out: BTreeSet<PathBuf> = BTreeSet::new();
     for root in SCAN_ROOTS {
         let dir = repo.path(root);
         if !dir.is_dir() {
             continue;
         }
-        for file in crate::util::walk_files(&dir, &[]) {
-            let name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let ext_ok = file
-                .extension()
-                .map(|e| extensions.iter().any(|x| x == &e.to_string_lossy()))
-                .unwrap_or(false);
-            let md_ok = extensions.contains(&"md") && name.ends_with(".md");
-            if !ext_ok && !md_ok {
-                continue;
-            }
+        for file in crate::util::walk_files(&dir, SCAN_SKIP_DIRS) {
             let path_str = crate::util::slash(&file);
             if EXCLUDED_FRAGMENTS.iter().any(|f| path_str.contains(f)) {
                 continue;
@@ -666,15 +737,38 @@ fn scan_files(repo: &Repo, extensions: &[&str]) -> Vec<PathBuf> {
             out.insert(file);
         }
     }
+    out.into_iter().collect()
+}
+
+fn select_scan_files(repo: &Repo, candidates: &[PathBuf], extensions: &[&str]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for file in candidates {
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ext_ok = file
+            .extension()
+            .map(|e| extensions.iter().any(|x| x == &e.to_string_lossy()))
+            .unwrap_or(false);
+        let md_ok = extensions.contains(&"md") && name.ends_with(".md");
+        if ext_ok || md_ok {
+            out.push(file.clone());
+        }
+    }
     if extensions.contains(&"md") {
+        // These two root documents are outside the scan roots but stay in
+        // the contract, exactly as before.
         for name in ["README.md", "SECURITY.md"] {
             let path = repo.path(name);
             if path.is_file() {
-                out.insert(path);
+                out.push(path);
             }
         }
     }
-    out.into_iter().collect()
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Baseline targets come from lanes that run with a different working
@@ -739,9 +833,10 @@ fn lang_for(path: &Path) -> Lang {
 }
 
 pub fn docs_lint(repo: &Repo, args: &DocsLintArgs) -> Result<(), String> {
-    let md_entries = word_split_entries(&scan_files(repo, &["md"]));
+    let candidates = scan_candidates(repo);
+    let md_entries = word_split_entries(&select_scan_files(repo, &candidates, &["md"]));
     let src_entries = if args.source {
-        word_split_entries(&scan_files(repo, SRC_EXTENSIONS))
+        word_split_entries(&select_scan_files(repo, &candidates, SRC_EXTENSIONS))
     } else {
         Vec::new()
     };
@@ -756,12 +851,26 @@ pub fn docs_lint(repo: &Repo, args: &DocsLintArgs) -> Result<(), String> {
 
     let mut file_counts: BTreeMap<String, CheckCounts> = BTreeMap::new();
     let mut report_lines: Vec<String> = Vec::new();
+    // Duplicate sentences are collected from the same parsed stream the
+    // per-file checks use, so markdown is read and parsed once (the second
+    // pass used to re-read every file).
+    let mut dup: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for entry in &md_entries {
         let scan = match &entry.real {
             Some(path) => {
                 let text =
                     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", entry.display))?;
-                run_checks(&md_prose(&text)?, &entry.display)?
+                let lines = md_prose(&text)?;
+                let scan = run_checks(&lines, &entry.display)?;
+                if !entry.display.ends_with("Resources/ACCESSIBILITY.md") {
+                    for sentence in dup_sentences(&lines)? {
+                        *dup.entry(sentence)
+                            .or_default()
+                            .entry(entry.display.clone())
+                            .or_insert(0) += 1;
+                    }
+                }
+                scan
             }
             None => FileScan {
                 counts: CheckCounts::default(),
@@ -787,21 +896,6 @@ pub fn docs_lint(repo: &Repo, args: &DocsLintArgs) -> Result<(), String> {
         file_counts.insert(entry.display.clone(), scan.counts);
     }
 
-    // Duplicate pass over markdown only.
-    let mut dup: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for entry in &md_entries {
-        let Some(path) = &entry.real else { continue };
-        if entry.display.ends_with("Resources/ACCESSIBILITY.md") {
-            continue;
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", entry.display))?;
-        for sentence in dup_sentences(&md_prose(&text)?)? {
-            *dup.entry(sentence)
-                .or_default()
-                .entry(entry.display.clone())
-                .or_insert(0) += 1;
-        }
-    }
     let mut dup_per_file: BTreeMap<String, usize> = BTreeMap::new();
     let mut dup_messages: Vec<(String, usize)> = Vec::new();
     for (sentence, files) in &dup {
@@ -923,6 +1017,27 @@ mod tests {
 
     fn scan_md(md: &str) -> FileScan {
         run_checks(&md_prose(md).unwrap(), "doc.md").unwrap()
+    }
+
+    /// The patterns are process-wide: scanning many files (and many comment
+    /// lines) must not compile a regex per file or per line.
+    #[test]
+    fn per_file_checks_reuse_the_compiled_patterns() {
+        md_prose("warm up the pattern cache").unwrap();
+        let before = crate::util::regex_compile_count();
+        for i in 0..200 {
+            let markdown = format!("Paragraph {i} with a **bold** phrase.\n\n* quoted line\n");
+            let lines = md_prose(&markdown).unwrap();
+            run_checks(&lines, "doc.md").unwrap();
+            let _ = dup_sentences(&lines).unwrap();
+            let source = "// a line comment\n/* a block comment\n * continued */\n";
+            run_checks(&source_comments(source, Lang::Js).unwrap(), "src.js").unwrap();
+        }
+        assert_eq!(
+            crate::util::regex_compile_count(),
+            before,
+            "docs-lint must reuse its compiled patterns across files and lines"
+        );
     }
 
     #[test]

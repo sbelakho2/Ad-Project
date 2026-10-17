@@ -20,6 +20,16 @@
 //! `--json` for the versioned document) and exports the bounded metrics
 //! textfile on every exit path, hard errors included.
 //!
+//! The `audit` command builds one snapshot per registered publisher **and
+//! platform** from that publisher's vaulted keys and writes each at
+//! `<snapshot root>/<publisher>/<platform>.json` (the layout the console
+//! reads); a later `cycle` command is handed exactly that publisher's own
+//! per-platform files. The snapshot root is `--out` (audit), then
+//! `APEX_RUNNER_SNAPSHOT`, then the console spelling `APEX_SNAPSHOT_ROOT`,
+//! defaulting to `.apex/snapshots`. Without a registry root the legacy
+//! single-publisher mode reads the `APEX_MAX_*` variables and writes the one
+//! `APEX_RUNNER_SNAPSHOT` file exactly as before.
+//!
 //! Commands: `audit`, `cycle`, `daily`, `monthly`, `recheck`, `aa`, `aa-eval`.
 //! Configuration (environment): `APEX_RUNNER_LEDGER`,
 //! `APEX_RUNNER_LEDGER_ROOT`, `APEX_RUNNER_PUBLISHER` (legacy mode only),
@@ -29,7 +39,9 @@
 //! `APEX_MAX_MANAGEMENT_BASE`, `APEX_MAX_REPORTING_BASE`,
 //! `APEX_RUNNER_WRITABLE`, `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS` (a file
 //! in legacy mode, a directory of `<publisher>.json` models in fleet mode),
-//! `APEX_RUNNER_SNAPSHOT`, `APEX_DEVELOPER_SITE`, `APEX_EXPECTED_NETWORKS`,
+//! `APEX_RUNNER_SNAPSHOT` (the single file in legacy mode; the snapshot root
+//! in fleet mode, falling back to `APEX_SNAPSHOT_ROOT`), `APEX_DEVELOPER_SITE`,
+//! `APEX_EXPECTED_NETWORKS`,
 //! `APEX_BILLING_PROFILE` (the seller billing profile the monthly VAT
 //! issuance loads; `APEX_BILLING_VAT_RATE_BP` overrides its domestic rate),
 //! `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`
@@ -144,8 +156,9 @@ async fn run_job(
     let transport: Arc<dyn Transport> =
         Arc::new(RetryTransport::new(inner, 2, Arc::new(TokioSleeper)));
 
-    // `audit` builds the account snapshot from the MAX keys and needs no
-    // ledger; every other command runs against the publisher's ledger.
+    // `audit` builds the account snapshots (one per registered publisher and
+    // platform from the vaulted keys, or one MAX snapshot in legacy mode) and
+    // needs no ledger; every other command runs against the publisher's ledger.
     if command == "audit" {
         let publisher = optional("APEX_RUNNER_PUBLISHER").unwrap_or_default();
         // The audit events require the publisher label, and the
@@ -171,6 +184,48 @@ async fn run_job(
                 .schedule_lag(apex_metrics::vocab::JobType::Audit, lag_seconds);
         }
         let rule_version = apex_autopilot::cli::audit_rule_version();
+
+        // Fleet mode: the deployment names the vault root the console writes,
+        // so the audit runs once per registered publisher and platform and
+        // writes each snapshot at `<root>/<publisher>/<platform>.json`.
+        if let Some(root) =
+            apex_autopilot::registry::vault_root_from_env(&|name| std::env::var(name).ok())
+        {
+            let key_hex = cli_required(apex_autopilot::registry::VAULT_KEY_ENV)?;
+            let vault = apex_vault::Vault::from_hex_key(&key_hex).map_err(|error| {
+                format!(
+                    "{} is not a valid vault key: {error}",
+                    apex_autopilot::registry::VAULT_KEY_ENV
+                )
+            })?;
+            let registry = apex_autopilot::registry::PublisherRegistry::load(&root, &vault)
+                .map_err(|error| error.to_string())?;
+            let snapshot_root = apex_autopilot::cli::flag(args, "--out")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    apex_autopilot::registry::snapshot_root_from_env(&|name| {
+                        std::env::var(name).ok()
+                    })
+                });
+            let report = apex_autopilot::cli::audit_fleet_snapshots(
+                &registry,
+                &snapshot_root,
+                transport,
+                instrumentation,
+                &rule_version,
+                now_unix_ms,
+            )
+            .await
+            .map_err(|e| format!("snapshot: {e}"))?;
+            let outcome = apex_autopilot::cli::render_fleet_audit(&report, now_unix_ms);
+            if as_json {
+                println!("{}", outcome.json);
+            } else {
+                println!("{}", outcome.human);
+            }
+            return Ok(outcome.failed);
+        }
+
         let snapshot = apex_autopilot::audited_snapshot(
             &cli_required("APEX_MAX_API_KEY")?,
             optional("APEX_MAX_REPORT_KEY").as_deref(),
@@ -318,11 +373,16 @@ async fn run_job(
             let registry = apex_autopilot::registry::PublisherRegistry::load(&root, &vault)
                 .map_err(|error| error.to_string())?;
             let ledger_root = cli_required(apex_autopilot::registry::LEDGER_ROOT_ENV)?;
+            // The snapshot root the audit wrote is the root the cycle reads
+            // each publisher's own `--snapshot` files from.
+            let snapshot_root =
+                apex_autopilot::registry::snapshot_root_from_env(&|name| std::env::var(name).ok());
             let fleet = apex_autopilot::cli::build_fleet(
                 |name| std::env::var(name).ok(),
                 &registry,
                 std::path::Path::new(&ledger_root),
                 &root,
+                &snapshot_root,
                 &keypair,
                 transport,
                 instrumentation,

@@ -11,16 +11,19 @@
 //! `/levelPlay/groups/v4/{appKey}`. The app key is percent-encoded as a single
 //! path segment, so a hostile key cannot forge path or query structure.
 //!
-//! Reporting reads the v1 API at `/levelPlay/reporting/v1` with the `abTest`
-//! breakdown and the `activeUsers` metric, shaped like the MAX reporting
-//! client (query-parameter request, `code`/`count`/`results` envelope, typed
-//! rows, fail-closed parsing).
+//! Reporting reads the v1 API at `/levelPlay/reporting/v1` with the `date` and
+//! `abTest` breakdowns and the `revenue` and `activeUsers` metrics, shaped like
+//! the MAX reporting client (query-parameter request,
+//! `code`/`count`/`results` envelope, typed rows, fail-closed parsing). Revenue
+//! follows the MAX unit convention: the API's currency amount is parsed exactly
+//! into integer micros (1 unit = 1_000_000 micros), never a float.
 //!
 //! Parsing is tolerant of the field spellings the API has used across versions
 //! (`instanceId`/`id`, `instanceName`/`name`, `adapterNetwork`/`network`,
 //! `price`/`priceEcpm`/`floorPrice`) but never invents data: a missing required
 //! field is a typed refusal.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use apex_core::endpoint::HttpMethod as CoreMethod;
@@ -91,11 +94,18 @@ pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 7] = [
     ),
 ];
 
-/// One row of the reporting v1 response: an A/B test arm (the `abTest`
-/// breakdown) and its active users (the `activeUsers` metric).
+/// One row of the reporting v1 response: an A/B test arm's day, its revenue and
+/// its active users (the `date`/`abTest` breakdowns and the
+/// `revenue`/`activeUsers` metrics).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AbTestActiveUsersRow {
+pub struct AbTestReportRow {
+    /// `YYYY-MM-DD`, UTC, as the `date` breakdown reports it.
+    pub day: String,
     pub ab_test: String,
+    /// Revenue in micros. The reporting `revenue` metric is a currency amount
+    /// in whole units (e.g. USD), parsed exactly at 1 unit = 1_000_000 micros
+    /// — the same convention as MAX's `estimated_revenue`.
+    pub revenue: i64,
     pub active_users: u64,
 }
 
@@ -112,6 +122,11 @@ pub struct LevelPlayClient {
     refresh_token: String,
     transport: Arc<dyn Transport>,
     token: Mutex<Option<CachedToken>>,
+    /// The app-level revenue already read this client's lifetime, keyed by
+    /// the inclusive `(start, end)` window. One client is one app key, so
+    /// every ad-unit scope bills from the same read; the monthly pass asks
+    /// once per scope and would otherwise re-fetch the identical report.
+    revenue: Mutex<BTreeMap<(String, String), i64>>,
 }
 
 impl std::fmt::Debug for LevelPlayClient {
@@ -145,6 +160,7 @@ impl LevelPlayClient {
             refresh_token: refresh_token.to_string(),
             transport,
             token: Mutex::new(None),
+            revenue: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -401,23 +417,28 @@ impl LevelPlayClient {
             .await
     }
 
-    /// Active users per A/B test arm over the inclusive window
-    /// `[start_date, end_date]` (reporting v1, `abTest` breakdown,
-    /// `activeUsers` metric).
+    /// Revenue and active users per A/B test arm per day over the inclusive
+    /// window `[start_date, end_date]` (reporting v1, `date` and `abTest`
+    /// breakdowns, `revenue` and `activeUsers` metrics).
     ///
     /// The response follows the report envelope convention shared with the MAX
     /// reporting client: an in-body `code` that must be 200, a `results` array
-    /// whose rows carry `abTest` and `activeUsers`. Numbers may arrive as JSON
-    /// numbers or decimal strings; anything else is a typed refusal, never a
-    /// silent zero.
-    pub async fn ab_test_active_users(
+    /// whose rows carry `date`, `abTest`, `revenue` and `activeUsers`. Revenue
+    /// is parsed exactly into micros; active users must be a whole number.
+    /// Anything missing or malformed is a typed refusal, never a silent zero.
+    ///
+    /// The operation label stays `reportAbTestActiveUsers` (the bounded metric
+    /// vocabulary of the connector surface); the request itself now carries
+    /// both metrics and the date breakdown. The app key remains a
+    /// percent-encoded query value and the call stays a GET.
+    pub async fn ab_test_report(
         &self,
         start_date: &str,
         end_date: &str,
-    ) -> Result<Vec<AbTestActiveUsersRow>, PlatformError> {
+    ) -> Result<Vec<AbTestReportRow>, PlatformError> {
         let caller = self.caller().await?;
         let path = format!(
-            "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=abTest&metrics=activeUsers&startDate={}&endDate={}",
+            "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate={}&endDate={}",
             crate::encode_query_component(&self.app_key),
             crate::encode_query_component(start_date),
             crate::encode_query_component(end_date),
@@ -451,21 +472,101 @@ impl LevelPlayClient {
         let mut out = Vec::with_capacity(results.len());
         for row in results {
             out.push(
-                parse_ab_test_active_users(row)
+                parse_ab_test_report_row(row)
                     .map_err(|detail| self.schema("reportAbTestActiveUsers", detail))?,
             );
         }
         Ok(out)
     }
+
+    /// The app's reported revenue over the inclusive window
+    /// `[start_date, end_date]`, in micros. The monthly pass bills the
+    /// pre-registered scope's incremental revenue from this total.
+    ///
+    /// This is the app-level read the connector is bound to (one client = one
+    /// app key): `breakdowns=date` and `metrics=revenue` only, so it works
+    /// whether or not an A/B test is still running. Totals are checked sums;
+    /// an overflow is a typed validation refusal, never a wrapped total.
+    pub async fn app_revenue(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<i64, PlatformError> {
+        let key = (start_date.to_string(), end_date.to_string());
+        if let Some(total) = self
+            .revenue
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).copied())
+        {
+            return Ok(total);
+        }
+        let caller = self.caller().await?;
+        let path = format!(
+            "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=date&metrics=revenue&startDate={}&endDate={}",
+            crate::encode_query_component(&self.app_key),
+            crate::encode_query_component(start_date),
+            crate::encode_query_component(end_date),
+        );
+        let data = caller
+            .call("adUnitRevenue", HttpMethod::Get, &path, None, None)
+            .await?;
+        let code = data
+            .get("code")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(200);
+        if code != 200 {
+            return Err(PlatformError::Http {
+                platform: PlatformId::LevelPlay,
+                operation: "adUnitRevenue".into(),
+                status: u16::try_from(code).unwrap_or(500),
+            });
+        }
+        let results = data
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| self.schema("adUnitRevenue", "response has no 'results' array"))?;
+        let mut total: i64 = 0;
+        for row in results {
+            let revenue =
+                parse_report_revenue(row).map_err(|detail| self.schema("adUnitRevenue", detail))?;
+            total = total
+                .checked_add(revenue)
+                .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+        }
+        if let Ok(mut cache) = self.revenue.lock() {
+            cache.insert(key, total);
+        }
+        Ok(total)
+    }
 }
 
-/// Parse one reporting v1 row into the typed shape.
-fn parse_ab_test_active_users(row: &serde_json::Value) -> Result<AbTestActiveUsersRow, String> {
+/// Parse a reporting `revenue` value exactly into micros. The metric is a
+/// currency amount (e.g. USD) whose JSON may be a number or a decimal string;
+/// the same convention as MAX's `estimated_revenue`.
+fn parse_report_revenue(row: &serde_json::Value) -> Result<i64, String> {
+    let raw = row
+        .get("revenue")
+        .and_then(crate::max::number_to_string)
+        .ok_or_else(|| format!("report row missing 'revenue': {row}"))?;
+    parse_decimal_micros(&raw).map_err(|e| format!("revenue '{raw}': {e}"))
+}
+
+/// Parse one reporting v1 row into the typed shape. Every field is required:
+/// a missing `date`, `abTest`, `revenue` or `activeUsers` is a typed refusal
+/// naming the field.
+fn parse_ab_test_report_row(row: &serde_json::Value) -> Result<AbTestReportRow, String> {
+    let day = row
+        .get("date")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("report row missing 'date': {row}"))?;
     let ab_test = row
         .get("abTest")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("report row missing 'abTest': {row}"))?;
+    let revenue = parse_report_revenue(row)?;
     let active_users_raw = row
         .get("activeUsers")
         .and_then(crate::max::number_to_string)
@@ -473,8 +574,10 @@ fn parse_ab_test_active_users(row: &serde_json::Value) -> Result<AbTestActiveUse
     let active_users = active_users_raw
         .parse::<u64>()
         .map_err(|e| format!("activeUsers '{active_users_raw}': {e}"))?;
-    Ok(AbTestActiveUsersRow {
+    Ok(AbTestReportRow {
+        day: day.to_string(),
         ab_test: ab_test.to_string(),
+        revenue,
         active_users,
     })
 }

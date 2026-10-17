@@ -758,11 +758,11 @@ See [Control Plane Architecture](docs/Architecture/CONTROL_PLANE.md) for:
 
 | Component | Old (DigitalOcean) | New (Hetzner) |
 |-----------|-------------------|---------------|
-| App Server | 164.90.232.151 | 203.0.113.10 |
+| App Server | 203.0.113.9 | 203.0.113.10 |
 | DB Server | (same droplet) | 203.0.113.12 |
 | Database | DO Managed Postgres | PostgreSQL 16 (self-hosted) |
 | TLS | Nginx + Certbot | Caddy (auto Let's Encrypt) |
-| SSH | `deploy@164.90.232.151` | `root@<IP>` with `~/.ssh/hetzner-db-mac` |
+| SSH | `deploy@203.0.113.9` | `root@<IP>` with `~/.ssh/hetzner-db-mac` |
 
 ### Scripts Updated
 
@@ -863,7 +863,7 @@ See [evidence-2025-12-13/infrastructure-validation-report.md](evidence-2025-12-1
 | `docs/Internal/Infrastructure/production-deployment.md` | Added Hetzner section at top, updated as primary production |
 | `docs/Internal/Monitoring/GRAFANA_DASHBOARDS.md` | Added deprecation notice pointing to new authoritative doc, updated branding from "Rival" to "ApexMediation" |
 | `docs/Internal/Monitoring/ALERTS.md` | Added deprecation notice, added Hetzner production alert section, updated branding |
-| `docs/runbooks/ROLLBACK.md` | Updated all IPs from DigitalOcean (164.90.232.151) to Hetzner (203.0.113.10), added monitoring checks |
+| `docs/runbooks/ROLLBACK.md` | Updated all IPs from DigitalOcean (203.0.113.9) to Hetzner (203.0.113.10), added monitoring checks |
 
 ### Branding Updates
 
@@ -1190,7 +1190,7 @@ Successfully integrated and tested Adyen webhooks on production droplet.
 **Testing Method:**
 ```bash
 # Used Adyen CLI to forward and trigger events
-adyen listen --forward-to http://164.90.232.151:8080/api/v1/webhooks/adyen
+adyen listen --forward-to http://203.0.113.9:8080/api/v1/webhooks/adyen
 adyen trigger invoice.paid
 adyen trigger customer.subscription.created
 adyen trigger checkout.session.completed
@@ -1346,7 +1346,7 @@ Created test accounts for all pricing tiers with SDK keys and validated RTB bidd
   - `VRA_ENABLED=true`
 
 ### Infrastructure Status
-All services healthy on droplet 164.90.232.151:
+All services healthy on droplet 203.0.113.9:
 - Backend: Port 8080 ✅ (healthy)
 - Console: Port 3000 ✅
 - PostgreSQL: Port 5432 ✅
