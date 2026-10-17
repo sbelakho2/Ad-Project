@@ -5,21 +5,41 @@ usage: apex-sales <command> [arguments]
   import-seeds <seeds.csv>   add publishers and contacts from a seed list
                              (domain,name,country,app_store_ids,email,contact_name,role)
   import-leads <leads.jsonl> add the free-audit requests written by apex-api
+  import-outcomes [file]     add the outcomes written by apex-api (the frozen
+                             one-line-per-event JSONL; default
+                             $APEX_SALES_OUTCOMES_FILE or
+                             .apex/sales/outcomes.jsonl). --dry-run prints the
+                             counts and writes nothing.
   discover [--limit N]       fetch app-ads.txt and App Store data (default 50 publishers)
   plan                       show today's plan and every gate reason
-  run                        plan and send what is due; schedule hourly
+  run                        plan and send what is due; schedule hourly.
+                             Imports the outcomes file first when it exists.
   approve <touch-id>         approve a planned touch (approval mode)
   ingest <message.eml>       classify a reply or bounce and record it
+  ingest --stdin             the same, reading one message from standard input
+  ingest --maildir <dir>     process every *.eml in a directory (a Maildir),
+                             newest first, once: a durable seen set in the
+                             state directory keeps replays idempotent and
+                             unreadable files are skipped with a counted reason
   record <target> <outcome> [note]
                              record an outcome for an email or publisher:
-                             audit_requested, connected, paid, complaint,
-                             unsubscribe, hard_bounce, reply:positive, ...
+                             audit_requested, connected, paid, watch_signup,
+                             complaint, unsubscribe, hard_bounce, reply:positive, ...
   suppress <target>          never contact an email or publisher again
-  reset-health               reset the sending domain after an investigation
+  reset-health [domain]      reset one sending domain (default: every domain)
+                             after investigating a quarantine
   report                     scores, messages, funnel, health, calibration and
                              the measured effect of outreach
   simulate [--publishers N] [--days D] [--seed S]
                              run the engine and a naive baseline on a synthetic market
+
+Sending domains: set APEX_SALES_SENDERS_FILE (CSV with header
+email,name,company,postal_address,unsubscribe_url) or APEX_SALES_SENDERS
+(semicolon-separated entries with pipe-separated fields in the same order)
+for several sending domains, each with its own daily cap and health; without
+either, APEX_SALES_FROM and friends define the one sender exactly as before.
+APEX_SALES_WATCH_CHECKOUT_URL (https) enables the Setup Watch offer variant
+and its per-publisher checkout link; without it the variant is never served.
 
 Configuration is read from APEX_SALES_* environment variables; see the
 crate documentation. The default mode is shadow: nothing is sent until

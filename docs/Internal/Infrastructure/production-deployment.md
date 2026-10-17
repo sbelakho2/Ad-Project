@@ -19,20 +19,21 @@ The primary production environment is deployed on Hetzner dedicated servers usin
 
 | Role | IP Address | Services |
 |------|------------|----------|
-| App Server | 46.62.252.96 | Backend:8080, Console:3000, Grafana:3001, Prometheus:9090 |
-| DB Server | 77.42.44.35 | PostgreSQL 16:5432 |
+| App Server | 203.0.113.10 | Backend:8080, Console:3000, Grafana:3001, Prometheus:9090 |
+| DB Server | 203.0.113.12 | PostgreSQL 16:5432 |
 
 ### Quick Access
 
 ```bash
+# Replace 203.0.113.10 and 203.0.113.12 with your server addresses
 # SSH to App Server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # SSH to DB Server  
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 
 # Database Connection
-PGPASSWORD='<DB_PASSWORD>' psql -h 77.42.44.35 -U postgres -d adproject
+PGPASSWORD='<DB_PASSWORD>' psql -h 203.0.113.12 -U postgres -d adproject
 ```
 
 ---

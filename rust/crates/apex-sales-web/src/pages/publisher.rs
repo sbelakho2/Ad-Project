@@ -85,18 +85,19 @@ pub fn origin_or_listed(
     if let Some((_, reason)) = data
         .learned
         .suppressions
-        .publishers
+        .publishers()
         .iter()
         .find(|(p, _)| p == key)
     {
         return Some((*reason, first_implying_event(data, key), true));
     }
+    let suppressions = data.suppression_index();
     let reason = data
         .snap
         .contacts
         .values()
         .filter(|contact| contact.publisher_key == key)
-        .find_map(|contact| data.learned.suppressions.check(contact))?;
+        .find_map(|contact| suppressions.check(contact))?;
     Some((reason, first_implying_event(data, key), false))
 }
 
@@ -181,11 +182,12 @@ fn publisher_facts(data: &RequestData, publisher: &Publisher) -> String {
 
 fn contacts_table(data: &RequestData, key: &str) -> String {
     let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let suppressions = data.suppression_index();
     for (email, contact) in &data.snap.contacts {
         if contact.publisher_key != key {
             continue;
         }
-        let status = match data.learned.suppressions.check(contact) {
+        let status = match suppressions.check(contact) {
             Some(reason) => Cell::Status(
                 format!("Suppressed ({})", super::leads::suppression_label(reason)),
                 StatusKind::Failure,
@@ -340,6 +342,7 @@ pub fn outcome_label(outcome: Outcome) -> String {
         Outcome::AuditRequested => "Audit requested".to_string(),
         Outcome::Connected => "Platform connected".to_string(),
         Outcome::Paid => "Paid".to_string(),
+        Outcome::WatchSignup => "Setup Watch signup".to_string(),
     }
 }
 
@@ -506,6 +509,7 @@ fn actions_panel(meta: &PageMeta, data: &RequestData, key: &str) -> String {
         Outcome::AuditRequested,
         Outcome::Connected,
         Outcome::Paid,
+        Outcome::WatchSignup,
     ]
     .into_iter()
     .map(|outcome| {
@@ -610,6 +614,7 @@ mod tests {
                 at: NOW - DAY,
                 email: "maria@studio.example".into(),
                 publisher: "studio.example".into(),
+                from: None,
                 step: 0,
                 arm: "t0-finding".into(),
                 message_id: "m1".into(),

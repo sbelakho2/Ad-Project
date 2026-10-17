@@ -324,4 +324,27 @@ mod tests {
         );
         assert!(pick_next(&priors, &[], 2000, 5).is_none());
     }
+
+    #[test]
+    fn non_finite_lifts_teach_nothing_and_non_finite_errors_floor() {
+        let mut priors = LiftPriors::default();
+        priors.observe(&bucket(), f64::NAN, 0.01);
+        priors.observe(&bucket(), f64::INFINITY, 0.01);
+        assert_eq!(
+            priors.total_observations(),
+            0,
+            "non-finite lifts are refused"
+        );
+        // A non-finite standard error floors to MIN_SE instead of poisoning
+        // the precision sums.
+        priors.observe(&bucket(), 0.02, f64::NAN);
+        assert_eq!(priors.total_observations(), 1);
+        let posterior = priors.posterior(&bucket());
+        assert!(
+            posterior.mean > 0.0 && posterior.mean < 0.02,
+            "{}",
+            posterior.mean
+        );
+        assert!(posterior.sd.is_finite() && posterior.sd > 0.0);
+    }
 }

@@ -235,9 +235,12 @@ pub fn run(policy: Policy, cfg: &SimConfig) -> SimResult {
         let learned = learn(&snap, &config, now);
         // An operator investigates a quarantine and resets the domain a week
         // later, as the runbook says.
-        if learned.health.state == crate::health::SenderState::Quarantined {
+        if learned.health.summary_state() == crate::health::SenderState::Quarantined {
             if !reset_scheduled {
-                pending.push(Event::HealthReset { at: now + 7 * DAY });
+                pending.push(Event::HealthReset {
+                    at: now + 7 * DAY,
+                    domain: None,
+                });
                 reset_scheduled = true;
             }
         } else {
@@ -254,7 +257,7 @@ pub fn run(policy: Policy, cfg: &SimConfig) -> SimResult {
                 }
             }
             Policy::Baseline => {
-                let cap = learned.health.cap.saturating_sub(learned.sent_today) as usize;
+                let cap = learned.health.cap_left() as usize;
                 let suppressed = |e: &str| {
                     snap.contacts
                         .get(e)
@@ -297,6 +300,7 @@ pub fn run(policy: Policy, cfg: &SimConfig) -> SimResult {
                 at,
                 email: email.clone(),
                 publisher: contact.publisher_key.clone(),
+                from: None,
                 step,
                 arm: arm.clone(),
                 message_id: format!("{email}-{step}"),

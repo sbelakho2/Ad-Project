@@ -324,6 +324,8 @@ pub enum Outcome {
     Connected,
     /// First paid autopilot invoice.
     Paid,
+    /// Signed up for the Setup Watch offer (the second offer in the bandit).
+    WatchSignup,
 }
 
 impl Outcome {
@@ -340,6 +342,7 @@ impl Outcome {
             Outcome::AuditRequested => "audit_requested".into(),
             Outcome::Connected => "connected".into(),
             Outcome::Paid => "paid".into(),
+            Outcome::WatchSignup => "watch_signup".into(),
         }
     }
 
@@ -358,6 +361,7 @@ impl Outcome {
             "audit_requested" => Outcome::AuditRequested,
             "connected" => Outcome::Connected,
             "paid" => Outcome::Paid,
+            "watch_signup" => Outcome::WatchSignup,
             _ => return None,
         })
     }
@@ -515,6 +519,7 @@ mod tests {
             Outcome::AuditRequested,
             Outcome::Connected,
             Outcome::Paid,
+            Outcome::WatchSignup,
         ] {
             assert_eq!(Outcome::parse(&o.as_string()), Some(o));
         }

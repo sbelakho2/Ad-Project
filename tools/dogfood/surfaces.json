@@ -23,7 +23,8 @@
           "path": "/",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console",
@@ -41,19 +42,22 @@
           "path": "/console/audit",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/audit/export.csv",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/audit/findings/{id}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/ledger",
@@ -66,7 +70,8 @@
           "path": "/console/ledger/records/{seq}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/ledger/session/end",
@@ -75,16 +80,24 @@
           ]
         },
         {
-          "path": "/console/connections",
+          "path": "/console/signin",
           "methods": [
             "GET"
           ]
         },
         {
+          "path": "/console/connections",
+          "methods": [
+            "GET"
+          ],
+          "session_required": true
+        },
+        {
           "path": "/console/connections/{platform}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/connections/{platform}/submit",
@@ -108,13 +121,15 @@
           "path": "/console/proposals",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/proposals/{id}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/proposals/{id}/decision",
@@ -126,37 +141,43 @@
           "path": "/console/experiments",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/experiments/{id}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/experiments/{id}/incident",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/billing",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/billing/invoices/{period}",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/settings",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/settings/theme",
@@ -168,7 +189,8 @@
           "path": "/console/settings/access",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/settings/access/revoke",
@@ -180,19 +202,41 @@
           "path": "/console/settings/policy",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/console/settings/monitoring",
           "methods": [
             "GET"
+          ],
+          "session_required": true
+        },
+        {
+          "path": "/console/settings/monitoring/cancel",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/console/settings/billing",
+          "methods": [
+            "GET"
+          ],
+          "session_required": true
+        },
+        {
+          "path": "/console/settings/billing/managed/cancel",
+          "methods": [
+            "POST"
           ]
         },
         {
           "path": "/console/analytics",
           "methods": [
             "GET"
-          ]
+          ],
+          "session_required": true
         },
         {
           "path": "/free-audit",
@@ -209,6 +253,25 @@
         },
         {
           "path": "/audit-requested/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/watch",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/watch/",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/watch/requested",
           "methods": [
             "GET"
           ]
@@ -273,9 +336,21 @@
           "methods": [
             "POST"
           ]
+        },
+        {
+          "path": "/v1/operator/jobs",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "path": "/v1/operator/jobs/{job_id}",
+          "methods": [
+            "GET"
+          ]
         }
       ],
-      "fixture_pages": 60,
+      "fixture_pages": 62,
       "required": [
         {
           "surface": "GET /",
@@ -445,7 +520,8 @@
           "surface": "GET /console/billing",
           "classes": [
             "response-contract",
-            "no-inline"
+            "no-inline",
+            "differential-truth"
           ]
         },
         {
@@ -494,7 +570,8 @@
           "surface": "GET /console/settings/monitoring",
           "classes": [
             "response-contract",
-            "no-inline"
+            "no-inline",
+            "differential-truth"
           ]
         },
         {
@@ -598,7 +675,9 @@
           "surface": "POST /v1/cycle/{publisher}",
           "classes": [
             "csrf-idempotency",
-            "traversal"
+            "traversal",
+            "auth-authority",
+            "differential-truth"
           ]
         },
         {
@@ -612,6 +691,68 @@
           "surface": "POST /v1/leads",
           "classes": [
             "csrf-idempotency"
+          ]
+        },
+        {
+          "surface": "GET /console/signin",
+          "classes": [
+            "response-contract",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "GET /watch",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "POST /watch",
+          "classes": [
+            "input-corpus",
+            "csrf-idempotency",
+            "differential-truth"
+          ]
+        },
+        {
+          "surface": "GET /watch/requested",
+          "classes": [
+            "response-contract"
+          ]
+        },
+        {
+          "surface": "GET /console/settings/billing",
+          "classes": [
+            "response-contract",
+            "no-inline"
+          ]
+        },
+        {
+          "surface": "POST /console/settings/monitoring/cancel",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /console/settings/billing/managed/cancel",
+          "classes": [
+            "csrf-idempotency",
+            "auth-authority"
+          ]
+        },
+        {
+          "surface": "POST /v1/operator/jobs",
+          "classes": [
+            "auth-authority",
+            "csrf-idempotency"
+          ]
+        },
+        {
+          "surface": "GET /v1/operator/jobs/{job_id}",
+          "classes": [
+            "response-contract",
+            "auth-authority"
           ]
         }
       ]
@@ -1113,7 +1254,7 @@
           ]
         }
       ],
-      "fixture_pages": 36,
+      "fixture_pages": 38,
       "required": [
         {
           "surface": "GET /",

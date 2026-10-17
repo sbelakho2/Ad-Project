@@ -6,7 +6,7 @@
 
 > **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system
 > 
-> **⚠️ Architecture Note (January 2026):** V2 Autonomous Sales runs entirely on the **Test Server** (157.90.126.205:4001).
+> **⚠️ Architecture Note (January 2026):** V2 Autonomous Sales runs entirely on the **Test Server** (203.0.113.11:4001).
 > The App Server control-plane is strictly a proxy client for sales automation.
 
 ---

@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         analytics,
         durable: DurableReader::new(config.ledger_root.clone(), config.invoice_register.clone()),
         operations: OperationsEvidence::load(&config.operations_path),
+        sync_marker: config.sync_marker.clone(),
     }));
     let state = ControlState::new(config, data)?;
     match &state.unconfigured_reason {

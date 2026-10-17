@@ -20,7 +20,34 @@
 //! stops the whole publisher; any interested reply hands the publisher to a
 //! person and stops automation.
 
+use std::collections::HashMap;
+
 use crate::model::{Contact, ReplyClass, UnixSecs, DAY};
+
+// Membership probes performed by suppression inserts and checks.
+//
+// The seam exists only in test builds; the scaling test asserts it grows
+// linearly with the list, so a regression back to a vector scan (one probe
+// per compared entry) fails it.
+#[cfg(test)]
+thread_local! {
+    static MEMBERSHIP_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn probe_membership() {
+    MEMBERSHIP_PROBES.with(|probes| probes.set(probes.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_membership_probes() {
+    MEMBERSHIP_PROBES.with(|probes| probes.set(0));
+}
+
+#[cfg(test)]
+fn membership_probes() -> u64 {
+    MEMBERSHIP_PROBES.with(std::cell::Cell::get)
+}
 
 /// Basis for contacting someone in a country.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,40 +187,113 @@ pub enum SuppressionReason {
 }
 
 /// The suppression list.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// The ordered export and the membership index live together and are only
+/// ever mutated by the methods below, so the index cannot go stale: there is
+/// no path that changes one without the other. [`Self::emails`] and
+/// [`Self::publishers`] expose the export read-only, one first-recorded
+/// entry per key in insertion order, preserving the exact order and shape
+/// callers and serializers observed when the vectors were public.
+#[derive(Clone, Default)]
 pub struct Suppressions {
-    /// Suppressed addresses.
-    pub emails: Vec<(String, SuppressionReason)>,
-    /// Suppressed publishers.
-    pub publishers: Vec<(String, SuppressionReason)>,
+    emails: Vec<(String, SuppressionReason)>,
+    publishers: Vec<(String, SuppressionReason)>,
+    index: SuppressionIndex,
+}
+
+/// The address and publisher membership indexes backing [`Suppressions`].
+#[derive(Debug, Clone, Default)]
+struct SuppressionIndex {
+    emails: HashMap<String, SuppressionReason>,
+    publishers: HashMap<String, SuppressionReason>,
+}
+
+impl SuppressionIndex {
+    fn reason(&self, contact: &Contact) -> Option<SuppressionReason> {
+        self.emails
+            .get(&contact.email)
+            .or_else(|| self.publishers.get(&contact.publisher_key))
+            .copied()
+    }
+}
+
+impl std::fmt::Debug for Suppressions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Suppressions")
+            .field("emails", &self.emails)
+            .field("publishers", &self.publishers)
+            .finish()
+    }
+}
+
+impl PartialEq for Suppressions {
+    fn eq(&self, other: &Self) -> bool {
+        self.emails == other.emails && self.publishers == other.publishers
+    }
 }
 
 impl Suppressions {
-    /// Add an address.
+    /// The suppressed addresses in first-recorded order.
+    pub fn emails(&self) -> &[(String, SuppressionReason)] {
+        &self.emails
+    }
+
+    /// The suppressed publishers in first-recorded order.
+    pub fn publishers(&self) -> &[(String, SuppressionReason)] {
+        &self.publishers
+    }
+
+    /// Add an address unless it is already present; the first reason wins.
     pub fn suppress_email(&mut self, email: &str, reason: SuppressionReason) {
-        if !self.emails.iter().any(|(e, _)| e == email) {
-            self.emails.push((email.to_string(), reason));
+        #[cfg(test)]
+        probe_membership();
+        if self.index.emails.contains_key(email) {
+            return;
         }
+        self.index.emails.insert(email.to_string(), reason);
+        self.emails.push((email.to_string(), reason));
     }
 
-    /// Add a publisher.
+    /// Add a publisher unless it is already present; the first reason wins.
     pub fn suppress_publisher(&mut self, key: &str, reason: SuppressionReason) {
-        if !self.publishers.iter().any(|(p, _)| p == key) {
-            self.publishers.push((key.to_string(), reason));
+        #[cfg(test)]
+        probe_membership();
+        if self.index.publishers.contains_key(key) {
+            return;
         }
+        self.index.publishers.insert(key.to_string(), reason);
+        self.publishers.push((key.to_string(), reason));
     }
 
-    /// Why `contact` is suppressed, if it is.
+    /// Remove an address, keeping the order of the remaining entries.
+    /// Returns whether it was present.
+    pub fn unsuppress_email(&mut self, email: &str) -> bool {
+        if self.index.emails.remove(email).is_none() {
+            return false;
+        }
+        // Ordered export: removal keeps the O(n) tail shift; removals are rare operator actions.
+        self.emails.retain(|(entry, _)| entry != email);
+        true
+    }
+
+    /// Remove a publisher, keeping the order of the remaining entries.
+    /// Returns whether it was present.
+    pub fn unsuppress_publisher(&mut self, key: &str) -> bool {
+        if self.index.publishers.remove(key).is_none() {
+            return false;
+        }
+        // Ordered export: removal keeps the O(n) tail shift; removals are rare operator actions.
+        self.publishers.retain(|(entry, _)| entry != key);
+        true
+    }
+
+    /// Why `contact` is suppressed, if it is: an address match wins over a
+    /// publisher match, and the first recorded entry supplies the reason.
     pub fn check(&self, contact: &Contact) -> Option<SuppressionReason> {
-        self.emails
-            .iter()
-            .find(|(e, _)| *e == contact.email)
-            .or_else(|| {
-                self.publishers
-                    .iter()
-                    .find(|(p, _)| *p == contact.publisher_key)
-            })
-            .map(|(_, r)| *r)
+        #[cfg(test)]
+        probe_membership();
+        self.index.reason(contact)
     }
 }
 
@@ -350,7 +450,7 @@ mod tests {
         let mut s = Suppressions::default();
         s.suppress_email("a@studio.example", SuppressionReason::OptOut);
         s.suppress_email("a@studio.example", SuppressionReason::HardBounce);
-        assert_eq!(s.emails.len(), 1);
+        assert_eq!(s.emails().len(), 1);
         assert_eq!(
             s.check(&contact("a@studio.example")),
             Some(SuppressionReason::OptOut)
@@ -361,6 +461,281 @@ mod tests {
         assert_eq!(
             s.check(&contact("b@studio.example")),
             Some(SuppressionReason::Complaint)
+        );
+    }
+
+    /// The read accessors return exactly the ordered pair sequence the public
+    /// vectors used to export, and `Debug` still renders only those two
+    /// vectors in the same order. That pair sequence is the shape any
+    /// serializer sees; this std-only crate has no serde derive on the type,
+    /// so the golden pins the observable export rather than inventing one.
+    #[test]
+    fn suppression_export_matches_the_ordered_golden() {
+        let mut s = Suppressions::default();
+        s.suppress_email("b@studio.example", SuppressionReason::HardBounce);
+        s.suppress_email("a@studio.example", SuppressionReason::OptOut);
+        s.suppress_email("b@studio.example", SuppressionReason::Operator);
+        s.suppress_publisher("studio.example", SuppressionReason::Complaint);
+        assert_eq!(
+            s.emails(),
+            &[
+                (
+                    "b@studio.example".to_string(),
+                    SuppressionReason::HardBounce
+                ),
+                ("a@studio.example".to_string(), SuppressionReason::OptOut),
+            ]
+        );
+        assert_eq!(
+            s.publishers(),
+            &[("studio.example".to_string(), SuppressionReason::Complaint)]
+        );
+        assert_eq!(
+            format!("{s:?}"),
+            "Suppressions { emails: [(\"b@studio.example\", HardBounce), \
+             (\"a@studio.example\", OptOut)], publishers: \
+             [(\"studio.example\", Complaint)] }"
+        );
+    }
+
+    /// The same-length in-place mutation that used to leave the index stale
+    /// is no longer expressible: the vectors are private and every mutation
+    /// goes through a method that updates the index. Removing and re-adding
+    /// must answer the new reason, never a stale hit from the removed entry.
+    #[test]
+    fn a_removed_then_re_added_suppression_has_no_stale_hit() {
+        let mut s = Suppressions::default();
+        s.suppress_email("a@studio.example", SuppressionReason::OptOut);
+        assert!(s.unsuppress_email("a@studio.example"));
+        assert!(!s.unsuppress_email("a@studio.example"));
+        assert!(s.emails().is_empty());
+        assert_eq!(s.check(&contact("a@studio.example")), None);
+        s.suppress_email("a@studio.example", SuppressionReason::HardBounce);
+        assert_eq!(
+            s.check(&contact("a@studio.example")),
+            Some(SuppressionReason::HardBounce),
+            "the re-added entry's reason, not the removed one"
+        );
+
+        s.suppress_publisher("studio.example", SuppressionReason::Complaint);
+        s.suppress_publisher("other.example", SuppressionReason::Operator);
+        assert!(s.unsuppress_publisher("studio.example"));
+        s.suppress_publisher("studio.example", SuppressionReason::OptOut);
+        assert_eq!(
+            s.check(&contact_at("b@other.example", "other.example")),
+            Some(SuppressionReason::Operator)
+        );
+        assert_eq!(
+            s.check(&contact_at("b@studio.example", "studio.example")),
+            Some(SuppressionReason::OptOut),
+            "the re-added publisher uses the new reason"
+        );
+        assert_eq!(
+            s.publishers(),
+            &[
+                ("other.example".to_string(), SuppressionReason::Operator),
+                ("studio.example".to_string(), SuppressionReason::OptOut),
+            ],
+            "removal preserves order and re-adding appends"
+        );
+    }
+
+    /// Removal shifts the remaining entries left without reordering them and a
+    /// re-add appends at the end. That ordered export is the contract the
+    /// `retain` comment protects; this pins it for both vectors.
+    #[test]
+    fn unsuppress_preserves_export_order_across_removals_and_re_adds() {
+        let mut s = Suppressions::default();
+        for (email, reason) in [
+            ("a@studio.example", SuppressionReason::OptOut),
+            ("b@studio.example", SuppressionReason::HardBounce),
+            ("c@studio.example", SuppressionReason::Complaint),
+        ] {
+            s.suppress_email(email, reason);
+        }
+        for (key, reason) in [
+            ("a.example", SuppressionReason::OptOut),
+            ("b.example", SuppressionReason::Complaint),
+            ("c.example", SuppressionReason::Operator),
+        ] {
+            s.suppress_publisher(key, reason);
+        }
+
+        assert!(s.unsuppress_email("b@studio.example"));
+        assert!(s.unsuppress_publisher("b.example"));
+        s.suppress_email("b@studio.example", SuppressionReason::Operator);
+        s.suppress_publisher("b.example", SuppressionReason::HardBounce);
+
+        assert_eq!(
+            s.emails(),
+            &[
+                ("a@studio.example".to_string(), SuppressionReason::OptOut),
+                ("c@studio.example".to_string(), SuppressionReason::Complaint),
+                ("b@studio.example".to_string(), SuppressionReason::Operator),
+            ],
+            "removal preserves the order of survivors and re-adding appends"
+        );
+        assert_eq!(
+            s.publishers(),
+            &[
+                ("a.example".to_string(), SuppressionReason::OptOut),
+                ("c.example".to_string(), SuppressionReason::Operator),
+                ("b.example".to_string(), SuppressionReason::HardBounce),
+            ],
+            "publisher removal preserves the same ordered export"
+        );
+        assert_eq!(
+            s.check(&contact("b@studio.example")),
+            Some(SuppressionReason::Operator),
+            "the re-added entry is visible to membership checks"
+        );
+    }
+
+    /// The exact pre-fix lookup: a linear scan of the exported vectors, first
+    /// entry wins, address before publisher, byte-for-byte case-sensitive.
+    fn naive_check(s: &Suppressions, contact: &Contact) -> Option<SuppressionReason> {
+        s.emails()
+            .iter()
+            .find(|(e, _)| *e == contact.email)
+            .or_else(|| {
+                s.publishers()
+                    .iter()
+                    .find(|(p, _)| *p == contact.publisher_key)
+            })
+            .map(|(_, r)| *r)
+    }
+
+    fn contact_at(email: &str, publisher: &str) -> Contact {
+        Contact {
+            email: email.into(),
+            name: None,
+            role: None,
+            publisher_key: publisher.into(),
+            kind: ContactKind::of_email(email),
+            source: "t".into(),
+            consent: false,
+        }
+    }
+
+    /// At the engine's reference size (10k addresses, 10k publishers, 10k
+    /// contacts), the indexed membership answers exactly like the verbatim
+    /// vector-scan reference, including precedence edges: an address entry
+    /// beats a publisher entry, the first duplicate wins, and matching stays
+    /// case-sensitive exactly as before.
+    #[test]
+    fn suppression_membership_matches_a_naive_scan_at_ten_thousand() {
+        const N: usize = 10_000;
+        let mut s = Suppressions::default();
+        for i in 0..N {
+            let reason = if i % 3 == 0 {
+                SuppressionReason::OptOut
+            } else {
+                SuppressionReason::HardBounce
+            };
+            s.suppress_email(&format!("suppressed{i}@p{i}.example"), reason);
+            s.suppress_publisher(&format!("p{i}.example"), SuppressionReason::Complaint);
+        }
+        // The exported order is insertion order.
+        for i in 0..N {
+            assert_eq!(s.emails()[i].0, format!("suppressed{i}@p{i}.example"));
+            assert_eq!(s.publishers()[i].0, format!("p{i}.example"));
+        }
+
+        // A duplicate is rejected without disturbing the first reason; a case
+        // variant is a distinct key and is appended.
+        s.suppress_email("suppressed0@p0.example", SuppressionReason::Operator);
+        s.suppress_email("SUPPRESSED1@P1.EXAMPLE", SuppressionReason::Operator);
+        s.suppress_publisher("p0.example", SuppressionReason::Operator);
+        assert_eq!(s.emails().len(), N + 1, "only the case variant is appended");
+        assert_eq!(s.publishers().len(), N);
+
+        let mut contacts: Vec<Contact> = (0..N)
+            .map(|i| match i % 4 {
+                0 => contact_at(&format!("suppressed{i}@p{i}.example"), "clean.example"),
+                1 => contact_at(&format!("clean{i}@p{i}.example"), &format!("p{i}.example")),
+                2 => contact_at(
+                    &format!("suppressed{i}@p{i}.example"),
+                    &format!("p{i}.example"),
+                ),
+                _ => contact_at(&format!("clean{i}@p{i}.example"), "clean.example"),
+            })
+            .collect();
+        // Precedence edges.
+        contacts.push(contact_at("suppressed0@p0.example", "p0.example"));
+        contacts.push(contact_at("SUPPRESSED1@P1.EXAMPLE", "clean.example"));
+        contacts.push(contact_at("suppressed1@p1.example", "clean.example"));
+        contacts.push(contact_at("suppressed0@p0.example", "clean.example"));
+        contacts.push(contact_at("clean0@p0.example", "p0.example"));
+        contacts.push(contact_at("clean9@p9.example", "p9.example"));
+
+        for (i, c) in contacts.iter().enumerate() {
+            assert_eq!(s.check(c), naive_check(&s, c), "contact {i}: {c:?}");
+        }
+        assert_eq!(
+            s.check(&contact_at("suppressed0@p0.example", "p0.example")),
+            Some(SuppressionReason::OptOut),
+            "the address entry wins over the publisher entry"
+        );
+        assert_eq!(
+            s.check(&contact_at("suppressed0@p0.example", "clean.example")),
+            Some(SuppressionReason::OptOut),
+            "the first duplicate supplies the reason"
+        );
+        assert_eq!(
+            s.check(&contact_at("suppressed1@p1.example", "clean.example")),
+            Some(SuppressionReason::HardBounce),
+            "a case variant is not the same address"
+        );
+
+        // A later insert is still rejected against the maintained index.
+        s.suppress_email("suppressed0@p0.example", SuppressionReason::Operator);
+        assert_eq!(s.emails().len(), N + 1);
+        s.suppress_publisher("p0.example", SuppressionReason::Operator);
+        assert_eq!(s.publishers().len(), N);
+    }
+
+    /// Inserts and checks perform one constant-time membership probe each:
+    /// 10k unique inserts, 10k duplicate inserts, 10k publisher inserts and
+    /// 10k checks stay linear (4n probes). Reverting either insert to the
+    /// pre-fix vector scan (with its per-compared-entry counter) makes this
+    /// fail by orders of magnitude; see the task report for the exact run.
+    #[test]
+    fn suppression_membership_does_not_rescan_the_list() {
+        const N: usize = 10_000;
+        reset_membership_probes();
+        let mut s = Suppressions::default();
+        for i in 0..N {
+            s.suppress_email(
+                &format!("suppressed{i}@p{i}.example"),
+                SuppressionReason::OptOut,
+            );
+        }
+        // Every duplicate must be rejected without walking the list.
+        for i in 0..N {
+            s.suppress_email(
+                &format!("suppressed{i}@p{i}.example"),
+                SuppressionReason::Operator,
+            );
+        }
+        for i in 0..N {
+            s.suppress_publisher(&format!("p{i}.example"), SuppressionReason::Complaint);
+        }
+        for i in 0..N {
+            let _ = s.check(&contact_at(
+                &format!("suppressed{i}@p{i}.example"),
+                &format!("p{i}.example"),
+            ));
+        }
+        let probes = membership_probes();
+        assert_eq!(s.emails().len(), N);
+        assert_eq!(s.publishers().len(), N);
+        assert!(
+            probes <= 4 * N as u64,
+            "4n constant-time probes expected, got {probes} for n={N}"
+        );
+        assert!(
+            probes < (N * N / 10) as u64,
+            "a vector scan is quadratic: {probes} probes for n={N}"
         );
     }
 

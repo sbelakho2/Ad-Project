@@ -37,7 +37,7 @@ steps:
   build:
     image: rust:1.88-bookworm
     commands:
-      - cd "$CI_WORKSPACE"/rust && cargo build -p apex-api -p apex-control -p apex-sales-web -p apex-sales -p apex-analytics -p apex-autopilot -p apex-tools
+      - cd "$CI_WORKSPACE"/rust && cargo build -p apex-api -p apex-control -p apex-sales-web -p apex-sales -p apex-analytics -p apex-autopilot -p apex-watch -p apex-tools
 
   dogfood-plan:
     image: rust:1.88-bookworm

@@ -3,8 +3,8 @@
 > **MIGRATION COMPLETE (2025-12-13)**: The platform has fully migrated from DigitalOcean to Hetzner infrastructure.
 >
 > **Current Production Infrastructure:**
-> - **App Server:** 46.62.252.96 (apexmediation.ee)
-> - **DB Server:** 77.42.44.35
+> - **App Server:** 203.0.113.10 (apexmediation.ee)
+> - **DB Server:** 203.0.113.12
 > - **Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<IP>`
 > - **TLS:** Caddy with auto Let's Encrypt

@@ -28,6 +28,19 @@
 //!
 //! Queries never interpolate user input: values travel as ClickHouse
 //! `{name:Type}` bound parameters over HTTP `param_*` keys.
+//!
+//! The store reads the environment contract `APEX_CLICKHOUSE_HTTP`,
+//! `APEX_CLICKHOUSE_DB`, `APEX_CLICKHOUSE_USER` and
+//! `APEX_CLICKHOUSE_PASSWORD` (through [`ClickHouseConfig::from_lookup`]).
+//! When a user or password is configured, every request carries the standard
+//! ClickHouse HTTP credentials (`X-ClickHouse-User` / `X-ClickHouse-Key`);
+//! when neither is set nothing is attached and the request is byte-identical
+//! to the unauthenticated form. TLS is the URL scheme: an `https://` base URL
+//! is served over rustls with the default `reqwest` certificate verification
+//! (never disabled here), so a server whose chain the client does not trust
+//! is refused at the handshake. The password is never rendered: the config's
+//! `Debug` redacts it, and it is never interpolated into a URL, body or
+//! error.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -351,14 +364,34 @@ pub struct ProjectionVersionRow {
 }
 
 /// ClickHouse HTTP connection settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` redacts the password; the value itself is compared normally.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClickHouseConfig {
-    /// Base HTTP URL, e.g. `http://127.0.0.1:8123`.
+    /// Base HTTP URL, e.g. `http://127.0.0.1:8123`. `https://` enables TLS
+    /// with the default `reqwest` certificate verification.
     pub http_url: String,
     /// Database name; a plain identifier, validated before use.
     pub database: String,
     /// Request timeout in milliseconds.
     pub request_timeout_ms: u64,
+    /// Optional ClickHouse user; sent as `X-ClickHouse-User` when set.
+    pub user: Option<String>,
+    /// Optional ClickHouse password; sent as `X-ClickHouse-Key` when set.
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ClickHouseConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClickHouseConfig")
+            .field("http_url", &self.http_url)
+            .field("database", &self.database)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 impl Default for ClickHouseConfig {
@@ -367,13 +400,17 @@ impl Default for ClickHouseConfig {
             http_url: "http://127.0.0.1:8123".to_string(),
             database: "apex_analytics".to_string(),
             request_timeout_ms: 30_000,
+            user: None,
+            password: None,
         }
     }
 }
 
 impl ClickHouseConfig {
     /// Build from environment-like lookups: `APEX_CLICKHOUSE_HTTP`,
-    /// `APEX_CLICKHOUSE_DB`; everything else keeps the default.
+    /// `APEX_CLICKHOUSE_DB`, `APEX_CLICKHOUSE_USER` and
+    /// `APEX_CLICKHOUSE_PASSWORD`; everything else keeps the default. A
+    /// blank/whitespace credential reads as unset.
     pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, StoreError> {
         let mut config = Self::default();
         if let Some(url) = lookup("APEX_CLICKHOUSE_HTTP") {
@@ -386,6 +423,16 @@ impl ClickHouseConfig {
                 config.database = database;
             }
         }
+        if let Some(user) = lookup("APEX_CLICKHOUSE_USER") {
+            if !user.trim().is_empty() {
+                config.user = Some(user);
+            }
+        }
+        if let Some(password) = lookup("APEX_CLICKHOUSE_PASSWORD") {
+            if !password.trim().is_empty() {
+                config.password = Some(password);
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -395,7 +442,9 @@ impl ClickHouseConfig {
         Self::from_lookup(&|key| std::env::var(key).ok())
     }
 
-    /// Validate the URL scheme and the database identifier.
+    /// Validate the URL scheme, the database identifier and the credential
+    /// header values (they travel as HTTP header values, so control
+    /// characters are refused before a request could smuggle them).
     pub fn validate(&self) -> Result<(), StoreError> {
         let url = reqwest::Url::parse(&self.http_url)
             .map_err(|error| StoreError::Config(format!("http_url: {error}")))?;
@@ -411,8 +460,35 @@ impl ClickHouseConfig {
                 "request_timeout_ms must be positive".to_string(),
             ));
         }
+        for (variable, value) in [
+            ("APEX_CLICKHOUSE_USER", &self.user),
+            ("APEX_CLICKHOUSE_PASSWORD", &self.password),
+        ] {
+            if let Some(value) = value {
+                if !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+                    return Err(StoreError::Config(format!(
+                        "{variable} must be printable ASCII without control characters"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// One transport failure with its full cause chain on one line, so a TLS or
+/// connection refusal names its cause (`invalid peer certificate:
+/// UnknownIssuer`) instead of only the outer `reqwest` message. No URL query
+/// or body is ever included beyond what `reqwest` itself renders.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
 }
 
 /// An event store backed by the ClickHouse HTTP interface.
@@ -464,19 +540,28 @@ impl ClickHouseStore {
     /// spelling keeps long DDL out of the URL.
     async fn post_text(&self, body: &str, params: &[(&str, &str)]) -> Result<String, StoreError> {
         let url = self.url(params)?;
-        let response = self
+        let mut request = self
             .client
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "text/plain")
+            .header(reqwest::header::CONTENT_TYPE, "text/plain");
+        // The standard ClickHouse HTTP credentials; absent configuration
+        // sends exactly the unauthenticated request.
+        if let Some(user) = &self.config.user {
+            request = request.header("X-ClickHouse-User", user);
+        }
+        if let Some(password) = &self.config.password {
+            request = request.header("X-ClickHouse-Key", password);
+        }
+        let response = request
             .body(body.to_string())
             .send()
             .await
-            .map_err(|error| StoreError::Http(error.to_string()))?;
+            .map_err(|error| StoreError::Http(error_chain(&error)))?;
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|error| StoreError::Http(error.to_string()))?;
+            .map_err(|error| StoreError::Http(error_chain(&error)))?;
         if !status.is_success() {
             return Err(StoreError::Status {
                 status: status.as_u16(),
@@ -1610,6 +1695,7 @@ mod tests {
             http_url: "http://127.0.0.1:1".into(),
             database: "apex_probe".into(),
             request_timeout_ms: 1_500,
+            ..ClickHouseConfig::default()
         };
         let store = ClickHouseStore::new(config).expect("store");
         assert_eq!(store.database(), "apex_probe");
@@ -1741,6 +1827,229 @@ mod tests {
         assert!(config.http_url.starts_with("http"), "{}", config.http_url);
         assert!(config.request_timeout_ms > 0);
         assert!(validate_identifier(&config.database).is_ok());
+    }
+
+    #[test]
+    fn credentials_come_from_the_environment_pair_and_blank_reads_as_unset() {
+        let overrides: BTreeMap<&str, &str> = [
+            ("APEX_CLICKHOUSE_USER", "report_user"),
+            ("APEX_CLICKHOUSE_PASSWORD", "top-secret-value"),
+        ]
+        .into_iter()
+        .collect();
+        let config =
+            ClickHouseConfig::from_lookup(&|key| overrides.get(key).map(|v| v.to_string()))
+                .expect("credential overrides");
+        assert_eq!(config.user.as_deref(), Some("report_user"));
+        assert_eq!(config.password.as_deref(), Some("top-secret-value"));
+        // Whitespace-only values read as unset, exactly like the URL pair.
+        let blank = ClickHouseConfig::from_lookup(&|key| {
+            (key == "APEX_CLICKHOUSE_PASSWORD").then(|| "   ".to_string())
+        })
+        .expect("blank credentials");
+        assert!(blank.user.is_none());
+        assert!(blank.password.is_none());
+    }
+
+    #[test]
+    fn https_base_urls_and_credential_shapes_are_validated() {
+        let https = ClickHouseConfig {
+            http_url: "https://clickhouse.example.test:8443".to_string(),
+            ..ClickHouseConfig::default()
+        };
+        https.validate().expect("https is a valid scheme");
+        let store = ClickHouseStore::new(https).expect("https store");
+        assert_eq!(store.http_url(), "https://clickhouse.example.test:8443");
+        // Credentials travel as HTTP header values: control characters that
+        // could smuggle a header are refused before any request is built.
+        for bad_value in ["report\r\nuser", "user\n"] {
+            let bad = ClickHouseConfig {
+                user: Some(bad_value.to_string()),
+                ..ClickHouseConfig::default()
+            };
+            assert!(matches!(bad.validate(), Err(StoreError::Config(_))));
+        }
+    }
+
+    #[test]
+    fn the_password_is_redacted_in_debug_output() {
+        let config = ClickHouseConfig {
+            user: Some("report_user".to_string()),
+            password: Some("top-secret-value".to_string()),
+            ..ClickHouseConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("top-secret-value"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        // The store derives Debug over the config, so it inherits the
+        // redaction.
+        let store = ClickHouseStore::new(config).expect("store");
+        let rendered = format!("{store:?}");
+        assert!(!rendered.contains("top-secret-value"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
+
+    /// A one-shot HTTP/1.1 capture server: accepts one connection, reads the
+    /// request head and body, answers `200` with an empty body, and hands the
+    /// raw request text to the test through the returned channel.
+    fn capture_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut raw = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                raw.extend_from_slice(&buffer[..read]);
+                let Some(head_end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                let content_length = head.lines().find_map(|line| {
+                    let line = line.to_ascii_lowercase();
+                    line.strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                });
+                if raw.len() >= head_end + 4 + content_length.unwrap_or(0) {
+                    break;
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = sender.send(String::from_utf8_lossy(&raw).to_string());
+        });
+        (port, receiver)
+    }
+
+    #[tokio::test]
+    async fn credentials_attach_the_clickhouse_headers_only_when_configured() {
+        // With credentials: the standard headers carry them and the body is
+        // unchanged.
+        let (port, capture) = capture_one_request();
+        let store = ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            user: Some("report_user".to_string()),
+            password: Some("top-secret-value".to_string()),
+        })
+        .expect("store");
+        let answer = store.execute_statement("SELECT 1").await.expect("200");
+        assert_eq!(answer, "");
+        let raw = capture
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        let head = raw.to_ascii_lowercase();
+        assert!(
+            head.contains("x-clickhouse-user: report_user"),
+            "missing user header: {raw}"
+        );
+        assert!(
+            head.contains("x-clickhouse-key: top-secret-value"),
+            "missing key header: {raw}"
+        );
+        assert!(raw.contains("SELECT 1"), "body changed: {raw}");
+
+        // Without credentials: neither header is present (the unauthenticated
+        // request shape is byte-for-byte the legacy one).
+        let (port, capture) = capture_one_request();
+        let store = ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            user: None,
+            password: None,
+        })
+        .expect("store");
+        store.execute_statement("SELECT 1").await.expect("200");
+        let raw = capture
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        let head = raw.to_ascii_lowercase();
+        assert!(
+            !head.contains("x-clickhouse"),
+            "credential header without configuration: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_uses_default_certificate_verification() {
+        use std::io::Write as _;
+
+        // A local TLS server presenting a self-signed certificate the client
+        // has no reason to trust. `https` must be attempted (the connection
+        // reaches the handshake) and the untrusted chain must be refused by
+        // the default verification, never accepted.
+        let cert = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tls/self-signed-cert.der"
+        ))
+        .expect("certificate fixture");
+        let key = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/tls/self-signed-key.der"
+        ))
+        .expect("key fixture");
+        let server_config = std::sync::Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![rustls::pki_types::CertificateDer::from(cert)],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(key),
+                    ),
+                )
+                .expect("server config"),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let config = std::sync::Arc::clone(&server_config);
+                std::thread::spawn(move || {
+                    let Ok(mut connection) = rustls::ServerConnection::new(config) else {
+                        return;
+                    };
+                    // The client aborts after rejecting the certificate; any
+                    // I/O outcome is fine here, the client-side assertion is
+                    // what the test pins.
+                    let _ = connection.complete_io(&mut stream);
+                });
+            }
+        });
+        let config = ClickHouseConfig {
+            http_url: format!("https://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            ..ClickHouseConfig::default()
+        };
+        config.validate().expect("https base URL is valid");
+        let store = ClickHouseStore::new(config).expect("https store");
+        let error = store
+            .execute_statement("SELECT 1")
+            .await
+            .expect_err("the untrusted self-signed certificate must be refused");
+        let message = error.to_string();
+        assert!(
+            message.to_ascii_lowercase().contains("certificate")
+                || message.contains("UnknownIssuer"),
+            "expected a certificate-verification failure, got: {message}"
+        );
+        // The server really was a TLS listener: it saw an incoming handshake.
+        // (If the client had fallen back to plaintext the request would have
+        // hung or failed differently; the certificate error above proves the
+        // handshake happened and verification ran.)
+        let _ = std::io::stderr().flush();
     }
 
     fn queue_row(object_id: &str) -> ProjectionRow {

@@ -3,15 +3,16 @@
 This is the production deployment runbook for ApexMediation on Hetzner infrastructure. It consolidates server setup, service deployment, database configuration, TLS termination, monitoring, and operational procedures.
 
 > **Infrastructure Overview:**  
-> - **App Server:** 46.62.252.96 (apexmediation.ee)  
-> - **DB Server:** 77.42.44.35 (PostgreSQL only - **not directly accessible**, reach via App Server)  
-> - **Test Server:** 157.90.126.205 (**ML workloads + SDK test harnesses**; managed and accessed same as app server)  
+> - **App Server:** 203.0.113.10 (apexmediation.ee)  
+> - **DB Server:** 203.0.113.12 (PostgreSQL only - **not directly accessible**, reach via App Server)  
+> - **Test Server:** 203.0.113.11 (**ML workloads + SDK test harnesses**; managed and accessed same as app server)  
 > - **Customer Domains:** apexmediation.ee, console.apexmediation.ee, api.apexmediation.ee  
 > - **Operator Domain:** admin.apexmediation.ee (Control Plane - separate from Console)  
 > - **SSH Access:** `ssh -i ~/.ssh/hetzner-db-mac root@<App Server IP>` (DB Server only reachable from App Server)
 > - **Project Path:** `/opt/adproject` (NOT `/opt/apex` or `/var/www`)
 > - **Deployment:** Git pull (preferred) or rsync
 > - **Compose File:** `infrastructure/docker/docker-compose.hetzner.yml`
+> - **Addresses:** Example addresses in this checklist use the RFC 5737 documentation range; replace them with your server addresses before running the commands.
 
 > **⚠️ CRITICAL: Production Paths**
 >
@@ -88,7 +89,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 | Rule # | NEVER DO | Why It Breaks Things |
 |--------|----------|---------------------|
 | 1 | **Modify App Server `.env` files without explicit approval** | Control Plane + backend share config. One wrong edit crashes auth. |
-| 2 | **Change `SALES_API_HOST` to the Test Server IP (157.90.126.205)** | ApexTunnel handles internal routing. Using external IP bypasses mesh. |
+| 2 | **Change `SALES_API_HOST` to the Test Server IP (203.0.113.11)** | ApexTunnel handles internal routing. Using external IP bypasses mesh. |
 | 3 | **Deploy Sales API or Edge Worker to App Server** | These run ONLY on Test Server. |
 | 4 | **Restart control-plane without checking for orphan processes** | `EADDRINUSE` on port 4000 will crash restart. |
 | 5 | **Assume "fixing wiring" means changing hostnames** | ApexTunnel resolves internal nodes. |
@@ -109,7 +110,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         APP SERVER (46.62.252.96)                       │
+│                         APP SERVER (203.0.113.10)                       │
 │                                                                         │
 │  [Control Plane] (Port 4000)                                            │
 │       │                                                                 │
@@ -120,7 +121,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
         │ P2P (UDP/Noise)                                           │
         │                                                           │
 ┌───────▼───────────────────────────────────────────────────────────│─────┐
-│                        TEST SERVER (157.90.126.205)               │     │
+│                        TEST SERVER (203.0.113.11)                 │     │
 │                                                                   │     │
 │  [ApexTunnel] ◄───────────────────────────────────────────┐       │     │
 │       │                                                   │       │     │
@@ -131,7 +132,7 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
                                                             │             │
                                                             │             │
 ┌───────────────────────────────────────────────────────────▼─────────────┐
-│                        DB SERVER (77.42.44.35)                          │
+│                        DB SERVER (203.0.113.12)                         │
 │                                                                         │
 │  [ApexTunnel] ◄─────────────────────────────────────────────────────────┘
 │       │
@@ -144,25 +145,25 @@ This is the production deployment runbook for ApexMediation on Hetzner infrastru
 
 **Control Plane won't start (EADDRINUSE):**
 ```bash
-ssh root@46.62.252.96 'lsof -ti :4000 | xargs -r kill -9 && systemctl start control-plane'
+ssh root@203.0.113.10 'lsof -ti :4000 | xargs -r kill -9 && systemctl start control-plane'
 ```
 
 **Sales automation shows "unhealthy" after config change:**
 ```bash
 # First, check what SALES_API_HOST is set to
-ssh root@46.62.252.96 'grep SALES_API_HOST /opt/adproject/control-plane/.env'
+ssh root@203.0.113.10 'grep SALES_API_HOST /opt/adproject/control-plane/.env'
 # If it's NOT 127.0.0.1, fix it:
-ssh root@46.62.252.96 'sed -i "s/SALES_API_HOST=.*/SALES_API_HOST=127.0.0.1/" /opt/adproject/control-plane/.env && systemctl restart control-plane'
+ssh root@203.0.113.10 'sed -i "s/SALES_API_HOST=.*/SALES_API_HOST=127.0.0.1/" /opt/adproject/control-plane/.env && systemctl restart control-plane'
 ```
 
 **Verify tunnels are running:**
 ```bash
-ssh root@46.62.252.96 'systemctl status sales-api-tunnel edge-tunnel --no-pager'
+ssh root@203.0.113.10 'systemctl status sales-api-tunnel edge-tunnel --no-pager'
 ```
 
 **Restart tunnels if needed:**
 ```bash
-ssh root@46.62.252.96 'systemctl restart sales-api-tunnel edge-tunnel'
+ssh root@203.0.113.10 'systemctl restart sales-api-tunnel edge-tunnel'
 ```
 
 **Check full health status:**
@@ -193,10 +194,10 @@ The following user is configured with `admin` role for production verification:
 
 
 > **⚠️ Important Notes:**
-> - **PostgreSQL runs on DB Server (77.42.44.35)** as a system service - NOT on App Server, NOT in Docker
+> - **PostgreSQL runs on DB Server (203.0.113.12)** as a system service - NOT on App Server, NOT in Docker
 > - **Redis runs on App Server** as a system service - NOT in Docker
 > - **PgBouncer runs on App Server** as a system service (port 6432)
-> - If PgBouncer is enabled for backend connections, set `DATABASE_URL` to `...@127.0.0.1:6432/...` on the App Server; otherwise connect directly to `77.42.44.35:5432`.
+> - If PgBouncer is enabled for backend connections, set `DATABASE_URL` to `...@127.0.0.1:6432/...` on the App Server; otherwise connect directly to `203.0.113.12:5432`.
 > - Backend queries PostgreSQL remotely via `DATABASE_URL` pointing to DB Server
 > - Monitoring stack runs in Docker; product services run via PM2/systemd
 > - Use `infrastructure/docker/docker-compose.hetzner.yml` (and/or `/opt/adproject/docker-compose.hetzner.yml` on-server) for monitoring containers
@@ -392,7 +393,7 @@ If you suspect billing is misconfigured, check backend logs for Adyen config err
 ```
 ┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
 │         App Server                  │     │         DB Server                   │
-│         46.62.252.96                │     │         77.42.44.35                 │
+│         203.0.113.10                │     │         203.0.113.12                │
 │                                     │     │         (NOT directly accessible)   │
 │  ┌─────────────────────────────┐   │     │                                     │
 │  │  Caddy (HTTPS termination)  │   │     │  ┌─────────────────────────────┐   │
@@ -418,7 +419,7 @@ If you suspect billing is misconfigured, check backend logs for Adyen config err
 │                                    │
 │  ┌─────────────────────────────┐  │      ┌─────────────────────────────────────┐
 │  │  Control Plane :4000        │  │      │         Test Server                 │
-│  │  (systemd - operator only)  │  │      │         157.90.126.205              │
+│  │  (systemd - operator only)  │  │      │         203.0.113.11                │
 │  └──────────────┬──────────────┘  │      │         (ML + SDK Harnesses)        │
 │                 │                  │      │                                     │
 │  ┌──────────────┴──────────────┐  │      │  ┌─────────────────────────────┐   │
@@ -439,10 +440,10 @@ If you suspect billing is misconfigured, check backend logs for Adyen config err
 
 ### 1.2 Database Architecture (CRITICAL)
 
-> **⚠️ PostgreSQL runs ONLY on the DB Server (77.42.44.35)**
+> **⚠️ PostgreSQL runs ONLY on the DB Server (203.0.113.12)**
 >
 > - The App Server does NOT run PostgreSQL
-> - Backend connects to DB Server via `DATABASE_URL=postgresql://...@77.42.44.35:5432/adproject`
+> - Backend connects to DB Server via `DATABASE_URL=postgresql://...@203.0.113.12:5432/adproject`
 > - All data is stored on DB Server, not App Server
 > - DB Server is NOT directly accessible via SSH from the internet (by design)
 > - To access DB Server, first SSH to App Server, then SSH to DB Server
@@ -452,7 +453,7 @@ If you suspect billing is misconfigured, check backend logs for Adyen config err
 │                     DATA FLOW (READ-ONLY from App Server perspective)   │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  App Server (46.62.252.96)              DB Server (77.42.44.35)        │
+│  App Server (203.0.113.10)              DB Server (203.0.113.12)       │
 │  ┌─────────────────────────┐           ┌─────────────────────────┐     │
 │  │ Backend Container       │           │ PostgreSQL 16           │     │
 │  │                         │  SELECT   │                         │     │
@@ -482,7 +483,7 @@ If you suspect billing is misconfigured, check backend logs for Adyen config err
 
 ## 2. Server Setup
 
-### 2.1 App Server (46.62.252.96)
+### 2.1 App Server (203.0.113.10)
 
 Prerequisites:
 - [x] Ubuntu 24.04 LTS
@@ -498,7 +499,7 @@ Services running:
 - [x] Prometheus (port 9090)
 - [x] Grafana (port 3001)
 
-### 2.2 DB Server (77.42.44.35)
+### 2.2 DB Server (203.0.113.12)
 
 Prerequisites:
 - [x] Ubuntu 24.04 LTS
@@ -510,7 +511,7 @@ Database:
 - [x] 139+ tables migrated
 - [x] Backups configured
 
-### 2.3 Test Server (157.90.126.205)
+### 2.3 Test Server (203.0.113.11)
 
 > **Purpose:** Dedicated to **ML workloads**, **SDK test harnesses**, and **Sales Automation execution**. Isolates ML inference and autonomous sales from the production App Server to prevent memory/CPU contention.
 
@@ -606,11 +607,11 @@ These scripts live under `scripts/ops/` in this repo and are designed to be idem
   - SSH wrapper for Hetzner app/db/test servers.
   - DB access always goes through the app server (ProxyJump) by design.
 - `scripts/ops/deploy-edge-worker.sh`
-  - Deploys Edge Worker to **Test Server only** (157.90.126.205).
+  - Deploys Edge Worker to **Test Server only** (203.0.113.11).
   - **Refuses to run on App Server** (server validation safeguard).
   - Rebuilds and restarts edge-worker.service.
 - `scripts/ops/deploy-control-plane-sales.sh`
-  - Deploys Control Plane to **App Server only** (46.62.252.96).
+  - Deploys Control Plane to **App Server only** (203.0.113.10).
   - **Refuses to run on Test Server** (server validation safeguard).
   - Rebuilds and restarts control-plane.service.
 - `scripts/ops/deploy-sales-automation.sh`
@@ -639,13 +640,13 @@ These scripts live under `scripts/ops/` in this repo and are designed to be idem
 
 ```bash
 # App server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # Database server (via app server jump host)
-ssh -i ~/.ssh/hetzner-db-mac -J root@46.62.252.96 root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac -J root@203.0.113.10 root@203.0.113.12
 
 # Test server (direct - same key, no jump host needed)
-ssh -i ~/.ssh/hetzner-db-mac root@157.90.126.205
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.11
 ```
 
 ---
@@ -848,8 +849,8 @@ caddy reload
 
 ### 6.1 Access Dashboards
 
-- **Prometheus:** http://46.62.252.96:9090 (internal)
-- **Grafana:** http://46.62.252.96:3001
+- **Prometheus:** http://203.0.113.10:9090 (internal)
+- **Grafana:** http://203.0.113.10:3001
 
 ### 6.2 Health Checks
 
@@ -1145,7 +1146,7 @@ cd /path/to/Ad-Project
 git add -A && git commit -m "feat: your changes" && git push origin main
 
 # SSH to server and pull
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 cd /opt/adproject
 git pull origin main
@@ -1160,10 +1161,10 @@ cd backend && npm run build && pm2 restart backend
 
 ```bash
 # Deploy backend
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 'cd /opt/adproject && git pull && cd backend && npm run build && pm2 restart backend'
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 'cd /opt/adproject && git pull && cd backend && npm run build && pm2 restart backend'
 
 # Deploy all services
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 'cd /opt/adproject && git pull && \
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 'cd /opt/adproject && git pull && \
   cd backend && npm run build && pm2 restart backend && \
   cd ../website && npm run build && pm2 restart website'
 ```
@@ -1184,10 +1185,10 @@ tar -czvf /tmp/deploy.tar.gz --exclude='node_modules' --exclude='.next' --exclud
   control-plane/src control-plane/package.json
 
 # 2. Upload to production
-scp -i ~/.ssh/hetzner-db-mac /tmp/deploy.tar.gz root@46.62.252.96:/opt/adproject/
+scp -i ~/.ssh/hetzner-db-mac /tmp/deploy.tar.gz root@203.0.113.10:/opt/adproject/
 
 # 3. Deploy (SSH in and run)
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 cd /opt/adproject
 tar -xzvf deploy.tar.gz
@@ -1225,10 +1226,10 @@ tar -czvf /tmp/backend-deploy.tar.gz --exclude='node_modules' \
   backend/src backend/package.json backend/tsconfig.json
 
 # Upload
-scp -i ~/.ssh/hetzner-db-mac /tmp/backend-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+scp -i ~/.ssh/hetzner-db-mac /tmp/backend-deploy.tar.gz root@203.0.113.10:/opt/adproject/
 
 # SSH and deploy
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject
 tar -xzvf backend-deploy.tar.gz
 cd /opt/adproject/backend
@@ -1247,9 +1248,9 @@ curl http://localhost:8080/health
 tar -czvf /tmp/console-deploy.tar.gz --exclude='node_modules' --exclude='.next' \
   console/src console/package.json console/next.config.js console/tsconfig.json
 
-scp -i ~/.ssh/hetzner-db-mac /tmp/console-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+scp -i ~/.ssh/hetzner-db-mac /tmp/console-deploy.tar.gz root@203.0.113.10:/opt/adproject/
 
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject
 tar -xzvf console-deploy.tar.gz
 cd /opt/adproject/console
@@ -1286,15 +1287,15 @@ npm run build
 rsync -avz --delete \
   -e "ssh -i ~/.ssh/hetzner-db-mac" \
   .next package.json node_modules public next.config.js \
-  root@46.62.252.96:/opt/adproject/website/
+  root@203.0.113.10:/opt/adproject/website/
 
 # 3. Copy static assets into standalone folder (REQUIRED for CSS/JS to work)
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "\
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "\
   cp -r /opt/adproject/website/.next/static /opt/adproject/website/.next/standalone/.next/ && \
   cp -r /opt/adproject/website/public /opt/adproject/website/.next/standalone/"
 
 # 4. Restart PM2 to pick up changes
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "pm2 restart website --update-env"
 
 # 5. Verify deployment
 curl -I https://apexmediation.ee
@@ -1314,9 +1315,9 @@ tar -czvf /tmp/website-deploy.tar.gz \
   website/next.config.js website/tsconfig.json \
   website/tailwind.config.ts website/postcss.config.js
 
-scp -i ~/.ssh/hetzner-db-mac /tmp/website-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+scp -i ~/.ssh/hetzner-db-mac /tmp/website-deploy.tar.gz root@203.0.113.10:/opt/adproject/
 
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject
 tar -xzvf website-deploy.tar.gz
 
@@ -1342,7 +1343,7 @@ curl -I http://localhost:3002
 
 **Verify PM2 is running from correct directory:**
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 show website | grep cwd"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "pm2 show website | grep cwd"
 # Should output: cwd: /opt/adproject/website
 ```
 
@@ -1354,9 +1355,9 @@ ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 show website | grep cwd"
 tar -czvf /tmp/control-plane-deploy.tar.gz --exclude='node_modules' \
   control-plane/src control-plane/package.json control-plane/tsconfig.json control-plane/migrations
 
-scp -i ~/.ssh/hetzner-db-mac /tmp/control-plane-deploy.tar.gz root@46.62.252.96:/opt/adproject/
+scp -i ~/.ssh/hetzner-db-mac /tmp/control-plane-deploy.tar.gz root@203.0.113.10:/opt/adproject/
 
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject
 tar -xzvf control-plane-deploy.tar.gz
 cd control-plane
@@ -1456,7 +1457,7 @@ docker compose restart backend
 
 ```bash
 # From app server, test connectivity
-nc -zv 77.42.44.35 5432
+nc -zv 203.0.113.12 5432
 
 # Check PostgreSQL is running (on DB server)
 systemctl status postgresql
@@ -1497,7 +1498,7 @@ caddy reload
 
 ```bash
 # 1. First, verify PM2 is running and check its working directory
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 show website"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "pm2 show website"
 
 # Look for the "cwd" line - it MUST be /opt/adproject/website
 # If cwd shows a different path, that's the problem
@@ -1516,19 +1517,19 @@ npm run build
 rsync -avz --delete \
   -e "ssh -i ~/.ssh/hetzner-db-mac" \
   .next package.json node_modules public next.config.js \
-  root@46.62.252.96:/opt/adproject/website/
+  root@203.0.113.10:/opt/adproject/website/
 
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 restart website --update-env"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "pm2 restart website --update-env"
 ```
 
 **Problem: PM2 process not running**
 
 ```bash
 # Check PM2 status
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "pm2 list"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "pm2 list"
 
 # If website is not listed or status is "errored", start fresh
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject/website
 pm2 delete website 2>/dev/null
 pm2 start npm --name website -- start -- -p 3002
@@ -1539,10 +1540,10 @@ pm2 save
 
 ```bash
 # Check if .next directory contains the pages
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "ls -la /opt/adproject/website/.next/server/app"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "ls -la /opt/adproject/website/.next/server/app"
 
 # If empty or missing pages, rebuild on server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject/website
 npm run build
 pm2 restart website
@@ -1596,7 +1597,7 @@ Key differences:
 | Servers | 1 droplet | 2 servers (App + DB) |
 | Database | DO Managed Postgres | Self-hosted PostgreSQL 16 |
 | TLS | Nginx + Certbot | Caddy (auto Let's Encrypt) |
-| SSH | `deploy@164.90.232.151` | `root@46.62.252.96` / `root@77.42.44.35` |
+| SSH | `deploy@164.90.232.151` | `root@203.0.113.10` / `root@203.0.113.12` |
 
 ### 12.2 Deprecated Files
 
@@ -1627,14 +1628,14 @@ The following files have been removed or deprecated:
 
 ---
 
-## 13. Continuous SLO Data Population (Test Server 157.90.126.205)
+## 13. Continuous SLO Data Population (Test Server 203.0.113.11)
 
 ### 13.1 Purpose
 
 To keep the public SLO page at `https://apexmediation.ee/slo` populated with live, representative metrics, we run continuous synthetic activity from a dedicated test server. This protects production from artificial load while ensuring SLO/SLA transparency remains meaningful before and during early customer ramp-up.
 
 Key points:
-- Runs from a separate test server: 157.90.126.205
+- Runs from a separate test server: 203.0.113.11
 - Managed operationally the same way as the App Server (same SSH key/process conventions)
 - Exercises: analytics ingestion, status/slo endpoints, and a minimal SSAI session path
 - NO test harness code runs on the App Server. The App Server only runs the normal product services.
@@ -1645,7 +1646,7 @@ Key points:
 
 SSH (same key as App/DB servers):
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac root@157.90.126.205
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.11
 ```
 
 Project layout on the test server should mirror `/opt/adproject` (rsync/tarball deploy acceptable).

@@ -1,0 +1,14 @@
+# mixed file: duplicates, blank lines, commented records and every malformed class
+
+metaads.com, pub-1, DIRECT
+metaads.com, pub-1, DIRECT
+METAADS.COM, PUB-1, direct
+vungle.com, pub-2, RESELLER
+
+
+applovin.com, pub-3, DIRECT, cert-a
+applovin.com, pub-3, RESELLER
+not a domain, pub-4, DIRECT
+metaads.com, , DIRECT
+metaads.com, pub-5, FRIEND
+#admob.com, pub-commented, DIRECT

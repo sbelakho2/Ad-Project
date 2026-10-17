@@ -151,8 +151,8 @@ Alerts are created when:
 
 | Component | Server | Status |
 |-----------|--------|--------|
-| VRA Tables | DB Server (77.42.44.35) | ✅ Deployed |
-| VRA Service | App Server (46.62.252.96) | ✅ Running |
+| VRA Tables | DB Server (203.0.113.12) | ✅ Deployed |
+| VRA Service | App Server (203.0.113.10) | ✅ Running |
 | VRA Scheduler | App Server | ✅ Active |
 | Console UI | App Server | ✅ Deployed |
 

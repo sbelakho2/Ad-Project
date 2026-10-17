@@ -17,3 +17,5 @@ apex-sales 85
 apex-sales-web 84
 apex-tools 54
 apex-ui 98
+apex-vault 83
+apex-watch 84

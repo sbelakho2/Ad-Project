@@ -105,6 +105,11 @@ mod parser_tests {
         assert_eq!(parse_revenue_micros("1.2345678"), None);
         assert_eq!(parse_revenue_micros("1..2"), None);
         assert_eq!(
+            parse_revenue_micros("."),
+            None,
+            "a bare separator has no digits at all"
+        );
+        assert_eq!(
             parse_revenue_micros(".5"),
             None,
             "exports never render a bare fraction"

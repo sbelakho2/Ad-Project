@@ -7,20 +7,23 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use apex_connectors::transport::{
-    HttpBody, HttpRequest, HttpResponse, RecordingSleeper, RetryTransport, Sleeper, Transport,
-    TransportError,
+    HttpBody, HttpMethod, HttpRequest, HttpResponse, RecordingSleeper, RetryTransport, Sleeper,
+    Transport, TransportError,
 };
 use async_trait::async_trait;
 
 use crate::adyen::{
-    create_payment_links, sign_notification_item, verify_notification_item, AdyenClient,
-    AdyenClientError, AdyenHmacError, BillingReceipt, InvoiceLineItem, NotificationItem,
+    collect_invoice, collect_line, create_payment_links, parse_stored_payment_method_id,
+    sign_notification_item, verify_notification_item, AdyenClient, AdyenClientError,
+    AdyenHmacError, BillingReceipt, CollectionChannel, InvoiceLineItem, NotificationItem,
     PaymentLinkResponse, MAX_REFERENCE_LEN,
 };
 use crate::errors::BillingError;
 use crate::invoice::{
     compute_invoice, BillingBasisRecord, BillingPeriod, BillingProofRecord, Invoice, InvoiceLine,
 };
+use crate::profile::BillingProfile;
+use crate::vat::VatTreatment;
 use crate::webhook::verify_adyen_webhook;
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
@@ -41,6 +44,7 @@ fn pinned_item() -> NotificationItem {
         success: "true".into(),
         hmac_signature: PINNED_SIGNATURE.into(),
         payment_method: String::new(),
+        stored_payment_method_id: String::new(),
     }
 }
 
@@ -291,6 +295,7 @@ fn error_response(status: u16) -> HttpResponse {
 fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
     let total_micros: i64 = lines.iter().map(|l| l.fee_micros).sum();
     Invoice {
+        number: 0,
         publisher_id: "pub-1".to_string(),
         period: BillingPeriod {
             year_month: "2026-10".to_string(),
@@ -302,6 +307,8 @@ fn invoice_with(lines: Vec<InvoiceLine>) -> Invoice {
         vat_rate_bp: 0,
         vat_micros: 0,
         gross_micros: total_micros,
+        customer: None,
+        vat_treatment: VatTreatment::NotApplied,
     }
 }
 
@@ -489,6 +496,425 @@ fn receipt_serializes_camel_case() {
     assert!(json.contains("PL-1"), "{json}");
 }
 
+// ---------------------------------------------------------------------------
+// Card on file: stored-method parsing, byte-exact request shaping, the typed
+// fallback path, and the billing-domain platform label.
+// ---------------------------------------------------------------------------
+
+/// The stored-method id a first payment reports, pinned.
+const STORED_ID: &str = "M5N7QDBX1234XZ56Q8F9GT34";
+
+fn stored_charge_ok(psp: &str) -> HttpResponse {
+    MockTransport::ok(
+        200,
+        Some(&format!(
+            r#"{{"pspReference":"{psp}","resultCode":"Authorised"}}"#
+        )),
+    )
+}
+
+#[test]
+fn the_first_payment_webhook_reports_the_stored_method() {
+    // The first payment's webhook carries the stored method id in
+    // additionalData; the field is not signed, so the pinned HMAC vector
+    // still verifies.
+    let body = serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "pspReference": "PSP123",
+                "originalReference": "",
+                "merchantAccountCode": "ApexMerchant",
+                "merchantReference": "apex-fee:pub:exp:2026-10",
+                "amount": {"value": 12_345, "currency": "USD"},
+                "eventCode": "AUTHORISATION",
+                "success": "true",
+                "additionalData": {
+                    "hmacSignature": PINNED_SIGNATURE,
+                    "storedPaymentMethodId": STORED_ID,
+                },
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes();
+    let items = verify_adyen_webhook(&body, KEY).expect("verified");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].stored_payment_method_id, STORED_ID);
+    assert_eq!(
+        items[0].signed_message(),
+        pinned_item().signed_message(),
+        "the stored method is not part of the signed message"
+    );
+
+    // A linked-parse of the raw item carries the same id.
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let item = &value["notificationItems"][0]["NotificationRequestItem"];
+    assert_eq!(
+        parse_stored_payment_method_id(item).as_deref(),
+        Some(STORED_ID)
+    );
+    // Absent, blank and non-string values are none, never a fabricated id.
+    assert_eq!(
+        parse_stored_payment_method_id(&serde_json::json!({"additionalData": {}})),
+        None
+    );
+    assert_eq!(
+        parse_stored_payment_method_id(
+            &serde_json::json!({"additionalData": {"storedPaymentMethodId": "  "}})
+        ),
+        None
+    );
+    assert_eq!(
+        parse_stored_payment_method_id(
+            &serde_json::json!({"additionalData": {"storedPaymentMethodId": 7}})
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn the_stored_charge_request_is_byte_exact() {
+    use apex_core::PlatformId;
+    let mock = MockTransport::new(vec![Ok(stored_charge_ok("PSP-9"))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let receipt = client()
+        .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
+        .await
+        .expect("charge");
+    assert_eq!(receipt.psp_reference, "PSP-9");
+    assert_eq!(receipt.result_code, "Authorised");
+    assert_eq!(receipt.stored_payment_method_id, None);
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.platform, PlatformId::Billing);
+    assert_eq!(call.operation, "chargeStoredPaymentMethod");
+    assert_eq!(call.method, HttpMethod::Post);
+    assert_eq!(call.url, "https://checkout-test.adyen.com/v71/payments");
+    // The pinned body, key for key: amount, ContAuth interaction,
+    // subscription model and the stored method.
+    let body = match call.body.as_ref().expect("body") {
+        HttpBody::Json(value) => serde_json::to_string(value).expect("serialize"),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(
+        body,
+        concat!(
+            r#"{"amount":{"currency":"USD","value":125},"#,
+            r#""description":"Apex proven-lift fee: experiment exp-a (1500 bp of 2500000 micros proven lift)","#,
+            r#""merchantAccount":"ApexMerchant","#,
+            r#""recurringProcessingModel":"Subscription","#,
+            r#""reference":"apex-fee:pub-1:exp-a:2026-10","#,
+            r#""shopperInteraction":"ContAuth","#,
+            r#""shopperReference":"publisher-pub-1","#,
+            r#""storedPaymentMethodId":"M5N7QDBX1234XZ56Q8F9GT34"}"#,
+        )
+    );
+    assert!(call
+        .headers
+        .iter()
+        .any(|(k, v)| k == "Idempotency-Key" && v == "apex-fee:pub-1:exp-a:2026-10"));
+}
+
+#[tokio::test]
+async fn the_link_request_is_byte_exact_and_stores_the_method() {
+    use apex_core::PlatformId;
+    let mock = MockTransport::new(vec![Ok(ok_item("PL-1"))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    client()
+        .create_payment_link(transport.as_ref(), &item)
+        .await
+        .expect("link");
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.platform, PlatformId::Billing);
+    assert_eq!(call.operation, "createPaymentLink");
+    assert_eq!(call.url, "https://checkout-test.adyen.com/v71/paymentLinks");
+    let body = match call.body.as_ref().expect("body") {
+        HttpBody::Json(value) => serde_json::to_string(value).expect("serialize"),
+        other => panic!("unexpected body {other:?}"),
+    };
+    assert_eq!(
+        body,
+        concat!(
+            r#"{"amount":{"currency":"USD","value":125},"#,
+            r#""description":"Apex proven-lift fee: experiment exp-a (1500 bp of 2500000 micros proven lift)","#,
+            r#""merchantAccount":"ApexMerchant","#,
+            r#""recurringProcessingModel":"Subscription","#,
+            r#""reference":"apex-fee:pub-1:exp-a:2026-10","#,
+            r#""shopperReference":"publisher-pub-1","#,
+            r#""storePaymentMethod":true}"#,
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_accepted_stored_charge_needs_no_link() {
+    let mock = MockTransport::new(vec![Ok(stored_charge_ok("PSP-1"))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let collected = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
+        .await
+        .expect("collected");
+    assert_eq!(collected.channel, CollectionChannel::StoredMethod);
+    assert_eq!(collected.psp_reference.as_deref(), Some("PSP-1"));
+    assert_eq!(collected.result_code.as_deref(), Some("Authorised"));
+    assert!(collected.payment_link.is_none());
+    assert_eq!(collected.fallback_reason, None);
+    assert_eq!(mock.calls().len(), 1, "no fallback request");
+}
+
+#[tokio::test]
+async fn a_refused_stored_charge_falls_back_to_a_link_with_the_reason() {
+    // Adyen refuses the token charge (HTTP 200 + resultCode Refused), so the
+    // collection falls back to a link and records why — never a silent skip.
+    let refused = MockTransport::ok(
+        200,
+        Some(r#"{"pspReference":"PSP-REF","resultCode":"Refused"}"#),
+    );
+    let mock = MockTransport::new(vec![Ok(refused), Ok(ok_item("PL-9"))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let collected = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
+        .await
+        .expect("fallback");
+    assert_eq!(collected.channel, CollectionChannel::PaymentLink);
+    assert_eq!(collected.payment_link.as_ref().expect("link").id, "PL-9");
+    assert_eq!(
+        collected.fallback_reason.as_deref(),
+        Some("resultCode Refused")
+    );
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 2, "charge then link");
+    assert_eq!(calls[0].operation, "chargeStoredPaymentMethod");
+    assert_eq!(calls[1].operation, "createPaymentLink");
+    // The fallback link carries the same deterministic idempotency key.
+    assert!(calls[1]
+        .headers
+        .iter()
+        .any(|(k, v)| k == "Idempotency-Key" && v == "apex-fee:pub-1:exp-a:2026-10"));
+}
+
+#[tokio::test]
+async fn a_missing_stored_method_creates_a_link_with_the_typed_reason() {
+    let mock = MockTransport::new(vec![
+        Ok(ok_item("PL-1")),
+        Ok(ok_item("PL-2")),
+        Ok(ok_item("PL-3")),
+    ]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    for absent in [None, Some(""), Some("   ")] {
+        let collected = collect_line(&client(), transport.as_ref(), &item, absent)
+            .await
+            .expect("link");
+        assert_eq!(collected.channel, CollectionChannel::PaymentLink);
+        assert_eq!(
+            collected.fallback_reason.as_deref(),
+            Some("no stored payment method is recorded")
+        );
+    }
+    assert_eq!(mock.calls().len(), 3, "one link per attempt, no charge");
+}
+
+#[tokio::test]
+async fn uncertain_charge_failures_never_fall_back() {
+    // A transport failure may mean the charge landed: falling back could
+    // double-charge, so only a typed refusal falls back.
+    let mock = MockTransport::new(vec![Err(TransportError::Network("dead".into()))]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let error = collect_line(&client(), transport.as_ref(), &item, Some(STORED_ID))
+        .await
+        .expect_err("typed");
+    assert!(matches!(error, BillingError::Network { .. }), "{error:?}");
+    assert_eq!(mock.calls().len(), 3, "retries only, never a link");
+}
+
+#[tokio::test]
+async fn stored_charge_errors_are_typed_and_never_a_link() {
+    for (body, expected) in [
+        (r#"{"pspReference":"PSP-1"}"#, "resultCode"),
+        (r#"{"resultCode":"Authorised"}"#, "pspReference"),
+        (
+            r#"{"resultCode":"Authorised","pspReference":" "}"#,
+            "pspReference",
+        ),
+        ("not json", "not JSON"),
+        (
+            r#"{"resultCode":"Error","pspReference":"PSP-1"}"#,
+            "resultCode Error",
+        ),
+        (
+            r#"{"resultCode":"Cancelled","pspReference":"PSP-1"}"#,
+            "resultCode Cancelled",
+        ),
+    ] {
+        let mock = MockTransport::new(vec![Ok(MockTransport::ok(200, Some(body)))]);
+        let transport = retried(mock.clone());
+        let line = invoice_line(1, "exp-a", 1_250_000);
+        let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+        let error = client()
+            .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
+            .await
+            .expect_err(body);
+        assert!(error.to_string().contains(expected), "{body}: {error}");
+    }
+    // An empty stored id is refused before any request.
+    let mock = MockTransport::new(vec![]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    assert!(matches!(
+        client()
+            .charge_stored_payment_method(transport.as_ref(), &item, " ")
+            .await,
+        Err(BillingError::Malformed(_))
+    ));
+    assert!(mock.calls().is_empty());
+}
+
+#[tokio::test]
+async fn collect_invoice_charges_every_line_on_the_recorded_token() {
+    let mock = MockTransport::new(vec![
+        Ok(stored_charge_ok("PSP-1")),
+        Ok(stored_charge_ok("PSP-2")),
+    ]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![
+        invoice_line(1, "exp-a", 1_250_000),
+        invoice_line(2, "exp-b", 2_000_000),
+    ]);
+    let receipt = collect_invoice(&client(), transport.as_ref(), &invoice, Some(STORED_ID))
+        .await
+        .expect("receipt");
+    assert_eq!(receipt.total_minor_units, 325);
+    assert_eq!(receipt.lines.len(), 2);
+    assert!(receipt
+        .lines
+        .iter()
+        .all(|line| line.channel == CollectionChannel::StoredMethod));
+    assert!(receipt.link_urls().is_empty());
+    assert!(!receipt.has_links());
+    assert_eq!(mock.calls().len(), 2);
+    assert!(mock
+        .calls()
+        .iter()
+        .all(|call| call.operation == "chargeStoredPaymentMethod"));
+}
+
+#[tokio::test]
+async fn billing_calls_never_carry_the_admob_label() {
+    use apex_core::PlatformId;
+    // The regression: billing requests are labeled with the billing domain,
+    // never with an ad-network platform.
+    let refused = MockTransport::ok(
+        200,
+        Some(r#"{"pspReference":"PSP-REF","resultCode":"Refused"}"#),
+    );
+    let mock = MockTransport::new(vec![Ok(refused), Ok(ok_item("PL-1")), Ok(ok_item("PL-2"))]);
+    let transport = retried(mock.clone());
+    let invoice = invoice_with(vec![invoice_line(1, "exp-a", 1_250_000)]);
+    collect_invoice(&client(), transport.as_ref(), &invoice, Some(STORED_ID))
+        .await
+        .expect("collect");
+    let receipt = create_payment_links(&client(), transport.as_ref(), &invoice)
+        .await
+        .expect("links");
+    assert_eq!(receipt.links.len(), 1);
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 3, "charge, fallback link, link-only");
+    for call in &calls {
+        assert_eq!(
+            call.platform,
+            PlatformId::Billing,
+            "billing requests carry the billing domain label: {call:?}"
+        );
+        assert_ne!(call.platform, PlatformId::Admob);
+    }
+}
+
+#[test]
+fn the_stored_method_lookup_reads_the_collection_log() {
+    use crate::collection::{stored_payment_method_id_for_publisher, CollectionEvent};
+    let dir = std::env::temp_dir().join(format!("apex-coll-method-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("collection.jsonl");
+    // A missing log is "none yet", not an error.
+    assert_eq!(
+        stored_payment_method_id_for_publisher(&path, "pub-1").unwrap(),
+        None
+    );
+    let mut first = CollectionEvent::from_item(&pinned_item(), 10);
+    first.merchant_reference = "apex-fee:pub-1:monitoring:2026-10:2026-10".into();
+    first.stored_payment_method_id = "M-OLD".into();
+    let mut newer = first.clone();
+    newer.at_unix_ms = 20;
+    newer.stored_payment_method_id = "M-NEW".into();
+    let mut other_publisher = first.clone();
+    other_publisher.at_unix_ms = 99;
+    other_publisher.merchant_reference = "apex-fee:pub-2:exp:2026-10".into();
+    other_publisher.stored_payment_method_id = "M-OTHER".into();
+    let mut no_method = first.clone();
+    no_method.at_unix_ms = 100;
+    no_method.stored_payment_method_id = String::new();
+    let raw = [first, newer, other_publisher, no_method]
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, format!("{raw}\n")).unwrap();
+    assert_eq!(
+        stored_payment_method_id_for_publisher(&path, "pub-1").unwrap(),
+        Some("M-NEW".to_string()),
+        "the newest recorded method wins; other publishers and empty ids are ignored"
+    );
+    assert_eq!(
+        stored_payment_method_id_for_publisher(&path, "pub-2").unwrap(),
+        Some("M-OTHER".to_string())
+    );
+    assert_eq!(
+        stored_payment_method_id_for_publisher(&path, "pub-3").unwrap(),
+        None
+    );
+    // A corrupt line is a typed refusal, never a silently skipped record.
+    std::fs::write(&path, "{ not json").unwrap();
+    assert!(matches!(
+        stored_payment_method_id_for_publisher(&path, "pub-1"),
+        Err(BillingError::Malformed(_))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collection_events_carry_the_stored_method_and_publisher() {
+    use crate::collection::CollectionEvent;
+    let mut item = pinned_item();
+    item.stored_payment_method_id = STORED_ID.into();
+    let event = CollectionEvent::from_item(&item, 42);
+    assert_eq!(event.stored_payment_method_id, STORED_ID);
+    assert_eq!(event.publisher_id(), Some("pub"));
+    // The publisher segment is parsed strictly.
+    let mut not_ours = event.clone();
+    not_ours.merchant_reference = "other:pub:exp:2026-10".into();
+    assert_eq!(not_ours.publisher_id(), None);
+    let mut empty = event;
+    empty.merchant_reference = "apex-fee::exp:2026-10".into();
+    assert_eq!(empty.publisher_id(), None);
+}
+
 fn period() -> BillingPeriod {
     BillingPeriod {
         year_month: "2023-11".to_string(),
@@ -665,9 +1091,24 @@ fn vat_is_added_on_top_of_the_net_fee() {
     assert_eq!(invoice.vat_micros, 250_000, "20% of the net");
     assert_eq!(invoice.gross_micros, 1_500_000);
     assert_eq!(invoice.line_items[0].gross_micros, 1_500_000);
-    let rendered = invoice.render_vat_invoice();
-    assert!(rendered.contains("VAT (2000 bp)"), "{rendered}");
-    assert!(rendered.contains("gross 1500000 micros"), "{rendered}");
+    // A bare rate is not a decided treatment: the renderer refuses until
+    // `apply_vat_treatment` records one (the golden tests cover the
+    // rendered document itself).
+    assert_eq!(
+        invoice.render_vat_invoice(&seller_profile()),
+        Err(BillingError::UnregisteredInvoice)
+    );
+}
+
+/// A complete seller profile for the renderer refusals in this suite.
+fn seller_profile() -> BillingProfile {
+    BillingProfile {
+        legal_name: "Apex Media OÜ".into(),
+        address_lines: vec!["Sepapaja tn 6".into(), "15551 Tallinn".into()],
+        country: "EE".into(),
+        vat_number: "EE123456789".into(),
+        vat_rate_bp: 2_000,
+    }
 }
 
 #[test]
@@ -733,6 +1174,26 @@ fn every_billing_error_renders_and_converts() {
             seq: 7,
             detail: "u".into(),
         },
+        BillingError::MissingProfileField {
+            party: "seller",
+            field: "legalName",
+        },
+        BillingError::MissingCustomerProfile,
+        BillingError::InvalidVatRate { detail: "d".into() },
+        BillingError::InvalidVatNumber {
+            party: "customer",
+            detail: "d".into(),
+        },
+        BillingError::InvalidCountryCode {
+            party: "seller",
+            value: "X".into(),
+        },
+        BillingError::VatTreatmentNotApplied,
+        BillingError::InconsistentVat { detail: "d".into() },
+        BillingError::UnregisteredInvoice,
+        BillingError::RegisterCorrupt { detail: "d".into() },
+        BillingError::PlanStateCorrupt { detail: "d".into() },
+        BillingError::StoredChargeRefused { detail: "d".into() },
         BillingError::Malformed("m".into()),
         BillingError::InvalidSignature,
     ];
@@ -1044,6 +1505,31 @@ fn basis_invoices_refuse_out_of_period_and_missing_change_ids() {
 }
 
 #[test]
+fn basis_invoices_refuse_an_empty_change_id() {
+    let period = BillingPeriod {
+        year_month: "2026-10".into(),
+        start_unix_ms: 0,
+        end_unix_ms: 1_000_000_000_000,
+    };
+    let record = BillingBasisRecord {
+        seq: 3,
+        at_unix_ms: 500,
+        change_id: String::new(),
+        scope_revenue: 1,
+        incremental: 90_909_090,
+        log_share: 1.0,
+        rate_bp: 2_000,
+        fee_micros: 18_180_000,
+        billed_days: 0,
+        month_days: 0,
+    };
+    assert!(matches!(
+        crate::invoice::compute_invoice_from_basis("pub1", period, &[record]),
+        Err(BillingError::TamperedProof { seq: 3, ref reason }) if reason.contains("no change id")
+    ));
+}
+
+#[test]
 fn a_fresh_collection_store_has_seen_nothing() {
     let dir = std::env::temp_dir().join(format!("apex-coll-fresh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1068,6 +1554,7 @@ fn collection_store_dispatches_through_the_trait_object() {
         success: "true".into(),
         amount_value: 1,
         amount_currency: "USD".into(),
+        stored_payment_method_id: String::new(),
     };
     assert!(store.record(&event).unwrap());
     assert!(!store.record(&event).unwrap());
@@ -1099,6 +1586,7 @@ fn collection_store_surfaces_append_and_directory_errors() {
         success: "true".into(),
         amount_value: 1,
         amount_currency: "USD".into(),
+        stored_payment_method_id: String::new(),
     };
     assert!(matches!(
         store.record(&event),

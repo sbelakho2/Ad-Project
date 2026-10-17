@@ -1,0 +1,19 @@
+[Unit]
+Description=Apex sync pull (object storage to the control host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+# WorkingDirectory anchors the default destinations under the state root:
+# the verified ledger root, the invoice register directory, the sales
+# imports directory and the sync marker under .apex/control. Every
+# destination must stay under /var/lib/apex, the writable path below.
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/sync.env
+ExecStart=/usr/local/bin/apex-sync-pull
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex/.apex/control /var/lib/apex/.apex/ledgers /var/lib/apex/.apex/billing /var/lib/apex/.apex/imports

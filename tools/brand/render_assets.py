@@ -348,14 +348,16 @@ def main() -> None:
     if len(mark) != 3 or len(small) != 3:
         raise SystemExit("expected three paths in both mark masters")
 
+    # logo-32@2x.png and mark-ink@2x.png are the same raster; render it once.
+    mark_ink_2x = rasterize_shapes(mark, (44, 64), 2.0, INK)
     outputs = [
         ("logo-16.png", rasterize_shapes(small, (11, 16), 1.0, INK)),
         ("logo-16@2x.png", rasterize_shapes(small, (22, 32), 2.0, INK)),
         ("logo-24.png", rasterize_shapes(mark, (17, 24), 0.75, INK)),
         ("logo-24@2x.png", rasterize_shapes(mark, (33, 48), 1.5, INK)),
         ("logo-32.png", rasterize_shapes(mark, (22, 32), 1.0, INK)),
-        ("logo-32@2x.png", rasterize_shapes(mark, (44, 64), 2.0, INK)),
-        ("mark-ink@2x.png", rasterize_shapes(mark, (44, 64), 2.0, INK)),
+        ("logo-32@2x.png", mark_ink_2x),
+        ("mark-ink@2x.png", mark_ink_2x),
         ("mark-white@2x.png", rasterize_shapes(mark, (44, 64), 2.0, WHITE)),
         ("mark-cobalt@2x.png", rasterize_shapes(mark, (44, 64), 2.0, COBALT)),
         ("lockup-ink@2x.png", render_lockup(args.root, mark, INK)),

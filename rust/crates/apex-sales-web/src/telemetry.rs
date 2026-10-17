@@ -283,4 +283,101 @@ mod tests {
         assert!(!dir.join("apex-sales-web.prom.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn the_middleware_records_the_matched_route_template() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        async fn ok() -> &'static str {
+            "ok"
+        }
+
+        let state = WebState::new(
+            crate::config::WebConfig::from_env(&apex_sales::cli::Env::new()).expect("config"),
+        );
+        let app = axum::Router::new().route("/thing/{id}", get(ok)).layer(
+            axum::middleware::from_fn_with_state(state.clone(), track_requests),
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/thing/42")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let labels = [
+            ("service", SERVICE),
+            ("route_template", "/thing/{id}"),
+            ("method", "GET"),
+            ("status_class", "2xx"),
+        ];
+        assert_eq!(
+            state
+                .metrics
+                .counter_value(&HTTP_REQUESTS_TOTAL, &labels)
+                .expect("counter"),
+            1
+        );
+        // An unrouted path is not recorded per route.
+        let missing = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/nothing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn textfile_export_is_driven_by_the_environment_variable() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-sales-web-textfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sales-web.prom");
+
+        let registry = Arc::new(Registry::new());
+        observe_request(&registry, "/", Method::Get, StatusCode::OK, 0.1);
+
+        // Unset and blank both count as not configured.
+        std::env::remove_var(apex_metrics::TEXTFILE_ENV);
+        assert!(!textfile_configured());
+        assert!(!spawn_textfile_exporter(Arc::clone(&registry)));
+        export_textfile(&registry);
+        assert!(!path.exists(), "no export without the variable");
+
+        std::env::set_var(apex_metrics::TEXTFILE_ENV, "   ");
+        assert!(!textfile_configured());
+
+        // A real path exports once.
+        std::env::set_var(apex_metrics::TEXTFILE_ENV, path.as_os_str());
+        assert!(textfile_configured());
+        export_textfile(&registry);
+        let contents = std::fs::read_to_string(&path).expect("exported textfile");
+        assert!(contents.contains("apex_http_requests_total"), "{contents}");
+
+        // The spawned exporter writes on its first tick (immediate).
+        let _ = std::fs::remove_file(&path);
+        assert!(spawn_textfile_exporter(Arc::clone(&registry)));
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(path.exists(), "the spawned exporter wrote its first tick");
+
+        std::env::remove_var(apex_metrics::TEXTFILE_ENV);
+        assert!(!textfile_configured());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -1,0 +1,3 @@
+#!/bin/sh
+printf 'rsync %s\n' "$*" >> "${FAKE_CAPTURE_DIR:?}/rsync.argv"
+exit "${FAKE_RSYNC_EXIT:-0}"

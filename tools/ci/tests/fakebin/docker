@@ -1,0 +1,16 @@
+#!/bin/sh
+printf 'docker %s\n' "$*" >> "${FAKE_CAPTURE_DIR:?}/docker.argv"
+case "${1:-}" in
+  info)
+    if [ "${FAKE_DOCKER_INFO_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  run)
+    exit "${FAKE_DOCKER_RUN_EXIT:-0}"
+    ;;
+  *)
+    exit 0
+    ;;
+esac

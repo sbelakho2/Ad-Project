@@ -202,6 +202,33 @@ pub fn render_all(out: &Path) -> Result<Vec<PathBuf>, String> {
         pages::domains::render(&meta, &paused),
     )?;
 
+    // Multi-domain configuration: two sending domains, one quarantined, the
+    // other clean, with the day's plan spread across them.
+    let multi_dir = work.join("multi");
+    seed_multi(&multi_dir)?;
+    let multi = load(
+        &multi_dir,
+        &[(
+            "APEX_SALES_SENDERS",
+            "aaron@one.example|Aaron at Apex|Apex OÜ|Tallinn, Estonia;dana@two.example|Dana at Apex|Apex OÜ|Tallinn, Estonia",
+        )],
+        FIXTURE_NOW,
+    )?;
+    let meta = page_meta("Domains", "Domains", Vec::new(), &multi, &csrf);
+    write(
+        out,
+        &mut files,
+        "domains-multi.html",
+        pages::domains::render(&meta, &multi),
+    )?;
+    let meta = page_meta("Plan", "Plan", Vec::new(), &multi, &csrf);
+    write(
+        out,
+        &mut files,
+        "plan-multi.html",
+        pages::plan::render(&meta, &multi, &data::Transport::Sendmail),
+    )?;
+
     // Empty state: every page with an empty store.
     let empty_dir = work.join("empty");
     let empty = load(&empty_dir, &[], FIXTURE_NOW)?;
@@ -313,6 +340,95 @@ pub fn render_all(out: &Path) -> Result<Vec<PathBuf>, String> {
     )?;
 
     Ok(files)
+}
+
+/// Every fixture page this renderer publishes, in the order the a11y gate
+/// scans them. [`run_cli`] refuses to report success unless the renderer
+/// wrote exactly this list.
+pub const PAGE_NAMES: [&str; 38] = [
+    "domains-empty.html",
+    "domains-multi.html",
+    "domains-paused.html",
+    "domains-quarantine.html",
+    "domains.html",
+    "error-bad-request.html",
+    "error-conflict.html",
+    "error-data-unavailable.html",
+    "error-not-found.html",
+    "leads-empty.html",
+    "leads-filtered.html",
+    "leads.html",
+    "login-failed.html",
+    "login-session-required.html",
+    "login-signed-out.html",
+    "login-unconfigured.html",
+    "login.html",
+    "models-empty.html",
+    "models.html",
+    "overview-empty.html",
+    "overview-quarantine.html",
+    "overview.html",
+    "plan-approval.html",
+    "plan-autonomous.html",
+    "plan-empty.html",
+    "plan-multi.html",
+    "plan-shadow.html",
+    "publisher-suppressed.html",
+    "publisher.html",
+    "replies-empty.html",
+    "replies.html",
+    "result-confirmed.html",
+    "result-failed.html",
+    "sends-empty.html",
+    "sends-preview-refused.html",
+    "sends-preview.html",
+    "sends-sendmail.html",
+    "sends.html",
+];
+
+/// The output directory a `render-fixtures` invocation writes to: the first
+/// argument when present, the documented default otherwise.
+pub fn out_dir(args: &[String]) -> PathBuf {
+    args.first()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("rust/target/ui-fixtures-sales"))
+}
+
+/// One completed `render-fixtures` run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixtureRun {
+    /// The directory the pages were written to.
+    pub out_dir: PathBuf,
+    /// The written page paths, in render order.
+    pub files: Vec<PathBuf>,
+}
+
+/// The whole `render-fixtures` command: resolve the output directory, render
+/// every page, and refuse anything that does not match [`PAGE_NAMES`]. The
+/// binary prints the returned summary; every check is unit-tested here.
+pub fn run_cli(args: &[String]) -> Result<FixtureRun, String> {
+    let out = out_dir(args);
+    let files = render_all(&out)?;
+    if files.len() != PAGE_NAMES.len() {
+        return Err(format!(
+            "the renderer produced {} pages but PAGES lists {}",
+            files.len(),
+            PAGE_NAMES.len()
+        ));
+    }
+    for path in &files {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("page {} is not a UTF-8 file name", path.display()))?;
+        if !PAGE_NAMES.contains(&name) {
+            return Err(format!("page {name} is not listed in PAGES"));
+        }
+    }
+    Ok(FixtureRun {
+        out_dir: out,
+        files,
+    })
 }
 
 fn empty_pages(empty: &RequestData, csrf: &str) -> Vec<(String, String)> {
@@ -532,6 +648,7 @@ fn seed_rich(dir: &Path) -> Result<(), String> {
             at,
             email: email.to_string(),
             publisher: key.to_string(),
+            from: None,
             step,
             arm: if step == 0 { "t0-finding" } else { "t1-offer" }.to_string(),
             message_id: format!("{key}-{step}-{at}"),
@@ -646,7 +763,10 @@ fn seed_rich(dir: &Path) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     store
-        .put_event(&Event::HealthReset { at: day(20) })
+        .put_event(&Event::HealthReset {
+            at: day(20),
+            domain: None,
+        })
         .map_err(|error| error.to_string())?;
     // One recorded approval so the approval page shows an approved row.
     let items = {
@@ -693,6 +813,7 @@ fn seed_complaint_burst(dir: &Path) -> Result<(), String> {
                 at: FIXTURE_NOW - DAY + index,
                 email: format!("c{index}@burst.example"),
                 publisher: "burst.example".to_string(),
+                from: None,
                 step: 0,
                 arm: "t0-finding".to_string(),
                 message_id: format!("m{index}"),
@@ -723,6 +844,7 @@ fn seed_bounce_burst(dir: &Path) -> Result<(), String> {
                 at: FIXTURE_NOW - DAY + index,
                 email: format!("b{index}@bounce.example"),
                 publisher: "bounce.example".to_string(),
+                from: None,
                 step: 0,
                 arm: "t0-finding".to_string(),
                 message_id: format!("m{index}"),
@@ -745,18 +867,106 @@ fn seed_bounce_burst(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A two-domain fixture: domain one carries a complaint burst (quarantined),
+/// domain two is clean, and the plan spreads across both.
+fn seed_multi(dir: &Path) -> Result<(), String> {
+    let store = StateDir::open(dir).map_err(|error| error.to_string())?;
+    for index in 0..6 {
+        let key = format!("multi{index}.example");
+        let mut publisher = base_publisher(
+            &key,
+            &format!("Multi {index}"),
+            Some(5_000 + index as u64 * 1_000),
+        );
+        publisher.ads_txt_missing = true;
+        publisher.evidence.push(Evidence {
+            id: "ads-missing".to_string(),
+            kind: EvidenceKind::AppAdsTxt,
+            source: format!("https://{key}/app-ads.txt"),
+            statement: format!("https://{key}/app-ads.txt was not found"),
+            observed_at: FIXTURE_NOW - DAY,
+        });
+        store
+            .put_publisher(&publisher)
+            .map_err(|error| error.to_string())?;
+        put_contact(
+            &store,
+            &format!("ceo@{key}"),
+            None,
+            &key,
+            ContactKind::Named,
+            "seed list",
+        )?;
+    }
+    for index in 0..40 {
+        store
+            .put_event(&Event::Touch {
+                at: FIXTURE_NOW - DAY + index,
+                email: format!("c{index}@burst.example"),
+                publisher: "burst.example".to_string(),
+                from: Some("one.example".to_string()),
+                step: 0,
+                arm: "t0-finding".to_string(),
+                message_id: format!("m{index}"),
+                local_hour: 9,
+                predicted: Some(0.04),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    for index in 0..5 {
+        store
+            .put_event(&Event::Outcome {
+                at: FIXTURE_NOW - DAY + 100 + index,
+                email: Some(format!("c{index}@burst.example")),
+                publisher: None,
+                outcome: Outcome::Complaint,
+                note: None,
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    for index in 0..4 {
+        store
+            .put_event(&Event::Touch {
+                at: FIXTURE_NOW - DAY + 200 + index,
+                email: format!("k{index}@second.example"),
+                publisher: "second.example".to_string(),
+                from: Some("two.example".to_string()),
+                step: 0,
+                arm: "t0-finding".to_string(),
+                message_id: format!("n{index}"),
+                local_hour: 9,
+                predicted: Some(0.03),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_fixture_set_renders_at_least_eighteen_pages() {
+    fn the_fixture_set_renders_at_least_thirty_eight_pages() {
+        // The entry point resolves the default output directory and rejects
+        // an argument-free run only by its successful default, which is
+        // checked here without rendering twice in one process.
+        assert_eq!(out_dir(&[]), PathBuf::from("rust/target/ui-fixtures-sales"));
         let out =
             std::env::temp_dir().join(format!("apex-sales-web-fixtest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
-        let files = render_all(&out).unwrap();
-        assert!(files.len() >= 18, "{} pages", files.len());
+        assert_eq!(out_dir(&[out.display().to_string()]), out);
+        let run = run_cli(&[out.display().to_string()]).expect("run");
+        assert_eq!(run.out_dir, out);
+        let files = run.files;
+        assert!(files.len() >= 38, "{} pages", files.len());
+        assert_eq!(files.len(), PAGE_NAMES.len(), "the listing stays exact");
         for path in &files {
+            assert!(
+                PAGE_NAMES.contains(&path.file_name().and_then(|n| n.to_str()).unwrap()),
+                "{} is not listed",
+                path.display()
+            );
             let html = std::fs::read_to_string(path).unwrap();
             assert_eq!(html.matches("<h1").count(), 1, "{}", path.display());
             assert!(!html.contains("<script"), "{}", path.display());

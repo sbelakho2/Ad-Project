@@ -2,10 +2,13 @@
 //!
 //! The token exchange on `POST /console/ledger` never keeps the publisher's
 //! access token: it mints an opaque, short-lived session id and puts only that
-//! id in an `HttpOnly`, host-only cookie scoped to `/console`. The store here
-//! is the only place a session lives: bounded, pruned on every use, and gone
-//! on process restart, so a leaked cookie has a small window and no
-//! server-side secret to leak.
+//! id in an `HttpOnly`, host-only cookie scoped to `/console`. The session is
+//! the console's whole access boundary: every console page except the access
+//! panel itself resolves its publisher from the live session, so one
+//! deployment serves many publishers without ever falling back to a
+//! deployment-wide default. The store here is the only place a session lives:
+//! bounded, pruned on every use, and gone on process restart, so a leaked
+//! cookie has a small window and no server-side secret to leak.
 //!
 //! - The cookie id and the CSRF token are 128 random bits hex-encoded; they
 //!   carry no publisher data. The id is never displayed; the access page

@@ -30,12 +30,12 @@ use apex_connectors::snapshot::{
 };
 use apex_connectors::transport::Transport;
 use apex_core::{PlatformError, PlatformId};
+use apex_vault::Vault;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
 use crate::error::ApiError;
-use crate::vault::Vault;
 
 /// Read cap for one encrypted credential bundle.
 pub const MAX_CREDENTIAL_BYTES: u64 = 1024 * 1024;
@@ -125,7 +125,7 @@ impl VaultedFileAccountStore {
     pub fn with_vault_key_hex(
         root: impl Into<PathBuf>,
         key_hex: &str,
-    ) -> Result<Self, crate::vault::VaultError> {
+    ) -> Result<Self, apex_vault::VaultError> {
         Ok(Self::new(root, Vault::from_hex_key(key_hex)?))
     }
 
@@ -318,6 +318,12 @@ impl LiveAuditor {
                 )?;
                 admob_snapshot(&client, &fetcher, &context, now_unix_ms).await?
             }
+            // The billing domain has no platform account or snapshot: it is
+            // never a connectable platform (the console refuses the wire name
+            // before this point), so reaching here is a typed refusal.
+            PlatformId::Billing => {
+                return Err(ApiError::BadRequest("unsupported_platform"));
+            }
         };
         let report = apex_audit::run(&snapshot);
         Ok((snapshot, report))
@@ -364,7 +370,6 @@ mod tests {
     use super::*;
     use crate::sources::{StaticAuditSource, StaticLedgerSource};
     use crate::state::AppState;
-    use crate::vault::Vault;
     use apex_connectors::transport::{
         HttpRequest, HttpResponse, RecordingSleeper, RetryTransport, TransportError,
     };
@@ -847,7 +852,11 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(calls.len(), 4, "auth + two units + app-ads.txt");
         assert!(calls[0].url.contains("/partners/publisher/auth"));
-        assert!(calls[1].url.contains("/mediation/instances/v4"));
+        // The instance path is the connector's own constant, so a documented
+        // endpoint move cannot leave this assertion behind.
+        assert!(calls[1]
+            .url
+            .contains(apex_connectors::levelplay::LEVELPLAY_INSTANCES_V4));
     }
 
     #[tokio::test]

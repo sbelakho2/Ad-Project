@@ -26,15 +26,15 @@
 //! Random draws for a contact are seeded from its touch id, so the plan for
 //! one day is stable across the hourly runs that execute it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::bandit::{choose, Arm, BanditConfig};
 use crate::cadence::{SendTimeModel, StepModel};
 use crate::calendar::{country_offset_minutes, local_parts, next_weekday_hour};
-use crate::compose::{render, templates_for_step, Rendered, Sender, TEMPLATES};
+use crate::compose::{available_templates_for_step, render, Rendered, Sender, TEMPLATES};
 use crate::decision::{decide, Autonomy, Decision, GateInput, Verdict};
 use crate::funnel::{FunnelModel, Stage};
-use crate::health::{HealthConfig, SenderHealth};
+use crate::health::{HealthBook, HealthConfig};
 use crate::holdout::{fnv1a, Holdout};
 use crate::model::{Contact, Outcome, Publisher, ReplyClass, UnixSecs, DAY};
 use crate::policy::{
@@ -48,8 +48,11 @@ use crate::store::{implied_suppression, Event, Snapshot};
 /// Engine configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    /// Who sends.
-    pub sender: Sender,
+    /// The sending identities, one per sending domain, in spread order.
+    pub senders: Vec<Sender>,
+    /// HTTPS Setup Watch checkout base URL, when configured. The publisher
+    /// key is appended. Without it the watch offer variant is unavailable.
+    pub watch_checkout_url: Option<String>,
     /// Operating mode.
     pub autonomy: Autonomy,
     /// Use top-two Thompson sampling to identify the best message faster.
@@ -62,7 +65,7 @@ pub struct Config {
     pub account: AccountRules,
     /// Message bandit.
     pub bandit: BanditConfig,
-    /// Sending-domain health.
+    /// Sending-domain health (per domain; caps warm up independently).
     pub health: HealthConfig,
     /// Touches per sequence (hard cap).
     pub max_steps: usize,
@@ -80,10 +83,16 @@ pub struct Config {
 }
 
 impl Config {
-    /// Defaults around a sender identity.
+    /// Defaults around one sender identity.
     pub fn new(sender: Sender) -> Self {
+        Self::with_senders(vec![sender])
+    }
+
+    /// Defaults around several sender identities (one per sending domain).
+    pub fn with_senders(senders: Vec<Sender>) -> Self {
         Self {
-            sender,
+            senders,
+            watch_checkout_url: None,
             autonomy: Autonomy::Shadow,
             experiment: true,
             holdout: Holdout::default(),
@@ -98,6 +107,17 @@ impl Config {
             settle_days: 14,
             funnel_window_days: [30, 30, 45],
         }
+    }
+
+    /// The identity that sends from `domain`.
+    pub fn sender_for(&self, domain: &str) -> Option<&Sender> {
+        self.senders.iter().find(|s| s.domain() == domain)
+    }
+
+    /// The first configured identity: the one single-domain deployments use
+    /// and the one history without a recorded domain belongs to.
+    pub fn primary_sender(&self) -> Option<&Sender> {
+        self.senders.first()
     }
 }
 
@@ -172,10 +192,8 @@ pub struct Learned {
     pub send_time: SendTimeModel,
     /// Per-step hazards.
     pub steps: StepModel,
-    /// Sending-domain health.
-    pub health: SenderHealth,
-    /// Messages sent today.
-    pub sent_today: u32,
+    /// Sending-domain health, one entry per domain keyed by from-domain.
+    pub health: HealthBook,
     /// Mediation inference.
     pub mediation: MediationModel,
     /// Suppressions.
@@ -220,10 +238,19 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
     let mut suppressions = Suppressions::default();
     let mut progress: BTreeMap<String, Progress> = BTreeMap::new();
     let mut stages: BTreeMap<String, Stages> = BTreeMap::new();
-    let mut day_sends: BTreeMap<i64, u32> = BTreeMap::new();
-    let mut day_complaints: BTreeMap<i64, u32> = BTreeMap::new();
-    let mut day_bounces: BTreeMap<i64, u32> = BTreeMap::new();
-    let mut resets: Vec<i64> = Vec::new();
+    // Health replay, keyed first by from-domain. The first configured sender
+    // is the default: history recorded without a domain (single-domain
+    // deployments, or events older than domain recording) belongs to it.
+    let default_domain = config
+        .primary_sender()
+        .map(|s| s.domain().to_string())
+        .unwrap_or_default();
+    let mut day_sends: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+    let mut day_complaints: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+    let mut day_bounces: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+    let mut resets: Vec<(Option<String>, i64)> = Vec::new();
+    let mut email_domain: BTreeMap<String, String> = BTreeMap::new();
+    let mut publisher_domain: BTreeMap<String, String> = BTreeMap::new();
     let publisher_of = |email: &str| snap.contacts.get(email).map(|c| c.publisher_key.clone());
 
     for e in &snap.events {
@@ -231,6 +258,8 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
             Event::Touch {
                 at,
                 email,
+                publisher,
+                from,
                 step,
                 arm,
                 local_hour,
@@ -248,7 +277,14 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                         local_hour: *local_hour,
                         predicted: *predicted,
                     });
-                *day_sends.entry(at.div_euclid(DAY)).or_default() += 1;
+                let domain = from.clone().unwrap_or_else(|| default_domain.clone());
+                *day_sends
+                    .entry(domain.clone())
+                    .or_default()
+                    .entry(at.div_euclid(DAY))
+                    .or_default() += 1;
+                email_domain.insert(email.clone(), domain.clone());
+                publisher_domain.insert(publisher.clone(), domain);
             }
             Event::Outcome {
                 at,
@@ -260,6 +296,20 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                 let pubkey = publisher
                     .clone()
                     .or_else(|| email.as_deref().and_then(publisher_of));
+                // The sending domain of this outcome: the domain of the
+                // contact's latest touch, else the publisher's, else the
+                // default domain.
+                let domain = email
+                    .as_deref()
+                    .and_then(|em| email_domain.get(em))
+                    .cloned()
+                    .or_else(|| {
+                        pubkey
+                            .as_ref()
+                            .and_then(|pk| publisher_domain.get(pk))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| default_domain.clone());
                 if let Some(reason) = implied_suppression(*outcome) {
                     if let Some(em) = email {
                         suppressions.suppress_email(em, reason);
@@ -272,14 +322,22 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                 }
                 match outcome {
                     Outcome::Complaint => {
-                        *day_complaints.entry(at.div_euclid(DAY)).or_default() += 1;
+                        *day_complaints
+                            .entry(domain.clone())
+                            .or_default()
+                            .entry(at.div_euclid(DAY))
+                            .or_default() += 1;
                         if let Some(em) = email {
                             let pr = progress.entry(em.clone()).or_default();
                             pr.complained_at.get_or_insert(*at);
                         }
                     }
                     Outcome::HardBounce => {
-                        *day_bounces.entry(at.div_euclid(DAY)).or_default() += 1;
+                        *day_bounces
+                            .entry(domain)
+                            .or_default()
+                            .entry(at.div_euclid(DAY))
+                            .or_default() += 1;
                     }
                     Outcome::Reply(class) => {
                         if let Some(em) = email {
@@ -299,12 +357,19 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                             }
                         }
                     }
-                    Outcome::AuditRequested | Outcome::Connected | Outcome::Paid => {
+                    Outcome::AuditRequested
+                    | Outcome::Connected
+                    | Outcome::Paid
+                    | Outcome::WatchSignup => {
                         if let Some(pk) = &pubkey {
                             let st = stages.entry(pk.clone()).or_default();
+                            // A watch signup is a paying customer of the
+                            // monitoring line: for the ladder it counts on
+                            // the connected rung, while the event log keeps
+                            // the distinct outcome.
                             let slot = match outcome {
                                 Outcome::AuditRequested => &mut st.audit,
-                                Outcome::Connected => &mut st.connected,
+                                Outcome::Connected | Outcome::WatchSignup => &mut st.connected,
                                 _ => &mut st.paid,
                             };
                             slot.get_or_insert(*at);
@@ -323,43 +388,60 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                     suppressions.suppress_publisher(pk, SuppressionReason::Operator);
                 }
             }
-            Event::HealthReset { at } => resets.push(at.div_euclid(DAY)),
+            Event::HealthReset { at, domain } => {
+                resets.push((domain.clone(), at.div_euclid(DAY)));
+            }
         }
     }
 
-    // Sending-domain health, replayed day by day.
+    // Sending-domain health, replayed day by day, one independent health per
+    // domain. One domain's complaints never move another domain's state.
     let today = now.div_euclid(DAY);
-    let mut health = SenderHealth::new(&config.health);
+    let domains: Vec<String> = config
+        .senders
+        .iter()
+        .map(|s| s.domain().to_string())
+        .collect();
+    let mut health = HealthBook::new(&config.health, &domains);
     let first_day = day_sends
-        .keys()
-        .chain(day_complaints.keys())
-        .chain(day_bounces.keys())
+        .values()
+        .flat_map(|m| m.keys())
+        .chain(day_complaints.values().flat_map(|m| m.keys()))
+        .chain(day_bounces.values().flat_map(|m| m.keys()))
         .copied()
         .min()
         .unwrap_or(today);
-    let mut sent_today = 0;
     for day in first_day..=today {
-        if resets.contains(&day) {
-            health.reset(&config.health);
-        }
-        let n = day_sends.get(&day).copied().unwrap_or(0);
-        let c = day_complaints.get(&day).copied().unwrap_or(0);
-        for _ in 0..n {
-            health.record_send();
-        }
-        for _ in 0..n.saturating_sub(c) {
-            health.record_complaint_outcome(false, &config.health);
-        }
-        for _ in 0..c {
-            health.record_complaint_outcome(true, &config.health);
-        }
-        for _ in 0..day_bounces.get(&day).copied().unwrap_or(0) {
-            health.record_hard_bounce();
-        }
-        if day < today {
-            health.end_day(day, n, &config.health);
-        } else {
-            sent_today = n;
+        for domain in health.domains().to_vec() {
+            if resets
+                .iter()
+                .any(|(d, at)| *at == day && d.as_deref().is_none_or(|d| d == domain.as_str()))
+            {
+                health.reset(Some(&domain), &config.health);
+            }
+            let n = day_sends
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            let c = day_complaints
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            let b = day_bounces
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            health.record_day(&domain, n, c, b, &config.health);
+            if day < today {
+                if let Some(h) = health.health_mut(&domain) {
+                    h.end_day(day, n, &config.health);
+                }
+            } else {
+                health.set_sent_today(&domain, n);
+            }
         }
     }
 
@@ -482,7 +564,6 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
         send_time,
         steps,
         health,
-        sent_today,
         mediation,
         suppressions,
         accounts,
@@ -500,6 +581,10 @@ pub struct PlanItem {
     pub email: String,
     /// Publisher key.
     pub publisher: String,
+    /// The from-domain this touch is planned to be sent from, once it
+    /// survives the gates and the per-domain caps. `None` on denied or
+    /// deferred items.
+    pub sender: Option<String>,
     /// Step.
     pub step: usize,
     /// Chosen template id, when one rendered.
@@ -529,8 +614,9 @@ pub fn touch_id(email: &str, step: usize, day: i64) -> String {
 }
 
 /// Plan the next touches as of `now`. Items whose gate verdict is not
-/// [`Verdict::Deny`] come first, by expected value; the daily cap is applied
-/// across them.
+/// [`Verdict::Deny`] come first, by expected value; the day's touched are
+/// then spread across the sending domains, each up to its own cap, in the
+/// configured order and round-robin (the spread rule in the module docs).
 pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) -> Vec<PlanItem> {
     let today = now.div_euclid(DAY);
     let hazard_total: f64 = learned
@@ -540,7 +626,32 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         .map(|(a, b)| a / (a + b))
         .sum::<f64>()
         .max(1e-12);
-    let cap_left = learned.health.cap.saturating_sub(learned.sent_today);
+    // The gate sees the whole engine: the cap left across every domain that
+    // may send, and a summary of the domain states. The per-domain split
+    // happens when the ranked items are placed.
+    let cap_left = learned.health.cap_left();
+    let sender_state = learned.health.summary_state();
+    let sender_reason: Option<String> = if config.senders.is_empty() {
+        Some("no sending domain is configured".to_string())
+    } else if config.senders.len() > 1 && !learned.health.may_send() {
+        let states: Vec<String> = learned
+            .health
+            .domains()
+            .iter()
+            .filter_map(|domain| {
+                learned
+                    .health
+                    .get(domain)
+                    .map(|h| format!("{domain}: {}", h.state.as_str()))
+            })
+            .collect();
+        Some(format!(
+            "no sending domain may send ({})",
+            states.join("; ")
+        ))
+    } else {
+        None
+    };
     let mut items = Vec::new();
     for (email, contact) in &snap.contacts {
         let Some(publisher) = snap.publishers.get(&contact.publisher_key) else {
@@ -585,8 +696,11 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             - ca / (ca + cb) * config.complaint_cost;
 
         // Message variant: bandit choice among this step's templates, then the
-        // others by posterior mean if the choice cannot be grounded.
-        let candidates: Vec<&crate::compose::Template> = templates_for_step(k);
+        // others by posterior mean if the choice cannot be grounded. The
+        // Setup Watch variant is enumerated only when its checkout URL is
+        // configured, so an unconfigured offer is never served.
+        let candidates: Vec<&crate::compose::Template> =
+            available_templates_for_step(k, config.watch_checkout_url.is_some());
         let arm_states: Vec<Arm> = candidates
             .iter()
             .filter_map(|t| learned.arms.get(t.id).cloned())
@@ -604,16 +718,24 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         }
         let mut chosen: Option<(String, Rendered)> = None;
         if picked.is_some() {
-            for i in order {
-                let Some(t) = candidates.iter().find(|t| t.id == arm_states[i].id) else {
-                    continue;
-                };
-                if !arm_states[i].is_safe(&config.bandit) {
-                    continue;
-                }
-                if let Ok(r) = render(t, publisher, contact, &config.sender) {
-                    chosen = Some((t.id.to_string(), r));
-                    break;
+            if let Some(feasibility_sender) = config.primary_sender() {
+                for i in order {
+                    let Some(t) = candidates.iter().find(|t| t.id == arm_states[i].id) else {
+                        continue;
+                    };
+                    if !arm_states[i].is_safe(&config.bandit) {
+                        continue;
+                    }
+                    if let Ok(r) = render(
+                        t,
+                        publisher,
+                        contact,
+                        feasibility_sender,
+                        config.watch_checkout_url.as_deref(),
+                    ) {
+                        chosen = Some((t.id.to_string(), r));
+                        break;
+                    }
                 }
             }
         }
@@ -629,7 +751,8 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             legal: config.legal.evaluate(publisher.country.as_deref(), contact),
             account: config.account.evaluate(&acc, email, now),
             held_out: config.holdout.is_held_out(&contact.publisher_key),
-            sender: learned.health.state,
+            sender: sender_state,
+            sender_reason: sender_reason.clone(),
             cap_left,
             grounded: chosen.is_some(),
             variant_available: picked.is_some(),
@@ -648,6 +771,7 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             touch_id: id,
             email: email.clone(),
             publisher: contact.publisher_key.clone(),
+            sender: None,
             step: k,
             arm,
             send_at,
@@ -664,8 +788,13 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             rendered,
         });
     }
-    // Rank, then spend the cap on the best non-denied items. A publisher gets
-    // at most one touch per plan.
+    // Rank, then spread the day's touches across the sending domains: the
+    // survivors keep their rank order and go round-robin over the domains in
+    // configured order, each up to its own remaining cap. A domain that
+    // cannot send (paused or quarantined) or whose cap is spent is skipped,
+    // so its share moves to the others. The engine's global daily cap is the
+    // sum of the per-domain caps. A publisher gets at most one touch per
+    // plan.
     items.sort_by(|a, b| {
         let live = |i: &PlanItem| u8::from(i.decision.verdict != Verdict::Deny);
         live(b)
@@ -673,8 +802,27 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             .then(b.expected_value.total_cmp(&a.expected_value))
             .then(a.touch_id.cmp(&b.touch_id))
     });
-    let mut used = 0u32;
-    let mut publishers_used: Vec<String> = Vec::new();
+    let domain_order: Vec<String> = config
+        .senders
+        .iter()
+        .map(|s| s.domain().to_string())
+        .collect();
+    let mut remaining: Vec<u32> = domain_order
+        .iter()
+        .map(|domain| {
+            learned.health.get(domain).map_or(0, |h| {
+                if h.state.may_send() {
+                    h.cap.saturating_sub(learned.health.sent_today_for(domain))
+                } else {
+                    0
+                }
+            })
+        })
+        .collect();
+    let mut cursor = 0usize;
+    // One touch per publisher per plan: membership is constant-time while the
+    // ranked list is walked in its (observable) order.
+    let mut publishers_used: HashSet<String> = HashSet::new();
     for item in items.iter_mut() {
         if item.decision.verdict == Verdict::Deny
             || matches!(item.decision.verdict, Verdict::Defer(_))
@@ -686,14 +834,63 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
             item.decision
                 .reasons
                 .push("another contact at this publisher is planned".into());
-        } else if used >= cap_left {
-            item.decision.verdict = Verdict::Deny;
-            item.decision
-                .reasons
-                .push("ranked below today's cap".into());
+            continue;
+        }
+        let pick = if domain_order.is_empty() {
+            None
         } else {
-            used += 1;
-            publishers_used.push(item.publisher.clone());
+            (0..domain_order.len())
+                .map(|offset| (cursor + offset) % domain_order.len())
+                .find(|&i| remaining[i] > 0)
+        };
+        match pick {
+            Some(i) => {
+                remaining[i] -= 1;
+                cursor = (i + 1) % domain_order.len();
+                publishers_used.insert(item.publisher.clone());
+                item.sender = Some(domain_order[i].clone());
+            }
+            None => {
+                item.decision.verdict = Verdict::Deny;
+                item.decision.reasons.push(if domain_order.is_empty() {
+                    "no sending domain is configured".into()
+                } else {
+                    "ranked below today's cap".into()
+                });
+            }
+        }
+    }
+
+    // Render each planned touch with the identity of the domain that will
+    // send it. With one sender this is byte-for-byte the same message the
+    // feasibility render above produced.
+    for item in items.iter_mut() {
+        let (Some(domain), Some(arm_id)) = (item.sender.as_deref(), item.arm.as_deref()) else {
+            continue;
+        };
+        let rendered = config.sender_for(domain).and_then(|sender| {
+            let template = TEMPLATES.iter().find(|t| t.id == arm_id)?;
+            let contact = snap.contacts.get(&item.email)?;
+            let publisher = snap.publishers.get(&item.publisher)?;
+            render(
+                template,
+                publisher,
+                contact,
+                sender,
+                config.watch_checkout_url.as_deref(),
+            )
+            .ok()
+        });
+        match rendered {
+            Some(rendered) => item.rendered = Some(rendered),
+            None => {
+                item.sender = None;
+                item.rendered = None;
+                item.decision.verdict = Verdict::Deny;
+                item.decision
+                    .reasons
+                    .push("the message could not be rendered for the sending domain".into());
+            }
         }
     }
     items
@@ -769,6 +966,22 @@ mod tests {
         c
     }
 
+    fn two_sender_config() -> Config {
+        let mut c = Config::with_senders(vec![
+            sender(),
+            Sender {
+                name: "Dana".into(),
+                email: "dana@mail2.example".into(),
+                company: "Apex".into(),
+                postal_address: "Tallinn".into(),
+                unsubscribe_url: None,
+            },
+        ]);
+        c.autonomy = Autonomy::Autonomous;
+        c.holdout.share = 0.0;
+        c
+    }
+
     const NOW: UnixSecs = 20_742 * DAY + 8 * 3600; // Fri 16 Oct 2026 08:00 UTC
 
     #[test]
@@ -776,7 +989,7 @@ mod tests {
         let s = snap(40);
         let c = config();
         let l = learn(&s, &c, NOW);
-        assert_eq!(l.health.cap, c.health.start_cap);
+        assert_eq!(l.health.total_cap(), c.health.start_cap);
         let items = plan(&s, &l, &c, NOW);
         assert_eq!(items.len(), 40);
         let send: Vec<&PlanItem> = items
@@ -794,6 +1007,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.cites == vec!["ev".to_string()]));
             assert!(i.score_reasons.iter().any(|r| r.contains("bias")));
+            assert_eq!(i.sender.as_deref(), Some("apexmediation.ee"));
         }
         let ranked_out = items
             .iter()
@@ -807,6 +1021,237 @@ mod tests {
         assert_eq!(ranked_out, 20);
         // Plans are stable within a day.
         assert_eq!(plan(&s, &l, &c, NOW + 3600)[0].touch_id, items[0].touch_id);
+    }
+
+    #[test]
+    fn a_single_domain_renders_and_records_exactly_as_before() {
+        let s = snap(5);
+        let c = config();
+        let l = learn(&s, &c, NOW);
+        let items = plan(&s, &l, &c, NOW);
+        for item in items.iter().filter(|i| i.decision.verdict == Verdict::Send) {
+            assert_eq!(item.sender.as_deref(), Some("apexmediation.ee"));
+            let publisher = s.publishers.get(&item.publisher).expect("publisher");
+            let contact = s.contacts.get(&item.email).expect("contact");
+            let template = TEMPLATES
+                .iter()
+                .find(|t| Some(t.id) == item.arm.as_deref())
+                .expect("template");
+            let direct = render(
+                template,
+                publisher,
+                contact,
+                c.primary_sender().expect("sender"),
+                None,
+            )
+            .expect("render");
+            assert_eq!(item.rendered.as_ref(), Some(&direct));
+        }
+        // Single-domain touches carry no `from` field, so events.jsonl stays
+        // byte-for-byte as it was.
+        let touch = Event::Touch {
+            at: 1,
+            email: "a@b.io".into(),
+            publisher: "b.io".into(),
+            from: None,
+            step: 0,
+            arm: "t0-finding".into(),
+            message_id: "m".into(),
+            local_hour: 9,
+            predicted: None,
+        };
+        assert!(!touch.to_json().to_json().contains("\"from\""));
+    }
+
+    #[test]
+    fn two_domains_split_a_days_plan_deterministically() {
+        let s = snap(40);
+        let c = two_sender_config();
+        let l = learn(&s, &c, NOW);
+        assert_eq!(l.health.total_cap(), c.health.start_cap * 2);
+        let items = plan(&s, &l, &c, NOW);
+        let send: Vec<&PlanItem> = items
+            .iter()
+            .filter(|i| i.decision.verdict == Verdict::Send)
+            .collect();
+        assert_eq!(send.len(), 40, "sum-of-domains cap");
+        let first = send
+            .iter()
+            .filter(|i| i.sender.as_deref() == Some("apexmediation.ee"))
+            .count();
+        let second = send
+            .iter()
+            .filter(|i| i.sender.as_deref() == Some("mail2.example"))
+            .count();
+        assert_eq!((first, second), (20, 20));
+        // Documented spread rule: round-robin over the rank order, in the
+        // configured sender order.
+        for pair in send.chunks(2) {
+            assert_eq!(pair[0].sender.as_deref(), Some("apexmediation.ee"));
+            assert_eq!(pair[1].sender.as_deref(), Some("mail2.example"));
+        }
+        // The plan is the same on the next hourly run of the same day.
+        let again = plan(&s, &l, &c, NOW + 3600);
+        assert_eq!(
+            again
+                .iter()
+                .map(|i| (i.touch_id.clone(), i.sender.clone()))
+                .collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|i| (i.touch_id.clone(), i.sender.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_paused_domains_share_moves_to_the_others() {
+        let mut s = snap(30);
+        let c = two_sender_config();
+        // Domain A sent 100 and drew 20 hard bounces two days ago: its
+        // breaker fires and it rests; B has no history at all.
+        let past = NOW - 2 * DAY;
+        for i in 0..100 {
+            s.events.push(Event::Touch {
+                at: past + i,
+                email: format!("hist{i}@x.example"),
+                publisher: "hist.example".into(),
+                from: Some("apexmediation.ee".into()),
+                step: 0,
+                arm: "t0-finding".into(),
+                message_id: format!("h{i}"),
+                local_hour: 9,
+                predicted: None,
+            });
+        }
+        for i in 0..20 {
+            s.events.push(Event::Outcome {
+                at: past + 200 + i,
+                email: Some(format!("hist{i}@x.example")),
+                publisher: None,
+                outcome: Outcome::HardBounce,
+                note: None,
+            });
+        }
+        s.events.sort_by_key(Event::at);
+        let l = learn(&s, &c, NOW);
+        assert_eq!(
+            l.health.get("apexmediation.ee").map(|h| h.state),
+            Some(crate::health::SenderState::Paused)
+        );
+        assert_eq!(
+            l.health.get("mail2.example").map(|h| h.state),
+            Some(crate::health::SenderState::Warming)
+        );
+        let items = plan(&s, &l, &c, NOW);
+        let send: Vec<&PlanItem> = items
+            .iter()
+            .filter(|i| i.decision.verdict == Verdict::Send)
+            .collect();
+        assert!(!send.is_empty());
+        assert!(send
+            .iter()
+            .all(|i| i.sender.as_deref() == Some("mail2.example")));
+        assert_eq!(
+            send.len(),
+            c.health.start_cap as usize,
+            "only B's cap bounds the day"
+        );
+    }
+
+    #[test]
+    fn complaints_quarantine_only_the_domain_that_sent() {
+        let mut s = snap(10);
+        let c = two_sender_config();
+        let past = NOW - DAY;
+        for i in 0..40 {
+            s.events.push(Event::Touch {
+                at: past + i,
+                email: format!("c{i}@burst.example"),
+                publisher: "burst.example".into(),
+                from: Some("apexmediation.ee".into()),
+                step: 0,
+                arm: "t0-finding".into(),
+                message_id: format!("m{i}"),
+                local_hour: 9,
+                predicted: None,
+            });
+        }
+        for i in 0..5 {
+            s.events.push(Event::Outcome {
+                at: past + 100 + i,
+                email: Some(format!("c{i}@burst.example")),
+                publisher: None,
+                outcome: Outcome::Complaint,
+                note: None,
+            });
+        }
+        s.events.sort_by_key(Event::at);
+        let l = learn(&s, &c, NOW);
+        assert_eq!(
+            l.health.get("apexmediation.ee").map(|h| h.state),
+            Some(crate::health::SenderState::Quarantined)
+        );
+        assert_eq!(
+            l.health.get("mail2.example").map(|h| h.state),
+            Some(crate::health::SenderState::Warming)
+        );
+        assert_eq!(
+            l.health.get("mail2.example").map(|h| h.cap),
+            Some(c.health.start_cap)
+        );
+        // The complaints also suppress the publisher (they were sent to it),
+        // so plan over publishers without that history.
+        let items = plan(&s, &l, &c, NOW);
+        let send: Vec<&PlanItem> = items
+            .iter()
+            .filter(|i| i.decision.verdict == Verdict::Send)
+            .collect();
+        assert!(!send.is_empty());
+        assert!(send
+            .iter()
+            .all(|i| i.sender.as_deref() == Some("mail2.example")));
+    }
+
+    #[test]
+    fn the_watch_offer_arm_serves_only_with_a_checkout_url() {
+        let s = snap(10);
+        let mut c = two_sender_config();
+        // Registered like every arm; without the URL it is never enumerated.
+        let l = learn(&s, &c, NOW);
+        assert!(l.arms.contains_key("t0-watch"));
+        for item in plan(&s, &l, &c, NOW) {
+            assert_ne!(item.arm.as_deref(), Some("t0-watch"));
+        }
+        // Configured and biased, the bandit serves it like any other arm,
+        // and the rendered message carries the per-publisher checkout link.
+        c.watch_checkout_url = Some("https://apexmediation.ee/watch/".to_string());
+        let mut l = learn(&s, &c, NOW);
+        if let Some(arm) = l.arms.get_mut("t0-watch") {
+            arm.value = (500.0, 1.0);
+        }
+        let items = plan(&s, &l, &c, NOW);
+        let watch: Vec<&PlanItem> = items
+            .iter()
+            .filter(|i| i.arm.as_deref() == Some("t0-watch"))
+            .collect();
+        assert!(!watch.is_empty(), "{items:#?}");
+        if let Some(item) = watch.first() {
+            if let Some(rendered) = &item.rendered {
+                assert!(rendered.body.contains(&format!(
+                    "https://apexmediation.ee/watch/{}",
+                    item.publisher
+                )));
+                assert!(rendered.body.contains(crate::compose::WATCH_PRICE_TEXT));
+            } else {
+                panic!("the watch item must carry its rendered message");
+            }
+        }
+        // Per-arm learning is unchanged: the arm records settlements.
+        if let Some(arm) = l.arms.get_mut("t0-watch") {
+            arm.record(1.0, false, 0, &c.bandit);
+        }
+        assert!(l.arms["t0-watch"].sends >= 1.0);
     }
 
     #[test]
@@ -826,6 +1271,7 @@ mod tests {
                 at: t0 + i as i64,
                 email: (*email).into(),
                 publisher: format!("studio{i}.io"),
+                from: None,
                 step: 0,
                 arm: "t0-finding".into(),
                 message_id: format!("m{i}"),
@@ -895,6 +1341,7 @@ mod tests {
             at: NOW - DAY,
             email: "ceo@studio0.io".into(),
             publisher: "studio0.io".into(),
+            from: None,
             step: 0,
             arm: "t0-short".into(),
             message_id: "m".into(),
@@ -902,7 +1349,7 @@ mod tests {
             predicted: None,
         });
         let l = learn(&s, &c, NOW);
-        assert_eq!(l.sent_today, 0);
+        assert_eq!(l.health.sent_today(), 0);
         assert!(plan(&s, &l, &c, NOW).is_empty(), "3-day gap not reached");
         let later = NOW + 3 * DAY;
         let l = learn(&s, &c, later);

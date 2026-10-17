@@ -26,6 +26,8 @@ pub mod cli;
 pub mod cycle;
 pub mod events;
 pub mod keys;
+pub mod live_admob;
+pub mod live_levelplay;
 pub mod live_max;
 pub mod model;
 pub mod notify;
@@ -35,6 +37,7 @@ pub mod payment_events;
 pub mod plan;
 pub mod projections_job;
 pub mod proposals;
+pub mod registry;
 pub mod runner;
 pub mod settle;
 pub mod telemetry;
@@ -55,6 +58,10 @@ pub use ops::{PlatformOps, RecordingOps};
 pub use payment_events::{PaymentLedgerRow, PaymentsReport, ScheduledRetry};
 pub use plan::{run_cycle, run_cycle_observed};
 pub use proposals::floor_proposals;
+pub use registry::{
+    PublisherRegistry, RegistryEntry, RegistryError, RunnablePublisher, SkipReason,
+    SkippedPublisher,
+};
 pub use runner::{DailyReport, MonthlyReport, Runner};
 pub use settle::settle_experiment;
 pub use telemetry::RunnerTelemetry;

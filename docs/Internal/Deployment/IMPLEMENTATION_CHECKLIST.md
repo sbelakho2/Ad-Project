@@ -122,8 +122,8 @@ NODE_ENV=development node -e "
 cd backend
 npm run build
 
-# Deploy to Hetzner test server
-DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
+# Deploy to Hetzner test server (replace 203.0.113.11 with your test server address)
+DEPLOY_SERVER=203.0.113.11 ./scripts/deploy-all.sh backend
 
 # Verify deployment
 curl https://api-staging.apexmediation.ee/health

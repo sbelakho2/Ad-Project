@@ -316,8 +316,9 @@ kubectl set env deployment/backend \
   -n production
 
 # 3. Monitor Grafana dashboard
-# Hetzner Production: http://46.62.252.96:3001/d/apex-rtb-analytics
-open http://46.62.252.96:3001/d/apex-rtb-analytics
+# Replace 203.0.113.10 with your Grafana host
+# Hetzner Production: http://203.0.113.10:3001/d/apex-rtb-analytics
+open http://203.0.113.10:3001/d/apex-rtb-analytics
 
 # 4. Increase to 10% after 24h
 kubectl set env deployment/backend \

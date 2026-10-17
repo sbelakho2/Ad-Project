@@ -53,7 +53,8 @@ pub fn fraction_to_basis_points(fraction: &str) -> Option<i64> {
     Some(micros / 100)
 }
 
-/// Minimal query-string percent-encoding (RFC 3986 unreserved characters kept).
+/// Minimal percent-encoding for path segments and query values (RFC 3986
+/// unreserved characters kept), so a hostile key cannot forge URL structure.
 pub fn encode_query_component(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for b in raw.bytes() {

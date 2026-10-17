@@ -1,0 +1,8 @@
+{
+  "file": "clean-standard.txt",
+  "note": "Clean standard file: comments, blank lines, a variable and three- and four-field records.",
+  "errors": [],
+  "records": 4,
+  "variables": 2,
+  "domains": ["applovin.com", "google.com", "mintegral.com", "unity3d.com"]
+}

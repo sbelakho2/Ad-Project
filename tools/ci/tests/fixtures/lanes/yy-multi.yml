@@ -1,0 +1,7 @@
+steps:
+  multi:
+    image: rust:1.88-bookworm
+    commands:
+      - echo one
+      - echo two
+      - echo three

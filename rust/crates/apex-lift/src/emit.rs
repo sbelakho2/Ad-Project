@@ -347,6 +347,24 @@ mod tests {
     }
 
     #[test]
+    fn rollback_results_emit_the_rollback_label_with_zero_lambda() {
+        let decision = Decision::Rollback {
+            reason: "flat test".into(),
+        };
+        let record =
+            result(&prereg(), &decision, &estimate(), vec![0.0, 0.001], 0.0).expect("record");
+        match record.record {
+            LiftRecord::Result {
+                decision, lambda, ..
+            } => {
+                assert_eq!(decision, "rollback");
+                assert_eq!(lambda, 0.0);
+            }
+            other => panic!("expected a result record, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn pre_registration_record_round_trips() {
         let original = prereg();
         let emitted = pre_registration(&original).expect("emit");

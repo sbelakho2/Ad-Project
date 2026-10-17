@@ -2,9 +2,57 @@
 //! publisher-override pro-rating and the re-check rule that can only lower
 //! the billed lift.
 
-use apex_core::Micros;
+use apex_core::{Micros, PlatformId};
 
 use crate::error::{LiftError, LiftResult};
+
+/// Why a kept change can never produce a lift fee.
+///
+/// The lift fee bills platform-measured incremental revenue (the lower bound
+/// of the daily log ratio of revenue per user). A platform that documents no
+/// per-variant revenue measurement cannot produce that proof, so its kept
+/// changes are excluded from every fee computation with this typed reason and
+/// never billed — while monitoring and the managed experiment lifecycle stay
+/// untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeIneligible {
+    /// The platform whose measurement gap excludes the fee.
+    pub platform: PlatformId,
+    /// The typed, human-auditable reason.
+    pub reason: String,
+}
+
+/// AdMob documents only a `variantLeader` verdict for mediation A/B
+/// experiments — no revenue (or any other per-variant metric) — so no
+/// measured lift can exist and no fee can ever be billed from one.
+pub const ADMOB_NO_MEASUREMENT_REASON: &str =
+    "no per-variant revenue measurement is documented for AdMob";
+
+/// The fee-eligibility gate: may a kept change on `platform` ever produce a
+/// lift fee?
+///
+/// This is the single fee-eligibility rule of the engine. It lives beside the
+/// fee formulas ([`monthly_fees`]) because eligibility is a property of the
+/// fee's evidence, not of the decision: the decision layer is platform-blind
+/// and a settlement records the measured outcome, while the fee path is the
+/// only place that turns a kept change into money. The caller building the
+/// `KeptChange` set applies this before [`monthly_fees`] ever sees the change,
+/// so an ineligible change can never be billed by any fee computation.
+pub fn fee_eligibility(platform: PlatformId) -> Result<(), FeeIneligible> {
+    match platform {
+        PlatformId::Admob => Err(FeeIneligible {
+            platform,
+            reason: ADMOB_NO_MEASUREMENT_REASON.to_string(),
+        }),
+        // The billing domain carries no measured experiments at all, so no
+        // lift record can ever name it as its platform (defensive arm only).
+        PlatformId::Billing => Err(FeeIneligible {
+            platform,
+            reason: "billing is not a measurement platform".to_string(),
+        }),
+        PlatformId::AppLovinMax | PlatformId::LevelPlay => Ok(()),
+    }
+}
 
 /// Why a change is or is not billed on a given day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,11 +381,64 @@ mod tests {
     }
 
     #[test]
+    fn fee_eligibility_excludes_admob_with_the_typed_reason() {
+        // AdMob can never bill a lift fee: the public API documents no
+        // per-variant revenue measurement, so no measured lift can exist.
+        let ineligible = fee_eligibility(PlatformId::Admob).expect_err("AdMob is excluded");
+        assert_eq!(ineligible.platform, PlatformId::Admob);
+        assert_eq!(ineligible.reason, ADMOB_NO_MEASUREMENT_REASON);
+        assert!(
+            ineligible
+                .reason
+                .contains("no per-variant revenue measurement"),
+            "{ineligible:?}"
+        );
+        // The measurable platforms stay eligible.
+        assert_eq!(fee_eligibility(PlatformId::AppLovinMax), Ok(()));
+        assert_eq!(fee_eligibility(PlatformId::LevelPlay), Ok(()));
+    }
+
+    #[test]
     fn pro_rating_is_exact_and_clamped() {
         assert_eq!(pro_rate(1_000_000, 15, 30), 500_000);
         assert_eq!(pro_rate(1_000_000, 31, 30), 1_000_000);
         assert_eq!(pro_rate(1_000_000, 0, 30), 0);
         assert_eq!(pro_rate(1_000_000, 5, 0), 0);
+    }
+
+    #[test]
+    fn the_billing_pseudo_platform_is_refused_with_its_reason() {
+        // The defensive arm: the billing domain is not a measurement
+        // platform, so a kept change on it can never bill a lift fee.
+        let ineligible = fee_eligibility(PlatformId::Billing).expect_err("billing is excluded");
+        assert_eq!(ineligible.platform, PlatformId::Billing);
+        assert_eq!(ineligible.reason, "billing is not a measurement platform");
+    }
+
+    #[test]
+    fn malformed_overrides_and_unknown_months_fail_closed() {
+        // An impossible or unparsable override day is an error, never an
+        // implicit end to the term.
+        let mut impossible = change("c1", 0.03);
+        impossible.overridden_day = Some("2026-02-30".into());
+        assert!(impossible.billing_stop("2026-03-01").is_err());
+        let mut garbage = change("c1", 0.03);
+        garbage.overridden_day = Some("garbage".into());
+        assert!(garbage.billing_stop("2026-03-01").is_err());
+        // Unknown month numbers fall back to 30 days rather than panicking.
+        assert_eq!(days_in_month(2026, 13), 30);
+        assert_eq!(days_in_month(2026, 4), 30);
+    }
+
+    #[test]
+    fn a_combined_factor_at_or_below_one_is_refused() {
+        // Two -60% changes: each above -100% alone, but the combined factor
+        // is below one and there is no incremental revenue to bill.
+        assert!(monthly_fees(1_000_000, &[change("c1", -0.6), change("c2", -0.6)]).is_err());
+        // A non-finite product cannot be billed either.
+        assert!(
+            monthly_fees(1_000_000, &[change("c1", f64::MAX), change("c2", f64::MAX)]).is_err()
+        );
     }
 
     #[test]

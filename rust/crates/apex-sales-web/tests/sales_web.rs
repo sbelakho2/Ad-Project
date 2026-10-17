@@ -51,6 +51,14 @@ struct Harness {
 }
 
 fn harness_with_token(token: Option<&str>) -> Harness {
+    let mut extra: Vec<(&str, &str)> = Vec::new();
+    if let Some(token) = token {
+        extra.push(("APEX_SALES_WEB_TOKEN", token));
+    }
+    harness_with(&extra)
+}
+
+fn harness_with(extra: &[(&str, &str)]) -> Harness {
     let dir = std::env::temp_dir().join(format!(
         "apex-sales-web-it-{}-{}",
         std::process::id(),
@@ -66,8 +74,8 @@ fn harness_with_token(token: Option<&str>) -> Harness {
         "APEX_SALES_OUTBOX".into(),
         dir.join("outbox").display().to_string(),
     );
-    if let Some(token) = token {
-        env.insert("APEX_SALES_WEB_TOKEN".into(), token.into());
+    for (key, value) in extra {
+        env.insert((*key).to_string(), (*value).to_string());
     }
     let clock = TestClock::new(T0_MS);
     let state =
@@ -257,6 +265,7 @@ fn seed_demo(dir: &Path) {
             at: now - 3 * DAY,
             email: "maria@studio.example".into(),
             publisher: "studio.example".into(),
+            from: None,
             step: 0,
             arm: "t0-finding".into(),
             message_id: "m1".into(),
@@ -269,6 +278,7 @@ fn seed_demo(dir: &Path) {
             at: now - 2 * DAY,
             email: "ceo@quiet.example".into(),
             publisher: "quiet.example".into(),
+            from: None,
             step: 0,
             arm: "t0-finding".into(),
             message_id: "m2".into(),
@@ -303,6 +313,7 @@ fn seed_quarantine(dir: &Path) {
                 at: now - DAY + index,
                 email: format!("c{index}@burst.example"),
                 publisher: "burst.example".into(),
+                from: None,
                 step: 0,
                 arm: "t0-finding".into(),
                 message_id: format!("m{index}"),
@@ -862,6 +873,38 @@ async fn the_quarantined_domain_shows_banner_and_state() {
     assert!(html.contains("The sending domain is quarantined"));
 }
 
+#[tokio::test]
+async fn a_multi_domain_deployment_renders_isolated_domains_and_the_spread() {
+    let harness = harness_with(&[
+        ("APEX_SALES_WEB_TOKEN", TOKEN),
+        (
+            "APEX_SALES_SENDERS",
+            "aaron@one.example|Aaron|Apex|Tallinn;dana@two.example|Dana|Apex|Tallinn",
+        ),
+    ]);
+    seed_demo(&harness.dir);
+    let app = harness.app();
+    let cookie = harness.sign_in().await;
+    // Both domains are listed, one row each.
+    let (status, html) = get(&app, "/domains", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Sending domains"), "{html}");
+    assert!(html.contains("one.example") && html.contains("two.example"));
+    assert!(html.contains("Warming"), "both start warming");
+    // The send history gains the From column.
+    let (status, html) = get(&app, "/sends", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(">From<"), "the history shows the domain");
+    // The plan spreads across the domains and shows where each touch goes.
+    let (status, html) = get(&app, "/plan", Some(&cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains(">From<"), "the plan shows the domain");
+    assert!(
+        html.contains("one.example") || html.contains("two.example"),
+        "a planned touch names its sending domain"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
@@ -1171,4 +1214,95 @@ async fn the_router_records_bounded_route_metrics() {
             ("status_class", "4xx"),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// The entry points the binaries call
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_fixture_entry_point_renders_and_validates_the_page_listing() {
+    let out =
+        std::env::temp_dir().join(format!("apex-sales-web-it-fixtures-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let run =
+        apex_sales_web::fixture_render::run_cli(&[out.display().to_string()]).expect("fixture run");
+    assert_eq!(run.out_dir, out);
+    assert_eq!(
+        run.files.len(),
+        apex_sales_web::fixture_render::PAGE_NAMES.len()
+    );
+    for path in &run.files {
+        let name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            apex_sales_web::fixture_render::PAGE_NAMES.contains(&name),
+            "{name} is not listed in PAGES"
+        );
+        let html = std::fs::read_to_string(path).expect("read page");
+        assert!(html.starts_with("<!DOCTYPE html>"), "{}", path.display());
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(apex_sales_web::fixture_render::fixture_work_dir());
+}
+
+#[tokio::test]
+async fn the_startup_line_and_serve_entry_are_wired_for_the_binary() {
+    // The not-configured startup line keeps the fail-closed contract visible.
+    let harness = harness_with_token(None);
+    let line = apex_sales_web::entry::startup_line(&harness.state);
+    assert!(line.contains("UNCONFIGURED"), "{line}");
+    assert!(line.contains("no session can be minted"), "{line}");
+
+    // The shared serve entry answers on a real listener until its shutdown
+    // future resolves.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(apex_sales_web::entry::serve(
+        listener,
+        harness.state.clone(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.expect("read");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("ok"), "{response}");
+    shutdown_tx.send(()).expect("shutdown");
+    server.await.expect("server task").expect("serve");
+}
+
+#[tokio::test]
+async fn telemetry_helpers_export_the_registry_from_the_environment() {
+    use apex_sales_web::telemetry;
+
+    let dir =
+        std::env::temp_dir().join(format!("apex-sales-web-it-metrics-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("sales-web.prom");
+
+    std::env::remove_var("APEX_METRICS_TEXTFILE");
+    assert!(!telemetry::textfile_configured());
+    std::env::set_var("APEX_METRICS_TEXTFILE", path.as_os_str());
+    assert!(telemetry::textfile_configured());
+
+    let harness = harness_with_token(Some(TOKEN));
+    let (status, _html) = get(&harness.app(), "/healthz", None).await;
+    assert_eq!(status, StatusCode::OK);
+    telemetry::export_textfile(&harness.state.metrics);
+    let contents = std::fs::read_to_string(&path).expect("export");
+    assert!(contents.contains("apex_http_requests_total"), "{contents}");
+
+    std::env::remove_var("APEX_METRICS_TEXTFILE");
+    let _ = std::fs::remove_dir_all(&dir);
 }

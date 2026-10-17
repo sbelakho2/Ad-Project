@@ -1,0 +1,12 @@
+{
+  "file": "malformed-five-field.txt",
+  "note": "The frozen sales parser checks the first four fields and ignores the tail, so line 1 (five valid fields) is accepted; errors on the other five-field lines come from the per-field checks (bad relationship, empty account id).",
+  "errors": [
+    {"line": 2, "kind": "BadRelationship"},
+    {"line": 3, "kind": "EmptyAccountId"},
+    {"line": 4, "kind": "BadRelationship"}
+  ],
+  "records": 1,
+  "variables": 0,
+  "domains": ["applovin.com"]
+}

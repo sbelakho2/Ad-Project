@@ -15,9 +15,9 @@ The Control Plane is a **completely separate service** from the customer-facing 
 
 | Component | Server | Port | Role |
 |-----------|--------|------|------|
-| Control Plane | App (46.62.252.96) | 4000 | **Proxy only** - forwards to test server |
-| **Sales API** | **Test (157.90.126.205)** | 4001 | **ALL orchestration, spintax, scoring** |
-| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (classification) |
+| Control Plane | App (203.0.113.10) | 4000 | **Proxy only** - forwards to test server |
+| **Sales API** | **Test (203.0.113.11)** | 4001 | **ALL orchestration, spintax, scoring** |
+| Edge Worker | Test (203.0.113.11) | 3500 | ML inference (classification) |
 
 ## Critical Separation: Operator vs Customer
 

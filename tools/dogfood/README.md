@@ -17,7 +17,12 @@ Schema, exactly as enforced by `rust/crates/apex-tools/src/dogfood_plan.rs`
 - `probe_classes`: the 12 frozen probe classes, in order. Must equal the
   registry in `dogfood_plan.rs`.
 - `services.<id>.routes`: the routes as registered, `{"path", "methods"}`
-  per route. The static gate requires exact parity with the routers.
+  per route, plus `"session_required": true` on the publisher-console GETs
+  that refuse anonymous reads. The static gate requires exact parity with the
+  routers, validates the marker (present only as `true`, only on an apex-api
+  console GET, never on a documented public console path), and the live
+  harness asserts both directions: anonymous `303 -> /console/ledger` and a
+  render under a live session.
 - `services.<id>.fixture_pages`: must equal the `PAGES` array length in that
   crate's `render-fixtures` bin (the bins carry the array precisely so this
   gate can check it).
@@ -57,14 +62,27 @@ observation) is recorded there too.
   service container). The harness creates a fresh database
   `dogfood_live_<pid>`, seeds `report_days` (10 final days at 5,150,000,000
   micros for publisher northstar) and `domain_events` (one `fee_computed`
-  event) over the HTTP interface, then runs `apex-runner daily` with dummy
-  MAX bases and `APEX_CLICKHOUSE_*` set so the projections are rebuilt and
-  published. Revenue pages must then show USD 51,500.00 — differential truth
-  hides nothing.
+  event) over the HTTP interface, then runs `apex-runner daily` in fleet mode
+  with `APEX_CLICKHOUSE_*` set so the projections are rebuilt and published.
+  Revenue pages must then show USD 51,500.00 — differential truth hides
+  nothing.
 - `apex-api`: fixtures copied from `rust/crates/apex-api/fixtures` plus temp
-  snapshots, ledger, tokens, leads and proposals, mirroring the crate's own
-  tests. The one intended mutation: the snapshot copy's first ad unit gets a
-  hostile name and a formula-leading id so the escaping probe has real cargo.
+  snapshots, ledger, tokens (`APEX_LEDGER_TOKENS_FILE`), leads, the hash-only
+  `signin.jsonl` rows beside them (one valid, one used, one expired link),
+  the watch store root, operator-jobs token/dir and proposals, mirroring the
+  crate's own tests. The one intended mutation: the snapshot copy's first ad
+  unit gets a hostile name and a formula-leading id so the escaping probe has
+  real cargo. A second `apex-api` instance boots with no tokens, no leads and
+  no live-audit/operator token so the documented `503` refusals are asserted.
+- `apex-runner` (fleet mode): the same `credentials` root the console reads
+  holds a vaulted AdMob connection bundle plus its validated meta record, the
+  customer billing sidecars and the recorded managed plan state; the seller
+  profile and an empty AdMob snapshot carrying the seeded `$350k` 30-day
+  revenue live beside it. `cycle` activates the monitoring tier from that
+  band, and a signed kept AdMob change (`experimentStarted` +
+  `experimentObserved` + `preRegistration` + `result keep`) is seeded into the
+  shared ledger with the deployment's runner seed — the product's own ledger
+  verifier accepts every line.
 - `apex-control`: two operators hashed through `apex-control hash-password`
   (TOTP secret `AAAA…B`), journal/jobs/ledger/policies/interventions in the
   workdir, the committed northstar ledger as the read-only evidence source.
@@ -76,6 +94,21 @@ observation) is recorded there too.
 - The site is never served: its probe parses `site/public` statically, and
   when the directory is absent the check is *skipped with the reason
   recorded*, never silently.
+
+## The monetization truth cells
+
+The differential-truth probe runs the product's own billing machinery over
+the seeded stores and cross-checks every observable:
+
+- the monthly runner run renders the monitoring line at the tier chosen from
+  the seeded 30-day revenue band (Mid, `$1,500`) and its recorded stop
+  period, the plan state file and the console monitoring page must agree;
+- the setup-watch sign-up submitted through the public form is billed by
+  `apex-watch bill` as exactly one `setup-watch:$period` `$99` line, and the
+  second run reports it skipped;
+- the kept AdMob change is typed fee-ineligible (no per-variant revenue
+  measurement) in the monthly report and the shared ledger, and no billed
+  artifact anywhere names it.
 
 ## Honest-state acceptance
 
@@ -96,6 +129,14 @@ Mechanical notes:
   the byte-aligned form of the same secret.
 - The harness seeds control accounts through the real subcommand:
   `apex-control hash-password` with the password on stdin, PHC on stdout.
+- The vaulted credential bundle (`<publisher>.blob`, AES-256-GCM,
+  `nonce-hex.ciphertext-hex`) and the seeded ledger lines (ed25519 over the
+  canonical record hash, `{"record":..,"signature":hex,"pubkey":hex}`) are
+  written by the stdlib-only implementations at the top of `live.py`, pinned
+  against the published NIST AES-GCM and RFC 8032 test vectors by
+  `crypto_self_check`, which runs at boot. The product itself is the final
+  oracle: the registry decrypts the blob and the ledger verifier accepts the
+  chain, or the live run fails.
 
 ## Teardown
 

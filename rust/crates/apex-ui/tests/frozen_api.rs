@@ -207,3 +207,40 @@ fn logo_and_theme_public_surface_is_frozen() {
     assert_eq!(theme::resolve(Some("dark")), Theme::Dark);
     assert!(theme::theme_form("/console/settings", Theme::Auto).contains("method=\"post\""));
 }
+
+#[test]
+fn the_committed_faces_and_the_linked_stylesheet_shell_resolve() {
+    for name in apex_ui::fonts::FONT_NAMES {
+        let bytes = apex_ui::fonts::font_bytes(name).unwrap_or(&[]);
+        assert!(
+            bytes.starts_with(b"wOF2"),
+            "{name} must be a committed WOFF2"
+        );
+        assert!(
+            apex_ui::fonts::request_bytes(&format!("{name}.woff2")).is_some(),
+            "{name} must resolve through the request path"
+        );
+    }
+    assert!(apex_ui::fonts::request_bytes("manrope-400.ttf").is_none());
+    assert!(apex_ui::fonts::request_bytes("../secrets").is_none());
+
+    let ctx = PageCtx {
+        title: "Leads".to_string(),
+        area: Area::SalesPlane,
+        publisher_label: Some("Northstar Studio".to_string()),
+        breadcrumb: vec!["Workspace".to_string()],
+        read_only: false,
+        theme: Theme::Light,
+        help_href: None,
+        marketing_header: false,
+    };
+    let html = apex_ui::shell::page_with_css(&ctx, "<h1>Leads</h1>", "/assets/apex.css");
+    assert_eq!(html.matches("<style").count(), 0, "no embedded stylesheet");
+    assert_eq!(
+        html.matches("<link rel=\"stylesheet\"").count(),
+        1,
+        "exactly one stylesheet link"
+    );
+    assert!(html.contains("href=\"/assets/apex.css\""));
+    assert!(html.contains("href=\"/leads\""));
+}

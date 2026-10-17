@@ -3,12 +3,12 @@
 # and assert the routing table. Run from the repository root with `caddy` and
 # `python3` on PATH. Exits nonzero on any violation.
 #
-# The checks pin the one-origin layout: the marketing host serves the static
-# site and proxies only POST /free-audit, /audit-requested/* and /console* to
-# apex-api; the API host fronts apex-api; the operator host fronts apex-control
-# alone; the marketing host carries the JSON access log `apex-ingest` reads;
-# and no route reaches anything but the two loopback services (ClickHouse is
-# never exposed).
+# The checks pin the two-origin public layout: the marketing host serves the
+# static site and proxies only POST /free-audit, /audit-requested/* and
+# /console* to apex-api; the API host fronts apex-api; the operator origin is
+# removed from this edge (apex-control binds loopback on the control host);
+# the marketing host carries the JSON access log `apex-ingest` reads; and no
+# route reaches anything but apex-api (ClickHouse is never exposed).
 set -eu
 
 CONFIG=${1:-infrastructure/caddy/Caddyfile}
@@ -18,7 +18,6 @@ trap 'rm -f "$ADAPTED"' EXIT
 APEX_ACCESS_LOG=/tmp/apex-access-contract.json \
 APEX_DOMAIN=api.edge.test \
 SITE_DOMAIN=www.edge.test \
-CONTROL_DOMAIN=control.edge.test \
 	caddy adapt --config "$CONFIG" --adapter caddyfile > "$ADAPTED"
 
 python3 - "$ADAPTED" <<'PY'
@@ -126,7 +125,9 @@ api = host_routes("api.edge.test")
 control = host_routes("control.edge.test")
 check(site is not None, "marketing host block is missing")
 check(api is not None, "API host block is missing")
-check(control is not None, "operator host block is missing")
+# The operator origin was removed from the public edge; the control plane is
+# not routed here at all (it binds loopback on the control host).
+check(control is None, "the removed operator host block must not return")
 
 if site is not None:
     # POST /free-audit reaches apex-api; the GET marketing pages stay static.
@@ -170,6 +171,11 @@ if site is not None:
         has_file_server(handlers_for(site, "GET", "/fonts/manrope-latin.woff2")),
         "static asset paths must be served by the static file server",
     )
+    # Metrics never reach the public marketing host either.
+    check(
+        not proxies_in(handlers_for(site, "GET", "/metrics")),
+        "GET /metrics must not be proxied on the marketing host",
+    )
 
 if api is not None:
     for method, path in (("GET", "/"), ("POST", "/v1/leads"), ("GET", "/console/audit")):
@@ -177,20 +183,23 @@ if api is not None:
             proxies_in(handlers_for(api, method, path)) == ["127.0.0.1:8787"],
             f"{method} {path} on the API host must proxy to apex-api",
         )
+    # Metrics are operator-only: the public API host must never proxy the
+    # path (apex-api serves it on the loopback bind the operator scrapes).
+    check(
+        not proxies_in(handlers_for(api, "GET", "/metrics")),
+        "GET /metrics must not be proxied on the public API host",
+    )
+    check(
+        proxies_in(handlers_for(api, "GET", "/healthz")) == ["127.0.0.1:8787"],
+        "GET /healthz on the API host must still proxy to apex-api",
+    )
+    check(
+        proxies_in(handlers_for(api, "GET", "/v1/audit/admob")) == ["127.0.0.1:8787"],
+        "GET /v1/audit/{platform} on the API host must still proxy to apex-api",
+    )
 
-if control is not None:
-    for method, path in (("GET", "/"), ("POST", "/control/login"), ("GET", "/control/system")):
-        handlers = handlers_for(control, method, path)
-        check(
-            proxies_in(handlers) == ["127.0.0.1:8790"],
-            f"{method} {path} on the operator host must proxy to apex-control alone",
-        )
-        check(
-            not has_file_server(handlers),
-            "the operator host must not serve static files",
-        )
-
-# Host isolation: each host reaches exactly its own service.
+# Host isolation: each host reaches exactly its own service, and the control
+# plane's port appears nowhere.
 if site is not None:
     check(
         dials_in_routes(site) == {"127.0.0.1:8787"},
@@ -200,11 +209,6 @@ if api is not None:
     check(
         dials_in_routes(api) == {"127.0.0.1:8787"},
         "the API host must only reach apex-api",
-    )
-if control is not None:
-    check(
-        dials_in_routes(control) == {"127.0.0.1:8790"},
-        "the operator host must only reach apex-control",
     )
 
 # No route anywhere reaches ClickHouse or any other service.
@@ -225,12 +229,12 @@ def walk(value):
 
 walk(config)
 check(
-    all_dials <= {"127.0.0.1:8787", "127.0.0.1:8790"},
-    f"unexpected upstream(s); ClickHouse must stay unreachable: {sorted(all_dials)}",
+    all_dials <= {"127.0.0.1:8787"},
+    f"unexpected upstream(s); only apex-api may be dialed: {sorted(all_dials)}",
 )
 text = json.dumps(config)
-for port in ("8123", "9000"):
-    check(port not in text, f"ClickHouse port {port} appears in the edge config")
+for port in ("8123", "9000", "8790"):
+    check(port not in text, f"port {port} must not appear in the edge config")
 
 # The marketing origin carries the JSON access log apex-ingest reads.
 logs = config.get("logging", {}).get("logs", {})
@@ -260,8 +264,8 @@ check(
     "only the marketing host carries the access log",
 )
 check(
-    {"api.edge.test", "control.edge.test"} <= skipped,
-    "the API and operator hosts must be excluded from the marketing access log",
+    "api.edge.test" in skipped,
+    "the API host must be excluded from the marketing access log",
 )
 
 if failures:
@@ -270,8 +274,9 @@ if failures:
         print(f"  - {failure}")
     sys.exit(1)
 print(
-    "caddy-edge-contract PASS: 3 hosts, POST /free-audit + /audit-requested/* + "
-    "/console* to apex-api, GET marketing pages static, operator host isolated to "
-    "apex-control, JSON access log on the marketing origin, no ClickHouse route"
+    "caddy-edge-contract PASS: 2 hosts, POST /free-audit + /audit-requested/* + "
+    "/console* to apex-api, GET marketing pages static, no operator block on the "
+    "edge, /metrics refused on the public hosts, JSON access log on the marketing "
+    "origin, no ClickHouse route"
 )
 PY

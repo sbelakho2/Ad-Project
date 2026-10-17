@@ -1,0 +1,5 @@
+# no records here yet
+
+#CONTACT=someone@example.com
+   
+# end of file

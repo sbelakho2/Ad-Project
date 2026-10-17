@@ -1,0 +1,17 @@
+[Unit]
+Description=Apex watch — monthly setup-watch billing pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+# Bills the month just closed through the runner's invoice register
+# (.apex/billing/invoices.jsonl under the state root).
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/watch.env
+ExecStart=/usr/local/bin/apex-watch bill
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex

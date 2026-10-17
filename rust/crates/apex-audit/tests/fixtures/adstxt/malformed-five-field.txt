@@ -1,0 +1,4 @@
+applovin.com, pub-1, DIRECT, f08c47fec0942fa0, extra-field
+mintegral.com, pub-2, SIDEWAYS, cert-1, cert-2
+unityads.com, , DIRECT, cert-3, cert-4
+chartboost.com, 77, , cert-5, cert-6

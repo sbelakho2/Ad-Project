@@ -1,6 +1,6 @@
 +++
 title = "Apex pricing | Fees tied to qualifying gains"
-description = "Free read-only audit. Lift fees of 15% to 20%, with a clear term and calculation. Optional monitoring is $500 per month."
+description = "Free read-only audit. Lift fees of 15% to 20%, with a clear term and calculation. Monitoring is included from $500 a month, cancel any time."
 template = "page.html"
 
 [extra]
@@ -19,11 +19,12 @@ lines = [
 ]
 
 [[extra.panels]]
-title = "Optional monitoring"
-lead = "$500 / month"
+title = "Monitoring"
+lead = "$500-$3,000 / month"
 lines = [
+  "Included at connection, cancel any time.",
   "Daily measurement, guardrail monitoring and customer-impact alerts.",
-  "A separate plan, billed month to month.",
+  "Tiers by reported 30-day revenue: $500 under $100k, $1,500 up to $500k, $3,000 above.",
 ]
 +++
 
@@ -35,11 +36,19 @@ A positive point estimate alone is not enough. A kept change must pass the regis
 
 A qualifying kept change can be billed for up to 12 months from its keep date. If you override the setting, billing for that change stops and the active period is prorated. A qualifying recheck can reduce the billed lift; it cannot raise it. Your order describes the applicable recheck schedule.
 
-## Optional monitoring
+## Monitoring
 
-$500 per month, optional.
+Monitoring is included, cancel any time.
 
-Daily measurement passes, guardrail monitoring and customer-impact alerts. This is a separate monthly plan and can carry a fee even when there is no billable lift. It is never added automatically.
+It switches on at connection and covers daily measurement passes, guardrail monitoring and customer-impact alerts. The price follows your reported 30-day revenue:
+
+<ul class="facts-list">
+  <li>$500 per month under $100k of monthly revenue.</li>
+  <li>$1,500 per month from $100k up to $500k.</li>
+  <li>$3,000 per month above $500k.</li>
+</ul>
+
+A monitoring line can carry a fee even when there is no billable lift. Cancel any time; the plan bills the current month only and stops after it.
 
 ## Worked example
 

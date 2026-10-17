@@ -17,6 +17,7 @@
 //! - **Credits, taxes and monitoring remain distinct** lines,
 //! - a missing VAT rate is "Not available", never a fabricated tax.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use apex_billing::CollectionEvent;
@@ -28,10 +29,6 @@ use crate::error::ApiError;
 /// VAT rate of the workspace in basis points (unset means no rate is
 /// recorded; the invoice shows VAT as unavailable, never as zero).
 pub const VAT_RATE_ENV: &str = "APEX_BILLING_VAT_RATE_BP";
-/// Monitoring plan monthly fee in micros (unset means nothing is selected).
-pub const MONITORING_FEE_ENV: &str = "APEX_MONITORING_FEE_MICROS";
-/// Monitoring plan effective day (`YYYY-MM-DD`), optional.
-pub const MONITORING_SINCE_ENV: &str = "APEX_MONITORING_SINCE";
 /// Read cap for the collection log.
 pub const MAX_COLLECTION_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -128,23 +125,159 @@ pub struct InvoiceRegisterRow {
     pub is_current: bool,
 }
 
-/// The monitoring plan state.
+/// The monitoring plan state, from the publisher's recorded plan state file.
+/// Nothing is fabricated: an unrecorded plan is "not recorded" and a
+/// malformed state file is a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitoringView {
-    /// The monthly fee, when a plan is selected.
+    /// Whether the plan is recorded as on (it switches on at connection).
+    pub active: bool,
+    /// The recorded tier.
+    pub tier: Option<apex_billing::MonitoringTier>,
+    /// The recorded monthly fee in micros.
     pub fee_micros: Option<i64>,
-    /// The effective day, when one is recorded.
+    /// The recorded effective day (`YYYY-MM-DD`).
     pub since: Option<String>,
+    /// Cancelled plans: the last period (`YYYY-MM`) the plan bills.
+    pub stops_after: Option<String>,
 }
 
 impl MonitoringView {
-    /// The frequency label: whether a monitoring plan is selected.
-    pub fn selected_label(&self) -> &'static str {
-        match self.fee_micros {
-            Some(_) => "Selected",
-            None => "Not selected",
+    /// A plan with nothing recorded.
+    pub fn not_recorded() -> Self {
+        Self {
+            active: false,
+            tier: None,
+            fee_micros: None,
+            since: None,
+            stops_after: None,
         }
     }
+
+    /// The view of one recorded plan state.
+    pub fn from_state(state: &apex_billing::PlanState) -> Self {
+        Self {
+            active: state.active,
+            tier: state.tier,
+            fee_micros: Some(state.monthly_fee_micros),
+            since: (!state.since.trim().is_empty()).then(|| state.since.clone()),
+            stops_after: state.stops_after.clone(),
+        }
+    }
+
+    /// The plan label: included (on at connection), cancelled, or not
+    /// recorded.
+    pub fn selected_label(&self) -> &'static str {
+        if !self.active {
+            "Not recorded"
+        } else if self.stops_after.is_some() {
+            "Cancelled"
+        } else {
+            "Included"
+        }
+    }
+
+    /// The recorded tier label, when one is recorded.
+    pub fn tier_label(&self) -> Option<&'static str> {
+        self.tier.map(apex_billing::MonitoringTier::label)
+    }
+
+    /// Whether a cancellation is recorded (the plan bills its stop period
+    /// and stops after it).
+    pub fn cancelled(&self) -> bool {
+        self.stops_after.is_some()
+    }
+}
+
+/// The managed ad-ops plan state, from the publisher's recorded plan state
+/// file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedView {
+    /// Whether the plan is recorded as on.
+    pub active: bool,
+    /// The recorded monthly fee in micros.
+    pub fee_micros: Option<i64>,
+    /// The recorded effective day (`YYYY-MM-DD`).
+    pub since: Option<String>,
+    /// Cancelled plans: the last period (`YYYY-MM`) the plan bills.
+    pub stops_after: Option<String>,
+}
+
+impl ManagedView {
+    /// A plan with nothing recorded.
+    pub fn not_recorded() -> Self {
+        Self {
+            active: false,
+            fee_micros: None,
+            since: None,
+            stops_after: None,
+        }
+    }
+
+    /// The view of one recorded plan state.
+    pub fn from_state(state: &apex_billing::PlanState) -> Self {
+        Self {
+            active: state.active,
+            fee_micros: Some(state.monthly_fee_micros),
+            since: (!state.since.trim().is_empty()).then(|| state.since.clone()),
+            stops_after: state.stops_after.clone(),
+        }
+    }
+
+    /// The plan label: active, cancelled, or not recorded.
+    pub fn selected_label(&self) -> &'static str {
+        if !self.active {
+            "Not recorded"
+        } else if self.stops_after.is_some() {
+            "Cancelled"
+        } else {
+            "Active"
+        }
+    }
+
+    /// Whether a cancellation is recorded.
+    pub fn cancelled(&self) -> bool {
+        self.stops_after.is_some()
+    }
+}
+
+/// Read one publisher's plan state file (`<root>/<publisher>.<slug>.json`).
+/// No connections root or no file means nothing is recorded; a malformed
+/// file is a typed refusal, never a fabricated plan.
+pub fn plan_state_view(
+    root: Option<&Path>,
+    publisher: &str,
+    plan: apex_billing::PlanId,
+) -> Result<Option<apex_billing::PlanState>, ApiError> {
+    let Some(root) = root else {
+        return Ok(None);
+    };
+    let path = apex_billing::PlanState::path_for(root, publisher, plan);
+    apex_billing::PlanState::load(&path)
+        .map_err(|error| ApiError::Internal(format!("plan state: {error}")))
+}
+
+/// The monitoring plan view for one publisher.
+pub fn monitoring_state_view(
+    root: Option<&Path>,
+    publisher: &str,
+) -> Result<MonitoringView, ApiError> {
+    Ok(
+        match plan_state_view(root, publisher, apex_billing::PlanId::Monitoring)? {
+            Some(state) => MonitoringView::from_state(&state),
+            None => MonitoringView::not_recorded(),
+        },
+    )
+}
+
+/// The managed ad-ops plan view for one publisher.
+pub fn managed_state_view(root: Option<&Path>, publisher: &str) -> Result<ManagedView, ApiError> {
+    Ok(
+        match plan_state_view(root, publisher, apex_billing::PlanId::Managed)? {
+            Some(state) => ManagedView::from_state(&state),
+            None => ManagedView::not_recorded(),
+        },
+    )
 }
 
 /// One recorded billing change (override, re-check, term end).
@@ -364,33 +497,35 @@ pub fn build(
     months.sort();
     months.dedup();
     months.reverse();
+    // One pass over the fee lines and one over the payments, grouped by
+    // period: per-month scans of both lists would grow with the register
+    // squared in a ledger with many periods.
+    let mut total_by_month: HashMap<&str, i64> = HashMap::new();
+    for line in &fee_lines {
+        *total_by_month.entry(line.month.as_str()).or_default() += line.fee_micros;
+    }
+    let mut collected_by_month: HashMap<String, i64> = HashMap::new();
+    let mut excluded_by_month: HashMap<String, usize> = HashMap::new();
+    for event in &payments {
+        let Some(period) = merchant_reference_period(&event.merchant_reference) else {
+            continue;
+        };
+        if !event.success.eq_ignore_ascii_case("true") {
+            continue;
+        }
+        if event.amount_currency.eq_ignore_ascii_case(currency) {
+            *collected_by_month.entry(period).or_default() +=
+                event.amount_value.saturating_mul(10_000);
+        } else {
+            *excluded_by_month.entry(period).or_default() += 1;
+        }
+    }
     let register: Vec<InvoiceRegisterRow> = months
         .iter()
         .map(|period| {
-            let total: i64 = fee_lines
-                .iter()
-                .filter(|line| &line.month == period)
-                .map(|line| line.fee_micros)
-                .sum();
-            let collected: i64 = payments
-                .iter()
-                .filter(|event| {
-                    merchant_reference_period(&event.merchant_reference).as_deref()
-                        == Some(period.as_str())
-                })
-                .filter(|event| event.success.eq_ignore_ascii_case("true"))
-                .filter(|event| event.amount_currency.eq_ignore_ascii_case(currency))
-                .map(|event| event.amount_value.saturating_mul(10_000))
-                .sum();
-            let excluded_foreign_receipts = payments
-                .iter()
-                .filter(|event| {
-                    merchant_reference_period(&event.merchant_reference).as_deref()
-                        == Some(period.as_str())
-                })
-                .filter(|event| event.success.eq_ignore_ascii_case("true"))
-                .filter(|event| !event.amount_currency.eq_ignore_ascii_case(currency))
-                .count();
+            let total = total_by_month.get(period.as_str()).copied().unwrap_or(0);
+            let collected = collected_by_month.get(period).copied().unwrap_or(0);
+            let excluded_foreign_receipts = excluded_by_month.get(period).copied().unwrap_or(0);
             let state = if period == &current_month {
                 InvoiceStateView::Draft
             } else if collected >= total && total > 0 {
@@ -457,17 +592,6 @@ pub fn vat_rate_from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Option<u16>
         .filter(|rate| *rate <= 10_000)
 }
 
-/// The monitoring plan from the environment, when one is selected.
-pub fn monitoring_from_env(lookup: &dyn Fn(&str) -> Option<String>) -> MonitoringView {
-    let fee = lookup(MONITORING_FEE_ENV)
-        .and_then(|raw| raw.trim().parse::<i64>().ok())
-        .filter(|fee| *fee > 0);
-    MonitoringView {
-        fee_micros: fee,
-        since: lookup(MONITORING_SINCE_ENV).filter(|value| !value.trim().is_empty()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -503,6 +627,7 @@ mod tests {
             success: success.to_string(),
             amount_value: amount_minor,
             amount_currency: currency.to_string(),
+            stored_payment_method_id: String::new(),
         }
     }
 
@@ -531,10 +656,7 @@ mod tests {
             &records,
             payments,
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(view.current_month, "2026-10");
@@ -570,10 +692,7 @@ mod tests {
             &records,
             vec![payment("2026-09", 10_000, "false", "psp-1")],
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(view.collected_for("2026-09"), 0);
@@ -591,10 +710,7 @@ mod tests {
             &records,
             vec![payment_in("2026-09", 300, "true", "psp-eur", "EUR")],
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(view.collected_for("2026-09"), 0);
@@ -625,10 +741,7 @@ mod tests {
                 payment_in("2026-09", 10_000, "true", "psp-usd", "usd"),
             ],
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         assert_eq!(
@@ -671,15 +784,12 @@ mod tests {
             &[],
             vec![],
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         assert!(view.register.is_empty());
         assert!(view.fee_lines.is_empty());
-        assert_eq!(view.monitoring.selected_label(), "Not selected");
+        assert_eq!(view.monitoring.selected_label(), "Not recorded");
         assert_eq!(view.total_for("2026-10"), 0);
     }
 
@@ -710,22 +820,76 @@ mod tests {
     }
 
     #[test]
-    fn vat_and_monitoring_are_read_from_explicit_configuration() {
+    fn vat_comes_from_configuration_and_plans_from_recorded_state() {
         let lookup = |key: &str| match key {
             VAT_RATE_ENV => Some("2000".to_string()),
-            MONITORING_FEE_ENV => Some("500000000".to_string()),
-            MONITORING_SINCE_ENV => Some("2026-05-01".to_string()),
             _ => None,
         };
         assert_eq!(vat_rate_from_env(&lookup), Some(2_000));
-        let monitoring = monitoring_from_env(&lookup);
-        assert_eq!(monitoring.fee_micros, Some(500_000_000));
-        assert_eq!(monitoring.since.as_deref(), Some("2026-05-01"));
-        assert_eq!(monitoring.selected_label(), "Selected");
         assert_eq!(vat_rate_from_env(&|_| Some("99999".to_string())), None);
         assert_eq!(vat_rate_from_env(&|_| None), None);
-        let none = monitoring_from_env(&|_| None);
-        assert_eq!(none.selected_label(), "Not selected");
+
+        // The monitoring view reads the recorded plan state file, never the
+        // environment: with none recorded it says so.
+        let dir = std::env::temp_dir().join(format!("apex-plan-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let none = monitoring_state_view(Some(&dir), "northstar").expect("view");
+        assert_eq!(none.selected_label(), "Not recorded");
+        assert_eq!(none.tier_label(), None);
+        assert_eq!(
+            monitoring_state_view(None, "northstar").expect("view"),
+            none
+        );
+
+        let state =
+            apex_billing::MonitoringPlan::default().activate(350_000 * 1_000_000, "2026-05-01");
+        state
+            .save(&apex_billing::PlanState::path_for(
+                &dir,
+                "northstar",
+                apex_billing::PlanId::Monitoring,
+            ))
+            .expect("save");
+        let view = monitoring_state_view(Some(&dir), "northstar").expect("view");
+        assert_eq!(view.selected_label(), "Included");
+        assert_eq!(view.tier_label(), Some("Mid"));
+        assert_eq!(view.fee_micros, Some(1_500_000_000));
+        assert_eq!(view.since.as_deref(), Some("2026-05-01"));
+        assert_eq!(view, MonitoringView::from_state(&state));
+        assert_eq!(view.stops_after, None);
+
+        // Other publishers are unaffected.
+        assert_eq!(
+            monitoring_state_view(Some(&dir), "aurora")
+                .expect("view")
+                .selected_label(),
+            "Not recorded"
+        );
+
+        // A malformed state file is a typed refusal, never a fabricated
+        // plan.
+        std::fs::write(dir.join("northstar.monitoring.json"), "{ nope").expect("write");
+        assert!(matches!(
+            monitoring_state_view(Some(&dir), "northstar"),
+            Err(ApiError::Internal(_))
+        ));
+
+        // The managed view reads its own recorded state (or nothing).
+        let none = managed_state_view(Some(&dir), "northstar").expect("view");
+        assert_eq!(none.selected_label(), "Not recorded");
+        let managed =
+            apex_billing::ManagedPlan::default().activate(900_000 * 1_000_000, "2026-05-01");
+        managed
+            .save(&apex_billing::PlanState::path_for(
+                &dir,
+                "northstar",
+                apex_billing::PlanId::Managed,
+            ))
+            .expect("save");
+        let view = managed_state_view(Some(&dir), "northstar").expect("view");
+        assert_eq!(view.selected_label(), "Active");
+        assert_eq!(view.fee_micros, Some(2_500_000_000));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -746,5 +910,138 @@ mod tests {
         assert!(InvoiceStateView::NotCollected
             .note()
             .contains("No verified payment is recorded"));
+    }
+
+    /// The pre-fix register build: per-month scans of the whole fee-line and
+    /// payment lists. Kept verbatim as the naive reference.
+    fn register_naive(
+        fee_lines: &[BillingFeeLine],
+        payments: &[CollectionEvent],
+        currency: &str,
+        now_unix_ms: i64,
+    ) -> Vec<InvoiceRegisterRow> {
+        let current_month = apex_analytics::UtcMillis::from_unix_millis(now_unix_ms)
+            .to_day_string()[..7]
+            .to_string();
+        let mut months: Vec<String> = fee_lines.iter().map(|line| line.month.clone()).collect();
+        months.sort();
+        months.dedup();
+        months.reverse();
+        months
+            .iter()
+            .map(|period| {
+                let total: i64 = fee_lines
+                    .iter()
+                    .filter(|line| &line.month == period)
+                    .map(|line| line.fee_micros)
+                    .sum();
+                let collected: i64 = payments
+                    .iter()
+                    .filter(|event| {
+                        merchant_reference_period(&event.merchant_reference).as_deref()
+                            == Some(period.as_str())
+                    })
+                    .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                    .filter(|event| event.amount_currency.eq_ignore_ascii_case(currency))
+                    .map(|event| event.amount_value.saturating_mul(10_000))
+                    .sum();
+                let excluded_foreign_receipts = payments
+                    .iter()
+                    .filter(|event| {
+                        merchant_reference_period(&event.merchant_reference).as_deref()
+                            == Some(period.as_str())
+                    })
+                    .filter(|event| event.success.eq_ignore_ascii_case("true"))
+                    .filter(|event| !event.amount_currency.eq_ignore_ascii_case(currency))
+                    .count();
+                let state = if period == &current_month {
+                    InvoiceStateView::Draft
+                } else if collected >= total && total > 0 {
+                    InvoiceStateView::Paid
+                } else if collected > 0 {
+                    InvoiceStateView::Pending
+                } else {
+                    InvoiceStateView::NotCollected
+                };
+                InvoiceRegisterRow {
+                    period: period.clone(),
+                    state,
+                    total_micros: total,
+                    collected_micros: collected,
+                    excluded_foreign_receipts,
+                    is_current: period == &current_month,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_register_agrees_with_the_naive_reference_at_ten_thousand_records() {
+        // 8_000 billing lines over 120 distinct months, 2_000 billing-change
+        // records, and 10_000 payment events (9_000 same-currency, 1_000
+        // foreign, a tenth unsuccessful).
+        let mut records: Vec<LedgerRecord> = Vec::with_capacity(10_000);
+        for i in 0..8_000 {
+            let month = format!("20{:02}-{:02}", 10 + (i / 12) % 10, i % 12 + 1);
+            records.push(billing_record(
+                &format!("ch_{i:05}"),
+                &month,
+                1_000_000 + i as i64,
+            ));
+        }
+        for i in 0..2_000 {
+            let payload = format!(
+                r#"{{"type":"billingChange","changeId":"ch_{i:05}","day":"2026-10-01","reason":"publisher override","billedLambda":0.0}}"#
+            );
+            let digest = hex::encode(Sha256::digest(payload.as_bytes()));
+            records.push(LedgerRecord::lift_record(
+                1_792_055_400_000,
+                &digest,
+                &payload,
+            ));
+        }
+        let payments: Vec<CollectionEvent> = (0..10_000)
+            .map(|i| {
+                let period = format!("20{:02}-{:02}", 10 + (i / 12) % 10, i % 12 + 1);
+                payment_in(
+                    &period,
+                    3_000,
+                    if i % 10 == 9 { "false" } else { "true" },
+                    &format!("psp-{i}"),
+                    if i % 10 == 5 { "EUR" } else { "USD" },
+                )
+            })
+            .collect();
+
+        let view = build(
+            &records,
+            payments,
+            1_792_055_400_000,
+            MonitoringView::not_recorded(),
+            "USD",
+        );
+        assert_eq!(view.fee_lines.len(), 8_000);
+        assert_eq!(view.payments.len(), 10_000);
+        let mut months: Vec<&str> = view.fee_lines.iter().map(|l| l.month.as_str()).collect();
+        months.sort();
+        months.dedup();
+        assert_eq!(months.len(), 120);
+        assert_eq!(
+            view.register,
+            register_naive(&view.fee_lines, &view.payments, "USD", 1_792_055_400_000),
+            "the grouped register must agree with the naive per-month scan"
+        );
+        // The register really carries the grouping work (not a vacuous
+        // comparison): one row per month, and collections split across
+        // several states.
+        assert_eq!(view.register.len(), 120);
+        assert!(view
+            .register
+            .iter()
+            .any(|row| row.state == InvoiceStateView::NotCollected));
+        assert!(view
+            .register
+            .iter()
+            .any(|row| row.excluded_foreign_receipts > 0));
     }
 }

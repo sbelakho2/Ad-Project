@@ -19,6 +19,13 @@
 //! ceiling, a warning halves it, a breach sets it to zero. A quarantined
 //! domain stays at zero until an operator resets it; a paused one resumes at
 //! half its old cap after a cool-off.
+//!
+//! Every sending domain is independent: one [`SenderHealth`] per from-domain,
+//! held together by [`HealthBook`]. A complaint or bounce attributed to one
+//! domain pauses or quarantines that domain only; the daily cap of the whole
+//! engine is the sum of the per-domain caps.
+
+use std::collections::BTreeMap;
 
 use crate::stats::beta_tail_above;
 
@@ -233,6 +240,187 @@ impl SenderHealth {
     }
 }
 
+/// Raw (undiscounted) event counts for one sending domain, for the reports
+/// and the workspace tables that show rates as `n / N`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawCounts {
+    /// Sends attributed to the domain.
+    pub sends: u32,
+    /// Complaints attributed to the domain.
+    pub complaints: u32,
+    /// Hard bounces attributed to the domain.
+    pub hard_bounces: u32,
+}
+
+/// The health of every sending domain, keyed by from-domain.
+///
+/// The order is the configured sender order, which is also the spread order:
+/// the engine rotates through it when it hands each planned touch to a
+/// domain. `sent_today` is the per-domain count for the current day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthBook {
+    /// Domains in configured order, deduplicated.
+    order: Vec<String>,
+    /// One rolling health per domain.
+    health: BTreeMap<String, SenderHealth>,
+    /// Messages sent today, per domain.
+    sent_today: BTreeMap<String, u32>,
+    /// Raw event counts per domain.
+    raw: BTreeMap<String, RawCounts>,
+}
+
+impl HealthBook {
+    /// A new book: one warming domain per entry of `domains`, in order.
+    pub fn new(config: &HealthConfig, domains: &[String]) -> Self {
+        let mut order = Vec::new();
+        let mut health = BTreeMap::new();
+        for domain in domains {
+            if health.contains_key(domain) {
+                continue;
+            }
+            order.push(domain.clone());
+            health.insert(domain.clone(), SenderHealth::new(config));
+        }
+        Self {
+            order,
+            health,
+            sent_today: BTreeMap::new(),
+            raw: BTreeMap::new(),
+        }
+    }
+
+    /// The domains, in the configured spread order.
+    pub fn domains(&self) -> &[String] {
+        &self.order
+    }
+
+    /// One domain's rolling health.
+    pub fn get(&self, domain: &str) -> Option<&SenderHealth> {
+        self.health.get(domain)
+    }
+
+    /// One domain's rolling health, mutably (the replay).
+    pub fn health_mut(&mut self, domain: &str) -> Option<&mut SenderHealth> {
+        self.health.get_mut(domain)
+    }
+
+    /// Messages sent today on `domain`.
+    pub fn sent_today_for(&self, domain: &str) -> u32 {
+        self.sent_today.get(domain).copied().unwrap_or(0)
+    }
+
+    /// Set today's send count for `domain` (the replay).
+    pub fn set_sent_today(&mut self, domain: &str, n: u32) {
+        if self.health.contains_key(domain) {
+            self.sent_today.insert(domain.to_string(), n);
+        }
+    }
+
+    /// Raw counts for `domain`.
+    pub fn raw(&self, domain: &str) -> RawCounts {
+        self.raw.get(domain).copied().unwrap_or_default()
+    }
+
+    /// Replay one day of raw counts onto a domain's health: sends first, then
+    /// the clean and complaining outcomes in the engine's fixed order, then
+    /// the hard bounces.
+    pub fn record_day(
+        &mut self,
+        domain: &str,
+        sends: u32,
+        complaints: u32,
+        hard_bounces: u32,
+        config: &HealthConfig,
+    ) {
+        let Some(h) = self.health.get_mut(domain) else {
+            return;
+        };
+        for _ in 0..sends {
+            h.record_send();
+        }
+        for _ in 0..sends.saturating_sub(complaints) {
+            h.record_complaint_outcome(false, config);
+        }
+        for _ in 0..complaints {
+            h.record_complaint_outcome(true, config);
+        }
+        for _ in 0..hard_bounces {
+            h.record_hard_bounce();
+        }
+        let raw = self.raw.entry(domain.to_string()).or_default();
+        raw.sends = raw.sends.saturating_add(sends);
+        raw.complaints = raw.complaints.saturating_add(complaints);
+        raw.hard_bounces = raw.hard_bounces.saturating_add(hard_bounces);
+    }
+
+    /// Operator reset: one domain when named, otherwise every domain.
+    pub fn reset(&mut self, domain: Option<&str>, config: &HealthConfig) {
+        match domain {
+            Some(d) => {
+                if let Some(h) = self.health.get_mut(d) {
+                    h.reset(config);
+                }
+            }
+            None => {
+                for h in self.health.values_mut() {
+                    h.reset(config);
+                }
+            }
+        }
+    }
+
+    /// Sum of the per-domain caps: the engine's global daily cap.
+    pub fn total_cap(&self) -> u32 {
+        self.health.values().map(|h| h.cap).sum()
+    }
+
+    /// Messages sent today across every domain.
+    pub fn sent_today(&self) -> u32 {
+        self.sent_today.values().sum()
+    }
+
+    /// Sends left today across the domains that may send.
+    pub fn cap_left(&self) -> u32 {
+        self.health
+            .iter()
+            .filter(|(_, h)| h.state.may_send())
+            .map(|(d, h)| h.cap.saturating_sub(self.sent_today_for(d)))
+            .sum()
+    }
+
+    /// Whether any domain may send.
+    pub fn may_send(&self) -> bool {
+        self.health.values().any(|h| h.state.may_send())
+    }
+
+    /// The one state that summarizes the book: the best sendable state when
+    /// any domain may send, otherwise the most severe state recorded. An
+    /// empty book cannot send.
+    pub fn summary_state(&self) -> SenderState {
+        let rank = |s: SenderState| match s {
+            SenderState::Healthy => 0,
+            SenderState::Warming => 1,
+            SenderState::Throttled => 2,
+            SenderState::Paused => 3,
+            SenderState::Quarantined => 4,
+        };
+        let states: Vec<SenderState> = self.health.values().map(|h| h.state).collect();
+        if let Some(s) = states
+            .iter()
+            .copied()
+            .filter(|s| s.may_send())
+            .min_by_key(|s| rank(*s))
+        {
+            return s;
+        }
+        // No domain may send: the most severe state explains why.
+        states
+            .into_iter()
+            .max_by_key(|s| rank(*s))
+            .unwrap_or(SenderState::Paused)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +524,79 @@ mod tests {
         ] {
             assert!(!s.as_str().is_empty());
         }
+    }
+
+    fn domains() -> Vec<String> {
+        vec!["a.example".to_string(), "b.example".to_string()]
+    }
+
+    #[test]
+    fn the_book_keyes_health_by_domain_and_isolates_breaches() {
+        let c = HealthConfig::default();
+        let mut book = HealthBook::new(&c, &domains());
+        assert_eq!(book.domains(), domains().as_slice());
+        assert_eq!(book.summary_state(), SenderState::Warming);
+        assert_eq!(book.total_cap(), c.start_cap * 2);
+        assert_eq!(book.cap_left(), c.start_cap * 2);
+
+        // Day one on a.example: enough complaints to quarantine it alone.
+        book.record_day("a.example", 40, 5, 0, &c);
+        if let Some(h) = book.health_mut("a.example") {
+            h.end_day(0, 40, &c);
+        }
+        book.record_day("b.example", 20, 0, 0, &c);
+        if let Some(h) = book.health_mut("b.example") {
+            h.end_day(0, 20, &c);
+        }
+        assert_eq!(
+            book.get("a.example").map(|h| h.state),
+            Some(SenderState::Quarantined)
+        );
+        assert_eq!(
+            book.get("b.example").map(|h| h.state),
+            Some(SenderState::Warming)
+        );
+        assert!(book.may_send());
+        assert_eq!(book.cap_left(), 30, "only the healthy domain's cap counts");
+        assert_eq!(book.summary_state(), SenderState::Warming);
+        // Raw counts stay per domain.
+        assert_eq!(book.raw("a.example").complaints, 5);
+        assert_eq!(book.raw("b.example").complaints, 0);
+        assert_eq!((book.raw("a.example").sends, book.sent_today()), (40, 0));
+        // Counting today on one domain.
+        book.set_sent_today("b.example", 7);
+        assert_eq!(book.sent_today(), 7);
+        assert_eq!(book.cap_left(), 23);
+
+        // A named reset touches one domain; a bare reset touches both.
+        book.reset(Some("b.example"), &c);
+        assert_eq!(
+            book.get("b.example").map(|h| h.state),
+            Some(SenderState::Warming)
+        );
+        assert_eq!(
+            book.get("a.example").map(|h| h.state),
+            Some(SenderState::Quarantined)
+        );
+        book.reset(None, &c);
+        assert!(book
+            .health
+            .values()
+            .all(|h| h.state == SenderState::Warming));
+
+        // Pausing every domain makes the book unable to send, and the
+        // summary names the most severe state.
+        let mut paused = HealthBook::new(&c, &["x.example".to_string()]);
+        paused.record_day("x.example", 100, 0, 20, &c);
+        if let Some(h) = paused.health_mut("x.example") {
+            h.end_day(0, 100, &c);
+        }
+        assert_eq!(paused.summary_state(), SenderState::Paused);
+        assert!(!paused.may_send());
+        assert_eq!(paused.cap_left(), 0);
+        // An empty book cannot send either.
+        let empty = HealthBook::new(&c, &[]);
+        assert!(!empty.may_send());
+        assert_eq!(empty.total_cap(), 0);
     }
 }

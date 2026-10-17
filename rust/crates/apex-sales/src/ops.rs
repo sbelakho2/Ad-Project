@@ -11,7 +11,7 @@ use crate::holdout::effect;
 use crate::io::Fetcher;
 use crate::json::{self, Value};
 use crate::model::{
-    normalize_domain, normalize_email, App, Contact, ContactKind, Evidence, EvidenceKind,
+    normalize_domain, normalize_email, App, Contact, ContactKind, Evidence, EvidenceKind, Outcome,
     Publisher, Store, UnixSecs, DAY,
 };
 use crate::rng::Rng;
@@ -258,6 +258,92 @@ pub fn import_leads(jsonl: &str, existing: &Snapshot) -> Imported {
     out
 }
 
+/// Build the outcome event the CLI's `record` writes, shared so the
+/// outcomes import records connected, paid and watch signups through exactly
+/// the same semantics: an address target becomes an email outcome, anything
+/// else a publisher outcome.
+pub fn record_outcome(target: &str, outcome: Outcome, note: Option<String>, at: UnixSecs) -> Event {
+    let email = normalize_email(target).filter(|_| target.contains('@'));
+    Event::Outcome {
+        at,
+        publisher: if email.is_none() {
+            Some(target.to_string())
+        } else {
+            None
+        },
+        email,
+        outcome,
+        note,
+    }
+}
+
+/// Import the frozen outcomes file appended by `apex-api`: one JSON object
+/// per line,
+/// `{"atUnixMs":<int>,"publisher":"<slug>","kind":"connected"|"paid"|"watch_signup","ref":"<free-form id>"}`.
+///
+/// Each line becomes the outcome event `record` writes, with the line's
+/// timestamp and the `ref` as the note. Lines are deduplicated by
+/// (publisher, kind, ref) against the store's events and against earlier
+/// lines of the same file, so re-importing the append-only file is
+/// idempotent. A malformed line is skipped and counted, never fatal.
+pub fn import_outcomes(jsonl: &str, existing: &Snapshot) -> Imported {
+    let mut out = Imported::default();
+    for (i, line) in jsonl.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record = json::parse(line).ok().and_then(|v| {
+            let at_ms = v.get("atUnixMs").and_then(Value::as_i64)?;
+            let publisher = v.str_at("publisher")?.trim().to_string();
+            let kind = v.str_at("kind")?.trim().to_string();
+            let reference = v.str_at("ref")?.trim().to_string();
+            if publisher.is_empty() || reference.is_empty() {
+                return None;
+            }
+            Some((at_ms, publisher, kind, reference))
+        });
+        let Some((at_ms, publisher, kind, reference)) = record else {
+            out.refused
+                .push(format!("line {}: not an outcomes record", i + 1));
+            continue;
+        };
+        let outcome = match kind.as_str() {
+            "connected" => Outcome::Connected,
+            "paid" => Outcome::Paid,
+            "watch_signup" => Outcome::WatchSignup,
+            other => {
+                out.refused
+                    .push(format!("line {}: unknown kind {other}", i + 1));
+                continue;
+            }
+        };
+        let seen = |events: &[Event]| {
+            events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::Outcome {
+                        publisher: Some(p),
+                        outcome: o,
+                        note: Some(n),
+                        ..
+                    } if *p == publisher && *o == outcome && *n == reference
+                )
+            })
+        };
+        if seen(&existing.events) || seen(&out.events) {
+            out.already += 1;
+            continue;
+        }
+        out.events.push(record_outcome(
+            &publisher,
+            outcome,
+            Some(reference),
+            at_ms.div_euclid(1000),
+        ));
+    }
+    out
+}
+
 /// Refresh a publisher's public signals: its `app-ads.txt` and its App
 /// Store listings. Returns the updated publisher and any contacts listed in
 /// `CONTACT=` lines.
@@ -481,17 +567,51 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
         snap.events.len(),
         learned.scoring_observations
     );
-    let _ = writeln!(
-        out,
-        "\nsending domain: {}  cap {}  sent today {}  P(complaints > {:.2}%) = {:.2}  P(bounces > {:.0}%) = {:.2}",
-        learned.health.state.as_str(),
-        learned.health.cap,
-        learned.sent_today,
-        config.health.complaint_ceiling * 100.0,
-        learned.health.p_complaints_over(&config.health),
-        config.health.bounce_ceiling * 100.0,
-        learned.health.p_bounces_over(&config.health),
-    );
+    let domains = learned.health.domains();
+    match domains.len() {
+        0 => {
+            let _ = writeln!(out, "\nsending domains: none configured");
+        }
+        1 => {
+            if let Some(h) = learned.health.get(&domains[0]) {
+                let _ = writeln!(
+                    out,
+                    "\nsending domain: {}  cap {}  sent today {}  P(complaints > {:.2}%) = {:.2}  P(bounces > {:.0}%) = {:.2}",
+                    h.state.as_str(),
+                    h.cap,
+                    learned.health.sent_today_for(&domains[0]),
+                    config.health.complaint_ceiling * 100.0,
+                    h.p_complaints_over(&config.health),
+                    config.health.bounce_ceiling * 100.0,
+                    h.p_bounces_over(&config.health),
+                );
+            }
+        }
+        n => {
+            let _ = writeln!(
+                out,
+                "\nsending domains: {}  total cap {}  sent today {}",
+                n,
+                learned.health.total_cap(),
+                learned.health.sent_today()
+            );
+            for domain in domains {
+                if let Some(h) = learned.health.get(domain) {
+                    let _ = writeln!(
+                        out,
+                        "  {domain}: {}  cap {}  sent today {}  P(complaints > {:.2}%) = {:.2}  P(bounces > {:.0}%) = {:.2}",
+                        h.state.as_str(),
+                        h.cap,
+                        learned.health.sent_today_for(domain),
+                        config.health.complaint_ceiling * 100.0,
+                        h.p_complaints_over(&config.health),
+                        config.health.bounce_ceiling * 100.0,
+                        h.p_bounces_over(&config.health),
+                    );
+                }
+            }
+        }
+    }
 
     let _ = writeln!(out, "\nlead score (log-odds, posterior mean ± sd):");
     for ((name, mean), precision) in FEATURES
@@ -522,17 +642,17 @@ pub fn report(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs
             "\nstep {step} messages (value = expected paid conversions per send):"
         );
         for r in rows {
+            let mut marker = String::new();
+            if !r.safe {
+                marker.push_str("  UNSAFE: complaint ceiling");
+            }
+            if r.id == "t0-watch" && config.watch_checkout_url.is_none() {
+                marker.push_str("  UNAVAILABLE: no checkout URL");
+            }
             let _ = writeln!(
                 out,
-                "  {:<12} value {:.5}  P(best) {:.2}{}",
-                r.id,
-                r.mean_value,
-                r.p_best,
-                if r.safe {
-                    ""
-                } else {
-                    "  UNSAFE: complaint ceiling"
-                }
+                "  {:<12} value {:.5}  P(best) {:.2}{marker}",
+                r.id, r.mean_value, r.p_best,
             );
         }
         let _ = writeln!(out, "  expected loss of choosing the leader now: {loss:.6}");
@@ -678,6 +798,72 @@ mod tests {
     }
 
     #[test]
+    fn outcomes_import_idempotently_and_skip_malformed_lines() {
+        let frozen = "{\"atUnixMs\":1700000000000,\"publisher\":\"tinyfox.io\",\"kind\":\"connected\",\"ref\":\"evt_1\"}\n\
+                      {\"atUnixMs\":1700000001000,\"publisher\":\"tinyfox.io\",\"kind\":\"paid\",\"ref\":\"inv_9\"}\n\
+                      {\"atUnixMs\":1700000002000,\"publisher\":\"solo\",\"kind\":\"watch_signup\",\"ref\":\"sub_3\"}\n\
+                      {\"atUnixMs\":1700000003000,\"publisher\":\"tinyfox.io\",\"kind\":\"connected\",\"ref\":\"evt_1\"}\n\
+                      garbage\n\
+                      {\"atUnixMs\":1700000004000,\"publisher\":\"x.io\",\"kind\":\"exploded\",\"ref\":\"e\"}\n\
+                      {\"atUnixMs\":\"soon\",\"publisher\":\"x.io\",\"kind\":\"paid\",\"ref\":\"e\"}\n\
+                      {\"atUnixMs\":1700000005000,\"publisher\":\"\",\"kind\":\"paid\",\"ref\":\"e\"}\n";
+        let out = import_outcomes(frozen, &Snapshot::default());
+        assert_eq!(out.events.len(), 3, "{:#?}", out.events);
+        assert_eq!(out.already, 1, "the repeated (publisher, kind, ref) line");
+        assert_eq!(out.refused.len(), 4, "{:#?}", out.refused);
+        assert_eq!(
+            out.events[0],
+            Event::Outcome {
+                at: 1_700_000_000,
+                email: None,
+                publisher: Some("tinyfox.io".into()),
+                outcome: Outcome::Connected,
+                note: Some("evt_1".into()),
+            }
+        );
+        assert!(matches!(
+            &out.events[2],
+            Event::Outcome {
+                outcome: Outcome::WatchSignup,
+                ..
+            }
+        ));
+        // Replaying the append-only file records nothing twice.
+        let mut snap = Snapshot::default();
+        snap.events.extend(out.events.iter().cloned());
+        let again = import_outcomes(frozen, &snap);
+        assert!(again.events.is_empty());
+        assert_eq!(again.already, 4);
+        assert_eq!(again.refused.len(), 4);
+    }
+
+    #[test]
+    fn record_outcome_matches_the_cli_record_semantics() {
+        let by_email = record_outcome("Maria@Studio.Example", Outcome::Connected, None, 7);
+        assert_eq!(
+            by_email,
+            Event::Outcome {
+                at: 7,
+                email: Some("maria@studio.example".into()),
+                publisher: None,
+                outcome: Outcome::Connected,
+                note: None,
+            }
+        );
+        let by_publisher = record_outcome("studio.example", Outcome::Paid, Some("inv_1".into()), 8);
+        assert_eq!(
+            by_publisher,
+            Event::Outcome {
+                at: 8,
+                email: None,
+                publisher: Some("studio.example".into()),
+                outcome: Outcome::Paid,
+                note: Some("inv_1".into()),
+            }
+        );
+    }
+
+    #[test]
     fn discovery_reads_app_ads_txt_and_the_app_store() {
         let mut p = Publisher::new("studio.example", "Studio");
         p.domain = Some("studio.example".into());
@@ -789,6 +975,7 @@ mod tests {
             at: 0,
             email: "maria@studio.example".into(),
             publisher: "studio.example".into(),
+            from: None,
             step: 0,
             arm: "t0-finding".into(),
             message_id: "m".into(),
@@ -848,6 +1035,7 @@ mod tests {
             at: now - DAY,
             email: "maria@studio.example".into(),
             publisher: "studio.example".into(),
+            from: None,
             step: 0,
             arm: "t0-finding".into(),
             message_id: "m".into(),

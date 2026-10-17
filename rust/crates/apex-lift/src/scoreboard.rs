@@ -140,4 +140,19 @@ mod tests {
         assert_eq!(json["month"], "2026-10");
         assert!(json.get("publisher").is_none());
     }
+
+    #[test]
+    fn non_finite_lifts_and_missing_rechecks_publish_zeroes() {
+        let board = Scoreboard {
+            month: "2026-10".into(),
+            tests_total: 2,
+            tests_kept: 2,
+            billed_lifts: vec![f64::NAN, f64::INFINITY],
+            rechecks_total: 0,
+            rechecks_confirmed: 0,
+        };
+        assert_eq!(board.median_billed_lift(), 0.0);
+        assert_eq!(board.recheck_confirmation_rate(), 0.0);
+        assert_eq!(board.kept_share(), 1.0);
+    }
 }

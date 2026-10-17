@@ -1,0 +1,14 @@
+{
+  "file": "mixed-duplicates.txt",
+  "note": "Mixed file: duplicate records (case-insensitive), blank lines, a commented record and one line per malformed class.",
+  "errors": [
+    {"line": 4, "kind": "Duplicate"},
+    {"line": 5, "kind": "Duplicate"},
+    {"line": 11, "kind": "BadDomain"},
+    {"line": 12, "kind": "EmptyAccountId"},
+    {"line": 13, "kind": "BadRelationship"}
+  ],
+  "records": 4,
+  "variables": 0,
+  "domains": ["applovin.com", "metaads.com", "vungle.com"]
+}

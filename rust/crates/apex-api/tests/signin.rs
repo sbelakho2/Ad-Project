@@ -1,0 +1,684 @@
+//! Integration tests for the self-serve sign-in flow over the real router:
+//! the workspace created by an accepted free-audit request, the hash-only
+//! one-time link row, the session minted with the exchange's exact cookie
+//! flags, single-use and expiry refusals, the no-mailer warning seam and the
+//! fail-closed `503` when the leads root is unavailable.
+//!
+//! Security invariants pinned here: the raw token never appears in any file
+//! under the leads root, no response ever contains the token, and a refused
+//! link never mints a cookie.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use apex_api::signin::{SigninService, WarningLog, WorkspaceTokens};
+use apex_api::{
+    router, AppState, FileLeadStore, FixedClock, StaticAuditSource, StaticLedgerSource,
+};
+use apex_notify::sink::{
+    DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
+};
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use common::*;
+use sha2::{Digest, Sha256};
+
+const HTML: &str = "text/html";
+/// The refusal copy the dead-link page must carry.
+const REFUSAL_COPY: &str =
+    "This sign-in link is no longer valid. Request a new audit to receive a fresh link.";
+/// A form submission that parses and validates.
+const FREE_AUDIT_BODY: &str =
+    "email=you%40studio.example&studio=Northstar+Studio&platforms=max&revenue=10k-50k";
+
+/// A mail sink that captures every message in memory (never a file, so the
+/// raw-token-never-stored scan stays honest).
+#[derive(Debug, Default)]
+struct CaptureMailer {
+    sent: Mutex<Vec<DeliveryMessage>>,
+}
+
+impl CaptureMailer {
+    fn texts(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|message| message.text.clone())
+            .collect()
+    }
+
+    fn last_text(&self) -> String {
+        self.texts().pop().unwrap_or_default()
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationSink for CaptureMailer {
+    async fn send(&self, message: &DeliveryMessage) -> Result<DeliveryReceipt, SinkError> {
+        self.sent.lock().unwrap().push(message.clone());
+        Ok(DeliveryReceipt {
+            state: DeliveryState::Accepted,
+            provider_reference: None,
+        })
+    }
+}
+
+/// Build the router with the self-serve wiring over `root`: one leads store,
+/// the live workspace token file and the sign-in service. The operator token
+/// is added only when `with_operator_token` is set, so the self-serve-only
+/// deployment path (no boot-time tokens) is exercised too.
+fn build_app(
+    root: &Path,
+    clock_secs: i64,
+    ttl_hours: i64,
+    mailer: Option<Arc<CaptureMailer>>,
+    warnings: &Arc<WarningLog>,
+    with_operator_token: bool,
+) -> (axum::Router, Arc<SigninService>) {
+    let leads = Arc::new(FileLeadStore::new(root.join("leads.jsonl")));
+    let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
+    let mut signin = SigninService::open(root)
+        .with_ttl_hours(ttl_hours)
+        .with_public_base("https://console.example")
+        .with_warnings(Arc::clone(warnings));
+    if let Some(mailer) = mailer {
+        let mailer: Arc<dyn NotificationSink> = mailer;
+        signin = signin.with_mailer(mailer);
+    }
+    let signin = Arc::new(signin);
+    let mut state = AppState::new(
+        Arc::new(StaticAuditSource::default()),
+        Arc::new(StaticLedgerSource::default()),
+    )
+    .with_clock(Arc::new(FixedClock::new(clock_secs)))
+    .with_leads(leads)
+    .with_workspaces(workspaces)
+    .with_signin(Arc::clone(&signin));
+    if with_operator_token {
+        state = state.with_ledger_token("operator-pub", b"operator-token".to_vec());
+    }
+    (router(state), signin)
+}
+
+/// A GET carrying `X-Forwarded-Proto: https` (the proxy's TLS signal).
+fn https_get(uri: &str, cookie: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .uri(uri)
+        .header("x-forwarded-proto", "https");
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+/// A form POST carrying `X-Forwarded-Proto: https`.
+fn https_post_form(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("x-forwarded-proto", "https")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+/// The `name=value` pair of a `Set-Cookie` value.
+fn cookie_pair(set_cookie: &str) -> String {
+    set_cookie
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string()
+}
+
+/// The attribute tail of a cookie: everything after the `name=value` pair.
+fn cookie_attributes(set_cookie: &str) -> String {
+    set_cookie
+        .split(';')
+        .skip(1)
+        .map(str::trim)
+        .collect::<Vec<&str>>()
+        .join("; ")
+}
+
+/// The 32-hex token carried by the `/console/signin?token=` link in a mail.
+fn token_from_mail(text: &str) -> String {
+    const MARK: &str = "/console/signin?token=";
+    let start = text.find(MARK).expect("the mail carries the link") + MARK.len();
+    let token: String = text[start..].chars().take(32).collect();
+    assert_eq!(token.len(), 32, "mail link: {text}");
+    assert!(
+        token.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "mail link: {text}"
+    );
+    token
+}
+
+/// Every file under `root`, recursively.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Submit the free-audit form and return the confirmation reference.
+async fn submit_audit(app: &axum::Router, body: &str) -> String {
+    let response = send(app, post_form("/free-audit", body)).await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    let location = response
+        .headers
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("location")
+        .to_string();
+    location
+        .strip_prefix("/audit-requested/?ref=")
+        .expect("the confirmation reference")
+        .to_string()
+}
+
+#[tokio::test]
+async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
+    let temp = TempDir::new("signin-request");
+    // An operator-managed entry that every extend must preserve.
+    std::fs::write(
+        temp.path().join("tokens.json"),
+        "{\n  \"operator-pub\": \"operator-token\"\n}\n",
+    )
+    .expect("seed tokens");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin) = build_app(
+        temp.path(),
+        // 72 hours in: the default TTL window, and the exact expiry instant.
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    let reference = submit_audit(&app, FREE_AUDIT_BODY).await;
+    assert!(reference.starts_with("req_"), "{reference}");
+
+    // 1. The workspace exists: the publisher key derived exactly as the lead
+    //    storage derives it has its own token entry, and the operator's entry
+    //    is untouched.
+    let tokens_raw = std::fs::read_to_string(temp.path().join("tokens.json")).expect("tokens");
+    let tokens: BTreeMap<String, String> = serde_json::from_str(&tokens_raw).expect("json");
+    let self_serve = tokens.get("northstar-studio").expect("the publisher entry");
+    assert_eq!(self_serve.len(), 64, "32 random bytes as hex");
+    assert!(self_serve.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        tokens.get("operator-pub").map(String::as_str),
+        Some("operator-token"),
+        "the operator entry survives"
+    );
+
+    // 2. The mapping is recorded through the existing lead store: the stored
+    //    lead row carries the slug and the studio display name.
+    let leads = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
+    assert_eq!(leads.lines().count(), 1);
+    assert!(
+        leads.contains("\"publisher\":\"northstar-studio\""),
+        "{leads}"
+    );
+    assert!(
+        leads.contains("\"displayName\":\"Northstar Studio\""),
+        "{leads}"
+    );
+
+    // 3. The link row stores only the SHA-256 hash, with the documented
+    //    fields and the configured expiry.
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].at, 1_700_000_000_000);
+    assert_eq!(rows[0].publisher, "northstar-studio");
+    assert_eq!(rows[0].expires_at, 1_700_000_000_000 + 72 * 3_600_000);
+    assert_eq!(rows[0].used_at, None);
+    let text = mailer.last_text();
+    let token = token_from_mail(&text);
+    assert_eq!(
+        rows[0].token_hash,
+        hex::encode(Sha256::digest(token.as_bytes()))
+    );
+
+    // The mail carries the link, the expiry and the "if this wasn't you"
+    // line, and the link base is the configured public console URL.
+    assert!(
+        text.contains("https://console.example/console/signin?token="),
+        "{text}"
+    );
+    assert!(text.contains("expires on"), "{text}");
+    assert!(text.contains("If this wasn't you"), "{text}");
+    assert!(warnings.lines().is_empty(), "{:?}", warnings.lines());
+
+    // 4. The raw token never appears in ANY file under the leads root: the
+    //    durable log holds the hash; the mail lives in memory only.
+    for path in files_under(temp.path()) {
+        let bytes = std::fs::read(&path).expect("read file");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(&token),
+            "raw token stored in {}",
+            path.display()
+        );
+    }
+    let store_raw = std::fs::read_to_string(signin.store().path()).expect("signin log");
+    assert!(!store_raw.contains(&token), "{store_raw}");
+    assert!(store_raw.contains(&rows[0].token_hash), "{store_raw}");
+
+    // 5. The workspace token is the seam the ledger surface authorizes
+    //    against, without a restart: a wrong bearer is 401, the self-serve
+    //    token passes authorization and the missing ledger is the honest 404.
+    let wrong = send(
+        &app,
+        get_with_bearer("/v1/ledger/northstar-studio", "not-the-token"),
+    )
+    .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    let authorized = send(
+        &app,
+        get_with_bearer("/v1/ledger/northstar-studio", self_serve),
+    )
+    .await;
+    assert_eq!(
+        authorized.status,
+        StatusCode::NOT_FOUND,
+        "authorized; the new publisher has no ledger yet: {}",
+        authorized.body
+    );
+    assert_eq!(authorized.json()["error"], "not_found");
+}
+
+#[tokio::test]
+async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview() {
+    let temp = TempDir::new("signin-mint");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        true,
+    );
+    submit_audit(&app, FREE_AUDIT_BODY).await;
+    let token = token_from_mail(&mailer.last_text());
+
+    let response = send(
+        &app,
+        https_get(&format!("/console/signin?token={token}"), None),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    assert_eq!(
+        response
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/"),
+        "the console overview is the landing page"
+    );
+    assert!(
+        !response.body.contains(&token),
+        "the redirect never echoes the token"
+    );
+    let cookie = set_cookie(&response).expect("the mint sets a cookie");
+    assert!(cookie.contains(&format!("{}=", apex_api::SESSION_COOKIE)));
+    assert!(cookie.contains("Path=/console;"));
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("SameSite=Lax"));
+    assert!(cookie.contains("Max-Age=900"));
+    assert!(
+        cookie.ends_with("; Secure"),
+        "the https request sets Secure: {cookie}"
+    );
+
+    // Differential: the ledger-token exchange on the same deployment produces
+    // exactly the same cookie attribute set (only the ids differ).
+    let exchange = send(
+        &app,
+        https_post_form(
+            "/console/ledger",
+            "publisher=operator-pub&token=operator-token",
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, StatusCode::SEE_OTHER, "{}", exchange.body);
+    let exchange_cookie = set_cookie(&exchange).expect("exchange cookie");
+    assert_eq!(
+        cookie_attributes(&cookie),
+        cookie_attributes(&exchange_cookie),
+        "sign-in cookies carry the exchange's flags"
+    );
+
+    // The minted session is live: the overview renders and the access page
+    // proves the session's publisher.
+    let pair = cookie_pair(&cookie);
+    let overview = send(&app, get_with_cookie("/", &pair)).await;
+    assert_eq!(overview.status, 200);
+    let access = send(&app, get_with_cookie("/console/settings/access", &pair)).await;
+    assert_eq!(access.status, 200, "{}", access.body);
+    assert!(access.body.contains("northstar-studio"), "{}", access.body);
+
+    // A second link consumed without the proxy's TLS signal mints the same
+    // cookie without `Secure`: the flag follows the request, exactly as the
+    // exchange's cookie does.
+    let second = signin
+        .issue_link("bright-arcade", "b@arcade.example", 1_700_000_000_000)
+        .await
+        .expect("issue");
+    let plain = send(
+        &app,
+        get(&format!("/console/signin?token={}", second.token)),
+    )
+    .await;
+    assert_eq!(plain.status, StatusCode::SEE_OTHER);
+    let plain_cookie = set_cookie(&plain).expect("plain cookie");
+    assert!(!plain_cookie.contains("Secure"), "{plain_cookie}");
+    assert!(plain_cookie.contains("Path=/console;"), "{plain_cookie}");
+    assert!(!plain.body.contains(&second.token));
+}
+
+#[tokio::test]
+async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
+    let temp = TempDir::new("signin-single-use");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+    submit_audit(&app, FREE_AUDIT_BODY).await;
+    let token = token_from_mail(&mailer.last_text());
+
+    let first = send(
+        &app,
+        https_get(&format!("/console/signin?token={token}"), None),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::SEE_OTHER);
+    let pair = cookie_pair(&set_cookie(&first).expect("cookie"));
+
+    // The row is marked used at the first mint.
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows[0].used_at, Some(1_700_000_000_000));
+
+    // The second use is refused: the documented refusal page, `200`, no
+    // cookie, no token anywhere in the response.
+    let second = send(
+        &app,
+        https_get(&format!("/console/signin?token={token}"), None),
+    )
+    .await;
+    assert_eq!(second.status, 200);
+    assert!(second.content_type().starts_with(HTML));
+    assert!(second.body.contains(REFUSAL_COPY), "{}", second.body);
+    assert!(
+        set_cookie(&second).is_none(),
+        "a refused link mints nothing"
+    );
+    assert!(!second.body.contains(&token));
+    assert!(!second.body.contains("token="), "{}", second.body);
+
+    // The refusal did not move `used_at` (single use applies to minting).
+    assert_eq!(
+        signin.store().read_rows().expect("rows")[0].used_at,
+        Some(1_700_000_000_000)
+    );
+
+    // Semantics: single-use applies to minting only; the first session keeps
+    // working for its own idle window.
+    let overview = send(&app, get_with_cookie("/", &pair)).await;
+    assert_eq!(overview.status, 200);
+}
+
+#[tokio::test]
+async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_token() {
+    let temp = TempDir::new("signin-refusals");
+    let warnings = Arc::new(WarningLog::default());
+    // "Now" is two hours past the issuance instant; the link lives one hour.
+    let (app, signin) = build_app(
+        temp.path(),
+        1_700_000_000 + 7_200,
+        1,
+        None,
+        &warnings,
+        false,
+    );
+    let created = signin
+        .issue_link("northstar-studio", "you@studio.example", 1_700_000_000_000)
+        .await
+        .expect("issue");
+    assert_eq!(created.expires_at_unix_ms, 1_700_000_000_000 + 3_600_000);
+
+    // Expired: the refusal page with `200`, and the row stays unused.
+    let expired = send(
+        &app,
+        get(&format!("/console/signin?token={}", created.token)),
+    )
+    .await;
+    assert_eq!(expired.status, 200);
+    assert!(expired.content_type().starts_with(HTML));
+    assert!(expired.body.contains(REFUSAL_COPY), "{}", expired.body);
+    assert!(!expired.body.contains(&created.token));
+    assert!(set_cookie(&expired).is_none());
+    assert_eq!(
+        signin.store().read_rows().expect("rows")[0].used_at,
+        None,
+        "an expired refusal never marks the row"
+    );
+
+    // Unknown but well-formed: the same refusal page.
+    let unknown = send(
+        &app,
+        get(&format!("/console/signin?token={}", "0".repeat(32))),
+    )
+    .await;
+    assert_eq!(unknown.status, 200);
+    assert!(unknown.body.contains(REFUSAL_COPY));
+
+    // Missing, empty and malformed tokens name no link: the `400` refusal.
+    for uri in [
+        "/console/signin",
+        "/console/signin?token=",
+        "/console/signin?token=zzzz",
+        "/console/signin?token=0123456789ABCDEF0123456789ABCDEF",
+        &format!("/console/signin?token={}", "a".repeat(31)),
+        &format!("/console/signin?token={}", "a".repeat(33)),
+    ] {
+        let response = send(&app, get(uri)).await;
+        assert_eq!(response.status, 400, "{uri}: {}", response.body);
+        assert!(response.content_type().starts_with(HTML), "{uri}");
+        assert!(response.body.contains(REFUSAL_COPY), "{uri}");
+        assert!(!response.body.contains("token="), "{uri}");
+        assert!(set_cookie(&response).is_none(), "{uri}");
+    }
+
+    // A wrong method on the path keeps the HTML 405 hint page.
+    let wrong_method = send(&app, post("/console/signin?token=x")).await;
+    assert_eq!(wrong_method.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(wrong_method.body.contains("Method not allowed."));
+}
+
+#[tokio::test]
+async fn without_an_email_sink_the_audit_succeeds_and_the_warning_is_recorded() {
+    let temp = TempDir::new("signin-no-mailer");
+    let warnings = Arc::new(WarningLog::default());
+    let (app, signin) = build_app(temp.path(), 1_700_000_000, 72, None, &warnings, false);
+
+    let reference = submit_audit(&app, FREE_AUDIT_BODY).await;
+    assert!(reference.starts_with("req_"));
+    // The audit success contract: the lead is saved and the confirmation is
+    // the same as with a mailer.
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("leads.jsonl"))
+            .expect("leads")
+            .lines()
+            .count(),
+        1
+    );
+    // The link row is durable even though nothing was sent.
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].used_at, None);
+
+    // The warning is captured through the test seam, names the publisher and
+    // the missing configuration, and never carries the link or the token.
+    let lines = warnings.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("not sent"), "{}", lines[0]);
+    assert!(lines[0].contains("APEX_NOTIFY_SINK=email"), "{}", lines[0]);
+    assert!(lines[0].contains("northstar-studio"), "{}", lines[0]);
+    assert!(!lines[0].contains("token="), "{}", lines[0]);
+}
+
+#[tokio::test]
+async fn two_publishers_get_independent_links_and_their_own_sessions() {
+    let temp = TempDir::new("signin-two-publishers");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    // No boot-time operator token: the workspace gate must pass on the live
+    // self-serve workspaces alone.
+    let (app, signin) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    submit_audit(
+        &app,
+        "email=a%40studio.example&studio=Northstar+Studio&platforms=max",
+    )
+    .await;
+    submit_audit(
+        &app,
+        "email=b%40arcade.example&studio=Bright+Arcade&platforms=admob",
+    )
+    .await;
+
+    let texts = mailer.texts();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    let northstar_token = token_from_mail(&texts[0]);
+    let bright_token = token_from_mail(&texts[1]);
+    assert_ne!(northstar_token, bright_token, "independent tokens");
+
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].publisher, "northstar-studio");
+    assert_eq!(rows[1].publisher, "bright-arcade");
+    assert_ne!(rows[0].token_hash, rows[1].token_hash);
+    assert!(!texts[0].contains(&bright_token), "no cross talk");
+    assert!(!texts[1].contains(&northstar_token), "no cross talk");
+
+    let tokens: BTreeMap<String, String> = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("tokens.json")).expect("tokens"),
+    )
+    .expect("json");
+    assert_eq!(tokens.len(), 2, "{tokens:?}");
+    assert_ne!(
+        tokens.get("northstar-studio"),
+        tokens.get("bright-arcade"),
+        "independent workspace tokens"
+    );
+
+    // Both sign in; each session lands on its own workspace.
+    let northstar_cookie = cookie_pair(
+        &set_cookie(
+            &send(
+                &app,
+                https_get(&format!("/console/signin?token={northstar_token}"), None),
+            )
+            .await,
+        )
+        .expect("northstar cookie"),
+    );
+    let bright_cookie = cookie_pair(
+        &set_cookie(
+            &send(
+                &app,
+                https_get(&format!("/console/signin?token={bright_token}"), None),
+            )
+            .await,
+        )
+        .expect("bright cookie"),
+    );
+    assert_ne!(northstar_cookie, bright_cookie, "distinct sessions");
+
+    for (cookie, own, other) in [
+        (&northstar_cookie, "northstar-studio", "bright-arcade"),
+        (&bright_cookie, "bright-arcade", "northstar-studio"),
+    ] {
+        let access = send(&app, get_with_cookie("/console/settings/access", cookie)).await;
+        assert_eq!(access.status, 200, "{}", access.body);
+        assert!(access.body.contains(own), "{}", access.body);
+        assert!(
+            !access.body.contains(other),
+            "another publisher's key leaked: {}",
+            access.body
+        );
+        let overview = send(&app, get_with_cookie("/", cookie)).await;
+        assert_eq!(overview.status, 200);
+    }
+}
+
+#[tokio::test]
+async fn signin_fails_closed_without_a_leads_root_or_when_the_store_is_unavailable() {
+    // (a) No leads root: the route answers the documented `503` panel.
+    let temp = TempDir::new("signin-unconfigured");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &app,
+        get("/console/signin?token=0123456789abcdef0123456789abcdef"),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response
+            .body
+            .contains("This view is not available in this deployment."),
+        "{}",
+        response.body
+    );
+
+    // (b) The sign-in log path is not usable (a directory squats it): the
+    //     store read fails and the path fails closed instead of minting.
+    let broken = TempDir::new("signin-broken-store");
+    std::fs::create_dir_all(broken.path().join("signin.jsonl")).expect("squat");
+    let warnings = Arc::new(WarningLog::default());
+    let (app, _signin) = build_app(broken.path(), 1_700_000_000, 72, None, &warnings, false);
+    let response = send(
+        &app,
+        get("/console/signin?token=0123456789abcdef0123456789abcdef"),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response
+        .body
+        .contains("This view is not available in this deployment."));
+    assert!(set_cookie(&response).is_none());
+}

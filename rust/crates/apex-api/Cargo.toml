@@ -9,7 +9,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-aes-gcm = { version = "0.10", features = ["std"] }
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
@@ -21,8 +20,11 @@ apex-connectors = { path = "../apex-connectors" }
 apex-core.workspace = true
 apex-lift = { path = "../apex-lift" }
 apex-metrics = { path = "../apex-metrics" }
+apex-notify = { path = "../apex-notify" }
 apex-proof = { path = "../apex-proof" }
 apex-ui = { path = "../apex-ui" }
+apex-vault = { path = "../apex-vault" }
+apex-watch = { path = "../apex-watch" }
 async-trait = "0.1"
 axum = "0.8"
 serde.workspace = true
@@ -36,6 +38,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]

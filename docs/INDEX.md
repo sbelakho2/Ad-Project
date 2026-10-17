@@ -23,6 +23,7 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 
 ## 🚀 Deployment & Operations
 - **[Deployment Roadmap](./Internal/Deployment/DEPLOYMENT_ROADMAP.md)**: Production rollout strategy.
+- **[Local CI](./Internal/CI/LOCAL_CI.md)**: Run the Woodpecker lanes locally and ship release binaries with rsync.
 - **[Control Plane Guide](./Internal/Operations/CONTROL_PLANE_GUIDE.md)**: Manual for operator tasks, compliance, and analytics.
 - **[Production Readiness](./Internal/Deployment/PRODUCTION_READINESS_CHECKLIST.md)**: Pre-flight checklist for live environments.
 - **[Monitoring Infrastructure](./Monitoring/MONITORING_INFRASTRUCTURE.md)**: Prometheus, Grafana, and alerting setup.
@@ -46,6 +47,10 @@ Welcome to the master documentation index for the ApexMediation platform. This p
 ## 🤖 Sales Automation
 
 - **[Apex Sales Engine](./Internal/Sales/APEX_SALES_ENGINE.md)**: Current runbook for the owner-only outbound engine in `rust/crates/apex-sales`, which finds publishers and emails them.
+
+## ⌚ Setup Watch
+
+- **[Setup Watch](./Internal/Watch/APEX_WATCH.md)**: Runbook for the paid daily app-ads.txt watch in `rust/crates/apex-watch`: sign-up, the daily check, the guard, alerts, billing and cancel.
 
 The entries below describe the removed TypeScript engine and its Test Server deployment; they are kept as history.
 

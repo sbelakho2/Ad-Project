@@ -1,6 +1,6 @@
 +++
 title = "Console settings | Apex API reference"
-description = "Account, theme, sessions, policy and monitoring pages on the publisher console."
+description = "Account, theme, sessions, policy, monitoring and billing pages on the publisher console."
 template = "api.html"
 weight = 17
 
@@ -12,7 +12,8 @@ og_image = "og/guides.png"
 ## Purpose
 
 Workspace settings: the account record, the theme choice, the session list,
-the recorded policy and the monitoring plan with per-platform health.
+the recorded policy, the monitoring plan with per-platform health, and the
+billing plans with their cancel actions.
 
 ## Method and path
 
@@ -24,19 +25,30 @@ the recorded policy and the monitoring plan with per-platform health.
 - `GET /console/settings/policy` renders the recorded policy.
 - `GET /console/settings/monitoring` renders the plan and each platform's
   reporting health.
+- `POST /console/settings/monitoring/cancel` records the monitoring
+  cancellation and answers 303 back. The plan bills the current period only;
+  the cancelled record is kept with its stop period.
+- `GET /console/settings/billing` renders the managed ad-ops plan, its
+  written scope and its cancel action.
+- `POST /console/settings/billing/managed/cancel` records the managed
+  cancellation and answers 303 back, with the same stop semantics.
 
 ## Authorization and CSRF
 
-The theme and revoke POSTs require a live change-log session and the hidden
-`csrf_token` field; without a session they 303-redirect to the change-log
-access panel and a wrong token is 400. The read pages need no session, but
-the access page only lists sessions when one is live.
+The theme, revoke and cancel POSTs require a live change-log session and the
+hidden `csrf_token` field; without a session they 303-redirect to the
+change-log access panel and a wrong token is 400. The read pages need no
+session, but the access page only lists sessions when one is live.
 
 ## Request fields
 
 - `POST /console/settings/theme`: `theme` is `auto`, `light` or `dark`.
 - `POST /console/settings/access/revoke`: `handle` is the session handle
   shown on the access page.
+- `POST /console/settings/monitoring/cancel` and
+  `POST /console/settings/billing/managed/cancel`: no fields beyond the
+  token; a publisher with no recorded plan has nothing to cancel and gets
+  400.
 
 ## States
 
@@ -48,14 +60,19 @@ the access page only lists sessions when one is live.
   current session is marked.
 - Policy: the recorded policy file's values and whether approval is
   required right now; without a readable policy the page says so.
-- Monitoring: the monitoring plan and one row per platform with its last
-  report date and readiness.
+- Monitoring: the plan record (tier, price, next billing date, cancellation)
+  and one row per platform with its last report date and readiness.
+- Billing: the managed ad-ops line, the written scope and the cancel action;
+  nothing recorded renders the offering's price points without a cancel
+  form.
 
 ## Failure states
 
-- 400 for an invalid theme value, a bad handle or a wrong CSRF token.
+- 400 for an invalid theme value, a bad handle, a wrong CSRF token or a
+  cancel with no recorded plan.
 - 303 to the access panel without a live session.
-- 500 with a support reference for a connection store read failure.
+- 500 with a support reference for a connection store read failure or an
+  unreadable plan state file.
 
 ## No-JS contract
 
@@ -64,9 +81,11 @@ Forms and links only. The theme is a cookie, not a script setting.
 ## Idempotency
 
 Setting the same theme again is harmless; revoking an already-ended session
-still answers 303 because the session is not live any more.
+still answers 303 because the session is not live any more; cancelling an
+already-cancelled plan keeps the recorded stop period unchanged.
 
 ## Current deployment
 
-The policy page reads the deployment's policy file; monitoring reads the
-connection metadata and the snapshot dates.
+The policy page reads the deployment's policy file; monitoring and billing
+read the recorded plan state files beside the connection records, and the
+monitoring page also reads the snapshot dates.

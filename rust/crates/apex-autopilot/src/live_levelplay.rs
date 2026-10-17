@@ -1,0 +1,1071 @@
+//! The live LevelPlay write adapter: the production [`PlatformOps`] for
+//! Unity LevelPlay publishers.
+//!
+//! LevelPlay documents A/B tests only in its publisher dashboard, so the
+//! publisher starts the test there once (a control group `abTest: "A"` and a
+//! variant group `abTest: "B"`). The runner's part is deliberately narrow:
+//!
+//! - it changes **only group B**: every write first reads the app's groups
+//!   through the connectors' groups v4 call and requires exactly one variant
+//!   group (the typed refusal otherwise), and an entry-targeting write is
+//!   refused when the target is not among that group's instances — the
+//!   control group A is never mutated;
+//! - it reads A against B per day through the reporting v1 call with the
+//!   `abTest` breakdown and the `activeUsers` metric, one call per day (the
+//!   connector row carries no date), oldest first;
+//! - it never promotes or deprecates through the API: the winning variant is
+//!   chosen in the dashboard, and the adapter refuses the promotion typed
+//!   instead of fabricating it. It also has no revenue metric to bill from
+//!   (the monthly pass refuses the scope revenue read rather than guessing).
+//!
+//! # The daily fold
+//!
+//! The v1 call exposes the `activeUsers` count per arm; no revenue (or any
+//! other per-arm quantity) is reported. The adapter therefore carries each
+//! arm's daily active-user count as the arm's value (`ArmDay.revenue`),
+//! leaving `users` unset so the window scales the count by the arm's
+//! pre-registered allocation exactly like the userless MAX path. Setting
+//! `users` would divide the value by the same count and flatten every day to
+//! a constant ratio, so the convention here is the count-as-value fold. The
+//! window's `levelplay_values_use_active_users` users-branch stays the rule
+//! for arm pulls that report both revenue and users.
+//!
+//! Rows split strictly: `A` is the control arm, `B` the test arm, and any
+//! other label fails the pull typed, naming it. A day is final once it is
+//! strictly before the pull day (so the second pull is the same count), and a
+//! day where only one arm reported gets the other arm zero-filled — both
+//! exactly the MAX conventions.
+//!
+//! Every write is gated by a caller-supplied allow-list (the verify-live
+//! gate): by default the adapter refuses all writes rather than guessing that
+//! an endpoint is safe.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use apex_connectors::levelplay::{AbTestActiveUsersRow, LevelPlayClient};
+use apex_connectors::transport::Transport;
+use apex_core::{ExperimentResult, ExperimentState, PlatformError, PlatformId};
+use apex_proof::ChangeKind;
+use async_trait::async_trait;
+
+use crate::live_max::Wall;
+use crate::ops::{ExperimentDays, ExperimentRequest, PlatformOps};
+
+/// How many trailing days the adapter asks the reporting API for; generous
+/// enough for any allowed window plus burn-in (the same bound as MAX).
+const LOOKBACK_DAYS: i64 = 63;
+const DAY_SECS: i64 = 86_400;
+
+pub struct LevelPlayPlatformOps {
+    management: LevelPlayClient,
+    wall: Arc<dyn Wall>,
+    /// Verify-live allow-list: an operation here (`updateEntryPrice`,
+    /// `createEntry`, `removeEntry`) is writable; anything else is refused
+    /// before any side effect.
+    writable: BTreeMap<String, bool>,
+}
+
+impl std::fmt::Debug for LevelPlayPlatformOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LevelPlayPlatformOps")
+            .field("writable", &self.writable)
+            .finish()
+    }
+}
+
+impl LevelPlayPlatformOps {
+    /// Build the adapter. `writable` lists the operations the operator has
+    /// verified against a live sandbox; without it every write is refused.
+    pub fn new(
+        secret_key: &str,
+        refresh_token: &str,
+        app_key: &str,
+        base_url: &str,
+        transport: Arc<dyn Transport>,
+        wall: Arc<dyn Wall>,
+        writable: impl IntoIterator<Item = String>,
+    ) -> Result<Self, PlatformError> {
+        let management =
+            LevelPlayClient::new(secret_key, refresh_token, app_key, base_url, transport)?;
+        Ok(Self {
+            management,
+            wall,
+            writable: writable.into_iter().map(|op| (op, true)).collect(),
+        })
+    }
+
+    fn schema(&self, operation: &str, detail: impl Into<String>) -> PlatformError {
+        PlatformError::Schema {
+            platform: PlatformId::LevelPlay,
+            operation: operation.into(),
+            detail: detail.into(),
+        }
+    }
+
+    /// The app's groups as the API reports them, accepting the response's
+    /// envelope or a bare array.
+    fn groups_array(data: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+        data.as_array()
+            .or_else(|| data.get("groups").and_then(serde_json::Value::as_array))
+    }
+
+    fn is_ab_group(group: &serde_json::Value, label: &str) -> bool {
+        group
+            .get("abTest")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| value.eq_ignore_ascii_case(label))
+    }
+
+    /// The one group created with `abTest: "B"` — the only group the runner
+    /// may change. Zero or several variant groups is a typed refusal, never a
+    /// silent pick.
+    async fn group_b(&self) -> Result<serde_json::Value, PlatformError> {
+        let groups = self.groups().await?;
+        let variant_groups: Vec<&serde_json::Value> = groups
+            .iter()
+            .filter(|group| Self::is_ab_group(group, "B"))
+            .collect();
+        match variant_groups.as_slice() {
+            [group] => Ok((*group).clone()),
+            [] => Err(self.schema(
+                "startExperiment",
+                "no abTest \"B\" group exists; the publisher must start the dashboard A/B test first",
+            )),
+            groups => {
+                let ids: Vec<&str> = groups
+                    .iter()
+                    .filter_map(|group| group.get("groupId").and_then(serde_json::Value::as_str))
+                    .collect();
+                Err(self.schema(
+                    "startExperiment",
+                    format!(
+                        "{} groups carry abTest \"B\" ({}) but the runner changes exactly one variant group",
+                        groups.len(),
+                        ids.join(", ")
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// The app's groups from the groups v4 read.
+    async fn groups(&self) -> Result<Vec<serde_json::Value>, PlatformError> {
+        let data = self.management.list_groups().await?;
+        let groups = Self::groups_array(&data)
+            .ok_or_else(|| self.schema("listGroups", "response has no groups array"))?;
+        Ok(groups.clone())
+    }
+
+    /// The group's configuration without its identity fields: everything a
+    /// second arm must mirror for an A/A read to be honest.
+    fn arm_configuration(group: &serde_json::Value) -> serde_json::Value {
+        let mut object = group.as_object().cloned().unwrap_or_default();
+        for key in ["groupId", "abTest", "name"] {
+            object.remove(key);
+        }
+        serde_json::Value::Object(object)
+    }
+
+    /// Refuse an entry-targeting write when the group advertises its members
+    /// and the target is not one of them: the runner changes variant-group
+    /// entries only.
+    fn require_entry_in_group(
+        &self,
+        group: &serde_json::Value,
+        entry_id: &str,
+    ) -> Result<(), PlatformError> {
+        let Some(instances) = group.get("instances").and_then(serde_json::Value::as_array) else {
+            return Ok(());
+        };
+        let member = instances.iter().any(|instance| {
+            ["instanceId", "id", "instance_id"].iter().any(|key| {
+                instance
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id == entry_id)
+            })
+        });
+        if member {
+            Ok(())
+        } else {
+            Err(self.schema(
+                "startExperiment",
+                format!(
+                    "entry '{entry_id}' is not an instance of the abTest \"B\" group; only variant-group entries may change"
+                ),
+            ))
+        }
+    }
+}
+
+#[async_trait]
+impl PlatformOps for LevelPlayPlatformOps {
+    fn platform(&self) -> PlatformId {
+        PlatformId::LevelPlay
+    }
+
+    async fn writable(&self, operation: &str) -> bool {
+        self.writable.get(operation).copied().unwrap_or(false)
+    }
+
+    async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError> {
+        // Only waterfall-entry changes exist on LevelPlay; anything else is
+        // refused before the group read (or any other call).
+        match &request.change {
+            ChangeKind::WaterfallEntryPriceSet { .. }
+            | ChangeKind::WaterfallEntryCreated { .. }
+            | ChangeKind::WaterfallEntryRemoved { .. } => {}
+            _ => {
+                return Err(self.schema(
+                    "startExperiment",
+                    "a LevelPlay experiment carries a waterfall-entry change only",
+                ))
+            }
+        }
+        // The A/B gate: exactly one variant group must exist; it is the only
+        // group any write may target.
+        let group_b = self.group_b().await?;
+        let group_id = group_b
+            .get("groupId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| self.schema("startExperiment", "group B missing its groupId"))?
+            .to_string();
+        match &request.change {
+            ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id,
+                entry_id,
+                price_ecpm,
+            } => {
+                self.require_entry_in_group(&group_b, entry_id)?;
+                self.management
+                    .update_entry_price(ad_unit_id, entry_id, *price_ecpm)
+                    .await?;
+            }
+            ChangeKind::WaterfallEntryCreated {
+                ad_unit_id,
+                network,
+                instance_name,
+                price_ecpm,
+            } => {
+                self.management
+                    .create_entry(ad_unit_id, network, instance_name, *price_ecpm)
+                    .await?;
+            }
+            ChangeKind::WaterfallEntryRemoved {
+                ad_unit_id,
+                entry_id,
+            } => {
+                self.require_entry_in_group(&group_b, entry_id)?;
+                self.management.remove_entry(ad_unit_id, entry_id).await?;
+            }
+            _ => unreachable!("the change kind was checked above"),
+        }
+        Ok(group_id)
+    }
+
+    fn change_in_test_arm(&self) -> bool {
+        true
+    }
+
+    /// LevelPlay has no create-A/A API, so the only honest null experiment is
+    /// the dashboard's own test **when its two arms are provably identical**:
+    /// the read adopts the existing variant group as the null experiment
+    /// (nothing is written). Groups whose configurations differ refuse typed —
+    /// a B group carrying a change is not an A/A, and the adapter never
+    /// fabricates one.
+    async fn start_null_experiment(
+        &self,
+        _spec: &apex_core::ExperimentSpec,
+    ) -> Result<String, PlatformError> {
+        let groups = self.groups().await?;
+        let controls: Vec<&serde_json::Value> = groups
+            .iter()
+            .filter(|group| Self::is_ab_group(group, "A"))
+            .collect();
+        let variants: Vec<&serde_json::Value> = groups
+            .iter()
+            .filter(|group| Self::is_ab_group(group, "B"))
+            .collect();
+        let [control] = controls.as_slice() else {
+            return Err(self.schema(
+                "startNullExperiment",
+                "an A/A read needs exactly one abTest \"A\" control group",
+            ));
+        };
+        let [variant] = variants.as_slice() else {
+            return Err(self.schema(
+                "startNullExperiment",
+                "an A/A read needs exactly one abTest \"B\" variant group",
+            ));
+        };
+        if Self::arm_configuration(variant) != Self::arm_configuration(control) {
+            return Err(self.schema(
+                "startNullExperiment",
+                "the abTest \"B\" group differs from the control; an A/A read needs identical arm configurations",
+            ));
+        }
+        variant
+            .get("groupId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| self.schema("startNullExperiment", "group B missing its groupId"))
+    }
+
+    /// The group B's own presence is the experiment state proxy: the
+    /// dashboard ends the test by removing the variant group (or promoting
+    /// it), so a present `abTest: "B"` group with this id reads running and
+    /// an absent one reads stopped. The lift verdict is never read from the
+    /// dashboard; only the measured counts are.
+    async fn experiment(&self, experiment_id: &str) -> Result<ExperimentResult, PlatformError> {
+        let data = self.management.list_groups().await?;
+        let groups = Self::groups_array(&data)
+            .ok_or_else(|| self.schema("experiment", "response has no groups array"))?;
+        let running = groups.iter().any(|group| {
+            group.get("groupId").and_then(serde_json::Value::as_str) == Some(experiment_id)
+                && Self::is_ab_group(group, "B")
+        });
+        Ok(ExperimentResult {
+            experiment_id: experiment_id.to_string(),
+            state: if running {
+                ExperimentState::Running
+            } else {
+                ExperimentState::Stopped
+            },
+            results: vec![],
+            lift_percent_bp: None,
+            confidence: None,
+            winner_variant_id: None,
+        })
+    }
+
+    /// One reporting v1 call per trailing day (the connector row carries no
+    /// date), oldest first; a day with no rows is simply absent, exactly like
+    /// the MAX pull's row union.
+    async fn experiment_days(&self, _experiment_id: &str) -> Result<ExperimentDays, PlatformError> {
+        let today = self.wall.now_unix_s().div_euclid(DAY_SECS);
+        let mut pulls: Vec<(String, Vec<AbTestActiveUsersRow>)> = Vec::new();
+        for offset in (1..=LOOKBACK_DAYS).rev() {
+            let day = crate::calendar::format_day(today - offset);
+            let rows = self.management.ab_test_active_users(&day, &day).await?;
+            if !rows.is_empty() {
+                pulls.push((day, rows));
+            }
+        }
+        arms_from_days(&pulls, today)
+    }
+
+    /// The groups list, canonically encoded: any publisher change to the A/B
+    /// configuration (including ending the test by removing group B) is an
+    /// edit and voids the experiment rather than keeping a stale test.
+    async fn current_settings(&self, _ad_unit_id: &str) -> Result<String, PlatformError> {
+        let data = self.management.list_groups().await?;
+        let groups = Self::groups_array(&data)
+            .ok_or_else(|| self.schema("current_settings", "response has no groups array"))?;
+        serde_json::to_string(groups).map_err(|error| {
+            self.schema("current_settings", format!("groups not encodable: {error}"))
+        })
+    }
+
+    /// LevelPlay has no documented promote API: the dashboard applies the
+    /// winning variant. The runner refuses instead of pretending.
+    async fn promote_experiment(&self, _experiment_id: &str) -> Result<(), PlatformError> {
+        Err(self.schema(
+            "promoteExperiment",
+            "LevelPlay promotes the winning arm in the publisher dashboard; no promote API is documented",
+        ))
+    }
+
+    /// LevelPlay has no documented stop/deprecate API either: the publisher
+    /// ends the dashboard A/B test.
+    async fn deprecate_experiment(&self, _experiment_id: &str) -> Result<(), PlatformError> {
+        Err(self.schema(
+            "deprecateExperiment",
+            "LevelPlay ends the dashboard A/B test in the publisher dashboard; no deprecate API is documented",
+        ))
+    }
+
+    async fn apply(&self, _action: &crate::model::Action, _id: &str) -> Result<(), PlatformError> {
+        // The change always rides group B; nothing is ever applied live.
+        Err(self.schema(
+            "apply",
+            "a LevelPlay change is carried by the A/B test's variant group; there is no live apply path",
+        ))
+    }
+
+    async fn rollback(&self, _action: &crate::model::Action) -> Result<(), PlatformError> {
+        Err(self.schema(
+            "rollback",
+            "a LevelPlay change is carried by the A/B test's variant group; there is no live rollback path",
+        ))
+    }
+
+    fn call_log(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// Fold the per-day pulls into the two arms: `A` is control, `B` is test, any
+/// other label fails typed; a day where only one arm reported zero-fills the
+/// other; a day strictly before the pull day is final (second pull equals the
+/// first) — the MAX conventions.
+fn arms_from_days(
+    pulls: &[(String, Vec<AbTestActiveUsersRow>)],
+    today_day: i64,
+) -> Result<ExperimentDays, PlatformError> {
+    let mut control: BTreeMap<String, i64> = BTreeMap::new();
+    let mut test: BTreeMap<String, i64> = BTreeMap::new();
+    for (day, rows) in pulls {
+        for row in rows {
+            let label = row.ab_test.trim();
+            let is_control = label.eq_ignore_ascii_case("A");
+            let is_test = label.eq_ignore_ascii_case("B");
+            if !is_control && !is_test {
+                return Err(PlatformError::Schema {
+                    platform: PlatformId::LevelPlay,
+                    operation: "experiment_days".into(),
+                    detail: format!(
+                        "abTest reports arm '{label}' but the experiment's groups are A and B"
+                    ),
+                });
+            }
+            let count = i64::try_from(row.active_users).map_err(|_| PlatformError::Schema {
+                platform: PlatformId::LevelPlay,
+                operation: "experiment_days".into(),
+                detail: format!("activeUsers for {day} exceeds i64"),
+            })?;
+            let map = if is_control { &mut control } else { &mut test };
+            let total = map.entry(day.clone()).or_default();
+            *total = total
+                .checked_add(count)
+                .ok_or_else(|| PlatformError::Schema {
+                    platform: PlatformId::LevelPlay,
+                    operation: "experiment_days".into(),
+                    detail: format!("activeUsers rows for {day} overflow i64"),
+                })?;
+        }
+    }
+    let days: BTreeSet<&String> = control.keys().chain(test.keys()).collect();
+    let arm = |map: &BTreeMap<String, i64>, day: &str| -> apex_lift::window::ArmDay {
+        let value = map.get(day).copied().unwrap_or(0);
+        let final_day = crate::calendar::day_number(day).is_some_and(|n| n < today_day);
+        apex_lift::window::ArmDay {
+            day: day.to_string(),
+            revenue: value,
+            users: None,
+            second_pull_revenue: final_day.then_some(value),
+            second_pull_users: None,
+            fill: None,
+        }
+    };
+    Ok(ExperimentDays {
+        control: days.iter().map(|day| arm(&control, day)).collect(),
+        test: days.iter().map(|day| arm(&test, day)).collect(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Mutex;
+
+    use apex_connectors::transport::{
+        HttpBody, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
+    };
+    use apex_core::ExperimentSpec;
+
+    use super::*;
+
+    /// A transport that answers from a fixed queue — falling back to an empty
+    /// (zero-row) A/B report once the queue drains, so the 63-day pull loop
+    /// stays scriptable by day — and records every request.
+    #[derive(Debug, Default)]
+    struct FakeTransport {
+        responses: Mutex<Vec<HttpResponse>>,
+        seen: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl FakeTransport {
+        fn push(&self, status: u16, body: serde_json::Value) -> &Self {
+            self.responses.lock().unwrap().push(HttpResponse {
+                status,
+                headers: vec![],
+                body: serde_json::to_vec(&body).unwrap(),
+            });
+            self
+        }
+    }
+
+    #[async_trait]
+    impl Transport for FakeTransport {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+            self.seen.lock().unwrap().push(req);
+            let scripted = self.responses.lock().unwrap();
+            if scripted.is_empty() {
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: serde_json::to_vec(&serde_json::json!({
+                        "code": 200,
+                        "count": 0,
+                        "results": []
+                    }))
+                    .unwrap(),
+                });
+            }
+            drop(scripted);
+            Ok(self.responses.lock().unwrap().remove(0))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FixedWall(i64);
+    impl Wall for FixedWall {
+        fn now_unix_s(&self) -> i64 {
+            self.0
+        }
+    }
+
+    const NOW_S: i64 = 1_800_000_000;
+
+    fn today_day() -> i64 {
+        NOW_S / 86_400
+    }
+
+    fn auth() -> serde_json::Value {
+        serde_json::json!("bearer")
+    }
+
+    fn day_report(rows: &[(&str, u64)]) -> serde_json::Value {
+        serde_json::json!({
+            "code": 200,
+            "count": rows.len(),
+            "results": rows
+                .iter()
+                .map(|(arm, users)| serde_json::json!({"abTest": arm, "activeUsers": users}))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn groups_report(variant_instances: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "groups": [
+                {
+                    "groupId": "g-a",
+                    "name": "Control",
+                    "abTest": "A",
+                    "floorPrice": 1.0,
+                    "instances": [{"instanceId": "i-control"}]
+                },
+                {
+                    "groupId": "g-b",
+                    "name": "Variant B",
+                    "abTest": "B",
+                    "floorPrice": 2.0,
+                    "instances": variant_instances
+                }
+            ]
+        })
+    }
+
+    fn ops(transport: Arc<FakeTransport>, writable: bool) -> LevelPlayPlatformOps {
+        let write = if writable {
+            vec![
+                "updateEntryPrice".to_string(),
+                "createEntry".to_string(),
+                "removeEntry".to_string(),
+            ]
+        } else {
+            vec![]
+        };
+        LevelPlayPlatformOps::new(
+            "secret-key",
+            "refresh-token",
+            "acct",
+            "https://lp.test",
+            transport,
+            Arc::new(FixedWall(NOW_S)),
+            write,
+        )
+        .expect("adapter")
+    }
+
+    fn spec() -> ExperimentSpec {
+        ExperimentSpec {
+            name: "autopilot-levelplay-u1-2-5".into(),
+            ad_unit_id: "u1".into(),
+            metric: apex_core::ExperimentMetric::Revenue,
+            variants: 2,
+            change_description: "raise the waterfall entry to 2.5".into(),
+            test_group_allocation: 50,
+        }
+    }
+
+    fn assert_typed_schema(error: &PlatformError, operation: &str) {
+        match error {
+            PlatformError::Schema {
+                platform,
+                operation: op,
+                ..
+            } => {
+                assert_eq!(*platform, PlatformId::LevelPlay);
+                assert_eq!(op, operation);
+            }
+            other => panic!("expected a typed Schema error, got {other:?}"),
+        }
+        assert!(!error.is_retryable(), "schema drift is not retryable");
+    }
+
+    #[tokio::test]
+    async fn an_aa_read_folds_to_exactly_zero_lift_through_the_window() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        // Ten equal-arm days; the fold maps every one to the same value.
+        for _ in 0..10 {
+            transport.push(200, day_report(&[("A", 100), ("B", 100)]));
+        }
+        let adapter = ops(Arc::clone(&transport), true);
+        let days = adapter.experiment_days("g-b").await.expect("days");
+        assert_eq!(days.control.len(), 10);
+        assert_eq!(days.test.len(), 10);
+        for (control, test) in days.control.iter().zip(&days.test) {
+            assert_eq!(control.day, test.day);
+            assert_eq!(control.revenue, test.revenue);
+            assert_eq!(control.revenue, 100, "the active-user count is the value");
+            assert_eq!(
+                control.second_pull_revenue,
+                Some(100),
+                "strictly before today"
+            );
+        }
+        // The full fold: the window completes and the estimate is exactly zero.
+        let window = apex_lift::window::build_window(&days.control, &days.test, 7, 0.5);
+        assert!(window.complete, "problems: {:?}", window.problems);
+        assert_eq!(window.days.len(), 7);
+        let estimate = apex_lift::estimate(
+            &window
+                .days
+                .iter()
+                .map(|day| day.log_ratio)
+                .collect::<Vec<_>>(),
+        )
+        .expect("estimate");
+        assert_eq!(estimate.lift, 0.0);
+        assert_eq!(estimate.mean_log, 0.0);
+        assert_eq!(estimate.lower_90, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_single_arm_day_zero_fills_and_pull_day_days_are_not_final() {
+        // Fold-level: the day the pull runs is not final, everything strictly
+        // before it is — the MAX finality convention.
+        let today = today_day();
+        let pulls = vec![
+            (
+                crate::calendar::format_day(today - 1),
+                vec![
+                    AbTestActiveUsersRow {
+                        ab_test: "A".into(),
+                        active_users: 700,
+                    },
+                    AbTestActiveUsersRow {
+                        ab_test: "B".into(),
+                        active_users: 900,
+                    },
+                ],
+            ),
+            (
+                crate::calendar::format_day(today),
+                vec![AbTestActiveUsersRow {
+                    ab_test: "A".into(),
+                    active_users: 100,
+                }],
+            ),
+        ];
+        let days = arms_from_days(&pulls, today).expect("fold");
+        assert_eq!(days.control.len(), 2);
+        assert_eq!(days.test.len(), 2, "a shared day shape");
+        assert_eq!(days.control[0].revenue, 700);
+        assert_eq!(days.control[0].second_pull_revenue, Some(700));
+        assert_eq!(days.test[0].revenue, 900);
+        // The pull day itself is not final.
+        assert_eq!(days.control[1].second_pull_revenue, None);
+        // The missing B row zero-fills, final exactly when the day is final.
+        assert_eq!(days.test[1].revenue, 0);
+        assert_eq!(days.test[1].second_pull_revenue, None);
+        assert!(days.control.iter().all(|day| day.users.is_none()));
+    }
+
+    #[test]
+    fn a_third_arm_label_fails_the_fold_typed() {
+        let pulls = vec![(
+            "2027-01-13".to_string(),
+            vec![
+                AbTestActiveUsersRow {
+                    ab_test: "A".into(),
+                    active_users: 10,
+                },
+                AbTestActiveUsersRow {
+                    ab_test: "NULL".into(),
+                    active_users: 10,
+                },
+            ],
+        )];
+        let error = arms_from_days(&pulls, 20_000).expect_err("third label");
+        assert_typed_schema(&error, "experiment_days");
+        assert!(error.to_string().contains("NULL"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_reporting_schema_drift_fails_typed() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        // A body without the `results` array is schema drift, not an empty day.
+        transport.push(200, serde_json::json!({"code": 200}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let error = adapter.experiment_days("g-b").await.expect_err("drift");
+        match &error {
+            PlatformError::Schema { operation, .. } => {
+                assert_eq!(operation, "reportAbTestActiveUsers")
+            }
+            other => panic!("expected a typed Schema error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn group_b_writes_only_target_b_and_refuse_foreign_entries() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        transport.push(200, serde_json::json!({}));
+        let adapter = ops(Arc::clone(&transport), true);
+        assert!(adapter.writable("updateEntryPrice").await);
+
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: "u1".into(),
+                entry_id: "i1".into(),
+                price_ecpm: 2_500_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert_eq!(id, "g-b", "the variant group is the experiment handle");
+
+        {
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(seen.len(), 3, "auth, groups read and exactly one write");
+            // The groups read matches the connector's recorded shape.
+            assert_eq!(seen[1].method, HttpMethod::Get);
+            assert_eq!(seen[1].url, "https://lp.test/levelPlay/groups/v4/acct");
+            assert_eq!(
+                seen[1]
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.as_str() == "Authorization")
+                    .map(|(_, value)| value.as_str()),
+                Some("Bearer bearer")
+            );
+            // The single write is the connector's recorded instances call.
+            assert_eq!(seen[2].method, HttpMethod::Put);
+            assert_eq!(
+                seen[2].url,
+                "https://lp.test/levelPlay/network/instances/v4/acct/"
+            );
+            assert!(
+                seen.iter().all(|request| !request.url.contains("g-a")),
+                "the control group is never addressed: {:?}",
+                seen.iter().map(|request| &request.url).collect::<Vec<_>>()
+            );
+            let body = match seen[2].body.as_ref().expect("body") {
+                HttpBody::Json(value) => value.clone(),
+                other => panic!("expected JSON body, got {other:?}"),
+            };
+            assert_eq!(
+                body,
+                serde_json::json!({"instanceId": "i1", "price": 2_500_000})
+            );
+        }
+
+        // An entry that is not a member of group B is refused with no write.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: "u1".into(),
+                entry_id: "i9".into(),
+                price_ecpm: 2_500_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let error = adapter
+            .start_experiment(&request)
+            .await
+            .expect_err("foreign");
+        assert_typed_schema(&error, "startExperiment");
+        assert!(error.to_string().contains("i9"), "{error}");
+        assert_eq!(
+            transport.seen.lock().unwrap().len(),
+            2,
+            "the groups read is the last call: no write"
+        );
+
+        // No variant group at all: refused, no write either.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            serde_json::json!({"groups": [{"groupId": "g-a", "name": "Control", "abTest": "A"}]}),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let error = adapter.start_experiment(&request).await.expect_err("no B");
+        assert_typed_schema(&error, "startExperiment");
+        assert!(error.to_string().contains("dashboard"), "{error}");
+        assert_eq!(transport.seen.lock().unwrap().len(), 2, "no write");
+    }
+
+    #[tokio::test]
+    async fn a_non_waterfall_change_is_refused_before_any_call() {
+        let transport = Arc::new(FakeTransport::default());
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: "e".into(),
+            spec: spec(),
+            change: ChangeKind::EcpmSet {
+                mediation_group_id: "g".into(),
+                ad_unit_id: "u1".into(),
+                ecpm: 1,
+            },
+            prev_value: "{}".into(),
+        };
+        let error = adapter
+            .start_experiment(&request)
+            .await
+            .expect_err("refuse");
+        assert_typed_schema(&error, "startExperiment");
+        assert!(transport.seen.lock().unwrap().is_empty(), "no call at all");
+    }
+
+    #[tokio::test]
+    async fn created_entries_write_through_the_variant_group() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(200, groups_report(serde_json::json!([])));
+        transport.push(200, serde_json::json!({"instanceId": "i-new"}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change: ChangeKind::WaterfallEntryCreated {
+                ad_unit_id: "u1".into(),
+                network: "admob".into(),
+                instance_name: "admob_b".into(),
+                price_ecpm: 1_250_000,
+            },
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert_eq!(id, "g-b");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[2].method, HttpMethod::Post);
+        let body = match seen[2].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "instanceName": "admob_b",
+                "adapterNetwork": "admob",
+                "price": 1_250_000
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn experiment_reads_group_b_presence_and_promote_refuses_typed() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let result = adapter.experiment("g-b").await.expect("read");
+        assert_eq!(result.state, ExperimentState::Running);
+        assert_eq!(result.experiment_id, "g-b");
+
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            serde_json::json!({"groups": [{"groupId": "g-a", "abTest": "A"}]}),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let result = adapter.experiment("g-b").await.expect("read");
+        assert_eq!(result.state, ExperimentState::Stopped);
+
+        // The dashboard-only outcomes refuse instead of fabricating an API:
+        // promote and deprecate make no call at all.
+        let transport = Arc::new(FakeTransport::default());
+        let adapter = ops(Arc::clone(&transport), true);
+        assert!(adapter.promote_experiment("g-b").await.is_err());
+        assert!(adapter.deprecate_experiment("g-b").await.is_err());
+        assert!(transport.seen.lock().unwrap().is_empty());
+
+        assert!(adapter.change_in_test_arm());
+        assert!(adapter.call_log().is_empty());
+        assert!(format!("{adapter:?}").contains("LevelPlayPlatformOps"));
+        assert!(adapter
+            .apply(
+                &crate::model::Action::RemoveWaterfallEntry {
+                    ad_unit_id: "u".into(),
+                    entry_id: "e".into(),
+                },
+                "k"
+            )
+            .await
+            .is_err());
+        assert!(adapter
+            .rollback(&crate::model::Action::RemoveWaterfallEntry {
+                ad_unit_id: "u".into(),
+                entry_id: "e".into(),
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn current_settings_encode_the_groups_and_scope_revenue_refuses() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let settings = adapter.current_settings("u1").await.expect("settings");
+        assert!(settings.contains("g-a"));
+        assert!(settings.contains("g-b"));
+        // Reading again returns the same canonical encoding.
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        assert_eq!(settings, settings_from(&adapter).await);
+        // LevelPlay's reporting call exposes only activeUsers; there is no
+        // revenue read, so billing refuses instead of guessing.
+        let error = adapter
+            .scope_revenue("u1", "2027-01-01", "2027-01-31")
+            .await
+            .expect_err("refuse");
+        assert!(error.to_string().contains("not supported"), "{error}");
+    }
+
+    async fn settings_from(adapter: &LevelPlayPlatformOps) -> String {
+        adapter.current_settings("u1").await.expect("settings")
+    }
+
+    #[tokio::test]
+    async fn a_null_experiment_is_only_adopted_when_the_arms_match() {
+        // The dashboard test's two arms are identical apart from their
+        // identity fields: the running test IS the A/A read, adopted with no
+        // write at all.
+        let identical = serde_json::json!({
+            "groups": [
+                {
+                    "groupId": "g-a",
+                    "name": "Control",
+                    "abTest": "A",
+                    "floorPrice": 1.5,
+                    "countriesRate": 0.8,
+                    "instances": [{"instanceId": "i1"}]
+                },
+                {
+                    "groupId": "g-b",
+                    "name": "Variant B",
+                    "abTest": "B",
+                    "floorPrice": 1.5,
+                    "countriesRate": 0.8,
+                    "instances": [{"instanceId": "i1"}]
+                }
+            ]
+        });
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(200, identical);
+        let adapter = ops(Arc::clone(&transport), true);
+        let id = adapter.start_null_experiment(&spec()).await.expect("adopt");
+        assert_eq!(id, "g-b", "the variant group is the null experiment handle");
+        assert_eq!(
+            transport.seen.lock().unwrap().len(),
+            2,
+            "the read is the only call: nothing is written"
+        );
+
+        // A variant arm carrying any change is not an A/A: refused typed.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let error = adapter
+            .start_null_experiment(&spec())
+            .await
+            .expect_err("a changed B arm is not an A/A");
+        assert_typed_schema(&error, "startNullExperiment");
+        assert!(error.to_string().contains("identical"), "{error}");
+        assert_eq!(transport.seen.lock().unwrap().len(), 2, "no write");
+    }
+
+    #[tokio::test]
+    async fn writes_are_refused_without_the_allow_list() {
+        let transport = Arc::new(FakeTransport::default());
+        let adapter = ops(Arc::clone(&transport), false);
+        assert!(!adapter.writable("updateEntryPrice").await);
+        assert!(!adapter.writable("createEntry").await);
+        assert!(!adapter.writable("removeEntry").await);
+        assert!(transport.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn experiment_days_pulls_each_trailing_day_oldest_first() {
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(200, day_report(&[("A", 10), ("B", 12)]));
+        let adapter = ops(Arc::clone(&transport), true);
+        let days = adapter.experiment_days("g-b").await.expect("days");
+        assert_eq!(days.control.len(), 1);
+        assert_eq!(days.test.len(), 1);
+        let seen = transport.seen.lock().unwrap();
+        let first_day = crate::calendar::format_day(today_day() - LOOKBACK_DAYS);
+        assert_eq!(seen[0].url, "https://lp.test/partners/publisher/auth");
+        assert_eq!(seen[1].method, HttpMethod::Get);
+        assert_eq!(
+            seen[1].url,
+            format!(
+                "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=abTest&metrics=activeUsers&startDate={first_day}&endDate={first_day}"
+            )
+        );
+        assert_eq!(seen.len(), 1 + LOOKBACK_DAYS as usize, "one call per day");
+    }
+}

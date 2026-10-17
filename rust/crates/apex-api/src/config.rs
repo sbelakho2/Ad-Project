@@ -1,8 +1,11 @@
-//! Configuration helpers shared by the API binary: environment reads and the
-//! `publisher=<hex key>` allow-list. They live in the library so they are
-//! compiled once and unit tested.
+//! Configuration helpers shared by the API binary: environment reads, the
+//! `publisher=<hex key>` allow-list and the hex decoding of wire-encoded
+//! binary keys (e.g. the Adyen webhook HMAC key, which Adyen publishes as hex
+//! while the verifier consumes raw bytes). They live in the library so they
+//! are compiled once and unit tested.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use apex_proof::VerifyingKey;
 
@@ -68,6 +71,99 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// A configuration value documented as hex that failed to decode. The error
+/// names the variable so an operator log points at the exact setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexKeyError {
+    variable: String,
+    reason: String,
+}
+
+impl HexKeyError {
+    /// The environment variable that carried the invalid value.
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+}
+
+impl fmt::Display for HexKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is not valid hex: {}", self.variable, self.reason)
+    }
+}
+
+impl std::error::Error for HexKeyError {}
+
+/// Decode a hex-encoded binary key from configuration. Adyen publishes the
+/// webhook HMAC key as hex text, but signatures are computed over the raw
+/// key bytes, so the text form must be decoded before it reaches the
+/// verifier. An empty value decodes to an empty key (the caller decides
+/// whether that counts as configured); odd-length or non-hex values are a
+/// [`HexKeyError`] naming `variable`.
+pub fn decode_hex_env_key(variable: &str, raw: &str) -> Result<Vec<u8>, HexKeyError> {
+    hex::decode(raw.trim()).map_err(|error| HexKeyError {
+        variable: variable.to_string(),
+        reason: error.to_string(),
+    })
+}
+
+/// The environment variable naming the one-time sign-in link lifetime.
+pub const SIGNIN_TTL_HOURS_ENV: &str = "APEX_SIGNIN_TTL_HOURS";
+/// Lifetime of a sign-in link when [`SIGNIN_TTL_HOURS_ENV`] is unset.
+pub const DEFAULT_SIGNIN_TTL_HOURS: i64 = 72;
+/// Smallest accepted sign-in link lifetime.
+pub const MIN_SIGNIN_TTL_HOURS: i64 = 1;
+/// Largest accepted sign-in link lifetime.
+pub const MAX_SIGNIN_TTL_HOURS: i64 = 720;
+
+/// A sign-in TTL value outside the documented `1..=720` bounds (or not an
+/// integer at all). The error names the variable and the offending value so
+/// an operator log points at the exact setting; it is never silently clamped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigninTtlError {
+    variable: String,
+    value: String,
+}
+
+impl SigninTtlError {
+    /// The environment variable that carried the invalid value.
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+}
+
+impl fmt::Display for SigninTtlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} must be an integer between {MIN_SIGNIN_TTL_HOURS} and \
+             {MAX_SIGNIN_TTL_HOURS}, got '{}'",
+            self.variable, self.value
+        )
+    }
+}
+
+impl std::error::Error for SigninTtlError {}
+
+/// Parse the sign-in link lifetime from [`SIGNIN_TTL_HOURS_ENV`]. An absent
+/// value is the documented default; anything non-numeric or outside the
+/// bounds is a typed [`SigninTtlError`].
+pub fn signin_ttl_hours(value: Option<&str>) -> Result<i64, SigninTtlError> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_SIGNIN_TTL_HOURS);
+    };
+    let refuse = || SigninTtlError {
+        variable: SIGNIN_TTL_HOURS_ENV.to_string(),
+        value: raw.to_string(),
+    };
+    let hours = raw.parse::<i64>().map_err(|_| refuse())?;
+    if (MIN_SIGNIN_TTL_HOURS..=MAX_SIGNIN_TTL_HOURS).contains(&hours) {
+        Ok(hours)
+    } else {
+        Err(refuse())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -113,5 +209,56 @@ mod tests {
         assert!(env_value("APEX_CONFIG_TEST").is_none());
         std::env::remove_var("APEX_CONFIG_TEST");
         assert!(env_value("APEX_CONFIG_TEST").is_none());
+    }
+
+    #[test]
+    fn hex_key_decoding_is_binary_and_named_errors_refuse_bad_hex() {
+        // Adyen's key is hex text over raw bytes: "686d61635f6170695f74657374"
+        // is the binary key b"hmac_api_test", not the 24-character text.
+        let decoded = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "686d61635f6170695f74657374")
+            .expect("valid hex");
+        assert_eq!(decoded, b"hmac_api_test");
+        assert_ne!(decoded, "686d61635f6170695f74657374".as_bytes());
+        // Whitespace around the value is tolerated; the payload is not.
+        assert_eq!(
+            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", " 686d61635f6170695f74657374 ")
+                .expect("trimmed hex"),
+            b"hmac_api_test"
+        );
+        // An absent key decodes to an empty key, not an error.
+        assert_eq!(
+            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "").expect("empty"),
+            Vec::<u8>::new()
+        );
+
+        let odd = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "abc").expect_err("odd length");
+        assert_eq!(odd.variable(), "APEX_ADYEN_HMAC_KEY");
+        assert!(odd.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{odd}");
+        let non_hex = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "zz").expect_err("non-hex");
+        assert_eq!(non_hex.variable(), "APEX_ADYEN_HMAC_KEY");
+        assert!(
+            non_hex.to_string().contains("APEX_ADYEN_HMAC_KEY"),
+            "{non_hex}"
+        );
+        assert!(non_hex.to_string().to_ascii_lowercase().contains("hex"));
+    }
+
+    #[test]
+    fn signin_ttl_defaults_and_refuses_values_outside_the_bounds() {
+        assert_eq!(signin_ttl_hours(None).expect("default"), 72);
+        assert_eq!(signin_ttl_hours(Some("  ")).expect("blank"), 72);
+        assert_eq!(signin_ttl_hours(Some("72")).expect("explicit"), 72);
+        assert_eq!(signin_ttl_hours(Some(" 1 ")).expect("bounds low"), 1);
+        assert_eq!(signin_ttl_hours(Some("720")).expect("bounds high"), 720);
+        for bad in ["0", "721", "-1", "abc", "72.5", "1e2"] {
+            let error = signin_ttl_hours(Some(bad)).expect_err(bad);
+            assert_eq!(error.variable(), SIGNIN_TTL_HOURS_ENV);
+            assert!(
+                error.to_string().contains(SIGNIN_TTL_HOURS_ENV),
+                "{bad}: {error}"
+            );
+            assert!(error.to_string().contains(bad), "{bad}: {error}");
+            assert!(error.to_string().contains("1 and 720"), "{bad}: {error}");
+        }
     }
 }

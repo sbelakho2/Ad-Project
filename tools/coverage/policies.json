@@ -71,6 +71,13 @@
    ]
   },
   {
+   "id": "apex-vault",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-vault/**/*.rs"
+   ]
+  },
+  {
    "id": "apex-tools",
    "kind": "code",
    "include": [
@@ -164,7 +171,9 @@
     "docs/**/evidence/**/*.{yml,yaml}",
     "infrastructure/**/grafana/**/*.json",
     "**/*.{service,timer}",
-    "infrastructure/**/*.xml"
+    "infrastructure/**/*.xml",
+    "infrastructure/**/*.sh",
+    "infrastructure/**/*.sample"
    ]
   },
   {
@@ -186,7 +195,15 @@
     "**/*.toml",
     ".github/required-checks.json",
     "tools/brand/**",
-    "tools/dogfood/**"
+    "tools/dogfood/**",
+    "tools/ci/**"
+   ]
+  },
+  {
+   "id": "apex-watch",
+   "kind": "code",
+   "include": [
+    "rust/crates/apex-watch/**/*.rs"
    ]
   }
  ],

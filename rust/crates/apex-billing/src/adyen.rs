@@ -1,5 +1,5 @@
-//! Adyen billing client: Checkout payment links plus the documented webhook
-//! HMAC verification.
+//! Adyen billing client: Checkout payment links, the card-on-file token
+//! charge, and the documented webhook HMAC verification.
 //!
 //! ## Webhook verification
 //!
@@ -19,7 +19,29 @@
 //! (`POST /v71/paymentLinks`): the customer gets the link, Adyen collects, and
 //! the webhook turns the collection state into ledger records. The deterministic
 //! `reference` is also sent as the `Idempotency-Key` header, so a resumed run
-//! returns the same link instead of double billing.
+//! returns the same link instead of double billing. A link request sets
+//! `storePaymentMethod: true`, so the first payment stores the card and the
+//! webhook reports the stored method id in
+//! `additionalData.storedPaymentMethodId`.
+//!
+//! ## Card on file
+//!
+//! Once a stored method exists, the monthly collection charges it directly
+//! (`POST /v71/payments` with `storedPaymentMethodId`,
+//! `shopperInteraction: ContAuth` and `recurringProcessingModel:
+//! Subscription`). A refusal (a non-accepted `resultCode`) is a typed
+//! [`BillingError::StoredChargeRefused`] and the collection falls back to a
+//! fresh payment link with the refusal recorded on the line — a token
+//! problem never silently stops billing and never silently double-charges
+//! (network/transport failures propagate instead of falling back, because
+//! the charge may have landed).
+//!
+//! ## Platform label
+//!
+//! Every request and error carries [`PlatformId::Billing`]: billing is its
+//! own domain (the metrics vocabulary value `billing`), not an ad-network
+//! mediation platform. Billing calls must never be labeled `Admob` — the
+//! regression test pins this.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -32,6 +54,14 @@ use crate::errors::BillingError;
 use crate::invoice::InvoiceLine;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// The platform/domain label every billing request and error carries.
+pub const BILLING_PLATFORM: PlatformId = PlatformId::Billing;
+
+/// The stored-method charge result codes accepted as collected. Every other
+/// code (Refused, Error, Cancelled, ...) is a typed refusal that falls back
+/// to a payment link.
+pub const ACCEPTED_CHARGE_RESULT_CODES: [&str; 2] = ["Authorised", "Received"];
 
 /// The currency invoices are billed in: fees are USD micros, sent to Adyen as
 /// cents (USD minor units).
@@ -151,7 +181,9 @@ impl AdyenClient {
 
     /// Create one payment link for one non-zero invoice line. The reference is
     /// the line's deterministic idempotency key, so a retried month returns
-    /// the same link instead of double billing.
+    /// the same link instead of double billing. The link stores the shopper's
+    /// payment method (`storePaymentMethod: true`), so the first payment
+    /// produces the card-on-file token the later months charge.
     pub async fn create_payment_link(
         &self,
         transport: &dyn Transport,
@@ -163,10 +195,11 @@ impl AdyenClient {
             "merchantAccount": self.merchant_account,
             "shopperReference": item.shopper_reference,
             "recurringProcessingModel": "Subscription",
+            "storePaymentMethod": true,
             "description": item.description,
         });
         let request = HttpRequest {
-            platform: PlatformId::Admob,
+            platform: BILLING_PLATFORM,
             operation: "createPaymentLink".to_string(),
             method: HttpMethod::Post,
             url: format!(
@@ -191,14 +224,14 @@ impl AdyenClient {
             }
             Err(apex_connectors::transport::TransportError::Network(detail)) => {
                 return Err(BillingError::from(apex_core::PlatformError::Network {
-                    platform: PlatformId::Admob,
+                    platform: BILLING_PLATFORM,
                     operation: "createPaymentLink".into(),
                     detail,
                 }))
             }
             Err(apex_connectors::transport::TransportError::Timeout(detail)) => {
                 return Err(BillingError::from(apex_core::PlatformError::Network {
-                    platform: PlatformId::Admob,
+                    platform: BILLING_PLATFORM,
                     operation: "createPaymentLink".into(),
                     detail: format!("timeout: {detail}"),
                 }))
@@ -208,17 +241,17 @@ impl AdyenClient {
             let status = response.status;
             return Err(match status {
                 401 | 403 => BillingError::from(apex_core::PlatformError::Auth {
-                    platform: PlatformId::Admob,
+                    platform: BILLING_PLATFORM,
                     operation: "createPaymentLink".into(),
                     status,
                 }),
                 429 => BillingError::from(apex_core::PlatformError::RateLimited {
-                    platform: PlatformId::Admob,
+                    platform: BILLING_PLATFORM,
                     operation: "createPaymentLink".into(),
                     retry_after: None,
                 }),
                 other => BillingError::from(apex_core::PlatformError::Http {
-                    platform: PlatformId::Admob,
+                    platform: BILLING_PLATFORM,
                     operation: "createPaymentLink".into(),
                     status: other,
                 }),
@@ -245,6 +278,116 @@ impl AdyenClient {
         Ok(PaymentLinkResponse {
             id: id.to_string(),
             url: url.to_string(),
+        })
+    }
+
+    /// Charge the stored card (`POST /v71/payments`, `ContAuth` +
+    /// `Subscription`). A non-accepted `resultCode` is the typed
+    /// [`BillingError::StoredChargeRefused`] the collection falls back from;
+    /// transport, auth, rate-limit and HTTP failures propagate unchanged
+    /// (the caller must never fall back on an uncertain charge).
+    pub async fn charge_stored_payment_method(
+        &self,
+        transport: &dyn Transport,
+        item: &InvoiceLineItem,
+        stored_payment_method_id: &str,
+    ) -> Result<PaymentReceipt, BillingError> {
+        if stored_payment_method_id.trim().is_empty() {
+            return Err(BillingError::Malformed(
+                "stored payment method id must not be empty".to_string(),
+            ));
+        }
+        let body = serde_json::json!({
+            "amount": {"value": item.amount_minor_units, "currency": item.currency},
+            "merchantAccount": self.merchant_account,
+            "reference": item.reference,
+            "shopperReference": item.shopper_reference,
+            "shopperInteraction": "ContAuth",
+            "recurringProcessingModel": "Subscription",
+            "storedPaymentMethodId": stored_payment_method_id,
+            "description": item.description,
+        });
+        let request = HttpRequest {
+            platform: BILLING_PLATFORM,
+            operation: "chargeStoredPaymentMethod".to_string(),
+            method: HttpMethod::Post,
+            url: format!("{}/v71/payments", self.checkout_base.trim_end_matches('/')),
+            headers: vec![
+                ("X-API-Key".into(), self.api_key.clone()),
+                ("Idempotency-Key".into(), item.reference.clone()),
+                ("Accept".into(), "application/json".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: Some(HttpBody::Json(body)),
+            timeout_ms: 30_000,
+        };
+        let response = match transport.request(request).await {
+            Ok(response) => response,
+            Err(apex_connectors::transport::TransportError::Platform(error)) => {
+                return Err(BillingError::from(error))
+            }
+            Err(apex_connectors::transport::TransportError::Network(detail)) => {
+                return Err(BillingError::from(apex_core::PlatformError::Network {
+                    platform: BILLING_PLATFORM,
+                    operation: "chargeStoredPaymentMethod".into(),
+                    detail,
+                }))
+            }
+            Err(apex_connectors::transport::TransportError::Timeout(detail)) => {
+                return Err(BillingError::from(apex_core::PlatformError::Network {
+                    platform: BILLING_PLATFORM,
+                    operation: "chargeStoredPaymentMethod".into(),
+                    detail: format!("timeout: {detail}"),
+                }))
+            }
+        };
+        if response.status != 200 {
+            let status = response.status;
+            return Err(match status {
+                401 | 403 => BillingError::from(apex_core::PlatformError::Auth {
+                    platform: BILLING_PLATFORM,
+                    operation: "chargeStoredPaymentMethod".into(),
+                    status,
+                }),
+                429 => BillingError::from(apex_core::PlatformError::RateLimited {
+                    platform: BILLING_PLATFORM,
+                    operation: "chargeStoredPaymentMethod".into(),
+                    retry_after: None,
+                }),
+                other => BillingError::from(apex_core::PlatformError::Http {
+                    platform: BILLING_PLATFORM,
+                    operation: "chargeStoredPaymentMethod".into(),
+                    status: other,
+                }),
+            });
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&response.body).map_err(|error| {
+                BillingError::Malformed(format!("payments response is not JSON: {error}"))
+            })?;
+        let result_code = parsed
+            .get("resultCode")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| BillingError::Malformed("payments response missing resultCode".into()))?
+            .to_string();
+        if !ACCEPTED_CHARGE_RESULT_CODES.contains(&result_code.as_str()) {
+            return Err(BillingError::StoredChargeRefused {
+                detail: format!("resultCode {result_code}"),
+            });
+        }
+        let psp_reference = parsed
+            .get("pspReference")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                BillingError::Malformed("payments response missing pspReference".into())
+            })?
+            .to_string();
+        Ok(PaymentReceipt {
+            psp_reference,
+            result_code,
+            stored_payment_method_id: parse_stored_payment_method_id(&parsed),
         })
     }
 }
@@ -275,6 +418,11 @@ pub struct NotificationItem {
     /// auditability.
     #[serde(default)]
     pub payment_method: String,
+    /// `additionalData.storedPaymentMethodId` when the payment stored the
+    /// shopper's method (the first payment of a subscription stores the
+    /// card). Not part of the signed fields; empty when absent.
+    #[serde(default)]
+    pub stored_payment_method_id: String,
 }
 
 impl NotificationItem {
@@ -360,6 +508,7 @@ fn parse_item(item: &serde_json::Value) -> Result<NotificationItem, BillingError
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let stored_payment_method_id = parse_stored_payment_method_id(item).unwrap_or_default();
     Ok(NotificationItem {
         psp_reference: text(item, "pspReference")?,
         original_reference: item
@@ -375,7 +524,23 @@ fn parse_item(item: &serde_json::Value) -> Result<NotificationItem, BillingError
         success,
         hmac_signature,
         payment_method,
+        stored_payment_method_id,
     })
+}
+
+/// The stored payment method id a webhook item or a payments response
+/// reports, when present and non-empty. Adyen carries it in
+/// `additionalData.storedPaymentMethodId` for both the first payment's
+/// webhook and the `/payments` response; the field is not part of the signed
+/// message.
+pub fn parse_stored_payment_method_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("additionalData")
+        .and_then(|data| data.get("storedPaymentMethodId"))
+        .and_then(|id| id.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Verify one notification item's `hmacSignature` against the endpoint's HMAC
@@ -567,6 +732,97 @@ pub struct PaymentLinkResponse {
     pub url: String,
 }
 
+/// The fields of Adyen's `/payments` (stored-method charge) response that
+/// billing records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentReceipt {
+    /// Adyen PSP reference of the charge.
+    pub psp_reference: String,
+    /// The accepted `resultCode` (`Authorised` / `Received`).
+    pub result_code: String,
+    /// A refreshed stored method id when the response carried one (network
+    /// token updates); the caller may persist it over the previous record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_payment_method_id: Option<String>,
+}
+
+/// How one line's payment was collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollectionChannel {
+    /// The recorded card-on-file token was charged (`ContAuth`).
+    StoredMethod,
+    /// A payment link was created: the first payment, or the typed fallback.
+    PaymentLink,
+}
+
+/// One line's collection outcome. A fallback carries the typed reason it
+/// happened — a token refusal or the absence of a stored method — so the
+/// collection log never shows a silent channel switch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineCollection {
+    /// Ledger sequence of the line billed.
+    pub seq: u64,
+    /// The deterministic reference (idempotency key) sent to Adyen.
+    pub reference: String,
+    /// Amount collected, in minor units.
+    pub amount_minor_units: i64,
+    /// ISO currency code.
+    pub currency: String,
+    /// The channel used.
+    pub channel: CollectionChannel,
+    /// PSP reference of an accepted stored-method charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psp_reference: Option<String>,
+    /// The accepted `resultCode` of a stored-method charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_code: Option<String>,
+    /// The created payment link on the link channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_link: Option<PaymentLinkResponse>,
+    /// Why the link channel was used: the stored-charge refusal that fell
+    /// back, or that no stored method is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+
+/// What [`collect_invoice`] did: the per-line channel outcomes and their
+/// checked total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionReceipt {
+    /// Publisher the invoice was built for.
+    pub publisher_id: String,
+    /// Billing period label (`YYYY-MM`).
+    pub year_month: String,
+    /// ISO currency code of all items.
+    pub currency: String,
+    /// Checked sum of the collected line amounts, in minor units.
+    pub total_minor_units: i64,
+    /// One outcome per non-zero line, in ledger `seq` order.
+    pub lines: Vec<LineCollection>,
+}
+
+impl CollectionReceipt {
+    /// The URLs of the created payment links (the fallback channel), in line
+    /// order. A receipt collected entirely by token charge has none.
+    pub fn link_urls(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter_map(|line| line.payment_link.as_ref().map(|link| link.url.as_str()))
+            .collect()
+    }
+
+    /// Whether the receipt contains at least one payment link.
+    pub fn has_links(&self) -> bool {
+        self.lines
+            .iter()
+            .any(|line| line.channel == CollectionChannel::PaymentLink)
+    }
+}
+
 /// What [`create_payment_links`] created: the payment links and their checked
 /// total. An invoice whose every line is zero (or which has no lines) sends
 /// no request at all and yields an empty receipt with a zero total. Zero-fee
@@ -592,7 +848,9 @@ pub struct BillingReceipt {
 /// `X-API-Key` header; the link reference is the line's deterministic
 /// idempotency key, so a partially applied invoice can be resumed without
 /// double billing. Refusals are typed and never retried at this layer; the
-/// caller composes the retry transport exactly like the connectors do.
+/// caller composes the retry transport exactly like the connectors do. This
+/// is the link-only collection; [`collect_invoice`] prefers the card on file
+/// and falls back to these links.
 pub async fn create_payment_links(
     client: &AdyenClient,
     transport: &dyn Transport,
@@ -624,5 +882,93 @@ pub async fn create_payment_links(
         currency: ADYEN_CURRENCY.to_string(),
         total_minor_units,
         links,
+    })
+}
+
+/// Collect one prepared line item: charge the stored card when a token is
+/// known, otherwise create a payment link. A stored-charge *refusal* falls
+/// back to a link with the typed reason recorded; every other failure
+/// propagates (a transport failure may mean the charge landed, so falling
+/// back could double-bill).
+pub async fn collect_line(
+    client: &AdyenClient,
+    transport: &dyn Transport,
+    item: &InvoiceLineItem,
+    stored_payment_method_id: Option<&str>,
+) -> Result<LineCollection, BillingError> {
+    let mut base = LineCollection {
+        seq: item.seq,
+        reference: item.reference.clone(),
+        amount_minor_units: item.amount_minor_units,
+        currency: item.currency.clone(),
+        channel: CollectionChannel::PaymentLink,
+        psp_reference: None,
+        result_code: None,
+        payment_link: None,
+        fallback_reason: None,
+    };
+    match stored_payment_method_id.filter(|id| !id.trim().is_empty()) {
+        Some(stored_id) => match client
+            .charge_stored_payment_method(transport, item, stored_id)
+            .await
+        {
+            Ok(receipt) => {
+                base.channel = CollectionChannel::StoredMethod;
+                base.psp_reference = Some(receipt.psp_reference);
+                base.result_code = Some(receipt.result_code);
+                Ok(base)
+            }
+            Err(BillingError::StoredChargeRefused { detail }) => {
+                // Typed fallback: the refusal travels on the line.
+                base.payment_link = Some(client.create_payment_link(transport, item).await?);
+                base.fallback_reason = Some(detail);
+                Ok(base)
+            }
+            Err(other) => Err(other),
+        },
+        None => {
+            base.payment_link = Some(client.create_payment_link(transport, item).await?);
+            base.fallback_reason = Some("no stored payment method is recorded".to_string());
+            Ok(base)
+        }
+    }
+}
+
+/// Collect one invoice: [`collect_line`] per non-zero line, in `seq` order,
+/// with the checked total. A zero invoice sends no request at all.
+pub async fn collect_invoice(
+    client: &AdyenClient,
+    transport: &dyn Transport,
+    invoice: &crate::invoice::Invoice,
+    stored_payment_method_id: Option<&str>,
+) -> Result<CollectionReceipt, BillingError> {
+    let mut lines = Vec::new();
+    let mut total_minor_units = 0i64;
+    for line in &invoice.line_items {
+        let billable = if line.gross_micros > 0 {
+            line.gross_micros
+        } else {
+            line.fee_micros
+        };
+        if billable == 0 {
+            continue;
+        }
+        let item = InvoiceLineItem::from_invoice_line(
+            line,
+            &invoice.publisher_id,
+            &invoice.period.year_month,
+        )?;
+        let collected = collect_line(client, transport, &item, stored_payment_method_id).await?;
+        total_minor_units = total_minor_units
+            .checked_add(item.amount_minor_units)
+            .ok_or(BillingError::Overflow)?;
+        lines.push(collected);
+    }
+    Ok(CollectionReceipt {
+        publisher_id: invoice.publisher_id.clone(),
+        year_month: invoice.period.year_month.clone(),
+        currency: ADYEN_CURRENCY.to_string(),
+        total_minor_units,
+        lines,
     })
 }

@@ -480,4 +480,34 @@ mod tests {
         assert!(sigma_z(0.03, 0.0).is_none());
         assert!(sigma_z(0.03, 1.0).is_none());
     }
+
+    #[test]
+    fn the_beta_machinery_covers_its_edges_and_reflection() {
+        // t == 0 is the distribution's center.
+        assert!((t_cdf(0.0, 5) - 0.5).abs() < 1e-12);
+        // Negative t is the reflected lower tail.
+        assert!((t_cdf(-1.0, 5) - (1.0 - t_cdf(1.0, 5))).abs() < 1e-12);
+        assert!(t_cdf(-1.0, 5) < 0.5);
+        // betai clamps outside the unit interval.
+        assert_eq!(betai(1.0, 1.0, 0.0), 0.0);
+        assert_eq!(betai(1.0, 1.0, 1.0), 1.0);
+        // A continued fraction evaluated exactly at its zero crossing stays
+        // finite through the TINY guard instead of dividing by zero.
+        assert!(betacf(1.0, 2.0, 2.0 / 3.0).is_finite());
+        // lgamma uses the reflection formula below 0.5; ln Gamma(0.3) is a
+        // published constant.
+        let reflected = lgamma(0.3);
+        assert!(
+            (reflected - 1.095_797_994_818_075_6).abs() < 1e-9,
+            "{reflected}"
+        );
+    }
+
+    #[test]
+    fn the_duration_planner_refuses_non_positive_deltas() {
+        assert!(plan_duration(0.03, 0.0, 0.5).is_none());
+        assert!(plan_duration(0.03, -0.01, 0.5).is_none());
+        assert!(plan_duration_days(0.03, 0.0, 0.5).is_none());
+        assert!(plan_duration_days(0.03, -0.5, 0.25).is_none());
+    }
 }

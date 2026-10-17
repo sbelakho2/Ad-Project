@@ -59,7 +59,7 @@ groups:
 | `billing.yml` | 4 | Payment processing, revenue tracking |
 | `infrastructure.yml` | 5 | Container health, disk, memory |
 
-**Access Alerts:** http://46.62.252.96:9093 (Alertmanager)
+**Access Alerts:** http://203.0.113.10:9093 (Alertmanager)
 
 ---
 

@@ -108,8 +108,16 @@ pub fn lcov_totals(files: &[LcovFile], require_branches: bool) -> LcovTotals {
     }
 }
 
+/// Whether an lcov record belongs to `rust/crates/<crate_name>/`.
+fn record_belongs_to_crate(file: &str, crate_name: &str) -> bool {
+    file.contains(&format!("/crates/{crate_name}/"))
+        || file.starts_with(&format!("crates/{crate_name}/"))
+}
+
 /// Standalone lcov gate: same rules as the retired lcov-gate.mjs, including
-/// the worst-files listing and the pass summary line format.
+/// the worst-files listing and the pass summary line format. With `--crate`,
+/// only records under `crates/<name>/` are gated, so a merged workspace
+/// profile can be sliced per domain without a second llvm-cov run.
 pub fn lcov_gate(
     path: &str,
     floor: f64,
@@ -118,25 +126,32 @@ pub fn lcov_gate(
 ) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("lcov not found: {path} ({e})"))?;
-    let files = parse_lcov(&text);
+    let mut files = parse_lcov(&text);
     if files.is_empty() {
         return Err("lcov contains no records".into());
     }
     // The artifact must cover the crate the matrix entry names: a wrong PKG
     // or a stale row must fail loudly instead of gating another crate's file.
+    // A matching artifact is then filtered to that crate's records only.
     if let Some(crate_name) = expect_crate {
-        let needle = format!("/crates/{crate_name}/");
-        if !files.iter().any(|file| {
-            file.file.contains(&needle) || file.file.starts_with(&format!("crates/{crate_name}/"))
-        }) {
+        if !files
+            .iter()
+            .any(|file| record_belongs_to_crate(&file.file, crate_name))
+        {
             return Err(format!(
                 "LCOV GATE FAILED ({path}): no records under crates/{crate_name}; the artifact does not cover the named crate"
             ));
         }
+        files.retain(|file| record_belongs_to_crate(&file.file, crate_name));
     }
     let (pass, message) = evaluate_lcov_gate(&files, floor, require_branches);
     if pass {
-        println!("lcov gate PASS ({path}): {message}");
+        match expect_crate {
+            Some(crate_name) => {
+                println!("lcov gate PASS ({path}, crate={crate_name}): {message}");
+            }
+            None => println!("lcov gate PASS ({path}): {message}"),
+        }
         Ok(())
     } else {
         Err(format!("LCOV GATE FAILED ({path})\n{message}"))
@@ -297,6 +312,81 @@ mod tests {
         let err = lcov_gate(file, 90.0, false, Some("apex-tools")).unwrap_err();
         assert!(err.contains("does not cover the named crate"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_fixture(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("apex-lcov-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("merged.lcov");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    const MERGED: &str = concat!(
+        "SF:/w/rust/crates/apex-analytics/src/a.rs\n",
+        "LF:100\nLH:80\nFNF:10\nFNH:8\nend_of_record\n",
+        "SF:/w/rust/crates/apex-analytics/src/b.rs\n",
+        "LF:100\nLH:80\nFNF:10\nFNH:8\nend_of_record\n",
+        "SF:crates/apex-api/src/c.rs\n",
+        "LF:100\nLH:95\nFNF:10\nFNH:10\nend_of_record\n",
+        // A sibling crate whose name starts with the target name must not
+        // leak into the filtered totals, whether the record path is absolute
+        // or relative to the repository root.
+        "SF:crates/apex-analytics-extra/src/decoy.rs\n",
+        "LF:1000\nLH:0\nend_of_record\n"
+    );
+
+    #[test]
+    fn lcov_gate_crate_filters_a_merged_profile() {
+        let path = write_fixture("crate-filter", MERGED);
+        let file = path.to_str().unwrap();
+        // Filtered totals: analytics 160/200 lines (80.00%), api 95/100
+        // lines (95.00%). Before the filter both calls summed the merged file
+        // (255/1300 = 19.62%) and failed these floors; the decoy alone would
+        // drag every crate below its floor.
+        assert!(lcov_gate(file, 80.0, false, Some("apex-analytics")).is_ok());
+        assert!(lcov_gate(file, 95.0, false, Some("apex-api")).is_ok());
+        // A floor between the two crate values splits them: api clears it,
+        // analytics does not.
+        assert!(lcov_gate(file, 90.0, false, Some("apex-api")).is_ok());
+        let err = lcov_gate(file, 90.0, false, Some("apex-analytics")).unwrap_err();
+        assert!(err.contains("lines: 80.00% < 90%"), "{err}");
+        assert!(!err.contains("decoy.rs"), "{err}");
+        // One percent above each filtered floor fails at the crate value, not
+        // at the merged value.
+        let err = lcov_gate(file, 81.0, false, Some("apex-analytics")).unwrap_err();
+        assert!(err.contains("lines: 80.00% < 81%"), "{err}");
+        let err = lcov_gate(file, 96.0, false, Some("apex-api")).unwrap_err();
+        assert!(err.contains("lines: 95.00% < 96%"), "{err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn lcov_gate_crate_ignores_non_matching_records() {
+        let decoy = concat!(
+            "SF:crates/apex-analytics-extra/src/decoy.rs\n",
+            "LF:1000\nLH:0\nend_of_record\n"
+        );
+        let path = write_fixture("crate-decoy", decoy);
+        let file = path.to_str().unwrap();
+        let err = lcov_gate(file, 0.0, false, Some("apex-analytics")).unwrap_err();
+        assert!(err.contains("does not cover the named crate"), "{err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn lcov_gate_without_crate_sums_every_record() {
+        let path = write_fixture("no-crate", MERGED);
+        let file = path.to_str().unwrap();
+        // The unfiltered total is 255/1300 = 19.62%, including the decoy.
+        assert!(lcov_gate(file, 19.0, false, None).is_ok());
+        let err = lcov_gate(file, 20.0, false, None).unwrap_err();
+        assert!(err.contains("lines: 19.62% < 20%"), "{err}");
+        assert!(
+            err.contains("low: crates/apex-analytics-extra/src/decoy.rs 0.0%"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

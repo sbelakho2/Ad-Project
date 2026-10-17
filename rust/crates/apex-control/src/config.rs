@@ -18,8 +18,19 @@
 //!   (default `PRODUCTION`; unknown labels are upper-cased and bounded);
 //! - `APEX_CONTROL_JOURNAL` — append-only action journal, default
 //!   `.apex/control/journal.jsonl`;
-//! - `APEX_OPERATOR_JOBS_DIR` — durable operator job directory, default
-//!   `.apex/control/jobs`;
+//! - `APEX_OPERATOR_JOBS_DIR` — durable operator job directory (the local,
+//!   single-host mode), default `.apex/control/jobs`;
+//! - `APEX_API_JOBS_URL` + `APEX_OPERATOR_JOBS_TOKEN` — the split-host
+//!   operator-jobs endpoint: when both are set the control plane POSTs each
+//!   job to the apex-api receiver and reads job state back through
+//!   `GET /v1/operator/jobs/{job_id}` instead of writing the local folder;
+//!   when the URL is unset (or only the token is set, which single-host
+//!   deployments share with the API's own environment) the local folder
+//!   write is used exactly as before. A URL without the token refuses
+//!   startup, so the control plane can never POST without authenticating.
+//! - `APEX_CONTROL_SYNC_MARKER` — the sync-timer marker file the system page
+//!   reads for the copied-ledger age; unset or absent is the honest "sync age
+//!   not recorded" state;
 //! - `APEX_CONTROL_LEDGER_ROOT` — read-only verified ledger root, default
 //!   `.apex/ledgers` (`<publisher>.jsonl`), the durable file the runner
 //!   keeps;
@@ -31,7 +42,9 @@
 //!   matrix shows every action as unavailable ("Missing evidence means the
 //!   action remains unavailable", page 72);
 //! - `APEX_CLICKHOUSE_HTTP`, `APEX_CLICKHOUSE_DB` — the analytics store the
-//!   read models come from; without them every queue reports the honest
+//!   read models come from; `APEX_CLICKHOUSE_USER` / `APEX_CLICKHOUSE_PASSWORD`
+//!   are the optional HTTP credentials, and `https://` in the store URL
+//!   enables TLS. Without the HTTP/DB pair every queue reports the honest
 //!   not-available state with the reason.
 
 use std::collections::HashMap;
@@ -41,6 +54,7 @@ use std::path::{Path, PathBuf};
 use apex_analytics::ClickHouseConfig;
 
 use crate::capabilities::Role;
+use crate::jobs::RemoteJobsConfig;
 
 /// Default listen address of the operator origin.
 pub const DEFAULT_BIND: &str = "127.0.0.1:8790";
@@ -76,6 +90,12 @@ pub enum ConfigError {
     /// The analytics store configuration is invalid.
     #[error("analytics store configuration is invalid: {0}")]
     Analytics(String),
+    /// The remote operator-jobs base URL is not usable.
+    #[error("APEX_API_JOBS_URL is not a valid http/https URL: {0}")]
+    JobsUrl(String),
+    /// The remote operator-jobs endpoint needs its bearer token.
+    #[error("APEX_API_JOBS_URL requires APEX_OPERATOR_JOBS_TOKEN to be set")]
+    JobsPair,
 }
 
 /// The deployment configuration of one control-plane process.
@@ -87,8 +107,14 @@ pub struct ControlConfig {
     pub operators_path: Option<PathBuf>,
     /// Append-only action journal path.
     pub journal_path: PathBuf,
-    /// Durable operator job directory.
+    /// Durable operator job directory (single-host mode).
     pub jobs_dir: PathBuf,
+    /// The split-host jobs endpoint, when `APEX_API_JOBS_URL` and
+    /// `APEX_OPERATOR_JOBS_TOKEN` are both set.
+    pub jobs_remote: Option<RemoteJobsConfig>,
+    /// The sync-timer marker file behind the system page's copied-ledger
+    /// age, when `APEX_CONTROL_SYNC_MARKER` is set.
+    pub sync_marker: Option<PathBuf>,
     /// The environment chip label (`PRODUCTION`, `TEST`, or a bounded
     /// deployment-specific label).
     pub environment: String,
@@ -125,6 +151,33 @@ impl ControlConfig {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_JOBS_DIR));
+        let jobs_remote = match (
+            lookup(crate::jobs::JOBS_URL_ENV).filter(|value| !value.trim().is_empty()),
+            lookup(crate::jobs::JOBS_TOKEN_ENV).filter(|value| !value.trim().is_empty()),
+        ) {
+            // Both unset (or only the token, which single-host deployments
+            // share with the API's own environment): the local folder.
+            (None, _) => None,
+            // Half the pair is a misconfiguration: never POST without auth.
+            (Some(_), None) => return Err(ConfigError::JobsPair),
+            (Some(url), Some(token)) => {
+                let url = url.trim();
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|error| ConfigError::JobsUrl(error.to_string()))?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return Err(ConfigError::JobsUrl(
+                        "the scheme must be http or https".to_string(),
+                    ));
+                }
+                Some(RemoteJobsConfig {
+                    url: url.to_string(),
+                    token,
+                })
+            }
+        };
+        let sync_marker = lookup("APEX_CONTROL_SYNC_MARKER")
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
         let environment = normalize_environment(
             lookup("APEX_ENVIRONMENT")
                 .filter(|value| !value.trim().is_empty())
@@ -174,6 +227,8 @@ impl ControlConfig {
             operators_path,
             journal_path,
             jobs_dir,
+            jobs_remote,
+            sync_marker,
             environment,
             ledger_root,
             invoice_register,
@@ -406,6 +461,71 @@ mod tests {
         );
         assert_eq!(config.operations_path, PathBuf::from(DEFAULT_OPERATIONS));
         assert!(config.clickhouse.is_none());
+        assert!(config.jobs_remote.is_none());
+        assert!(config.sync_marker.is_none());
+    }
+
+    #[test]
+    fn the_split_host_jobs_pair_must_be_complete_and_is_debug_redacted() {
+        // Both set: the remote transport, with the URL and token kept.
+        let config = ControlConfig::from_lookup(&lookup(&[
+            ("APEX_API_JOBS_URL", "https://api.example.test"),
+            ("APEX_OPERATOR_JOBS_TOKEN", "jobs-token"),
+        ]))
+        .expect("remote pair");
+        let remote = config.jobs_remote.as_ref().expect("remote mode");
+        assert_eq!(remote.url, "https://api.example.test");
+        assert_eq!(remote.token, "jobs-token");
+        let rendered = format!("{remote:?}");
+        assert!(!rendered.contains("jobs-token"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+
+        // URL without token: refused at startup, never an unauthenticated POST.
+        let half = ControlConfig::from_lookup(&lookup(&[(
+            "APEX_API_JOBS_URL",
+            "https://api.example.test",
+        )]));
+        assert!(matches!(half, Err(ConfigError::JobsPair)));
+
+        // Token without URL: the local folder stays (single-host deployments
+        // share the API's token environment without splitting the hosts).
+        let token_only =
+            ControlConfig::from_lookup(&lookup(&[("APEX_OPERATOR_JOBS_TOKEN", "jobs-token")]))
+                .expect("token only");
+        assert!(token_only.jobs_remote.is_none());
+        assert_eq!(token_only.jobs_dir, PathBuf::from(DEFAULT_JOBS_DIR));
+
+        // A malformed or non-http URL is refused.
+        for bad in ["not a url", "ftp://api.example.test"] {
+            let config = ControlConfig::from_lookup(&lookup(&[
+                ("APEX_API_JOBS_URL", bad),
+                ("APEX_OPERATOR_JOBS_TOKEN", "jobs-token"),
+            ]));
+            assert!(matches!(config, Err(ConfigError::JobsUrl(_))), "{bad}");
+        }
+
+        // A blank token reads as unset, so the pair is incomplete.
+        let blank = ControlConfig::from_lookup(&lookup(&[
+            ("APEX_API_JOBS_URL", "https://api.example.test"),
+            ("APEX_OPERATOR_JOBS_TOKEN", "   "),
+        ]));
+        assert!(matches!(blank, Err(ConfigError::JobsPair)));
+    }
+
+    #[test]
+    fn the_sync_marker_path_is_optional_and_blank_reads_as_unset() {
+        let config = ControlConfig::from_lookup(&lookup(&[(
+            "APEX_CONTROL_SYNC_MARKER",
+            "/var/lib/apex/sync-marker.json",
+        )]))
+        .expect("marker path");
+        assert_eq!(
+            config.sync_marker,
+            Some(PathBuf::from("/var/lib/apex/sync-marker.json"))
+        );
+        let blank = ControlConfig::from_lookup(&lookup(&[("APEX_CONTROL_SYNC_MARKER", "  ")]))
+            .expect("blank marker");
+        assert!(blank.sync_marker.is_none());
     }
 
     #[test]

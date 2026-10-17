@@ -204,7 +204,7 @@ exclude_also = []
 
 `services/mail-server` runs `cargo llvm-cov --workspace --all-features --lcov` with `--fail-under-lines "$FLOOR"`, the floor read from `tools/coverage/floors.txt`. Branch parity comes from the lcov adapter (`tools/coverage/lcov-gate.mjs`) requiring BRH==BRF on every first-party `SF` record; the proto-generated files under `mail-proto` are `GENERATED`-excluded with the generator anchor `proto/mail.proto`.
 
-The seven product crates (`apex-core`, `apex-connectors`, `apex-audit`, `apex-proof`, `apex-autopilot`, `apex-billing`, `apex-api`) run one matrix lane each in `apex-rs-coverage.yml`: per-crate llvm-cov, `cargo test -p`, clippy `-D warnings`, `cargo fmt --check`, and the same lcov gate.
+Every Rust crate runs one matrix entry in `apex-rs-coverage.yml` with `cargo test -p`, clippy `-D warnings` and `cargo fmt --check`. Coverage comes from one workspace-instrumented `cargo llvm-cov --workspace --lcov` run, which executes once in the apex-core entry. The merged profile is gated once per domain from `tools/coverage/floors.txt`; `apex-tools lcov-gate --crate <name>` filters the records to `rust/crates/<name>/` and applies the floor to that crate's lines and functions. Stable cargo-llvm-cov emits no branch records, so branches stay ungated; branch parity remains a nightly-toolchain upgrade.
 
 ### 3.10 Flutter — pipeline `sdk-flutter-coverage.yml`
 
@@ -461,7 +461,7 @@ Inventory note: the all-Rust tree runs six configs (five lanes plus the aggregat
 
 | pipeline | covers domains | key services |
 |---|---|---|
-| `apex-rs-coverage.yml` | the seven apex product crates (one matrix entry each) | none (cargo-llvm-cov) |
+| `apex-rs-coverage.yml` | every workspace crate (one matrix entry each; coverage from one workspace-instrumented cargo-llvm-cov run) | none (cargo-llvm-cov) |
 | `backend-coverage.yml` | backend TS + SQL | postgres:16, redis:7 |
 | `frontend-coverage.yml` | console, website, control-plane | none (jsdom/supertest) |
 | `node-services-coverage.yml` | edge-worker, autopilot, sdk/web, sdk/react-native, tools JS | none |
@@ -577,7 +577,7 @@ All checks below ran locally on 2026-10-13 from the repository root.
 |---|---|
 | Rust workspace (`cargo test --workspace`) | 347 tests, 0 failed |
 | Rust lints | `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all --check` clean |
-| apex crate coverage lanes | 9 per-crate matrix entries in `apex-rs-coverage.yml` (measured floors, ratcheting; §9.10) |
+| apex crate coverage lanes | 18 coverage domains in `apex-rs-coverage.yml` (one matrix entry per crate; floors measured from one workspace-instrumented run and gated per domain, ratcheting; §9.10) |
 | tool suites (`npm test` under `tools/`) | 42/42 pass (coverage 22, site, ui-ux) |
 | docs-lint | total at or below the committed baseline of 8005; every scanned row at or below its row |
 | docs-lint one-shot adoption | self-test all pass (10 cases) |

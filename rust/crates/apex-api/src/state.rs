@@ -46,19 +46,35 @@ pub struct AppState {
     /// its ledger read: the route answers `503 ledger_auth_not_configured`
     /// rather than serving it unauthenticated.
     pub ledger_tokens: Arc<HashMap<String, Vec<u8>>>,
+    /// The live per-publisher token file behind the self-serve workspace
+    /// (`APEX_LEDGER_TOKENS_FILE`). A free-audit submission extends it with
+    /// the submission's publisher key, and both the ledger authorization and
+    /// the console's "has any credentials" gate consult it, so a workspace
+    /// created after boot is usable without a restart.
+    pub workspaces: Option<Arc<crate::signin::WorkspaceTokens>>,
+    /// The one-time sign-in link service (`signin.jsonl` under the leads
+    /// root). `None` makes `GET /console/signin` answer the `503`
+    /// not-configured panel: without a leads root the path fails closed.
+    pub signin: Option<Arc<crate::signin::SigninService>>,
     /// Lead capture behind `POST /v1/leads`. `None` makes the route answer
     /// `503 lead_capture_not_configured`.
     pub leads: Option<Arc<dyn LeadStore>>,
+    /// The setup-watch subscriber store behind `GET`/`POST /watch`. `None`
+    /// makes `POST /watch` answer the not-configured page (`503`).
+    pub watch: Option<Arc<apex_watch::SubscriberStore>>,
+    /// The frozen sales-outcomes appender. `None` (tests, or a deployment
+    /// that removed the variable) makes every call site a no-op; the primary
+    /// action never depends on it.
+    pub outcomes: Option<Arc<crate::outcomes::OutcomesAppender>>,
     /// Where accepted Adyen collection events are recorded (replay-protected).
     /// `None` makes the webhook answer `503 collection_store_not_configured`.
     pub collection: Option<Arc<dyn CollectionStore>>,
-    /// In-memory browser sessions for the console change log (`POST
-    /// /console/ledger` mints one; the cookie carries only its opaque id).
+    /// In-memory browser sessions for the console (`POST /console/ledger`
+    /// mints one; every console page resolves its publisher from it and the
+    /// cookie carries only its opaque id).
     pub ledger_sessions: Arc<LedgerSessions>,
     /// The analytics reader and emitter (disabled when unset).
     pub analytics: AnalyticsAccess,
-    /// The workspace publisher the console surfaces read (`APEX_CONSOLE_PUBLISHER`).
-    pub workspace_publisher: Option<String>,
     /// The lead-id salt shared by the lead store and the analytics emitter.
     pub lead_id_salt: Arc<String>,
     /// The vault-backed connection store (`APEX_CREDENTIAL_ROOT` + vault key).
@@ -100,14 +116,17 @@ impl AppState {
             cycle_runner,
             live_auditor: None,
             ledger_tokens: Arc::new(HashMap::new()),
+            workspaces: None,
+            signin: None,
             leads: None,
+            watch: None,
+            outcomes: None,
             collection: None,
             ledger_sessions: Arc::new(LedgerSessions::new(
                 DEFAULT_SESSION_CAPACITY,
                 SESSION_IDLE_MS,
             )),
             analytics: AnalyticsAccess::disabled(crate::analytics::NOT_CONFIGURED_REASON),
-            workspace_publisher: None,
             lead_id_salt: Arc::new(crate::leads::DEFAULT_LEAD_ID_SALT.to_string()),
             connection_store: None,
             connection_validator: None,
@@ -123,16 +142,6 @@ impl AppState {
     #[must_use]
     pub fn with_analytics(mut self, analytics: AnalyticsAccess) -> Self {
         self.analytics = analytics;
-        self
-    }
-
-    /// Attach the workspace publisher the console surfaces read.
-    #[must_use]
-    pub fn with_workspace_publisher(mut self, publisher: impl Into<String>) -> Self {
-        let publisher = publisher.into();
-        if !publisher.trim().is_empty() {
-            self.workspace_publisher = Some(publisher);
-        }
         self
     }
 
@@ -191,6 +200,20 @@ impl AppState {
         self
     }
 
+    /// Attach the setup-watch subscriber store.
+    #[must_use]
+    pub fn with_watch(mut self, store: Arc<apex_watch::SubscriberStore>) -> Self {
+        self.watch = Some(store);
+        self
+    }
+
+    /// Attach the frozen sales-outcomes appender.
+    #[must_use]
+    pub fn with_outcomes(mut self, appender: Arc<crate::outcomes::OutcomesAppender>) -> Self {
+        self.outcomes = Some(appender);
+        self
+    }
+
     /// Attach the collection store the webhook records accepted events into.
     #[must_use]
     pub fn with_collection(mut self, store: Arc<dyn CollectionStore>) -> Self {
@@ -225,16 +248,37 @@ impl AppState {
         self
     }
 
+    /// Attach the live workspace token file (the self-serve seam).
+    #[must_use]
+    pub fn with_workspaces(mut self, workspaces: Arc<crate::signin::WorkspaceTokens>) -> Self {
+        self.workspaces = Some(workspaces);
+        self
+    }
+
+    /// Attach the one-time sign-in link service.
+    #[must_use]
+    pub fn with_signin(mut self, signin: Arc<crate::signin::SigninService>) -> Self {
+        self.signin = Some(signin);
+        self
+    }
+
     /// Authorize a read of `publisher`'s ledger. Fails closed: a publisher
     /// with no configured token is refused (`503`), and a missing or wrong
-    /// token is `401`. The comparison is constant-time.
+    /// token is `401`. The comparison is constant-time. Tokens come from the
+    /// boot-time map first; the live workspace file is the fallback, so a
+    /// workspace created by a free-audit submission authorizes without a
+    /// restart.
     pub fn authorize_ledger(
         &self,
         publisher: &str,
         authorization: Option<&str>,
     ) -> Result<(), ApiError> {
-        let Some(expected) = self.ledger_tokens.get(publisher) else {
-            return Err(ApiError::LedgerAuthNotConfigured);
+        let expected = match self.ledger_tokens.get(publisher) {
+            Some(token) => token.clone(),
+            None => match self.workspaces.as_ref().and_then(|w| w.token(publisher)) {
+                Some(token) => token.into_bytes(),
+                None => return Err(ApiError::LedgerAuthNotConfigured),
+            },
         };
         if expected.is_empty() {
             return Err(ApiError::Unauthorized);

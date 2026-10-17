@@ -663,6 +663,43 @@ mod tests {
         );
     }
 
+    /// Rendering is one row and one cell per input, at the protocol's
+    /// 10_000-row reference size: a duplicated or re-scanned render (the
+    /// shape a quadratic table builder takes) would show up as extra rows,
+    /// cells or repeated cell text.
+    #[test]
+    fn data_table_renders_every_row_and_cell_exactly_once_at_ten_thousand_rows() {
+        let rows: Vec<Vec<Cell>> = (0..10_000)
+            .map(|i| {
+                vec![
+                    Cell::Mono(format!("t{i:016x}")),
+                    Cell::Text(format!("lead{i}@p{i}.example")),
+                    Cell::Num(format!("{i}")),
+                ]
+            })
+            .collect();
+        let headers = ["Touch", "Contact", "N"];
+        let html = data_table(Some("Rows"), &headers, &rows, None, None);
+        assert_eq!(
+            html.matches("<tr").count(),
+            10_001,
+            "one row per input, plus the header"
+        );
+        assert_eq!(html.matches("<td").count(), 30_000, "one cell per input");
+        for probe in [
+            "t0000000000000000",
+            "lead0@p0.example",
+            "t000000000000270f", // row 9_999 in hex
+            "lead9999@p9999.example",
+        ] {
+            assert_eq!(
+                html.matches(probe).count(),
+                1,
+                "{probe} must appear exactly once"
+            );
+        }
+    }
+
     #[test]
     fn kpi_row_and_split_wrap_fragments() {
         let row = kpi_row(&[
@@ -1081,5 +1118,28 @@ mod tests {
         let hostile = status_pair(HOSTILE, StatusKind::Attention);
         assert_escaped(&hostile);
         assert!(hostile.contains("Needs attention"));
+    }
+
+    #[test]
+    fn injected_attrs_land_on_the_earliest_control_tag_of_a_fragment() {
+        // Two candidate controls: the earliest one takes the label wiring,
+        // the later one stays untouched, and the fragment keeps its order.
+        let html = inject_control_attrs(
+            "<textarea class=\"input\"></textarea><input class=\"input\">",
+            "f1-help",
+            true,
+        );
+        assert!(
+            html.starts_with("<textarea aria-describedby=\"f1-help\" aria-invalid=\"true\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("aria-describedby").count(), 1, "{html}");
+        // A tag-like prefix is not a control tag start and gets nothing.
+        assert_eq!(
+            inject_control_attrs("<inputx>", "f1-help", false),
+            "<inputx>"
+        );
+        // Without described-by or invalid, the fragment is returned untouched.
+        assert_eq!(inject_control_attrs("<input>", "", false), "<input>");
     }
 }

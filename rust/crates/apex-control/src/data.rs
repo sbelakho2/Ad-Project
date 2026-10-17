@@ -49,6 +49,100 @@ impl Unavailable {
     }
 }
 
+/// The sync state of the copied ledger data, read from the sync-timer marker
+/// file (`APEX_CONTROL_SYNC_MARKER`). The three states are exhaustive and
+/// honest: recorded, not recorded (no path configured or no file yet), and
+/// unreadable (present but not a trustworthy marker). A malformed marker is
+/// never a panic and never a fabricated age.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerCopy {
+    /// The marker records when the copy was last synced.
+    Recorded {
+        /// The sync time, unix milliseconds.
+        synced_at_ms: i64,
+    },
+    /// No marker configured or present: the honest "sync age not recorded".
+    NotRecorded,
+    /// The marker exists but cannot be trusted; the reason is shown.
+    Unreadable {
+        /// Why the marker cannot be read.
+        reason: String,
+    },
+}
+
+/// The closed set of marker sources the sync timer may record.
+const SYNC_MARKER_SOURCES: [&str; 3] = ["ledger", "invoices", "leads"];
+
+/// The marker file shape: `{"synced_at_unix_ms": ..., "source": "..."}`.
+#[derive(Debug, serde::Deserialize)]
+struct SyncMarkerFile {
+    synced_at_unix_ms: i64,
+    source: String,
+}
+
+/// Read the sync marker. `None` (env unset) and an absent file are the
+/// honest not-recorded state; a file that does not parse, carries an unknown
+/// source, or records a time ahead of `as_of_ms` is a typed unavailable with
+/// the reason, never a panic and never a guess.
+pub fn read_sync_marker(path: Option<&Path>, as_of_ms: i64) -> LedgerCopy {
+    let Some(path) = path else {
+        return LedgerCopy::NotRecorded;
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LedgerCopy::NotRecorded
+        }
+        Err(error) => {
+            return LedgerCopy::Unreadable {
+                reason: format!("the sync marker could not be read: {error}"),
+            }
+        }
+    };
+    let marker: SyncMarkerFile = match serde_json::from_str(&raw) {
+        Ok(marker) => marker,
+        Err(error) => {
+            return LedgerCopy::Unreadable {
+                reason: format!("the sync marker did not parse: {error}"),
+            }
+        }
+    };
+    if !SYNC_MARKER_SOURCES.contains(&marker.source.as_str()) {
+        return LedgerCopy::Unreadable {
+            reason: format!(
+                "the sync marker names an unknown source '{source}'",
+                source = marker.source
+            ),
+        };
+    }
+    if marker.synced_at_unix_ms > as_of_ms {
+        return LedgerCopy::Unreadable {
+            reason: "the sync marker records a time in the future".to_string(),
+        };
+    }
+    LedgerCopy::Recorded {
+        synced_at_ms: marker.synced_at_unix_ms,
+    }
+}
+
+impl LedgerCopy {
+    /// The one factual system-page line: the UTC sync time and the age in
+    /// whole hours for a recorded marker, the honest absent state otherwise.
+    pub fn system_line(&self, as_of_ms: i64) -> String {
+        match self {
+            LedgerCopy::Recorded { synced_at_ms } => format!(
+                "Ledger copy synced: {} (age {} h)",
+                apex_ui::format::utc_datetime(*synced_at_ms),
+                as_of_ms.saturating_sub(*synced_at_ms).max(0) / 3_600_000
+            ),
+            LedgerCopy::NotRecorded => "Ledger copy synced: not recorded".to_string(),
+            LedgerCopy::Unreadable { reason } => {
+                format!("Ledger copy synced: not recorded ({reason})")
+            }
+        }
+    }
+}
+
 /// The analytics endpoint bound to the configured store.
 #[derive(Debug, Clone)]
 pub struct AnalyticsSource {
@@ -283,19 +377,58 @@ pub struct DurableReader {
     pub ledger_root: PathBuf,
     /// Invoice register JSONL path.
     pub invoice_register: PathBuf,
-    /// Parsed ledgers keyed by path, reused while length and mtime are
-    /// unchanged so repeated page reads do not re-parse the whole directory.
+    /// Parsed ledgers keyed by path, reused while the file identity (length,
+    /// mtime and on Unix ctime and inode) is unchanged, so repeated page
+    /// reads do not re-parse the whole directory.
     cache: Arc<Mutex<HashMap<PathBuf, CachedLedger>>>,
 }
 
 /// One parsed publisher ledger: the publisher name and its parsed lines.
 type LedgerLines = (String, Arc<Vec<serde_json::Value>>);
 
+/// A durable file's cache identity: byte length, modification time (`None`
+/// when the filesystem does not expose one) and, on Unix, the ctime and
+/// inode. An unprivileged writer cannot restore the ctime, so a same-length
+/// rewrite that puts the mtime back (`touch -t`) still invalidates the entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileStamp {
+    /// The stamp of `metadata`.
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
+        let len = metadata.len();
+        let modified = metadata.modified().ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                len,
+                modified,
+                ctime: metadata.ctime(),
+                ctime_nsec: metadata.ctime_nsec(),
+                ino: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { len, modified }
+        }
+    }
+}
+
 /// One cached ledger parse.
 #[derive(Debug, Clone)]
 struct CachedLedger {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
+    stamp: FileStamp,
     lines: Arc<Vec<serde_json::Value>>,
 }
 
@@ -342,8 +475,7 @@ impl DurableReader {
             let metadata = std::fs::metadata(&path).map_err(|error| {
                 Unavailable::new(format!("the ledger {name} could not be read: {error}"))
             })?;
-            let len = metadata.len();
-            let modified = metadata.modified().ok();
+            let stamp = FileStamp::of(&metadata);
             let cached = {
                 let cache = self
                     .cache
@@ -351,7 +483,7 @@ impl DurableReader {
                     .map_err(|_| Unavailable::new("ledger cache lock poisoned"))?;
                 cache
                     .get(&path)
-                    .filter(|cached| cached.len == len && cached.modified == modified)
+                    .filter(|cached| cached.stamp == stamp)
                     .map(|cached| cached.lines.clone())
             };
             let lines = match cached {
@@ -382,8 +514,7 @@ impl DurableReader {
                     cache.insert(
                         path,
                         CachedLedger {
-                            len,
-                            modified,
+                            stamp,
                             lines: lines.clone(),
                         },
                     );
@@ -793,6 +924,8 @@ pub struct LiveData {
     pub durable: DurableReader,
     /// Verified-operation evidence, or the reason it is not on file.
     pub operations: Result<OperationsEvidence, Unavailable>,
+    /// The sync-timer marker file, when `APEX_CONTROL_SYNC_MARKER` is set.
+    pub sync_marker: Option<PathBuf>,
 }
 
 /// The default reason shown when no analytics store is configured.
@@ -998,6 +1131,19 @@ impl ControlData {
         }
     }
 
+    /// The copied-ledger sync state. Fixtures carry one illustrative recorded
+    /// marker two hours before the pinned demo clock; the live mode reads the
+    /// sync marker file fresh on every request, so a timer update is visible
+    /// without a restart.
+    pub fn ledger_copy(&self, as_of_ms: i64) -> LedgerCopy {
+        match self {
+            ControlData::Fixtures(_) => LedgerCopy::Recorded {
+                synced_at_ms: crate::fixtures::DEMO_NOW_MS - 7_200_000,
+            },
+            ControlData::Live(live) => read_sync_marker(live.sync_marker.as_deref(), as_of_ms),
+        }
+    }
+
     /// The verified-operation evidence.
     pub fn operations_evidence(&self) -> Result<OperationsEvidence, Unavailable> {
         match self {
@@ -1053,6 +1199,69 @@ mod tests {
         let third = reader.ledger_files().expect("third read");
         assert_eq!(third[0].1.len(), 2, "the changed file re-parses");
         assert!(!Arc::ptr_eq(&second[0].1, &third[0].1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A same-length rewrite whose mtime is restored (`touch -t`) must still
+    /// re-parse: the Unix ctime is part of the cache key. A pair-keyed cache
+    /// serves the stale lines here; this test fails on it.
+    #[test]
+    fn ledger_cache_detects_a_same_length_rewrite_with_restored_mtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-ctime-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let ledger = dir.join("northstar.jsonl");
+        let original =
+            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_1\"}\n";
+        let replacement =
+            "{\"publisherId\":\"northstar\",\"type\":\"liftRecord\",\"experimentId\":\"exp_2\"}\n";
+        assert_eq!(original.len(), replacement.len(), "same length");
+        std::fs::write(&ledger, original).expect("write");
+        let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
+
+        let first = reader.ledger_files().expect("first read");
+        assert_eq!(
+            first[0].1[0]
+                .get("experimentId")
+                .and_then(|value| value.as_str()),
+            Some("exp_1")
+        );
+        let modified = std::fs::metadata(&ledger)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        std::fs::write(&ledger, replacement).expect("rewrite");
+        std::fs::File::options()
+            .write(true)
+            .open(&ledger)
+            .expect("open")
+            .set_modified(modified)
+            .expect("restore mtime");
+        assert_eq!(
+            std::fs::metadata(&ledger)
+                .expect("stat")
+                .modified()
+                .expect("mtime"),
+            modified,
+            "the mtime is restored to the pair-keyed value"
+        );
+
+        let second = reader.ledger_files().expect("second read");
+        assert!(
+            !Arc::ptr_eq(&first[0].1, &second[0].1),
+            "the restored-mtime rewrite re-parses"
+        );
+        assert_eq!(
+            second[0].1[0]
+                .get("experimentId")
+                .and_then(|value| value.as_str()),
+            Some("exp_2"),
+            "the new content is parsed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1260,6 +1469,7 @@ mod tests {
             analytics: None,
             durable: DurableReader::new("/nonexistent-ledgers", "/nonexistent-invoices.jsonl"),
             operations: Ok(OperationsEvidence::default()),
+            sync_marker: None,
         }));
         assert!(!live.is_fixtures());
         let as_of = UtcMillis::from_unix_millis(0);
@@ -1271,6 +1481,124 @@ mod tests {
         );
         let error = live.durable_experiments().expect_err("no ledgers");
         assert!(error.reason.contains("no ledger root"));
+    }
+
+    #[test]
+    fn the_sync_marker_line_is_exact_or_honestly_absent() {
+        // A fixed clock: 2026-10-16T15:00:00Z.
+        let as_of = 1_792_162_800_000i64;
+        let synced = 1_792_152_000_000i64; // 2026-10-16T12:00:00Z
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-syncmarker-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sync.json");
+
+        // Present: the exact line, with whole-hour age.
+        std::fs::write(
+            &path,
+            format!("{{\"synced_at_unix_ms\":{synced}, \"source\":\"ledger\"}}"),
+        )
+        .expect("write");
+        let state = read_sync_marker(Some(&path), as_of);
+        assert_eq!(
+            state,
+            LedgerCopy::Recorded {
+                synced_at_ms: synced
+            }
+        );
+        assert_eq!(
+            state.system_line(as_of),
+            "Ledger copy synced: 16 Oct 2026, 12:00 UTC (age 3 h)"
+        );
+
+        // The age floors to whole hours.
+        let one_ms_late = LedgerCopy::Recorded {
+            synced_at_ms: synced + 1,
+        };
+        assert_eq!(
+            one_ms_late.system_line(as_of),
+            "Ledger copy synced: 16 Oct 2026, 12:00 UTC (age 2 h)"
+        );
+
+        // Unset path and an absent file: the honest not-recorded state.
+        assert_eq!(read_sync_marker(None, as_of), LedgerCopy::NotRecorded);
+        assert_eq!(
+            read_sync_marker(Some(&dir.join("absent.json")), as_of),
+            LedgerCopy::NotRecorded
+        );
+        assert_eq!(
+            LedgerCopy::NotRecorded.system_line(as_of),
+            "Ledger copy synced: not recorded"
+        );
+
+        // Malformed shapes are typed unreadable states, never a panic.
+        for (label, body) in [
+            ("not json", "{ not json".to_string()),
+            ("missing time", "{\"source\":\"ledger\"}".to_string()),
+            (
+                "unknown source",
+                format!("{{\"synced_at_unix_ms\":{synced},\"source\":\"customers\"}}"),
+            ),
+            (
+                "future time",
+                format!(
+                    "{{\"synced_at_unix_ms\":{},\"source\":\"ledger\"}}",
+                    as_of + 1
+                ),
+            ),
+        ] {
+            std::fs::write(&path, body).expect("write");
+            let state = read_sync_marker(Some(&path), as_of);
+            assert!(
+                matches!(state, LedgerCopy::Unreadable { .. }),
+                "{label}: {state:?}"
+            );
+            let line = state.system_line(as_of);
+            assert!(line.contains("not recorded"), "{label}: {line}");
+        }
+
+        // An extreme recorded time cannot overflow the age computation.
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"synced_at_unix_ms\":{},\"source\":\"ledger\"}}",
+                i64::MIN
+            ),
+        )
+        .expect("write");
+        let state = read_sync_marker(Some(&path), as_of);
+        assert_eq!(
+            state,
+            LedgerCopy::Recorded {
+                synced_at_ms: i64::MIN
+            }
+        );
+        assert!(state.system_line(as_of).starts_with("Ledger copy synced: "));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fixtures_carry_a_deterministic_recorded_sync_marker() {
+        let as_of = crate::fixtures::DEMO_NOW_MS;
+        let fixtures = ControlData::fixtures();
+        assert_eq!(
+            fixtures.ledger_copy(as_of),
+            LedgerCopy::Recorded {
+                synced_at_ms: as_of - 7_200_000
+            }
+        );
+        let live = ControlData::Live(Box::new(LiveData {
+            analytics: None,
+            durable: DurableReader::new("/nonexistent-ledgers", "/nonexistent-invoices.jsonl"),
+            operations: Ok(OperationsEvidence::default()),
+            sync_marker: None,
+        }));
+        assert_eq!(live.ledger_copy(as_of), LedgerCopy::NotRecorded);
     }
 
     #[tokio::test]
@@ -1286,6 +1614,7 @@ mod tests {
             analytics: None,
             durable: DurableReader::new("/nonexistent-ledgers", "/nonexistent-invoices.jsonl"),
             operations: Ok(OperationsEvidence::default()),
+            sync_marker: None,
         }));
         assert_eq!(live.site_requests_last_30_days(as_of).await, None);
     }

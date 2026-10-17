@@ -1885,7 +1885,7 @@ email:
     
   dns_records:
     mx: mail.apexmediation.ee
-    spf: "v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all"
+    spf: "v=spf1 ip4:203.0.113.11 ip4:203.0.113.10 -all"
     dkim: apexmail._domainkey
     dmarc: "v=DMARC1; p=reject;"
 ```

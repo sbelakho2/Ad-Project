@@ -15,8 +15,13 @@ Contract, matching the frozen schema in
 `rust/crates/apex-tools/src/dogfood_plan.rs`:
 
 - the catalog (`tools/dogfood/surfaces.json`) declares `services.<id>.routes`
-  (`path` + `methods`), `fixture_pages` and `required` cells; a cell expands
-  to `"<service>|<METHOD path>|<class>"`;
+  (`path` + `methods`, plus `"session_required": true` on the publisher-console
+  GETs that refuse anonymous reads), `fixture_pages` and `required` cells; a
+  cell expands to `"<service>|<METHOD path>|<class>"`;
+- every route declared `session_required` must answer the recorded gate
+  without a session (exactly `303 -> /console/ledger` on a deployment with
+  tokens configured) and must render under a live session; the documented
+  public console exceptions stay public and are asserted as such;
 - every required cell must be attempted in a live run and every attempted
   cell must pass; any failure or unattempted cell exits 1 with the cell list;
 - `--static-only` runs only the surface-parity and catalog checks (no
@@ -24,13 +29,16 @@ Contract, matching the frozen schema in
 - the ratchet (`tools/dogfood/live-baseline.json`, the same file the static
   gate reads): a required cell missing from the recorded baseline fails the
   run (drift), and a baseline cell that is no longer required fails unless a
-  `removals` entry with a reason releases it;
-- `--update-baseline` rewrites the baseline (cells identical to the required
-  set, removals preserved) after a fully green run;
+  `removals` entry with a reason releases it; `--update-baseline` records pure
+  additions during the green recording run and the ratchet is strict again on
+  every run that does not carry the flag;
 - teardown always kills every process the harness started, drops the
   ClickHouse test database and prints the cleanup proof.
 
-Only the Python standard library is used.
+Only the Python standard library is used; the vaulted credential bundle and
+the tamper-evident ledger lines the harness seeds are written by the
+pure-stdlib AES-256-GCM and ed25519 implementations at the top of this file,
+pinned against the published NIST/RFC vectors at boot.
 """
 
 import argparse
@@ -73,9 +81,30 @@ SERVICES = ["apex-api", "apex-control", "apex-sales-web"]
 # Product facts the harness injects (the catalog declares only the contract).
 API_LEDGER_TOKEN = "dogfood-live-ledger-token"
 API_LIVE_AUDIT_TOKEN = "dogfood-live-audit-token"
+API_OPERATOR_JOBS_TOKEN = "dogfood-live-operator-jobs-token"
+API_VAULT_KEY_HEX = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 SALES_WEB_TOKEN = "dogfood-live-owner-token"
 CONTROL_OPERATOR_PASSWORD = "dogfood-operator-passphrase"
 CONTROL_LOCKED_OPERATOR = "locked-probe"
+# The setup-watch sign-up lane: one domain/email pair the harness submits
+# through the public form and bills through the product's own billing run.
+WATCH_DOMAIN = "dogfood-watch.example"
+WATCH_PUBLISHER = "dogfood-watch-example"
+WATCH_EMAIL = "watch@dogfood-watch.example"
+# The seeded monitoring band: USD 350,000 of reported 30-day revenue, inside
+# the Mid band ($100k..$500k) so the chosen tier ($1,500/month) is provably
+# band-selected and not a default.
+MONITORING_BAND_REVENUE_30D_MICROS = 350_000 * 1_000_000
+MONITORING_MID_FEE_MICROS = 1_500 * 1_000_000
+MONITORING_BASE_FEE_MICROS = 500 * 1_000_000
+# The typed reason the monthly pass records when monitoring is on but no
+# connections root is configured (the legacy-mode skip the defect cell pins).
+MONITORING_ROOT_UNCONFIGURED_REASON = "monitoring state root not configured"
+# The seeded kept AdMob change: the experiment name and the monthly fee the
+# fee-eligibility gate must refuse to ever charge.
+ADMOB_KEPT_EXPERIMENT = "exp_dogfood_admob"
+SELLER_VAT_RATE_BP = 2000
+WATCH_FEE_MICROS = 99 * 1_000_000
 # The RFC 4648 base32 form of the 20-byte all-zero-then-0x01 secret. The
 # brief's literal is one character short of a whole byte count, which the
 # product decoder correctly refuses (trailing bits are non-zero), so the
@@ -84,6 +113,7 @@ CONTROL_TOTP_SECRET_B32 = "A" * 31 + "B"
 # ed25519 public key of the [7u8; 32] test seed the committed fixture ledger
 # (rust/crates/apex-api/fixtures/northstar.jsonl) is signed with.
 NORTHSTAR_PUBKEY_HEX = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+RUNNER_SIGNING_SEED_HEX = "07" * 32
 FONT_NAMES = [
     "ibm-plex-mono-400.woff2",
     "ibm-plex-mono-500.woff2",
@@ -180,7 +210,26 @@ PATH_PARAMETERS = {
     "{file}": "m-dogfood-live-1.eml",
     "{kind}": "policy_draft",
     "{register}": "invoices",
+    "{job_id}": "opj_000000000000",
 }
+
+# Patterns used inside the per-cell probe loops are compiled once here.
+CSRF_FIELD_PATTERNS = (
+    re.compile(r'name="csrf_token"\s+value="([^"]+)"'),
+    re.compile(r'value="([^"]+)"\s+name="csrf_token"'),
+)
+INPUT_TAG_PATTERN = re.compile(r"<input\b[^>]*>")
+INPUT_ATTR_PATTERN = re.compile(r'([A-Za-z_:][-\w:.]*)="([^"]*)"')
+PENDING_INPUT_PATTERN = re.compile(r'name="pending"\s+value="([^"]+)"')
+TRAVERSAL_TOKEN_PATTERN = re.compile(r"\{[^}]+\}")
+H1_TAG_PATTERN = re.compile(r"<h1[\s>]")
+STYLE_TAG_PATTERN = re.compile(r"<style[\s>]")
+STYLE_BLOCK_PATTERN = re.compile(r"<style>(.*?)</style>", re.S)
+FINDING_LINK_PATTERN = re.compile(r"/console/audit/findings/([A-Za-z0-9_.-]+)")
+REVOKE_FORM_PATTERN = re.compile(
+    r'<form[^>]*action="/control/actions/session_revoke"[^>]*>(.*?)</form>', re.S
+)
+CONFIRM_PHRASE_PATTERN = re.compile(r"Type exactly: ([A-Z ]+)")
 
 
 def log(message):
@@ -195,11 +244,8 @@ def materialize(template):
 
 
 def extract_csrf(html):
-    for pattern in (
-        r'name="csrf_token"\s+value="([^"]+)"',
-        r'value="([^"]+)"\s+name="csrf_token"',
-    ):
-        match = re.search(pattern, html)
+    for pattern in CSRF_FIELD_PATTERNS:
+        match = pattern.search(html)
         if match:
             return match.group(1)
     return None
@@ -208,8 +254,8 @@ def extract_csrf(html):
 def parse_hidden_fields(fragment):
     """Every <input name=... value=...>, attribute order independent."""
     fields = {}
-    for tag in re.findall(r"<input\b[^>]*>", fragment):
-        attrs = dict(re.findall(r'([A-Za-z_:][-\w:.]*)="([^"]*)"', tag))
+    for tag in INPUT_TAG_PATTERN.findall(fragment):
+        attrs = dict(INPUT_ATTR_PATTERN.findall(tag))
         if "name" in attrs:
             fields[attrs["name"]] = html_unescape(attrs.get("value", ""))
     return fields
@@ -240,6 +286,260 @@ def debase32(text):
     if bits and (buffer & ((1 << bits) - 1)):
         raise ValueError("base32 trailing bits are non-zero")
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# Pure-stdlib crypto for the harness's own provisioning seams.
+#
+# Two product formats are written by the harness, both owned by the deployment
+# side: the vaulted credential bundle (AES-256-GCM, `nonce-hex.ct-hex`, see
+# `apex-vault`) and the tamper-evident ledger line (`{"record":..,
+# "signature":hex,"pubkey":hex}`, ed25519 over the record hash, see
+# `apex-proof`). Python's standard library ships neither cipher, so both live
+# here, pinned by the product's own published vectors (NIST AES-GCM, RFC 8032
+# ed25519 test 1) in `crypto_self_check`, which the harness runs at boot.
+# ---------------------------------------------------------------------------
+
+_SBOX = bytes.fromhex(
+    "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0"
+    "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275"
+    "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf"
+    "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2"
+    "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb"
+    "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08"
+    "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e"
+    "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16"
+)
+
+
+def _aes_expand_key(key):
+    nk = len(key) // 4
+    nr = nk + 6
+    words = [list(key[4 * i : 4 * i + 4]) for i in range(nk)]
+    rcon = 1
+    for i in range(nk, 4 * (nr + 1)):
+        temp = list(words[i - 1])
+        if i % nk == 0:
+            temp = temp[1:] + temp[:1]
+            temp = [_SBOX[b] for b in temp]
+            temp[0] ^= rcon
+            rcon = ((rcon << 1) ^ (0x11B if rcon & 0x80 else 0)) & 0xFF
+        elif nk > 6 and i % nk == 4:
+            temp = [_SBOX[b] for b in temp]
+        words.append([words[i - nk][j] ^ temp[j] for j in range(4)])
+    return [sum(words[4 * r : 4 * r + 4], []) for r in range(nr + 1)], nr
+
+
+def _aes_encrypt_block(round_keys, block):
+    state = [block[i] ^ round_keys[0][i] for i in range(16)]
+
+    def xtime(a):
+        return ((a << 1) ^ 0x1B) & 0xFF if a & 0x80 else a << 1
+
+    for rnd in range(1, len(round_keys)):
+        state = [_SBOX[b] for b in state]
+        # ShiftRows (column-major state index = 4*col + row).
+        shifted = state[:]
+        for col in range(4):
+            for row in range(4):
+                shifted[4 * col + row] = state[4 * ((col + row) % 4) + row]
+        state = shifted
+        if rnd != len(round_keys) - 1:
+            mixed = []
+            for col in range(4):
+                a = state[4 * col : 4 * col + 4]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                mixed.extend(
+                    [
+                        a[i] ^ t ^ xtime(a[i] ^ a[(i + 1) % 4])
+                        for i in range(4)
+                    ]
+                )
+            state = mixed
+        state = [state[i] ^ round_keys[rnd][i] for i in range(16)]
+    return bytes(state)
+
+
+def _gf_mul(x, y):
+    result = 0
+    for bit in range(128):
+        if (y >> (127 - bit)) & 1:
+            result ^= x
+        if x & 1:
+            x = (x >> 1) ^ 0xE1000000000000000000000000000000
+        else:
+            x >>= 1
+    return result
+
+
+def _ghash(h, data):
+    y = 0
+    for offset in range(0, len(data), 16):
+        block = data[offset : offset + 16].ljust(16, b"\x00")
+        y = _gf_mul(y ^ int.from_bytes(block, "big"), h)
+    return y
+
+
+def aes_gcm_encrypt(key, nonce, plaintext, aad=b""):
+    """AES-GCM (12-byte nonce) -> (ciphertext, 16-byte tag)."""
+    round_keys, _nr = _aes_expand_key(key)
+    h = int.from_bytes(_aes_encrypt_block(round_keys, b"\x00" * 16), "big")
+    counter = int.from_bytes(nonce + b"\x00\x00\x00\x01", "big")
+    ciphertext = bytearray()
+    for offset in range(0, len(plaintext), 16):
+        counter = (counter + 1) & ((1 << 128) - 1)
+        keystream = _aes_encrypt_block(round_keys, counter.to_bytes(16, "big"))
+        chunk = plaintext[offset : offset + 16]
+        ciphertext.extend(a ^ b for a, b in zip(chunk, keystream))
+    lengths = (len(aad) * 8).to_bytes(8, "big") + (len(ciphertext) * 8).to_bytes(8, "big")
+    padded = aad + b"\x00" * (-len(aad) % 16)
+    padded += bytes(ciphertext) + b"\x00" * (-len(ciphertext) % 16)
+    tag = _ghash(h, padded + lengths) ^ int.from_bytes(
+        _aes_encrypt_block(round_keys, nonce + b"\x00\x00\x00\x01"), "big"
+    )
+    return bytes(ciphertext), tag.to_bytes(16, "big")
+
+
+_ED_P = 2**255 - 19
+_ED_L = 2**252 + 27742317777372353535851937790883648493
+_ED_D = (-121665 * pow(121666, _ED_P - 2, _ED_P)) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_xrecover(y):
+    xx = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P)
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P != 0:
+        x = (x * _ED_I) % _ED_P
+    if x % 2 != 0:
+        x = _ED_P - x
+    return x
+
+
+_ED_BY = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+_ED_BX = _ed_xrecover(_ED_BY)
+_ED_B = (_ED_BX, _ED_BY, 1, (_ED_BX * _ED_BY) % _ED_P)
+
+
+def _ed_add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = 2 * t1 * t2 * _ED_D % _ED_P
+    d = z1 * 2 * z2 % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_scalarmult(point, scalar):
+    result = (0, 1, 1, 0)
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = _ed_add(result, addend)
+        addend = _ed_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def _ed_encode(point):
+    x, y, z, _t = point
+    zi = pow(z, _ED_P - 2, _ED_P)
+    x = x * zi % _ED_P
+    y = y * zi % _ED_P
+    encoded = y | ((x & 1) << 255)
+    return encoded.to_bytes(32, "little")
+
+
+def _ed_clamp(seed):
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a &= (1 << 254) - 8
+    a |= 1 << 254
+    return a, h[32:]
+
+
+def ed25519_public_key(seed):
+    a, _prefix = _ed_clamp(seed)
+    return _ed_encode(_ed_scalarmult(_ED_B, a))
+
+
+def ed25519_sign(seed, message):
+    a, prefix = _ed_clamp(seed)
+    public = _ed_encode(_ed_scalarmult(_ED_B, a))
+    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % _ED_L
+    big_r = _ed_encode(_ed_scalarmult(_ED_B, r))
+    k = int.from_bytes(hashlib.sha512(big_r + public + message).digest(), "little") % _ED_L
+    s = (r + k * a) % _ED_L
+    return big_r + s.to_bytes(32, "little")
+
+
+def vault_encrypt(key_hex, plaintext):
+    """`<nonce hex>.<ciphertext hex>` exactly as apex-vault writes it."""
+    key = bytes.fromhex(key_hex)
+    nonce = os.urandom(12)
+    ciphertext, tag = aes_gcm_encrypt(key, nonce, plaintext.encode("utf-8"))
+    return nonce.hex() + "." + (ciphertext + tag).hex()
+
+
+def crypto_self_check():
+    """Pin both primitives against their published vectors and raise on any
+    mismatch, so a broken cipher can never silently corrupt the boot."""
+    key128 = bytes(16)
+    ciphertext, tag = aes_gcm_encrypt(key128, bytes(12), bytes(16))
+    assert ciphertext.hex() == "0388dace60b6a392f328c2b971b2fe78", ciphertext.hex()
+    assert tag.hex() == "ab6e47d42cec13bdf53a67b21257bddf", tag.hex()
+    ciphertext, tag = aes_gcm_encrypt(bytes(32), bytes(12), bytes(16))
+    assert ciphertext.hex() == "cea7403d4d606b6e074ec5d3baf39d18", ciphertext.hex()
+    assert tag.hex() == "d0d1c8a799996bf0265b98b5d48ab919", tag.hex()
+    seed = bytes.fromhex(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+    )
+    assert ed25519_public_key(seed).hex() == (
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    )
+    assert ed25519_sign(seed, b"").hex() == (
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb88215"
+        "90a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    )
+    # The runner's deployment seed must produce the fixture ledger's public key
+    # (the same key the api verifies the sealed chain with).
+    assert ed25519_public_key(bytes.fromhex(RUNNER_SIGNING_SEED_HEX)).hex() == (
+        NORTHSTAR_PUBKEY_HEX
+    )
+
+
+def canonical_json(value):
+    """Compact JSON with recursively sorted keys: apex-proof's hash input."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def ledger_hashed_record(record):
+    """The 32-byte record hash: sha256 of the canonical record without `hash`."""
+    body = {key: value for key, value in record.items() if key != "hash"}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).digest()
+
+
+def ledger_line(record, seed):
+    """One byte-exact persisted line: `{"record":..,"signature":hex,
+    "pubkey":hex}` with the signature over the record hash (apex-proof)."""
+    signature = ed25519_sign(seed, ledger_hashed_record(record))
+    line = {"record": record, "signature": signature.hex(), "pubkey": ed25519_public_key(seed).hex()}
+    return json.dumps(line, separators=(",", ":"), ensure_ascii=False)
+
+
+def seal_ledger_record(record, seq, prev_hash):
+    """Rebuild the record in serde's declaration order, fill the envelope,
+    compute the chain hash and return the finished record."""
+    ordered = {"type": record["type"], "seq": seq}
+    for key, value in record.items():
+        if key not in ("type", "seq", "prevHash", "hash"):
+            ordered[key] = value
+    ordered["prevHash"] = prev_hash
+    ordered["hash"] = "0" * 64
+    ordered["hash"] = ledger_hashed_record(ordered).hex()
+    return ordered
 
 
 def count_lines(path, kind=None):
@@ -366,6 +666,7 @@ class Harness:
             "apex-control": args.port_base + 1,
             "apex-sales-web": args.port_base + 2,
             "apex-sales-web-unconfigured": args.port_base + 3,
+            "apex-api-unconfigured": args.port_base + 4,
         }
         self.procs = {}
         self.checks = []
@@ -382,6 +683,18 @@ class Harness:
         self.ch_owned = args.clickhouse_owned
         self.ch_owned_procs = []
         self.site_skip_reason = None
+        # Declared publisher-console GETs that must refuse anonymous reads
+        # (`"session_required": true` in the catalog): the anonymous sweep and
+        # the with-session sweep both read this set.
+        self.session_required = set()
+        self.fleet = {}
+        self.monetization = {}
+        # Per-run caches for the per-cell loops: the class index over the
+        # required cells, the response-contract tables and the no-inline
+        # sweep targets are built once instead of once per cell.
+        self._cell_index_cache = None
+        self._contract_expectations = {}
+        self._no_inline_targets = None
 
     # ------------------------------------------------------------------ io
     def repo_path(self, rel):
@@ -467,6 +780,47 @@ class Harness:
             not notes,
             "; ".join(notes) if notes else "every class is required somewhere and has a probe",
         )
+        # The recorded session gate: every `"session_required": true` route is
+        # an apex-api console GET, and the documented public exceptions are
+        # declared as plain routes. The anonymous sweep and the with-session
+        # sweep both drive from this set.
+        self.session_required = set()
+        bad_markers = []
+        declared_get = set()
+        for service, declared_service in self.surface["services"].items():
+            for route in declared_service["routes"]:
+                if "GET" in [m.upper() for m in route["methods"]]:
+                    declared_get.add("%s|GET %s" % (service, route["path"]))
+                if route.get("session_required"):
+                    cell_surface = "%s|GET %s" % (service, route["path"])
+                    if service != "apex-api" or cell_surface not in declared_get:
+                        bad_markers.append(cell_surface)
+                        continue
+                    self.session_required.add(cell_surface)
+        public = [
+            "/console",
+            "/console/",
+            "/console/ledger",
+            "/console/signin",
+            "/free-audit",
+            "/free-audit/",
+            "/audit-requested/",
+            "/watch",
+            "/watch/",
+            "/watch/requested",
+        ]
+        collisions = sorted(
+            surface for surface in self.session_required if surface.split("|", 1)[1][4:] in public
+        )
+        self.check(
+            "catalog|session-markers",
+            not bad_markers and not collisions and len(self.session_required) == 20,
+            "%d session_required console GETs recorded; public exceptions stay unmarked"
+            % len(self.session_required)
+            if not bad_markers and not collisions and len(self.session_required) == 20
+            else "bad markers %s; public-route collisions %s; total %d (expected 20)"
+            % (bad_markers, collisions, len(self.session_required)),
+        )
 
     def check_site(self):
         public = self.repo_path("site/public")
@@ -492,7 +846,7 @@ class Harness:
 
     def require_binaries(self):
         missing = []
-        for name in ("apex-api", "apex-control", "apex-sales-web", "apex-sales", "apex-runner", "apex-tools"):
+        for name in ("apex-api", "apex-control", "apex-sales-web", "apex-sales", "apex-runner", "apex-watch", "apex-tools"):
             if not os.access(self.bin_path(name), os.X_OK):
                 missing.append(name)
         if missing:
@@ -583,45 +937,402 @@ class Harness:
         )
         return self.run_runner()
 
-    def run_runner(self):
+    def runner_env(self):
+        """The fleet-mode runner environment: the console-validated vaulted
+        connection registry (`APEX_CONNECTIONS_ROOT`) drives which publishers
+        run, exactly the deployment shape the product documents. The legacy
+        single-publisher variables are deliberately absent."""
         env = dict(os.environ)
+        for name in (
+            "APEX_CLICKHOUSE_HTTP",
+            "APEX_CLICKHOUSE_DB",
+            "APEX_RUNNER_PUBLISHER",
+            "APEX_RUNNER_LEDGER",
+            "APEX_MAX_API_KEY",
+            "APEX_MAX_REPORT_KEY",
+            "APEX_MAX_MANAGEMENT_BASE",
+            "APEX_MAX_REPORTING_BASE",
+        ):
+            env.pop(name, None)
         env.update(
             {
                 "APEX_CLICKHOUSE_HTTP": self.ch_url,
                 "APEX_CLICKHOUSE_DB": self.database,
                 "APEX_ANALYTICS_ENV": "production",
-                "APEX_MAX_API_KEY": "dogfood-live-dummy",
-                "APEX_MAX_REPORT_KEY": "dogfood-live-dummy",
-                "APEX_MAX_MANAGEMENT_BASE": "http://127.0.0.1:9",
-                "APEX_MAX_REPORTING_BASE": "http://127.0.0.1:9",
-                "APEX_RUNNER_LEDGER": os.path.join(self.workdir, "runner", "ledger.jsonl"),
-                "APEX_RUNNER_SIGNING_KEY_HEX": "07" * 32,
-                "APEX_RUNNER_PUBLISHER": "northstar",
-                "APEX_RUNNER_DATA_DIR": os.path.join(self.workdir, "runner"),
-                "APEX_OPERATOR_JOBS_DIR": os.path.join(self.workdir, "runner", "jobs"),
+                "APEX_RUNNER_SIGNING_KEY_HEX": RUNNER_SIGNING_SEED_HEX,
+                "APEX_RUNNER_DATA_DIR": self.fleet["runner_data"],
+                "APEX_CONNECTIONS_ROOT": self.fleet["credentials"],
+                "APEX_VAULT_KEY_HEX": API_VAULT_KEY_HEX,
+                "APEX_RUNNER_LEDGER_ROOT": self.fleet["ledgers"],
+                "APEX_BILLING_PROFILE": self.fleet["seller"],
+                "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+                "APEX_OPERATOR_JOBS_DIR": self.fleet["jobs_dir"],
                 "APEX_METRICS_TEXTFILE": os.path.join(self.workdir, "runner", "runner.prom"),
             }
         )
-        os.makedirs(os.path.join(self.workdir, "runner", "jobs"), exist_ok=True)
-        proc = subprocess.run(
-            [self.bin_path("apex-runner"), "daily"],
-            cwd=self.root,
+        os.makedirs(self.fleet["jobs_dir"], exist_ok=True)
+        return env
+
+    def run_runner_command(self, argv, cwd=None, extra_env=None, timeout=180):
+        env = self.runner_env()
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [self.bin_path("apex-runner")] + argv,
+            cwd=cwd or self.root,
             env=env,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=timeout,
         )
+
+    def run_runner(self):
+        proc = self.run_runner_command(["daily"])
         out = (proc.stdout or "") + (proc.stderr or "")
         ok = proc.returncode == 0 and "Projections: rebuilt" in out
         self.check(
             "clickhouse|runner-daily",
             ok,
             "apex-runner daily exit=%d; %s" % (proc.returncode, sanitize_evidence(out, 400)),
-            "apex-runner daily (APEX_CLICKHOUSE_HTTP=%s APEX_CLICKHOUSE_DB=%s, dummy MAX bases)" % (self.ch_url, self.database),
+            "apex-runner daily (fleet: APEX_CONNECTIONS_ROOT=%s, APEX_CLICKHOUSE_DB=%s)"
+            % (self.fleet["credentials"], self.database),
         )
         if ok:
             self.runner_ran = True
         return ok
+
+    def bootstrap_monitoring(self):
+        """Activate the monitoring plan the way the product does: the `cycle`
+        command consumes a snapshot and records the tier chosen from its
+        reported 30-day revenue (the seeded $350k band -> Mid)."""
+        work = os.path.join(self.workdir, "billing-run")
+        os.makedirs(work, exist_ok=True)
+        proc = self.run_runner_command(
+            ["cycle", "--snapshot", self.fleet["snapshot"], "--json"], cwd=work
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        ok = proc.returncode == 0
+        tier = None
+        if ok:
+            try:
+                document = json.loads(proc.stdout)
+                tier = document.get("cycle", {}).get("monitoring_activated")
+            except ValueError:
+                ok = False
+        self.monetization["cycle"] = {
+            "exit": proc.returncode,
+            "activated": tier,
+            "human": sanitize_evidence(out, 400),
+        }
+        self.check(
+            "boot|monitoring-activation",
+            ok and tier == "Mid",
+            "apex-runner cycle exit=%d; activated=%r; %s"
+            % (proc.returncode, tier, sanitize_evidence(out, 300)),
+            "apex-runner cycle --snapshot band-snapshot.json (30-day revenue $350k)",
+        )
+
+    def seed_admob_kept_change(self):
+        """Append the signed records of one kept AdMob change to the shared
+        fleet ledger: the exact envelope records a settled AdMob mediation A/B
+        experiment produces (experimentStarted + preRegistration + result
+        keep). Signed with the deployment's runner seed, so the product's own
+        ledger verifier accepts the chain byte-for-byte."""
+        seed = bytes.fromhex(RUNNER_SIGNING_SEED_HEX)
+        ledger_path = os.path.join(self.fleet["ledgers"], "northstar.jsonl")
+        with open(ledger_path, "r", encoding="utf-8") as fh:
+            lines = [line for line in fh.read().splitlines() if line.strip()]
+        previous = json.loads(lines[-1])["record"]["hash"] if lines else "0" * 64
+        seq = len(lines)
+        now_ms = int(time.time() * 1000)
+        started = {
+            "type": "experimentStarted",
+            "atUnixMs": now_ms - 3 * 86_400_000,
+            "platform": "admob",
+            "experimentId": ADMOB_KEPT_EXPERIMENT,
+            "spec": {
+                "name": ADMOB_KEPT_EXPERIMENT,
+                "adUnitId": "rw_de_01",
+                "metric": "revenue",
+                "variants": 2,
+                "changeDescription": "AdMob mediation-group eCPM",
+                "testGroupAllocation": 25,
+            },
+        }
+        observed = {
+            "type": "experimentObserved",
+            "atUnixMs": now_ms - 2 * 86_400_000,
+            "platform": "admob",
+            "experimentId": ADMOB_KEPT_EXPERIMENT,
+            "result": {
+                "experimentId": ADMOB_KEPT_EXPERIMENT,
+                "state": "completed",
+                "results": [],
+                "winnerVariantId": "test",
+            },
+        }
+        preregistration = {
+            "type": "preRegistration",
+            "experiment_id": ADMOB_KEPT_EXPERIMENT,
+            "scope": "g1/rw_de_01",
+            "before_value": 1_000_000,
+            "after_value": 1_200_000,
+            "split": 0.25,
+            "metric": "revenue_per_user",
+            "burn_in_days": 3,
+            "window_days": 14,
+            "looks": 1,
+            "extension_allowed": False,
+            "guardrail_thresholds": {},
+            "code_version_hash": "deadbeef",
+            "rate_bp": 2_000,
+        }
+        result = {
+            "type": "result",
+            "experiment_id": ADMOB_KEPT_EXPERIMENT,
+            "daily_log_ratios": [0.1],
+            "mean_log": 0.1,
+            "lower_90": 0.05,
+            "lower_99": 0.02,
+            "bootstrap_lower": 0.01,
+            "decision": "keep",
+            "lambda": 0.03,
+        }
+        lift_records = []
+        for payload in (preregistration, result):
+            payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            lift_records.append(
+                {
+                    "type": "liftRecord",
+                    "atUnixMs": now_ms - 2 * 86_400_000,
+                    "payloadSha256": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                    "payload": payload_json,
+                }
+            )
+        out_lines = []
+        for record in [started, observed] + lift_records:
+            sealed = seal_ledger_record(record, seq, previous)
+            out_lines.append(ledger_line(sealed, seed))
+            previous = sealed["hash"]
+            seq += 1
+        with open(ledger_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(out_lines) + "\n")
+        self.check(
+            "boot|admob-kept-change",
+            True,
+            "seeded one kept AdMob change (%s) as %d signed ledger records continuing seq %d"
+            % (ADMOB_KEPT_EXPERIMENT, len(out_lines), seq - len(out_lines)),
+        )
+
+    # ------------------------------------------- runner defect regression cells
+    def run_runner_regression_cells(self):
+        """The two runner-level regression cells the extended live dogfood
+        found, each running the real `apex-runner` binary: the legacy-mode
+        monthly with monitoring on (the historical abort) and the cycle
+        against the committed admob fixture snapshot (the historical
+        "not writable" abort). Recorded as checks like the neighbouring
+        runner probes (`boot|monitoring-activation`,
+        `clickhouse|runner-daily`); both are bounded local invocations."""
+        self.legacy_monthly_monitoring_cell()
+        self.admob_cycle_capability_cell()
+
+    def legacy_monthly_monitoring_cell(self):
+        """Cell `runner|legacy-monthly-monitoring`: legacy-mode monthly with
+        monitoring env defaults and the seeded seller billing profile.
+
+        Without a connections root the pass must exit 0 and record the typed
+        monitoring-skip reason while billing no plan line — the historical
+        abort on this exact env is the defect. With the root seeded the same
+        command bills the chosen tier line; the real binary carries a root
+        only in the single-publisher fleet shape, so the root-seeded variant
+        runs that shape and asserts the recorded Mid tier line."""
+        problems = []
+        notes = []
+        period = time.strftime("%Y-%m", time.gmtime())
+        start = period + "-01"
+        work = os.path.join(self.workdir, "runner-monthly-check")
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work)
+
+        # Variant 1, the exact defect: legacy mode (publisher env set, no
+        # connections root), monitoring on by default, seller profile seeded.
+        legacy_env = self.runner_env()
+        for name in (
+            "APEX_CONNECTIONS_ROOT",
+            "APEX_CREDENTIAL_ROOT",
+            "APEX_CLICKHOUSE_HTTP",
+            "APEX_CLICKHOUSE_DB",
+            "APEX_RUNNER_WRITABLE",
+        ):
+            legacy_env.pop(name, None)
+        legacy_env.update(
+            {
+                "APEX_RUNNER_PUBLISHER": "northstar",
+                "APEX_RUNNER_LEDGER": os.path.join(work, "legacy-ledger.jsonl"),
+                "APEX_MAX_API_KEY": "dogfood-live-legacy-key",
+                "APEX_MAX_REPORT_KEY": "dogfood-live-legacy-report-key",
+            }
+        )
+        proc = subprocess.run(
+            [
+                self.bin_path("apex-runner"),
+                "monthly",
+                "--month",
+                period,
+                "--start",
+                start,
+                "--json",
+            ],
+            cwd=work,
+            env=legacy_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode != 0:
+            problems.append(
+                "legacy monthly exit=%d: %s" % (proc.returncode, sanitize_evidence(out, 240))
+            )
+        else:
+            document = None
+            try:
+                document = json.loads(proc.stdout)
+            except ValueError as error:
+                problems.append("legacy monthly stdout is not JSON: %s" % error)
+            if document is not None:
+                billing = document.get("billing", {})
+                if billing.get("monitoring_skipped") != MONITORING_ROOT_UNCONFIGURED_REASON:
+                    problems.append(
+                        "no typed monitoring skip reason (got %r)"
+                        % billing.get("monitoring_skipped")
+                    )
+                elif billing.get("fees") != 0 or billing.get("rendered_invoice"):
+                    problems.append(
+                        "the skipped plan still billed a line (fees=%r, rendered=%r)"
+                        % (billing.get("fees"), bool(billing.get("rendered_invoice")))
+                    )
+                else:
+                    notes.append(
+                        "no root: exit 0, typed skip %r, no plan line billed"
+                        % MONITORING_ROOT_UNCONFIGURED_REASON
+                    )
+        # The human report carries the same typed reason verbatim.
+        proc = subprocess.run(
+            [self.bin_path("apex-runner"), "monthly", "--month", period, "--start", start],
+            cwd=work,
+            env=legacy_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        human = (proc.stdout or "") + (proc.stderr or "")
+        if (
+            proc.returncode != 0
+            or "Monitoring: skipped (monitoring state root not configured)" not in human
+        ):
+            problems.append(
+                "the human report lacks the typed skip line (exit %d): %s"
+                % (proc.returncode, sanitize_evidence(human, 200))
+            )
+
+        # Variant 2, the tier assertion: run with the seeded root (the
+        # single-publisher fleet shape) and require the Mid tier line chosen
+        # from the seeded $350k band.
+        fleet_cwd = os.path.join(work, "fleet")
+        os.makedirs(fleet_cwd)
+        proc = self.run_runner_command(
+            ["monthly", "--month", period, "--start", start, "--json"], cwd=fleet_cwd
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode != 0:
+            problems.append(
+                "root-seeded monthly exit=%d: %s" % (proc.returncode, sanitize_evidence(out, 240))
+            )
+        else:
+            document = None
+            try:
+                document = json.loads(proc.stdout)
+            except ValueError as error:
+                problems.append("root-seeded monthly stdout is not JSON: %s" % error)
+            if document is not None:
+                rendered = document.get("billing", {}).get("rendered_invoice") or ""
+                tier_line = "monitoring:%s: net %d micros" % (period, MONITORING_MID_FEE_MICROS)
+                if tier_line not in rendered:
+                    problems.append(
+                        "the root-seeded monthly run lacks the chosen tier line %r"
+                        % tier_line
+                    )
+                else:
+                    notes.append("root seeded: the record-and-bill path renders %r" % tier_line)
+        self.check(
+            "runner|legacy-monthly-monitoring",
+            not problems,
+            "; ".join(notes + problems) if (notes or problems) else "no observation",
+            "apex-runner monthly (legacy, no root; then the root-seeded singleton) "
+            "with monitoring env defaults and the seeded billing profile",
+        )
+
+    def admob_cycle_capability_cell(self):
+        """Cell `runner|admob-cycle-capability`: cycle against the committed
+        admob fixture snapshot in fleet/AdMob mode.
+
+        The MAX-style country-floor proposals are not in the AdMob adapter's
+        verified write set: the pass must exit 0 with the typed
+        awaiting-live-verification record, and the canary refuses the
+        historical hard "not writable" abort text."""
+        problems = []
+        notes = []
+        work = os.path.join(self.workdir, "runner-cycle-check")
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work)
+        env = self.runner_env()
+        env.pop("APEX_RUNNER_WRITABLE", None)
+        snapshot = self.repo_path("rust/crates/apex-api/fixtures/admob.json")
+        proc = subprocess.run(
+            [self.bin_path("apex-runner"), "cycle", "--snapshot", snapshot, "--json"],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        typed = "awaiting live verification for Admob: setCountryFloor"
+        if proc.returncode != 0:
+            problems.append("cycle exit=%d: %s" % (proc.returncode, sanitize_evidence(out, 240)))
+        else:
+            document = None
+            try:
+                document = json.loads(proc.stdout)
+            except ValueError as error:
+                problems.append("cycle stdout is not JSON: %s" % error)
+            if document is not None:
+                cycle = document.get("cycle", {})
+                holds = cycle.get("awaiting_verification") or []
+                if cycle.get("proposed", 0) < 1:
+                    problems.append("the fixture proposed nothing to hold")
+                elif cycle.get("applied") != 0:
+                    problems.append("held operations were applied (%r)" % cycle.get("applied"))
+                elif not holds or any(reason != typed for reason in holds):
+                    problems.append("the typed awaiting record is missing or wrong: %r" % holds)
+                else:
+                    notes.append(
+                        "exit 0: %d proposal(s) held with the typed record %r"
+                        % (len(holds), typed)
+                    )
+        if "not writable" in out:
+            # The canary: the historical hard error text must never return.
+            problems.append(
+                "the historical hard abort text is present: %s" % sanitize_evidence(out, 240)
+            )
+        self.check(
+            "runner|admob-cycle-capability",
+            not problems,
+            "; ".join(notes + problems) if (notes or problems) else "no observation",
+            "apex-runner cycle --snapshot rust/crates/apex-api/fixtures/admob.json "
+            "(fleet AdMob, no verified write set)",
+        )
 
     def ch_sum_revenue(self):
         sql = (
@@ -733,7 +1444,160 @@ class Harness:
             json.dump(snapshot, fh)
         with open(os.path.join(work, "tokens.json"), "w", encoding="utf-8") as fh:
             json.dump({"northstar": API_LEDGER_TOKEN}, fh)
+        self.seed_signin_rows(work)
+        self.seed_billing_stores(work)
         return work
+
+    def seed_signin_rows(self, work):
+        """Hash-only `signin.jsonl` rows beside the leads file: one valid link,
+        one already-used link and one expired link. The raw tokens exist only
+        in the harness; the product stores SHA-256 hex digests (its own
+        format), so the seeds are indistinguishable from rows the product
+        itself would append."""
+        now_ms = int(time.time() * 1000)
+        tokens = {"valid": "a1" * 16, "used": "b2" * 16, "expired": "c3" * 16}
+
+        def row(token, at_ms, expires_at_ms, used_at_ms):
+            return {
+                "at": at_ms,
+                "publisher": "northstar",
+                "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                "expires_at": expires_at_ms,
+                "used_at": used_at_ms,
+            }
+
+        rows = [
+            row(tokens["valid"], now_ms - 60_000, now_ms + 72 * 3_600_000, None),
+            row(tokens["used"], now_ms - 3_600_000, now_ms + 3_600_000, now_ms - 1_800_000),
+            row(tokens["expired"], now_ms - 10 * 86_400_000, now_ms - 86_400_000, None),
+        ]
+        with open(os.path.join(work, "signin.jsonl"), "w", encoding="utf-8") as fh:
+            for entry in rows:
+                fh.write(json.dumps(entry) + "\n")
+        self.api["signin"] = tokens
+        self.check(
+            "boot|signin-seed",
+            True,
+            "signin.jsonl seeded (hash-only rows): one valid, one used, one expired link",
+        )
+
+    def seed_billing_stores(self, work):
+        """The billing seams the fleet runner and the console share:
+        - the vaulted AdMob connection bundle plus its validated meta record
+          (exactly the shape apex-autopilot's own fleet tests provision);
+        - the customer billing sidecars (`<root>/<publisher>.billing.json`)
+          the monthly pass and the watch bill load;
+        - the recorded managed plan state the console's cancel action needs;
+        - the seller billing profile and the revenue-band snapshot the
+          monitoring tier is chosen from."""
+        credentials = os.path.join(work, "credentials")
+        os.makedirs(credentials, exist_ok=True)
+        now_ms = int(time.time() * 1000)
+        account = {
+            "developer_site": "studio.example.com",
+            "expected_networks": [],
+            "ad_unit_ids": [],
+            "bidder_accounts": [],
+            "platforms": {
+                "admob": {
+                    "api_key": "dogfood-live-admob-key",
+                    "account_id": "pub-1234567890",
+                    "base_url": "https://127.0.0.1:9",
+                    "report_key": None,
+                    "reporting_base_url": None,
+                    "refresh_token": None,
+                }
+            },
+        }
+        with open(os.path.join(credentials, "northstar.blob"), "w", encoding="utf-8") as fh:
+            fh.write(vault_encrypt(API_VAULT_KEY_HEX, json.dumps(account)))
+        meta = {
+            "platforms": {
+                "admob": {
+                    "state": "validated",
+                    "validated_at_unix_ms": now_ms,
+                    "reporting": True,
+                    "credential_fields": ["account_id", "api_key"],
+                    "failure_class": None,
+                }
+            }
+        }
+        with open(
+            os.path.join(credentials, "northstar.connections.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(meta, fh)
+        customer = {
+            "legalName": "Northstar Studio Oy",
+            "addressLines": ["Rantatie 4"],
+            "country": "FI",
+        }
+        with open(
+            os.path.join(credentials, "northstar.billing.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(customer, fh)
+        managed = {
+            "plan": "managed",
+            "active": True,
+            "since": "2026-10-01",
+            "monthlyFeeMicros": 2_500 * 1_000_000,
+            "currency": "USD",
+            "revenue30d": 60_000 * 1_000_000,
+        }
+        with open(
+            os.path.join(credentials, "northstar.managed.json"), "w", encoding="utf-8"
+        ) as fh:
+            json.dump(managed, fh)
+        seller = {
+            "legalName": "Apex Ops Oy",
+            "addressLines": ["Testikatu 1"],
+            "country": "FI",
+            "vatNumber": "FI12345678",
+            "vatRateBp": SELLER_VAT_RATE_BP,
+        }
+        seller_path = os.path.join(self.workdir, "seller.json")
+        with open(seller_path, "w", encoding="utf-8") as fh:
+            json.dump(seller, fh)
+        # The band snapshot: a valid, empty AdMob snapshot whose only signal is
+        # the reported 30-day revenue the tier is chosen from. Empty because
+        # the cycle's proposal pipeline must stay out of the way: the tier
+        # activation is the seam under test, not the audit.
+        band_snapshot = {
+            "platform": "admob",
+            "fetchedAtUnixMs": now_ms,
+            "adUnits": [],
+            "waterfall": [],
+            "mediationGroups": [],
+            "bidderAccounts": [],
+            "countryRevenue": [],
+            "appAdsTxt": {"present": False, "lines": [], "expectedNetworks": []},
+            "platformTotals30d": {
+                "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+                "impressions30d": 0,
+            },
+            "mediationTotals30d": {
+                "revenue30d": MONITORING_BAND_REVENUE_30D_MICROS,
+                "impressions30d": 0,
+            },
+        }
+        snapshot_dir = os.path.join(self.workdir, "billing")
+        os.makedirs(snapshot_dir, exist_ok=True)
+        snapshot_path = os.path.join(snapshot_dir, "band-snapshot.json")
+        with open(snapshot_path, "w", encoding="utf-8") as fh:
+            json.dump(band_snapshot, fh)
+        self.fleet = {
+            "credentials": credentials,
+            "ledgers": os.path.join(work, "ledgers"),
+            "seller": seller_path,
+            "snapshot": snapshot_path,
+            "runner_data": os.path.join(self.workdir, "runner"),
+            "jobs_dir": os.path.join(self.workdir, "runner", "jobs"),
+        }
+        self.check(
+            "boot|billing-seed",
+            True,
+            "vaulted AdMob bundle + validated meta, customer billing sidecars, managed plan state, "
+            "seller profile and the $350k band snapshot seeded",
+        )
 
     def api_env(self, work, port):
         return {
@@ -749,14 +1613,16 @@ class Harness:
             "APEX_CONSOLE_PUBLISHER_NAME": "Northstar Studio",
             "APEX_CONSOLE_CURRENCY": "USD",
             "APEX_CREDENTIAL_ROOT": os.path.join(work, "credentials"),
-            "APEX_VAULT_KEY_HEX": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            "APEX_VAULT_KEY_HEX": API_VAULT_KEY_HEX,
             "APEX_LIVE_AUDIT_TOKEN": API_LIVE_AUDIT_TOKEN,
+            "APEX_OPERATOR_JOBS_TOKEN": API_OPERATOR_JOBS_TOKEN,
+            "APEX_OPERATOR_JOBS_DIR": os.path.join(work, "jobs"),
+            "APEX_WATCH_ROOT": os.path.join(work, "watch"),
             "APEX_CLICKHOUSE_HTTP": self.ch_url,
             "APEX_CLICKHOUSE_DB": self.database,
             "APEX_ANALYTICS_ENV": "production",
             "APEX_METRICS_TEXTFILE": os.path.join(self.workdir, "api.prom"),
             "APEX_BILLING_VAT_RATE_BP": "2000",
-            "APEX_MONITORING_FEE_MICROS": "500000000",
         }
 
     def start_api(self):
@@ -766,6 +1632,25 @@ class Harness:
         )
         self.wait_http(self.base_url("apex-api") + "/healthz", lambda status: status == 200)
         return self.procs["apex-api"]
+
+    def start_api_unconfigured(self):
+        """The not-configured deployment: no ledger tokens, no leads store, no
+        live-audit or operator-jobs token. The documented 503 panels and the
+        machine routes' 503 refusals are asserted against this instance."""
+        self.start_process(
+            "apex-api-unconfigured",
+            [self.bin_path("apex-api")],
+            {
+                "APEX_API_BIND": "127.0.0.1:%d" % self.ports["apex-api-unconfigured"],
+                "APEX_CONSOLE_PUBLISHER": "northstar",
+                "APEX_METRICS_TEXTFILE": os.path.join(self.workdir, "api-unconfigured.prom"),
+            },
+            "apex-api-unconfigured.log",
+        )
+        self.wait_http(
+            self.base_url("apex-api-unconfigured") + "/healthz", lambda status: status == 200
+        )
+        return self.procs["apex-api-unconfigured"]
 
     def hash_password(self, password):
         proc = subprocess.run(
@@ -1038,7 +1923,7 @@ class Harness:
         )
         if resp.status != 200:
             return resp, None
-        match = re.search(r'name="pending"\s+value="([^"]+)"', resp.text)
+        match = PENDING_INPUT_PATTERN.search(resp.text)
         if not match:
             return resp, None
         pending = match.group(1)
@@ -1110,15 +1995,23 @@ class Harness:
 
     # ------------------------------------------------------------- probes
     def cells_of(self, cls, service=None):
-        out = []
-        for cell_id in sorted(self.required):
-            svc, surface, cell_cls = cell_id.split("|", 2)
-            if cell_cls != cls:
-                continue
-            if service and svc != service:
-                continue
-            out.append((svc, surface, cell_id))
-        return out
+        """The required cells of one probe class, in sorted order, from the
+        class index built once per run."""
+        cells = self._cell_index().get(cls)
+        if not cells:
+            return []
+        if service is None:
+            return list(cells)
+        return [entry for entry in cells if entry[0] == service]
+
+    def _cell_index(self):
+        if self._cell_index_cache is None:
+            index = {}
+            for cell_id in sorted(self.required):
+                svc, surface, cell_cls = cell_id.split("|", 2)
+                index.setdefault(cell_cls, []).append((svc, surface, cell_id))
+            self._cell_index_cache = index
+        return self._cell_index_cache
 
     def run_all_probes(self):
         for cls in PROBE_ORDER:
@@ -1155,120 +2048,240 @@ class Harness:
 
     # 2 --------------------------------------------------- response-contract
     def response_contract_expectations(self, service):
+        """(anonymous statuses, with-session statuses or None, html check).
+
+        For every route declared `session_required` the anonymous answer must
+        be the recorded gate (303 to /console/ledger, asserted in the probe);
+        the with-session status is the product's documented answer for the
+        harness seed (200 for the pages the seed can render, 404 for the
+        routes whose identifiers deliberately do not exist, 400 for the CSV
+        without its platform parameter). The table is built once per service
+        per run; the per-cell loop used to rebuild it for every cell."""
+        table = self._contract_expectations.get(service)
+        if table is None:
+            table = self._response_contract_table(service)
+            self._contract_expectations[service] = table
+        return table
+
+    def _response_contract_table(self, service):
         if service == "apex-api":
             return {
-                "/": ({200}, True),
-                "/console": ({303}, False),
-                "/console/": ({303}, False),
-                "/console/audit": ({200}, True),
-                "/console/audit/export.csv": ({400}, False),
-                "/console/audit/findings/{id}": ({404}, True),
-                "/console/ledger": ({200}, True),
-                "/console/ledger/records/{seq}": ({303}, False),
-                "/console/connections": ({200}, True),
-                "/console/connections/{platform}": ({200}, True),
-                "/console/proposals": ({200}, True),
-                "/console/proposals/{id}": ({404}, True),
-                "/console/experiments": ({200}, True),
-                "/console/experiments/{id}": ({404}, True),
-                "/console/experiments/{id}/incident": ({404}, True),
-                "/console/billing": ({200}, True),
-                "/console/billing/invoices/{period}": ({404}, True),
-                "/console/settings": ({200}, True),
-                "/console/settings/access": ({200}, True),
-                "/console/settings/policy": ({200}, True),
-                "/console/settings/monitoring": ({200}, True),
-                "/console/analytics": ({200}, True),
-                "/free-audit": ({303}, False),
-                "/free-audit/": ({200}, True),
-                "/audit-requested/": ({200}, True),
-                "/healthz": ({200}, False),
-                "/favicon.ico": ({200}, False),
-                "/favicon.svg": ({200}, False),
-                "/assets/fonts/{name}": ({200}, False),
-                "/metrics": ({200}, False),
-                "/v1/audit/{platform}": ({200}, False),
-                "/v1/ledger/{publisher}": ({401}, False),
+                "/": ({303}, {200}, True),
+                "/console": ({303}, None, False),
+                "/console/": ({303}, None, False),
+                "/console/audit": ({303}, {200}, True),
+                "/console/audit/export.csv": ({303}, {400}, False),
+                "/console/audit/findings/{id}": ({303}, {200}, True),
+                "/console/ledger": ({200}, None, True),
+                "/console/ledger/records/{seq}": ({303}, {200}, True),
+                "/console/signin": ({400}, None, False),
+                "/console/connections": ({303}, {200}, True),
+                "/console/connections/{platform}": ({303}, {200}, True),
+                "/console/proposals": ({303}, {200}, True),
+                "/console/proposals/{id}": ({303}, {404}, True),
+                "/console/experiments": ({303}, {200}, True),
+                "/console/experiments/{id}": ({303}, {404}, True),
+                "/console/experiments/{id}/incident": ({303}, {404}, True),
+                "/console/billing": ({303}, {200}, True),
+                "/console/billing/invoices/{period}": ({303}, {404}, True),
+                "/console/settings": ({303}, {200}, True),
+                "/console/settings/access": ({303}, {200}, True),
+                "/console/settings/policy": ({303}, {200}, True),
+                "/console/settings/monitoring": ({303}, {200}, True),
+                "/console/settings/billing": ({303}, {200}, True),
+                "/console/analytics": ({303}, {200}, True),
+                "/free-audit": ({303}, None, False),
+                "/free-audit/": ({200}, None, True),
+                "/audit-requested/": ({200}, None, True),
+                "/watch": ({303}, None, False),
+                "/watch/": ({200}, None, True),
+                "/watch/requested": ({200}, None, True),
+                "/healthz": ({200}, None, False),
+                "/favicon.ico": ({200}, None, False),
+                "/favicon.svg": ({200}, None, False),
+                "/assets/fonts/{name}": ({200}, None, False),
+                "/metrics": ({200}, None, False),
+                "/v1/audit/{platform}": ({200}, None, False),
+                "/v1/ledger/{publisher}": ({401}, None, False),
+                "/v1/operator/jobs/{job_id}": ({401}, None, False),
             }
         if service == "apex-control":
             return {
-                "/": ({303}, False),
-                "/control": ({401}, True),
-                "/control/": ({401}, True),
-                "/control/customers": ({401}, True),
-                "/control/customers/{id}": ({401}, True),
-                "/control/ingestion": ({401}, True),
-                "/control/audits": ({401}, True),
-                "/control/experiments": ({401}, True),
-                "/control/experiments/{id}": ({401}, True),
-                "/control/incidents": ({401}, True),
-                "/control/incidents/{id}": ({401}, True),
-                "/control/finance": ({401}, True),
-                "/control/finance/invoices/{id}": ({401}, True),
-                "/control/finance/exports/{register}": ({401}, True),
-                "/control/growth": ({401}, True),
-                "/control/system": ({401}, True),
-                "/control/system/policies": ({401}, True),
-                "/control/access": ({401}, True),
-                "/favicon.ico": ({200}, False),
-                "/favicon.svg": ({200}, False),
-                "/assets/fonts/{name}": ({200}, False),
-                "/control/login": ({200}, True),
-                "/control/login/code": ({200}, True),
-                "/control/actions/{kind}/result/{id}": ({401}, True),
+                "/": ({303}, None, False),
+                "/control": ({401}, None, True),
+                "/control/": ({401}, None, True),
+                "/control/customers": ({401}, None, True),
+                "/control/customers/{id}": ({401}, None, True),
+                "/control/ingestion": ({401}, None, True),
+                "/control/audits": ({401}, None, True),
+                "/control/experiments": ({401}, None, True),
+                "/control/experiments/{id}": ({401}, None, True),
+                "/control/incidents": ({401}, None, True),
+                "/control/incidents/{id}": ({401}, None, True),
+                "/control/finance": ({401}, None, True),
+                "/control/finance/invoices/{id}": ({401}, None, True),
+                "/control/finance/exports/{register}": ({401}, None, True),
+                "/control/growth": ({401}, None, True),
+                "/control/system": ({401}, None, True),
+                "/control/system/policies": ({401}, None, True),
+                "/control/access": ({401}, None, True),
+                "/favicon.ico": ({200}, None, False),
+                "/favicon.svg": ({200}, None, False),
+                "/assets/fonts/{name}": ({200}, None, False),
+                "/control/login": ({200}, None, True),
+                "/control/login/code": ({200}, None, True),
+                "/control/actions/{kind}/result/{id}": ({401}, None, True),
             }
         return {
-            "/": ({401}, True),
-            "/leads": ({401}, True),
-            "/leads/export.csv": ({401}, False),
-            "/publishers/{domain}": ({401}, True),
-            "/plan": ({401}, True),
-            "/sends": ({401}, True),
-            "/sends/preview/{file}": ({401}, True),
-            "/replies": ({401}, True),
-            "/domains": ({401}, True),
-            "/models": ({401}, True),
-            "/healthz": ({200}, False),
-            "/assets/apex.css": ({200}, False),
-            "/assets/fonts/{name}": ({200}, False),
-            "/favicon.ico": ({200}, False),
-            "/favicon.svg": ({200}, False),
-            "/login": ({200}, True),
-            "/actions/result/{id}": ({401}, True),
+            "/": ({401}, None, True),
+            "/leads": ({401}, None, True),
+            "/leads/export.csv": ({401}, None, False),
+            "/publishers/{domain}": ({401}, None, True),
+            "/plan": ({401}, None, True),
+            "/sends": ({401}, None, True),
+            "/sends/preview/{file}": ({401}, None, True),
+            "/replies": ({401}, None, True),
+            "/domains": ({401}, None, True),
+            "/models": ({401}, None, True),
+            "/healthz": ({200}, None, False),
+            "/assets/apex.css": ({200}, None, False),
+            "/assets/fonts/{name}": ({200}, None, False),
+            "/favicon.ico": ({200}, None, False),
+            "/favicon.svg": ({200}, None, False),
+            "/login": ({200}, None, True),
+            "/actions/result/{id}": ({401}, None, True),
         }
 
+    def finding_id(self):
+        """A real finding id from the seeded hostile report, so the session
+        probe of `/console/audit/findings/{id}` renders a real page. The id
+        lives on the report page's finding links; no id means the probe must
+        fail loudly, not skip."""
+        self.api_session()
+        try:
+            resp = http_req(
+                "GET",
+                self.base_url("apex-api") + "/console/audit?platform=admob",
+                headers=self.cookie_header("apex-api"),
+                timeout=10,
+            )
+        except ReqError:
+            return None
+        match = FINDING_LINK_PATTERN.search(resp.text)
+        return match.group(1) if match else None
+
     def probe_response_contract(self):
-        for service, _surface, cell_id in self.cells_of("response-contract"):
+        """Every response-contract cell, both directions for the recorded
+        session gate: the anonymous request must answer the documented status
+        (and, for `session_required` routes, the exact `303 ->
+        /console/ledger`), and the with-session request must answer the
+        product's documented page status."""
+        session = self.api_session()
+        session = session[0] if session else None
+        finding_id = None
+        cells = self.cells_of("response-contract")
+        expectations = {
+            service: self.response_contract_expectations(service)
+            for service, _surface, _cell_id in cells
+        }
+        for service, _surface, cell_id in cells:
             surface = cell_id.split("|")[1]
             method, template = surface.split(" ", 1)
-            expect = self.response_contract_expectations(service).get(template)
+            expect = expectations[service].get(template)
             if expect is None:
                 self.cell(cell_id, False, "no response-contract expectation for %s" % template)
                 continue
-            statuses, html = expect
-            url = self.base_url(service) + materialize(template)
+            anonymous_statuses, session_statuses, html = expect
+            path = materialize(template)
+            if template == "/console/audit/findings/{id}" and self.session_required:
+                if finding_id is None:
+                    finding_id = self.finding_id() or ""
+                if finding_id:
+                    path = path.replace("/console/audit/findings/nope", "/console/audit/findings/" + finding_id)
+            url = self.base_url(service) + path
+            problems = []
             try:
-                resp = http_req(method, url)
+                anonymous = http_req(method, url)
             except ReqError as error:
                 self.cell(cell_id, False, str(error))
                 continue
-            problems = []
-            if resp.status not in statuses:
-                problems.append("HTTP %d not in %s" % (resp.status, sorted(statuses)))
-            if html and 200 <= resp.status < 400 and resp.content_type() == "text/html":
-                body = resp.text
-                h1 = len(re.findall(r"<h1[\s>]", body))
+            if anonymous.status not in anonymous_statuses:
+                problems.append("anonymous HTTP %d not in %s" % (anonymous.status, sorted(anonymous_statuses)))
+            gate = ("%s|%s" % (service, surface)) in self.session_required
+            if gate:
+                # The recorded expectation: without a live session the console
+                # answers exactly 303 to the access panel.
+                if anonymous.status != 303:
+                    problems.append("session gate answered HTTP %d, not 303" % anonymous.status)
+                location = anonymous.header("location")
+                if location != "/console/ledger":
+                    problems.append("session gate Location %r, not /console/ledger" % location)
+            detail = "GET %s -> anonymous HTTP %d" % (url, anonymous.status)
+            final = anonymous
+            if session_statuses is not None:
+                if session is None:
+                    problems.append("could not open a console session")
+                else:
+                    headers = {"Cookie": "apex_ledger_session=%s" % session}
+                    try:
+                        final = http_req(method, url, headers=headers)
+                    except ReqError as error:
+                        problems.append("with session: %s" % error)
+                        final = anonymous
+                    else:
+                        if final.status not in session_statuses:
+                            problems.append(
+                                "with session HTTP %d not in %s" % (final.status, sorted(session_statuses))
+                            )
+                        detail += "; with session HTTP %d" % final.status
+            if html and 200 <= final.status < 400 and final.content_type() == "text/html":
+                body = final.text
+                h1 = len(H1_TAG_PATTERN.findall(body))
                 if h1 != 1:
                     problems.append("expected exactly one h1, found %d" % h1)
                 if "<title" not in body:
                     problems.append("missing <title>")
-            detail = "GET %s -> HTTP %d" % (url, resp.status)
+                # The pinned confirmation copy on the setup-watch receipt.
+                if template == "/watch/requested" and "Your watch is requested." not in body:
+                    problems.append("the confirmation page does not carry its pinned copy")
             if problems:
                 detail += "; " + "; ".join(problems)
-            self.cell(cell_id, not problems, detail, "GET %s" % url)
+            self.cell(cell_id, not problems, detail, "GET %s (anonymous%s)" % (url, " + session" if session_statuses else ""))
+        # The explicit documented exception list: these console paths stay
+        # public, so none may ever be declared session_required (their public
+        # anonymous statuses are their own response-contract cells above).
+        exceptions = [
+            "/console/ledger",
+            "/console",
+            "/console/",
+            "/console/signin",
+            "/free-audit",
+            "/free-audit/",
+            "/audit-requested/",
+            "/watch",
+            "/watch/",
+            "/watch/requested",
+        ]
+        leaked = sorted(
+            surface
+            for surface in ("apex-api|GET " + p for p in exceptions)
+            if surface in self.session_required
+        )
+        self.check(
+            "response-contract|public-exceptions",
+            not leaked,
+            "documented public console paths stay public; none is session_required"
+            if not leaked
+            else "public paths marked session_required: %s" % leaked,
+        )
 
     # 3 ---------------------------------------------------------- no-inline
     def no_inline_targets(self):
+        if self._no_inline_targets is None:
+            self._no_inline_targets = self._build_no_inline_targets()
+        return self._no_inline_targets
+
+    def _build_no_inline_targets(self):
         return {
             "apex-api": [
                 ("GET /console/audit/findings/{id}", "/console/audit/findings/nope"),
@@ -1287,6 +2300,7 @@ class Harness:
                 ("GET /console/settings/access", "/console/settings/access"),
                 ("GET /console/settings/policy", "/console/settings/policy"),
                 ("GET /console/settings/monitoring", "/console/settings/monitoring"),
+                ("GET /console/settings/billing", "/console/settings/billing"),
                 ("GET /console/analytics", "/console/analytics"),
                 ("GET /console/audit", "/console/audit"),
                 ("GET /", "/"),
@@ -1331,13 +2345,14 @@ class Harness:
         }
 
     def probe_no_inline(self):
+        targets = {
+            (service, template): path
+            for service, pairs in self.no_inline_targets().items()
+            for template, path in pairs
+        }
         for service, _surface, cell_id in self.cells_of("no-inline"):
             surface = cell_id.split("|")[1]
-            target = None
-            for template, path in self.no_inline_targets()[service]:
-                if template == surface:
-                    target = path
-                    break
+            target = targets.get((service, surface))
             if target is None:
                 self.cell(cell_id, False, "no no-inline sweep target for %s" % surface)
                 continue
@@ -1380,7 +2395,7 @@ class Harness:
                     if "/assets/apex.css" not in body:
                         problems.append("the stylesheet link does not point at /assets/apex.css")
                 else:
-                    styles = len(re.findall(r"<style[\s>]", body))
+                    styles = len(STYLE_TAG_PATTERN.findall(body))
                     if styles != 1:
                         problems.append("expected exactly one <style block, found %d" % styles)
             detail = "GET %s -> HTTP %d" % (url, resp.status)
@@ -1392,8 +2407,14 @@ class Harness:
     def fetch_css_fixture(self, service):
         if service == "apex-sales-web":
             return http_req("GET", self.base_url(service) + "/assets/apex.css").body
-        resp = http_req("GET", self.base_url(service) + "/console/audit")
-        match = re.search(r"<style>(.*?)</style>", resp.text, re.S)
+        headers = {}
+        if service == "apex-api":
+            # The console report page is session-gated; the CSS fixture is
+            # extracted from the rendered page under the live session.
+            self.api_session()
+            headers = self.cookie_header(service)
+        resp = http_req("GET", self.base_url(service) + "/console/audit", headers=headers)
+        match = STYLE_BLOCK_PATTERN.search(resp.text)
         if not match:
             return None
         return match.group(1).encode("utf-8")
@@ -1517,6 +2538,116 @@ class Harness:
             problems.append("live audit without bearer answered %d, expected 401" % live.status)
         else:
             notes.append("live audit no bearer -> 401")
+        # POST /v1/cycle/{publisher}: the live-auditor bearer gates the write
+        # cycle. Missing and wrong bearers are 401; a bearer without a
+        # platform query is the documented 400 behind the gate, proving the
+        # authority check runs first without masking the validation.
+        cycle_anon = http_req("POST", base + "/v1/cycle/northstar", headers={"Content-Type": "application/json"}, body=b"{}")
+        if cycle_anon.status != 401:
+            problems.append("cycle without bearer answered %d, expected 401" % cycle_anon.status)
+        else:
+            notes.append("cycle no bearer -> 401")
+        cycle_wrong = http_req(
+            "POST",
+            base + "/v1/cycle/northstar",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer wrong-audit-token"},
+            body=b"{}",
+        )
+        if cycle_wrong.status != 401:
+            problems.append("cycle with wrong bearer answered %d, expected 401" % cycle_wrong.status)
+        else:
+            notes.append("cycle wrong bearer -> 401")
+        cycle_ok = http_req(
+            "POST",
+            base + "/v1/cycle/northstar",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+            body=b"{}",
+        )
+        if cycle_ok.status != 400:
+            problems.append("cycle with bearer answered %d, expected the 400 platform refusal" % cycle_ok.status)
+        else:
+            notes.append("cycle bearer -> 400 platform_required")
+        # GET /console/signin: one-time links. No token is 400; used or
+        # expired links are the typed 200 refusal; a valid link 303s and mints
+        # the console session; the same link replayed is refused (single use).
+        signin = self.api.get("signin") or {}
+        bare = http_req("GET", base + "/console/signin")
+        if bare.status != 400:
+            problems.append("signin without token answered %d, expected 400" % bare.status)
+        else:
+            notes.append("signin without token -> 400")
+        for label in ("used", "expired"):
+            token = signin.get(label)
+            resp = http_req("GET", base + "/console/signin?token=" + token)
+            if resp.status != 200 or "Sign-in refused." not in resp.text:
+                problems.append("signin %s link answered %d without the one-time refusal copy" % (label, resp.status))
+            else:
+                notes.append("signin %s -> 200 refusal" % label)
+        fresh = http_req("GET", base + "/console/signin?token=" + signin.get("valid", ""))
+        fresh_cookie = cookie_value(fresh.header("set-cookie") or "", "apex_ledger_session")
+        if fresh.status != 303 or not fresh_cookie:
+            problems.append("signin valid link answered %d (cookie %r), expected 303 + session" % (fresh.status, fresh_cookie))
+        else:
+            notes.append("signin valid link -> 303 + session")
+        replay = http_req("GET", base + "/console/signin?token=" + signin.get("valid", ""))
+        if replay.status != 200 or "Sign-in refused." not in replay.text:
+            problems.append("signin replay answered %d, expected the 200 refusal" % replay.status)
+        else:
+            notes.append("signin replay -> 200 refusal")
+        if fresh_cookie:
+            granted = http_req(
+                "GET",
+                base + "/console/audit?platform=admob",
+                headers={"Cookie": "apex_ledger_session=" + fresh_cookie},
+            )
+            if granted.status != 200:
+                problems.append("sign-in session did not grant the console (HTTP %d)" % granted.status)
+            else:
+                notes.append("sign-in session grants /console/audit (200)")
+        # POST/GET /v1/operator/jobs: the bearer gates both; the unconfigured
+        # deployment keeps the 503 refusal.
+        jobs_anon = http_req(
+            "POST", base + "/v1/operator/jobs", headers={"Content-Type": "application/json"}, body=b"{}"
+        )
+        if jobs_anon.status != 401:
+            problems.append("operator jobs POST without bearer answered %d, expected 401" % jobs_anon.status)
+        else:
+            notes.append("operator jobs no bearer -> 401")
+        jobs_wrong = http_req(
+            "POST",
+            base + "/v1/operator/jobs",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer wrong-jobs-token"},
+            body=b"{}",
+        )
+        if jobs_wrong.status != 401:
+            problems.append("operator jobs POST with wrong bearer answered %d, expected 401" % jobs_wrong.status)
+        else:
+            notes.append("operator jobs wrong bearer -> 401")
+        jobs_show_anon = http_req("GET", base + "/v1/operator/jobs/opj_aaaaaaaaaaa1")
+        if jobs_show_anon.status != 401:
+            problems.append("operator jobs GET without bearer answered %d, expected 401" % jobs_show_anon.status)
+        else:
+            notes.append("operator jobs GET no bearer -> 401")
+        unconfigured = self.base_url("apex-api-unconfigured")
+        for label, method, path, body in (
+            ("cycle", "POST", "/v1/cycle/northstar", b"{}"),
+            ("operator jobs POST", "POST", "/v1/operator/jobs", b"{}"),
+            ("operator jobs GET", "GET", "/v1/operator/jobs/opj_aaaaaaaaaaa1", None),
+            ("signin", "GET", "/console/signin?token=" + signin.get("valid", ""), None),
+        ):
+            headers = {"Authorization": "Bearer " + (API_OPERATOR_JOBS_TOKEN if "jobs" in label else API_LIVE_AUDIT_TOKEN)}
+            if method == "POST":
+                headers["Content-Type"] = "application/json"
+            resp = http_req(method, unconfigured + path, headers=headers, body=body)
+            if resp.status != 503:
+                problems.append("unconfigured api %s answered %d, expected 503" % (label, resp.status))
+            else:
+                notes.append("unconfigured api %s -> 503" % label)
+        panel = http_req("GET", unconfigured + "/console/connections")
+        if panel.status != 503 or "not available in this deployment" not in panel.text:
+            problems.append("unconfigured console panel answered %d without the typed copy" % panel.status)
+        else:
+            notes.append("unconfigured console panel -> 503 typed copy")
         control_with_api_cookie = http_req(
             "GET",
             self.base_url("apex-control") + "/control/",
@@ -1550,7 +2681,7 @@ class Harness:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=form_body([("operator", "ops"), ("password", CONTROL_OPERATOR_PASSWORD)]),
         )
-        match = re.search(r'name="pending"\s+value="([^"]+)"', pending_resp.text)
+        match = PENDING_INPUT_PATTERN.search(pending_resp.text)
         if pending_resp.status != 200 or not match:
             problems.append("password step did not reach the code step (HTTP %d)" % pending_resp.status)
             return (False, "; ".join(notes + problems))
@@ -1692,17 +2823,35 @@ class Harness:
 
         base = self.base_url("apex-api")
         try:
-            resp = http_req("GET", base + "/console/audit?platform=%zz")
+            self.api_session()
+            cookie = self.cookie_header("apex-api")
+            resp = http_req("GET", base + "/console/audit?platform=%zz", headers=cookie)
             note("apex-api", resp.status == 400, "malformed percent in query -> %d (expected 400)" % resp.status)
-            resp = http_req("GET", base + "/console/audit/findings/%00")
+            resp = http_req("GET", base + "/console/audit/findings/%00", headers=cookie)
             note("apex-api", resp.status in (400, 404), "%%00 path segment -> %d" % resp.status)
             resp = http_req("GET", base + "/v1/audit/%ff")
             note("apex-api", resp.status in (400, 404), "%%ff path segment -> %d" % resp.status)
             resp = http_req("GET", base + "/" + "a" * 8192)
             note("apex-api", resp.status < 500, "8KB path -> %d" % resp.status)
             flood = "&".join("p%d=%d" % (i, i) for i in range(500))
-            resp = http_req("GET", base + "/console/analytics?" + flood)
+            resp = http_req("GET", base + "/console/analytics?" + flood, headers=cookie)
             note("apex-api", resp.status == 200, "500-param flood on /console/analytics -> %d" % resp.status)
+            # The public setup-watch form: a malformed submission is the typed
+            # 400 with its pinned field copy, never a stored subscriber.
+            invalid_watch = http_req(
+                "POST",
+                base + "/watch",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=form_body([("domain", "not a domain"), ("email", "nope"), ("accounts", "===")]),
+            )
+            note(
+                "apex-api",
+                invalid_watch.status == 400
+                and "Enter the domain where your app-ads.txt lives." in invalid_watch.text
+                and "Enter an email address we can reply to." in invalid_watch.text
+                and "<script" not in invalid_watch.text,
+                "invalid watch form -> %d with the pinned field copy" % invalid_watch.status,
+            )
             big = b"x" * (300 * 1024)
             resp = http_req(
                 "POST",
@@ -1847,6 +2996,8 @@ class Harness:
             ("/console/proposals/nope/decision", "decision=approve"),
             ("/console/settings/theme", "theme=dark"),
             ("/console/settings/access/revoke", "handle=deadbeef"),
+            ("/console/settings/monitoring/cancel", ""),
+            ("/console/settings/billing/managed/cancel", ""),
         ]
         for path, payload in session_posts:
             body = (payload + "&").encode() if payload else b""
@@ -1867,7 +3018,7 @@ class Harness:
             if no_session.status != 303:
                 problems.append("without session: %s -> %d (expected 303)" % (path, no_session.status))
         if not problems:
-            notes.append("7 session POSTs: no-CSRF 400, no-session 303")
+            notes.append("9 session POSTs: no-CSRF 400, no-session 303")
         exchange = http_req(
             "POST",
             base + "/console/ledger",
@@ -1885,10 +3036,13 @@ class Harness:
         if live.status != 401:
             problems.append("/v1/audit without bearer -> %d (expected 401)" % live.status)
         cycle = http_req(
-            "POST", base + "/v1/cycle/northstar", headers={"Content-Type": "application/json"}, body=b"{}"
+            "POST",
+            base + "/v1/cycle/northstar",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + API_LIVE_AUDIT_TOKEN},
+            body=b"{}",
         )
         if cycle.status != 400:
-            problems.append("/v1/cycle without platform -> %d (expected 400)" % cycle.status)
+            problems.append("/v1/cycle without platform answered %d (expected 400 behind the bearer)" % cycle.status)
         webhook = http_req(
             "POST", base + "/v1/adyen/webhook", headers={"Content-Type": "application/json"}, body=b"{}"
         )
@@ -1945,6 +3099,113 @@ class Harness:
             problems.append("free-audit replay stored %d leads, expected 1" % (after - before))
         else:
             notes.append("free-audit replay: same ref %s, one durable lead" % refs[0])
+        # POST /watch: the public setup-watch form. A repeat submission inside
+        # the dedup window is the same subscription: same confirmation ref,
+        # exactly one durable subscriber row. The valid submission is the seed
+        # the billing run later turns into the $99 line.
+        watch_root = os.path.join(self.api["work"], "watch")
+        subscribers_path = os.path.join(watch_root, "subscribers.jsonl")
+        signup = form_body(
+            [
+                ("domain", WATCH_DOMAIN),
+                ("email", WATCH_EMAIL),
+                ("accounts", "admob.com = pub-1234567890\napplovin.com = dogfood-live"),
+            ]
+        )
+        watch_before = count_lines(subscribers_path)
+        watch_first = http_req(
+            "POST",
+            base + "/watch",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=signup,
+        )
+        watch_second = http_req(
+            "POST",
+            base + "/watch",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=signup,
+        )
+        watch_after = count_lines(subscribers_path)
+        watch_refs = [resp.header("location") for resp in (watch_first, watch_second)]
+        self.monetization["watch_ref"] = None
+        if watch_first.status != 303 or watch_second.status != 303:
+            problems.append("watch submit -> %s (expected 303, 303)" % [watch_first.status, watch_second.status])
+        elif watch_refs[0] != watch_refs[1] or not (watch_refs[0] or "").startswith("/watch/requested?ref=sub_"):
+            problems.append("watch replay returned refs %s (expected one /watch/requested?ref=sub_...)" % watch_refs)
+        elif watch_after - watch_before != 1:
+            problems.append("watch replay stored %d subscriber rows, expected 1" % (watch_after - watch_before))
+        else:
+            self.monetization["watch_ref"] = watch_refs[0].split("ref=", 1)[-1]
+            notes.append("watch replay: same ref %s, one durable subscriber" % self.monetization["watch_ref"])
+        # The cancel actions: no CSRF is 400; with CSRF the first and repeated
+        # cancellations both 303 and the recorded stop period is never
+        # re-dated (idempotent, recorded-forever state).
+        csrf = form_body([("csrf_token", self.api.get("csrf") or "")])
+        for path in ("/console/settings/monitoring/cancel", "/console/settings/billing/managed/cancel"):
+            plan_name = "monitoring" if "monitoring" in path else "managed"
+            state_path = os.path.join(self.api["work"], "credentials", "northstar.%s.json" % plan_name)
+            cancel_first = http_req(
+                "POST",
+                base + path,
+                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+                body=csrf,
+            )
+            stop_first = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
+            cancel_second = http_req(
+                "POST",
+                base + path,
+                headers={"Content-Type": "application/x-www-form-urlencoded", **cookie},
+                body=csrf,
+            )
+            stop_second = json.load(open(state_path)).get("stopsAfter") if os.path.exists(state_path) else None
+            if cancel_first.status != 303 or cancel_second.status != 303:
+                problems.append("cancel %s -> %s (expected 303, 303)" % (path, [cancel_first.status, cancel_second.status]))
+            elif not stop_first or stop_first != stop_second:
+                problems.append("cancel %s stop period %r was re-dated to %r" % (path, stop_first, stop_second))
+            else:
+                notes.append("cancel %s: 303 twice, stop period %s unchanged" % (plan_name, stop_first))
+        # POST /v1/operator/jobs: the bearer-gated receiver persists the exact
+        # request bytes, a duplicate job_id returns the existing recording
+        # unchanged, and GET reads the same bytes back.
+        job = {
+            "job_id": "opj_d0f00d000001",
+            "kind": "recheck_request",
+            "requested_by": "dogfood-live-console",
+            "requested_at_ms": int(time.time() * 1000),
+            "target": "northstar",
+            "payload": {"reason": "dogfood-live idempotency probe"},
+            "idempotency_key": "dogfood-live-opj-1",
+            "state": "queued",
+            "state_history": [
+                {"state": "queued", "at_ms": int(time.time() * 1000), "note": "submitted by the dogfood console probe"}
+            ],
+            "outcome": {},
+            "correlation_id": "dogfood-live-opj-correlation",
+        }
+        job_bytes = json.dumps(job, separators=(",", ":")).encode()
+        auth = {"Authorization": "Bearer " + API_OPERATOR_JOBS_TOKEN, "Content-Type": "application/json"}
+        jobs_dir = os.path.join(self.api["work"], "jobs")
+        jobs_before = sorted(os.listdir(jobs_dir)) if os.path.isdir(jobs_dir) else []
+        jobs_first = http_req("POST", base + "/v1/operator/jobs", headers=auth, body=job_bytes)
+        jobs_second = http_req("POST", base + "/v1/operator/jobs", headers=auth, body=job_bytes)
+        jobs_after = sorted(os.listdir(jobs_dir)) if os.path.isdir(jobs_dir) else []
+        jobs_get = http_req(
+            "GET", base + "/v1/operator/jobs/" + job["job_id"], headers={"Authorization": "Bearer " + API_OPERATOR_JOBS_TOKEN}
+        )
+        job_file = os.path.join(jobs_dir, job["job_id"] + ".json")
+        if jobs_first.status != 200 or jobs_second.status != 200:
+            problems.append("operator jobs POST -> %s (expected 200, 200)" % [jobs_first.status, jobs_second.status])
+        elif jobs_first.body != job_bytes or jobs_second.body != job_bytes:
+            problems.append("operator jobs POST did not return the request bytes verbatim")
+        elif jobs_after != sorted(jobs_before + [job["job_id"] + ".json"]):
+            problems.append("operator jobs dir gained %s, expected exactly %s" % (jobs_after, job["job_id"] + ".json"))
+        elif not os.path.exists(job_file) or open(job_file, "rb").read() != job_bytes:
+            problems.append("operator job file does not hold the exact request bytes")
+        elif jobs_get.status != 200 or jobs_get.body != job_bytes:
+            problems.append("operator jobs GET answered %d/%.40r, expected the stored bytes" % (jobs_get.status, jobs_get.body))
+        else:
+            self.monetization["job_id"] = job["job_id"]
+            notes.append("operator jobs: duplicate idempotent, GET reads the stored bytes")
         return (not problems, "; ".join(notes + problems))
 
     def csrf_control(self):
@@ -1983,13 +3244,11 @@ class Harness:
     def control_revoke_form(self, cookie, driver_id):
         page = http_req("GET", self.base_url("apex-control") + "/control/access", headers=cookie)
         fallback = None
-        for form in re.findall(
-            r'<form[^>]*action="/control/actions/session_revoke"[^>]*>(.*?)</form>', page.text, re.S
-        ):
+        for form in REVOKE_FORM_PATTERN.findall(page.text):
             fields = parse_hidden_fields(form)
             if not fields.get("target"):
                 continue
-            phrase = re.search(r"Type exactly: ([A-Z ]+)", form)
+            phrase = CONFIRM_PHRASE_PATTERN.search(form)
             if phrase:
                 # The input ships empty; the operator types the phrase, and
                 # the probe supplies it from the form's own help line.
@@ -2116,7 +3375,7 @@ class Harness:
                 problems = []
                 observations = []
                 for payload in TRAVERSAL_CORPUS:
-                    path = re.sub(r"\{[^}]+\}", payload, template, count=1)
+                    path = TRAVERSAL_TOKEN_PATTERN.sub(payload, template, count=1)
                     url = self.base_url(service) + path
                     request_headers = dict(headers)
                     body = None
@@ -2166,17 +3425,23 @@ class Harness:
         problems = []
         notes = []
         base = self.base_url("apex-api")
-        resp = http_req("GET", base + "/console/audit?platform=" + urllib.parse.quote(HOSTILE_QUERY))
+        self.api_session()
+        cookie = self.cookie_header("apex-api")
+        resp = http_req(
+            "GET",
+            base + "/console/audit?platform=" + urllib.parse.quote(HOSTILE_QUERY),
+            headers=cookie,
+        )
         if HOSTILE_QUERY in resp.text:
             problems.append("the hostile platform echo is unescaped on /console/audit")
         else:
             notes.append("hostile platform refused/escaped (HTTP %d)" % resp.status)
-        report = http_req("GET", base + "/console/audit?platform=admob")
+        report = http_req("GET", base + "/console/audit?platform=admob", headers=cookie)
         if "<script" in report.text:
             problems.append("the audit report echoes the hostile snapshot name as script")
         else:
             notes.append("the hostile snapshot name never becomes script")
-        csv_resp = http_req("GET", base + "/console/audit/export.csv?platform=admob")
+        csv_resp = http_req("GET", base + "/console/audit/export.csv?platform=admob", headers=cookie)
         if csv_resp.status != 200:
             problems.append("audit CSV answered %d" % csv_resp.status)
         else:
@@ -2409,11 +3674,12 @@ class Harness:
             notes.append("pre-crash session honestly invalidated (access panel, HTTP %d)" % old.status)
         self.api["cookie"] = None
         self.api["csrf"] = None
-        page = http_req("GET", base + "/console/audit?platform=admob")
+        self.api_session(force=True)
+        page = http_req("GET", base + "/console/audit?platform=admob", headers=self.cookie_header("apex-api"))
         if page.status != 200:
             problems.append("audit page after restart -> %d" % page.status)
         else:
-            notes.append("pages recover after restart")
+            notes.append("pages recover after restart (session re-minted)")
         if self.ch_owned:
             ok, detail = self.clickhouse_severance()
             if not ok:
@@ -2565,7 +3831,11 @@ class Harness:
             time.sleep(0.3)
         if self.ch_reachable():
             return False, "ClickHouse still answers after the shutdown request"
-        analytics = http_req("GET", self.base_url("apex-api") + "/console/analytics?view=revenue")
+        self.api_session()
+        api_cookie = self.cookie_header("apex-api")
+        analytics = http_req(
+            "GET", self.base_url("apex-api") + "/console/analytics?view=revenue", headers=api_cookie
+        )
         if analytics.status != 200 or "the analytics store did not answer" not in analytics.text:
             problems.append(
                 "with the store down /console/analytics answered %d without the not-available state" % analytics.status
@@ -2585,13 +3855,21 @@ class Harness:
         notes.append("ClickHouse restarted")
         if self.runner_ran:
             self.ch_bootstrap()
-            recovery = http_req("GET", self.base_url("apex-api") + "/console/analytics?view=revenue")
+            recovery = http_req(
+                "GET",
+                self.base_url("apex-api") + "/console/analytics?view=revenue",
+                headers=self.cookie_header("apex-api"),
+            )
             if recovery.status != 200 or "$51,500.00" not in recovery.text:
                 problems.append("recovery: revenue page does not show USD 51,500.00 again")
             else:
                 notes.append("recovery: re-seeded, projections republished, revenue shows USD 51,500.00")
         else:
-            recovery = http_req("GET", self.base_url("apex-api") + "/console/analytics?view=revenue")
+            recovery = http_req(
+                "GET",
+                self.base_url("apex-api") + "/console/analytics?view=revenue",
+                headers=self.cookie_header("apex-api"),
+            )
             if recovery.status != 200:
                 problems.append("recovery: analytics page -> %d" % recovery.status)
             else:
@@ -2613,7 +3891,9 @@ class Harness:
         problems = []
         notes = []
         base = self.base_url("apex-api")
-        analytics = http_req("GET", base + "/console/analytics?view=revenue")
+        self.api_session()
+        cookie = self.cookie_header("apex-api")
+        analytics = http_req("GET", base + "/console/analytics?view=revenue", headers=cookie)
         sql_sum = self.ch_sum_revenue()
         expected_micros = 51_500_000_000
         if analytics.status != 200:
@@ -2626,8 +3906,7 @@ class Harness:
             problems.append("ClickHouse sum(revenue_micros) = %d, expected %d" % (sql_sum, expected_micros))
         else:
             notes.append("ClickHouse published projection sum = %d micros" % sql_sum)
-        self.api_session()
-        ledger_page = http_req("GET", base + "/console/ledger", headers=self.cookie_header("apex-api"))
+        ledger_page = http_req("GET", base + "/console/ledger", headers=cookie)
         ledger_json = http_req(
             "GET", base + "/v1/ledger/northstar", headers={"Authorization": "Bearer " + API_LEDGER_TOKEN}
         )
@@ -2645,15 +3924,195 @@ class Harness:
             )
         else:
             notes.append("ledger page and /v1/ledger agree on %d records" % page_records)
-        report = http_req("GET", base + "/console/audit?platform=admob")
-        csv_resp = http_req("GET", base + "/console/audit/export.csv?platform=admob")
+        report = http_req("GET", base + "/console/audit?platform=admob", headers=cookie)
+        csv_resp = http_req("GET", base + "/console/audit/export.csv?platform=admob", headers=cookie)
         page_findings = len(re.findall(r"/console/audit/findings/", report.text))
         csv_rows = len([line for line in csv_resp.text.split("\r\n") if line]) - 1
         if page_findings != csv_rows:
             problems.append("the report page links %d findings, the CSV exports %d rows" % (page_findings, csv_rows))
         else:
             notes.append("audit CSV rows equal the report rows (%d)" % csv_rows)
-        return (not problems, "; ".join(notes + problems))
+        ok, detail = self.differential_monetization(base, cookie)
+        (notes if ok else problems).append(detail)
+        return (not problems, "; ".join(problems + notes))
+
+    def differential_monetization(self, base, cookie):
+        """The monetization truth cells, differential across the harness-seeded
+        stores:
+        - the monitoring tier chosen from the seeded $350k band (runner JSON,
+          plan state file and the console monitoring page agree);
+        - the setup-watch $99 line after the seeded sign-up (subscriber store,
+          invoice register and the idempotent second billing run agree);
+        - the AdMob no-lift rule (the kept AdMob change yields the typed
+          ineligible record and no fee anywhere)."""
+        problems = []
+        notes = []
+        ledger_root = self.fleet["ledgers"]
+        # 1. The monthly run: billed after the cancel so the recorded stop
+        # period is proven to still bill its current period.
+        period = time.strftime("%Y-%m", time.gmtime())
+        start = period + "-01"
+        monthly_cwd = os.path.join(self.workdir, "billing-run")
+        os.makedirs(monthly_cwd, exist_ok=True)
+        proc = self.run_runner_command(["monthly", "--month", period, "--start", start, "--json"], cwd=monthly_cwd)
+        monthly_out = (proc.stdout or "") + (proc.stderr or "")
+        billing = None
+        if proc.returncode == 0:
+            try:
+                billing = json.loads(proc.stdout).get("billing")
+            except ValueError:
+                billing = None
+        if billing is None:
+            problems.append("monthly run failed (exit %d): %s" % (proc.returncode, sanitize_evidence(monthly_out, 300)))
+        else:
+            rendered = billing.get("rendered_invoice") or ""
+            # The cancellation preceded this run, so the stop-period line
+            # records it in the id: `monitoring:<month>:cancelled:stops-*`
+            # with the Mid band fee.
+            monitoring_line = "monitoring:%s:cancelled:stops-%s: net %d micros" % (
+                period,
+                period,
+                MONITORING_MID_FEE_MICROS,
+            )
+            if monitoring_line not in rendered:
+                problems.append("the rendered invoice lacks the Mid band line %r" % monitoring_line)
+            else:
+                notes.append("monthly VAT render bills %s (band-selected tier, recorded stop)" % monitoring_line)
+            ineligible = billing.get("fee_ineligible") or []
+            admob_reasons = [
+                entry.get("reason", "") for entry in ineligible if entry.get("platform") == "admob"
+            ]
+            if billing.get("fees") != 0 or ADMOB_KEPT_EXPERIMENT in rendered:
+                problems.append(
+                    "the kept AdMob change was billed (fees=%s)" % billing.get("fees")
+                )
+            elif not admob_reasons or "no per-variant revenue measurement" not in admob_reasons[0]:
+                problems.append("the AdMob ineligible record is missing its typed reason: %s" % ineligible)
+            else:
+                notes.append("AdMob kept change: typed fee-ineligible (%s), zero fees" % admob_reasons[0])
+            self.monetization["monthly"] = {
+                "period": period,
+                "rendered_invoice": rendered,
+                "fee_ineligible": ineligible,
+                "fees": billing.get("fees"),
+                "invoice_gross_micros": billing.get("invoice_gross_micros"),
+            }
+        # 2. The recorded plan state: the tier and the band revenue the tier
+        # was chosen from, plus the recorded cancellation.
+        state_path = os.path.join(self.api["work"], "credentials", "northstar.monitoring.json")
+        if not os.path.exists(state_path):
+            problems.append("no monitoring plan state was recorded")
+        else:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+            if state.get("tier") != "mid" or state.get("monthlyFeeMicros") != MONITORING_MID_FEE_MICROS:
+                problems.append(
+                    "plan state tier %r fee %r, expected the Mid band" % (state.get("tier"), state.get("monthlyFeeMicros"))
+                )
+            elif state.get("revenue30d") != MONITORING_BAND_REVENUE_30D_MICROS:
+                problems.append(
+                    "plan state revenue %r does not equal the seeded band %d"
+                    % (state.get("revenue30d"), MONITORING_BAND_REVENUE_30D_MICROS)
+                )
+            elif state.get("stopsAfter") != period:
+                problems.append("plan state stop period %r, expected %s" % (state.get("stopsAfter"), period))
+            else:
+                notes.append(
+                    "plan state: tier mid from $350,000 band revenue, cancellation stops after %s" % period
+                )
+        # 3. The console monitoring page renders the same store's truth.
+        monitoring_page = http_req("GET", base + "/console/settings/monitoring", headers=cookie)
+        if monitoring_page.status != 200:
+            problems.append("monitoring page -> %d" % monitoring_page.status)
+        elif ">Mid<" not in monitoring_page.text or "$1,500.00" not in monitoring_page.text:
+            problems.append("the monitoring page does not render the recorded Mid tier and $1,500.00 price")
+        elif ("bills %s and stops after it" % period) not in monitoring_page.text:
+            problems.append("the monitoring page does not render the recorded cancellation stop period")
+        else:
+            notes.append("console monitoring page agrees: Mid, $1,500.00, billed through %s" % period)
+        # 4. The AdMob no-lift rule: the typed ineligible record reached the
+        # shared ledger, and the console billing view keeps the change out of
+        # every billed artifact (no signed fee line anywhere names it).
+        with open(os.path.join(ledger_root, "northstar.jsonl"), "r", encoding="utf-8") as fh:
+            ledger_lines = [line for line in fh.read().splitlines() if line.strip()]
+        ineligible_records = [
+            line for line in ledger_lines if "no per-variant revenue measurement" in line
+        ]
+        if not ineligible_records or ADMOB_KEPT_EXPERIMENT not in ineligible_records[0]:
+            problems.append("the typed AdMob ineligible record never reached the ledger")
+        else:
+            notes.append("ledger carries %d typed AdMob ineligible record(s)" % len(ineligible_records))
+        billing_page = http_req("GET", base + "/console/billing", headers=cookie)
+        if billing_page.status != 200:
+            problems.append("billing page -> %d" % billing_page.status)
+        elif "No signed monthly billing record is stored for this workspace." not in billing_page.text:
+            problems.append("the console billing register does not render its no-fee state")
+        elif ADMOB_KEPT_EXPERIMENT in billing_page.text:
+            problems.append("the console billing page lists the fee-ineligible AdMob change as billed")
+        else:
+            notes.append("console billing page: no signed fee record names the ineligible AdMob change")
+        # 5. The setup-watch $99 line: the subscriber the form seeded, the
+        # billing run's report, the register document, and the idempotent
+        # second run (one month never bills twice).
+        ref = self.monetization.get("watch_ref")
+        subscribers_path = os.path.join(self.api["work"], "watch", "subscribers.jsonl")
+        rows = []
+        if os.path.exists(subscribers_path):
+            with open(subscribers_path, "r", encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        active = [
+            row
+            for row in rows
+            if row.get("id") == ref and row.get("publisher") == WATCH_PUBLISHER and row.get("status") == "active"
+        ]
+        if ref is None or len(active) != 1:
+            problems.append("the seeded subscriber row (%s) is missing or duplicated" % ref)
+        watch_cwd = os.path.join(self.workdir, "watch-billing")
+        os.makedirs(watch_cwd, exist_ok=True)
+        watch_env = {
+            "APEX_WATCH_ROOT": os.path.join(self.api["work"], "watch"),
+            "APEX_BILLING_PROFILE": self.fleet["seller"],
+            "APEX_BILLING_VAT_RATE_BP": str(SELLER_VAT_RATE_BP),
+        }
+        sidecar = os.path.join(watch_env["APEX_WATCH_ROOT"], WATCH_PUBLISHER + ".billing.json")
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            json.dump({"legalName": "Dogfood Watch Oy", "addressLines": ["Vahdontie 9"], "country": "FI"}, fh)
+        first_bill = self.watch_bill(period, watch_cwd, watch_env)
+        second_bill = self.watch_bill(period, watch_cwd, watch_env)
+        register_path = os.path.join(watch_cwd, ".apex", "billing", "invoices.jsonl")
+        register_lines = []
+        if os.path.exists(register_path):
+            with open(register_path, "r", encoding="utf-8") as fh:
+                register_lines = [line for line in fh.read().splitlines() if line.strip()]
+        if first_bill is None or first_bill.get("issued") != 1:
+            problems.append("watch bill run 1: %s (expected 1 issued)" % (first_bill or "failed"))
+        elif second_bill is None or second_bill.get("issued") != 0 or second_bill.get("skipped") != 1:
+            problems.append("watch bill run 2: %s (expected 0 issued, 1 skipped)" % (second_bill or "failed"))
+        elif not register_lines or "setup-watch:%s" % period not in register_lines[0] or str(WATCH_FEE_MICROS) not in register_lines[0]:
+            problems.append("the invoice register lacks the setup-watch $99 line for %s" % period)
+        else:
+            notes.append(
+                "watch sign-up bills exactly once: setup-watch:%s net %d micros, second run skipped"
+                % (period, WATCH_FEE_MICROS)
+            )
+        return (not problems, "; ".join(problems + notes))
+
+    def watch_bill(self, period, cwd, env):
+        proc = subprocess.run(
+            [self.bin_path("apex-watch"), "bill", period],
+            cwd=cwd,
+            env={**os.environ, **env},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            return None
+        out = (proc.stdout or "") + (proc.stderr or "")
+        match = re.search(r"(\d+) issued, (\d+) refused, (\d+) skipped", out)
+        if not match:
+            return None
+        return {"issued": int(match.group(1)), "refused": int(match.group(2)), "skipped": int(match.group(3))}
 
     def differential_control(self):
         problems = []
@@ -2790,9 +4249,28 @@ class Harness:
         removals = {entry.get("cell") for entry in baseline.get("removals", []) if entry.get("cell")}
         problems = []
         missing = sorted(self.required - recorded)
+        dangling = sorted(recorded - self.required - removals)
+        if self.args.update_baseline and not dangling and missing:
+            # The recording run itself: pure additions are what `--update-baseline`
+            # exists to record, so the drift passes once and the green gate still
+            # has to hold everywhere else. The ratchet is strict again on every
+            # run that does not carry the flag.
+            self.check(
+                "ratchet|baseline",
+                True,
+                "recording %d new cell(s) with --update-baseline (baseline %d -> required %d)"
+                % (len(missing), len(recorded), len(self.required)),
+            )
+            return
+        if self.args.update_baseline and dangling:
+            self.check(
+                "ratchet|baseline",
+                False,
+                "baseline cells no longer required without a reasoned removal: %s" % dangling[:6],
+            )
+            return
         if missing:
             problems.append("required cells missing from the baseline (drift): %s" % missing[:6])
-        dangling = sorted(recorded - self.required - removals)
         if dangling:
             problems.append("baseline cells no longer required without a reasoned removal: %s" % dangling[:6])
         self.check(
@@ -2918,12 +4396,29 @@ class Harness:
                 self.probe_surface_parity()
                 return
             self.check("boot|clickhouse", True, "ClickHouse reachable at %s" % self.ch_url)
+            crypto_self_check()
+            self.check(
+                "boot|crypto",
+                True,
+                "AES-256-GCM and ed25519 pinned against the published vectors "
+                "(NIST GCM, RFC 8032 test 1); the runner seed derives the fixture pubkey",
+            )
             self.api["work"] = self.prepare_api_files()
+            # The runner-, billing- and watch-run working trees hold durable
+            # product state (registers, job files, projections); a stale tree
+            # from an earlier run would leak into this one, so the harness
+            # resets them before seeding its own stores.
+            for stale in ("runner", "billing-run", "watch-billing"):
+                shutil.rmtree(os.path.join(self.workdir, stale), ignore_errors=True)
             self.control["work"] = self.prepare_control_files()
             self.prepare_sales_files()
             self.seed_touch()
             self.ch_bootstrap()
+            self.bootstrap_monitoring()
+            self.seed_admob_kept_change()
+            self.run_runner_regression_cells()
             self.start_api()
+            self.start_api_unconfigured()
             self.start_control()
             self.start_sales_web()
             self.run_all_probes()

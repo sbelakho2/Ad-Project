@@ -21,41 +21,44 @@
 ## Quick Reference
 
 ### SSH Access (Hetzner Production)
+
+> **Note:** Example commands in this runbook use RFC 5737 documentation addresses; replace them with your server addresses before running them.
+
 ```bash
 # App Server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # DB Server  
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 ```
 
 ### Current Services (Hetzner)
 | Service | Port | Server | Notes |
 |---------|------|--------|-------|
-| Backend | 8080 | 46.62.252.96 | Node.js API |
-| Console | 3000 | 46.62.252.96 | Next.js dashboard |
-| Control Plane | 3001 | 46.62.252.96 | Operator Cockpit |
-| Grafana | 3001 | 46.62.252.96 | Monitoring dashboards (Port conflict? Check prod config) |
-| Prometheus | 9090 | 46.62.252.96 | Metrics collection |
-| Alertmanager | 9093 | 46.62.252.96 | Alert routing |
-| PostgreSQL | 5432 | 77.42.44.35 | Database |
-| Redis | 6379 | 46.62.252.96 | Cache (container) |
+| Backend | 8080 | 203.0.113.10 | Node.js API |
+| Console | 3000 | 203.0.113.10 | Next.js dashboard |
+| Control Plane | 3001 | 203.0.113.10 | Operator Cockpit |
+| Grafana | 3001 | 203.0.113.10 | Monitoring dashboards (Port conflict? Check prod config) |
+| Prometheus | 9090 | 203.0.113.10 | Metrics collection |
+| Alertmanager | 9093 | 203.0.113.10 | Alert routing |
+| PostgreSQL | 5432 | 203.0.113.12 | Database |
+| Redis | 6379 | 203.0.113.10 | Cache (container) |
 
 ### Health Endpoints
 ```bash
 # Quick health check (Hetzner)
-curl -s http://46.62.252.96:8080/health | jq .
-curl -s http://46.62.252.96:8080/ready | jq .
-curl -s http://46.62.252.96:3000 | head -1
+curl -s http://203.0.113.10:8080/health | jq .
+curl -s http://203.0.113.10:8080/ready | jq .
+curl -s http://203.0.113.10:3000 | head -1
 
 # Prometheus targets
-curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets | length'
+curl -s http://203.0.113.10:9090/api/v1/targets | jq '.data.activeTargets | length'
 ```
 
 ### Monitoring Links
-- **Grafana:** http://46.62.252.96:3001 (credentials in secret store)
-- **Prometheus:** http://46.62.252.96:9090
-- **Alertmanager:** http://46.62.252.96:9093
+- **Grafana:** http://203.0.113.10:3001 (credentials in secret store)
+- **Prometheus:** http://203.0.113.10:9090
+- **Alertmanager:** http://203.0.113.10:9093
 
 ---
 
@@ -81,7 +84,7 @@ If issue is container-related (crash, resource exhaustion):
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # Restart affected service
 cd Ad-Project
@@ -97,7 +100,7 @@ If issue is in recent code changes:
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd Ad-Project
 
 # View recent commits
@@ -125,7 +128,7 @@ If you have tagged releases:
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd Ad-Project
 
 # Stop current container
@@ -145,7 +148,7 @@ For complete environment issues:
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd Ad-Project
 
 # Stop all services
@@ -174,7 +177,7 @@ Before rollback, check SSAI component health:
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # Check SSAI health endpoint
 curl -s http://localhost:8080/api/v1/ssai/health | jq .
@@ -199,7 +202,7 @@ If only SSAI is affected:
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd /opt/adproject
 
 # Identify SSAI-related commits
@@ -241,7 +244,7 @@ npx jest --testPathPattern="vast/__tests__" --silent
 
 ```bash
 # SSH to db server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 
 # List applied migrations
 psql -U postgres -d adproject -c \
@@ -252,14 +255,14 @@ psql -U postgres -d adproject -c \
 
 ```bash
 # SSH to app server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 cd Ad-Project
 
 # Run migration rollback (if supported)
 docker exec ad-project-backend-1 npm run migrate:down
 
 # Verify on DB server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 psql -U postgres -d adproject -c \
   "SELECT * FROM migrations ORDER BY id DESC LIMIT 5;"
 ```
@@ -270,7 +273,7 @@ If you have a backup:
 
 ```bash
 # SSH to db server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 
 # Restore from backup (after stopping backend on app server)
 psql -U postgres -d adproject < /path/to/backup.sql
@@ -285,38 +288,38 @@ After any rollback, verify:
 ### 1. Health Checks
 ```bash
 # API health
-curl -s http://46.62.252.96:8080/health | jq .
+curl -s http://203.0.113.10:8080/health | jq .
 # Expected: {"status":"healthy","services":{"postgres":"up","redis":"up","queues":"up"}}
 
-curl -s http://46.62.252.96:8080/ready | jq .
+curl -s http://203.0.113.10:8080/ready | jq .
 # Expected: {"status":"ready","database":{"connected":true}}
 
 # Console health
-curl -s -o /dev/null -w "%{http_code}" http://46.62.252.96:3000
+curl -s -o /dev/null -w "%{http_code}" http://203.0.113.10:3000
 # Expected: 200
 
 # Monitoring health
-curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets | length'
+curl -s http://203.0.113.10:9090/api/v1/targets | jq '.data.activeTargets | length'
 # Expected: 7
 ```
 
 ### 2. Core Functionality
 ```bash
 # Authentication
-curl -s -X POST http://46.62.252.96:8080/api/v1/auth/login \
+curl -s -X POST http://203.0.113.10:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@hetzner-test.com","password":"Admin123!"}' | jq .success
+  -d '{"email":"admin@hetzner-test.com","password":"<operator-password-from-the-vault>"}' | jq .success
 # Expected: true
 
 # RTB endpoint
-curl -s -X POST http://46.62.252.96:8080/api/v1/rtb/bid \
+curl -s -X POST http://203.0.113.10:8080/api/v1/rtb/bid \
   -H "Content-Type: application/json" \
   -H "X-SDK-Key: ak_test_..." \
   -d '{"placementId":"test","adType":"banner"}' | jq .
 # Expected: bid response
 
 # SSAI health
-curl -s http://46.62.252.96:8080/api/v1/ssai/health | jq .
+curl -s http://203.0.113.10:8080/api/v1/ssai/health | jq .
 # Expected: {"healthy":true,"components":{"redis":{"status":"healthy"},"database":{"status":"healthy"}}}
 ```
 
@@ -335,10 +338,10 @@ docker logs --since 5m ad-project-backend-1 2>&1 | grep -i error | tail -20
 ### 5. Monitoring Check
 ```bash
 # Check Grafana (in browser)
-open http://46.62.252.96:3001
+open http://203.0.113.10:3001
 
 # Check Prometheus targets
-curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+curl -s http://203.0.113.10:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
 ```
 
 ---

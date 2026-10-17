@@ -8,14 +8,14 @@
 
 ## ⚠️ CRITICAL Architecture Note
 
-**ALL sales automation work runs on the Test Server** (157.90.126.205:4001).  
+**ALL sales automation work runs on the Test Server** (203.0.113.11:4001).  
 **The App Server control-plane is strictly a proxy client.**
 
 | Server | IP | Role | Services |
 |--------|-----|------|----------|
-| **Test Server** | 157.90.126.205 | **Execution Server** | sales-api (PM2:4001), edge-worker (3500), inbound-smtp (2525) |
-| **App Server** | 46.62.252.96 | **Proxy Client** | control-plane (4000), sales-api-tunnel, edge-tunnel |
-| **DB Server** | 77.42.44.35 | Database | PostgreSQL (via App Server PgBouncer only) |
+| **Test Server** | 203.0.113.11 | **Execution Server** | sales-api (PM2:4001), edge-worker (3500), inbound-smtp (2525) |
+| **App Server** | 203.0.113.10 | **Proxy Client** | control-plane (4000), sales-api-tunnel, edge-tunnel |
+| **DB Server** | 203.0.113.12 | Database | PostgreSQL (via App Server PgBouncer only) |
 
 ---
 
@@ -166,7 +166,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                         APP SERVER (46.62.252.96)                        │
+│                         APP SERVER (203.0.113.10)                        │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  sales-api-tunnel.service                                                │
 │    localhost:4001 ───SSH──────────────────────> Test Server:4001         │
@@ -176,7 +176,7 @@
 └──────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                       TEST SERVER (157.90.126.205)                       │
+│                       TEST SERVER (203.0.113.11)                         │
 ├──────────────────────────────────────────────────────────────────────────┤
 │  db-tunnel.service                                                       │
 │    localhost:6432 ───SSH──────────────────────> App Server:6432          │

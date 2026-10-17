@@ -65,6 +65,7 @@ dependencies = [
  "apex-core",
  "async-trait",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror",
@@ -75,7 +76,6 @@ dependencies = [
 name = "apex-api"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "apex-analytics",
  "apex-audit",
  "apex-autopilot",
@@ -84,8 +84,11 @@ dependencies = [
  "apex-core",
  "apex-lift",
  "apex-metrics",
+ "apex-notify",
  "apex-proof",
  "apex-ui",
+ "apex-vault",
+ "apex-watch",
  "async-trait",
  "axum",
  "criterion",
@@ -94,6 +97,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower",
@@ -126,7 +130,9 @@ dependencies = [
  "apex-metrics",
  "apex-notify",
  "apex-proof",
+ "apex-vault",
  "async-trait",
+ "hex",
  "serde",
  "serde_json",
  "thiserror",
@@ -179,6 +185,7 @@ dependencies = [
  "hex",
  "hmac",
  "rand 0.8.8",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",
@@ -277,6 +284,34 @@ dependencies = [
 [[package]]
 name = "apex-ui"
 version = "0.1.0"
+
+[[package]]
+name = "apex-vault"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "hex",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "apex-watch"
+version = "0.1.0"
+dependencies = [
+ "apex-audit",
+ "apex-billing",
+ "apex-core",
+ "apex-metrics",
+ "apex-notify",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "argon2"

@@ -27,7 +27,9 @@ Complete guide to all Grafana dashboards for the ApexMediation platform.
 | Billing & Finance | `apex-billing-finance` | MRR/ARR, churn, payment processing |
 | Database Performance | `apex-database` | PostgreSQL monitoring |
 
-**Access:** http://46.62.252.96:3001 (Credentials stored in secret store)
+> **Note:** Example addresses in this document use the RFC 5737 documentation range; replace them with your server addresses before running the commands.
+
+**Access:** http://203.0.113.10:3001 (Credentials stored in secret store)
 
 ### Legacy Kubernetes Dashboards
 
@@ -53,7 +55,7 @@ open http://localhost:3000
 
 **Production (Hetzner):**
 ```
-http://46.62.252.96:3001
+http://203.0.113.10:3001
 ```
 
 ---
@@ -892,14 +894,14 @@ Grafana sidecar will auto-load dashboards with label `grafana_dashboard: "1"`.
 
 ```bash
 # Export existing dashboard (Hetzner Production)
-curl -X GET http://46.62.252.96:3001/api/dashboards/uid/apex-rtb-analytics \
+curl -X GET http://203.0.113.10:3001/api/dashboards/uid/apex-rtb-analytics \
   -H "Authorization: Bearer $GRAFANA_API_KEY" > my-dashboard.json
 
 # Edit dashboard
 vi my-dashboard.json
 
 # Import modified version
-curl -X POST http://46.62.252.96:3001/api/dashboards/db \
+curl -X POST http://203.0.113.10:3001/api/dashboards/db \
   -H "Authorization: Bearer $GRAFANA_API_KEY" \
   -H "Content-Type: application/json" \
   -d @my-dashboard.json
@@ -972,7 +974,7 @@ Add annotations to mark deployments/incidents:
 
 ```bash
 # Hetzner Production Grafana
-curl -X POST http://46.62.252.96:3001/api/annotations \
+curl -X POST http://203.0.113.10:3001/api/annotations \
   -H "Authorization: Bearer $GRAFANA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

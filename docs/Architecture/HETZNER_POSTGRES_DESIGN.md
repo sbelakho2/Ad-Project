@@ -28,7 +28,7 @@
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       APP SERVER (46.62.252.96)                              │
+│                       APP SERVER (203.0.113.10)                              │
 │                       Ubuntu 24.04, 2 vCPU, 8GB RAM                          │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │                         CADDY (Reverse Proxy)                           ││
@@ -70,7 +70,7 @@
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       DB SERVER (77.42.44.35)                                │
+│                       DB SERVER (203.0.113.12)                               │
 │                       Dedicated PostgreSQL Server                            │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │                    PostgreSQL 16  :5432                                 ││
@@ -152,15 +152,17 @@ api.apexmediation.ee {
 
 ### SSH Access
 
+> **Note:** Example commands in this document use RFC 5737 documentation addresses; replace them with your server addresses before running them.
+
 ```bash
 # App Server
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10
 
 # DB Server
-ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12
 
 # Database connection (from app server or direct)
-PGPASSWORD='<DB_PASSWORD>' psql -h 77.42.44.35 -U adproject -d adproject
+PGPASSWORD='<DB_PASSWORD>' psql -h 203.0.113.12 -U adproject -d adproject
 ```
 
 ---
@@ -274,7 +276,7 @@ REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6379/0
 ```ini
 # /etc/pgbouncer/pgbouncer.ini
 [databases]
-adproject = host=77.42.44.35 port=5432 dbname=adproject
+adproject = host=203.0.113.12 port=5432 dbname=adproject
 
 [pgbouncer]
 listen_addr = *
@@ -305,12 +307,12 @@ reserve_pool_size = 5
 1. **Provision new server** (same Hetzner DC: Finland)
 2. **Open Redis firewall:**
    ```bash
-   ssh root@46.62.252.96 'ufw allow from NEW_SERVER_IP to any port 6379'
+   ssh root@203.0.113.10 'ufw allow from NEW_SERVER_IP to any port 6379'
    ```
 3. **Deploy same code with shared env:**
    ```bash
-    DATABASE_URL=postgresql://adproject:<DB_PASSWORD>@77.42.44.35:5432/adproject
-    REDIS_URL=redis://:<REDIS_PASSWORD>@46.62.252.96:6379/0
+    DATABASE_URL=postgresql://adproject:<DB_PASSWORD>@203.0.113.12:5432/adproject
+    REDIS_URL=redis://:<REDIS_PASSWORD>@203.0.113.10:6379/0
     JWT_SECRET=<JWT_SECRET>
     NEXTAUTH_SECRET=<NEXTAUTH_SECRET>
    ```
@@ -1211,17 +1213,17 @@ ORDER BY bucket_date;
 
 | Server | Role | Public IP | Private IP | SSH Command |
 |--------|------|-----------|------------|-------------|
-| **App Server** | Backend + Console + Admin | 77.42.44.35 | TBD | `ssh -i ~/.ssh/hetzner-db-mac root@77.42.44.35` |
+| **App Server** | Backend + Console + Admin | 203.0.113.12 | TBD | `ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.12` |
 | **DB Server** | PostgreSQL + Autopilot | NONE | TBD | Via App Server jump host only |
 
 ### SSH to DB Server (via jump host)
 ```bash
 # From local machine
-ssh -i ~/.ssh/hetzner-db-mac -J root@77.42.44.35 root@<DB_PRIVATE_IP>
+ssh -i ~/.ssh/hetzner-db-mac -J root@203.0.113.12 root@<DB_PRIVATE_IP>
 
 # Or configure ~/.ssh/config
 Host hetzner-app
-    HostName 77.42.44.35
+    HostName 203.0.113.12
     User root
     IdentityFile ~/.ssh/hetzner-db-mac
 

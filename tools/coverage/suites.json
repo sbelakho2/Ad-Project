@@ -44,6 +44,12 @@
    ]
   },
   {
+   "id": "apex-vault-unit",
+   "covers": [
+    "rust/crates/apex-vault/**/*.rs"
+   ]
+  },
+  {
    "id": "apex-tools-unit",
    "covers": [
     "rust/crates/apex-tools/**/*.rs"
@@ -95,6 +101,12 @@
    "id": "apex-sales-web-unit",
    "covers": [
     "rust/crates/apex-sales-web/**/*.rs"
+   ]
+  },
+  {
+   "id": "apex-watch-unit",
+   "covers": [
+    "rust/crates/apex-watch/**/*.rs"
    ]
   }
  ]

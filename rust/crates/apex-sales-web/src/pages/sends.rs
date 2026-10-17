@@ -44,18 +44,25 @@ fn skip_notice(data: &RequestData) -> String {
 /// Today's sends versus the current daily cap, as a native progress element
 /// with its text equivalent.
 fn progress_block(data: &RequestData) -> String {
-    let sent = data.learned.sent_today;
-    let cap = data.learned.health.cap;
+    let sent = data.learned.health.sent_today();
+    let cap = data.learned.health.total_cap();
     let ceiling = data.config.health.max_cap;
-    let state = data.learned.health.state.as_str();
+    let state = data.learned.health.summary_state().as_str();
+    let domains = data.config.senders.len();
     let (value, max) = if cap == 0 { (0, 1) } else { (sent, cap) };
     let mut out = String::from("<section class=\"panel\"><h2 class=\"panel-heading\">Today versus the cap</h2><div class=\"panel-body\">");
     out.push_str(&format!(
         "<progress value=\"{value}\" max=\"{max}\">{sent} of {cap}</progress>"
     ));
-    out.push_str(&format!(
-        "<p class=\"table-note\">Sent today: {sent} of today's cap {cap} (warm-up ceiling {ceiling}; domain {state}).</p>"
-    ));
+    if domains <= 1 {
+        out.push_str(&format!(
+            "<p class=\"table-note\">Sent today: {sent} of today's cap {cap} (warm-up ceiling {ceiling}; domain {state}).</p>"
+        ));
+    } else {
+        out.push_str(&format!(
+            "<p class=\"table-note\">Sent today: {sent} of today's cap {cap} across {domains} sending domains (warm-up ceiling {ceiling} per domain; {state}).</p>"
+        ));
+    }
     if cap == 0 {
         out.push_str(&format!(
             "<p class=\"table-note\">{}</p>",
@@ -86,6 +93,7 @@ fn history_table(data: &RequestData, transport: &Transport) -> String {
     sends.sort_by_key(|event| std::cmp::Reverse(event.at()));
     sends.truncate(HISTORY_LIMIT);
     let transport_name = data::transport_label(transport);
+    let multi = data.config.senders.len() > 1;
     let rows: Vec<Vec<Cell>> = sends
         .iter()
         .map(|event| {
@@ -93,6 +101,7 @@ fn history_table(data: &RequestData, transport: &Transport) -> String {
                 at,
                 email,
                 publisher,
+                from,
                 step,
                 arm,
                 ..
@@ -100,30 +109,35 @@ fn history_table(data: &RequestData, transport: &Transport) -> String {
             else {
                 return Vec::new();
             };
-            vec![
+            let mut row = vec![
                 Cell::Text(date_short(at * 1000)),
                 Cell::Link(publisher.clone(), format!("/publishers/{publisher}")),
                 Cell::Mono(email.clone()),
-                Cell::Num((step + 1).to_string()),
-                Cell::Mono(arm.clone()),
-                Cell::Text(transport_name.to_string()),
-            ]
+            ];
+            if multi {
+                row.push(match from {
+                    Some(domain) => Cell::Mono(domain.clone()),
+                    None => Cell::Muted(or_not_available("no domain recorded")),
+                });
+            }
+            row.push(Cell::Num((step + 1).to_string()));
+            row.push(Cell::Mono(arm.clone()));
+            row.push(Cell::Text(transport_name.to_string()));
+            row
         })
         .collect();
     let empty = EmptyState {
         reason: "No sends are recorded yet. In shadow mode the runner writes .eml previews instead of sending; in approval or autonomous mode a send becomes a Touch event.".to_string(),
         action: Some(("Open today's plan".to_string(), "/plan".to_string())),
     };
+    let mut headers = vec!["Day (UTC)", "Publisher", "Contact"];
+    if multi {
+        headers.push("From");
+    }
+    headers.extend(["Step", "Arm", "Transport"]);
     data_table(
         Some("Send history"),
-        &[
-            "Day (UTC)",
-            "Publisher",
-            "Contact",
-            "Step",
-            "Arm",
-            "Transport",
-        ],
+        &headers,
         &rows,
         Some(empty),
         Some(&shared::count_note(rows.len(), total, "sends")),

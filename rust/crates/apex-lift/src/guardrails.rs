@@ -467,4 +467,50 @@ mod tests {
         }
         .voids());
     }
+
+    #[test]
+    fn non_gap_events_never_pause_or_void() {
+        assert!(!GuardrailEvent::FastHarm {
+            day: "d".into(),
+            point_lift: -0.2
+        }
+        .pauses());
+        assert!(!GuardrailEvent::PublisherEdit { day: "d".into() }.pauses());
+        assert!(!GuardrailEvent::PlatformIncident { day: "d".into() }.pauses());
+        assert!(!GuardrailEvent::ReportingGap {
+            day: "d".into(),
+            stale_days: 3
+        }
+        .pauses());
+        assert!(!GuardrailEvent::FastHarm {
+            day: "d".into(),
+            point_lift: -0.2
+        }
+        .voids());
+    }
+
+    #[test]
+    fn settings_changes_are_reported_and_nan_days_are_skipped() {
+        // A NaN ratio cannot produce an estimate; the day is skipped in the
+        // harm loop while the publisher edit is still reported.
+        let days = vec![
+            analysis_day("2026-10-01", f64::NAN, None, 0),
+            analysis_day("2026-10-02", 0.01, None, 1),
+        ];
+        let events = evaluate(
+            &prereg(0.5),
+            &days,
+            &[],
+            FillFormat::Rewarded,
+            &["2026-10-02".to_string()],
+            0,
+            &[],
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GuardrailEvent::PublisherEdit { day } if day == "2026-10-02")));
+        assert!(events
+            .iter()
+            .all(|e| !matches!(e, GuardrailEvent::FastHarm { .. })));
+    }
 }

@@ -208,6 +208,9 @@ pub fn suppression_label(reason: apex_sales::policy::SuppressionReason) -> &'sta
 /// Build every lead row (unfiltered), sorted by domain then address.
 pub fn all_rows(data: &RequestData) -> Vec<LeadRow> {
     let mut rows = Vec::new();
+    // One index for the whole page: a per-row scan of the suppression list
+    // would make the page quadratic in contacts × suppressions.
+    let suppressions = data.suppression_index();
     for (email, contact) in &data.snap.contacts {
         let publisher = data.snap.publishers.get(&contact.publisher_key);
         let (platform_key, platform_label) = match publisher {
@@ -261,11 +264,7 @@ pub fn all_rows(data: &RequestData) -> Vec<LeadRow> {
             }
             None => (0, String::new(), None),
         };
-        let suppressed = data
-            .learned
-            .suppressions
-            .check(contact)
-            .map(suppression_label);
+        let suppressed = suppressions.check(contact).map(suppression_label);
         rows.push(LeadRow {
             email: email.clone(),
             publisher_key: contact.publisher_key.clone(),

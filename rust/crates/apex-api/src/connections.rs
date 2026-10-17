@@ -28,12 +28,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use apex_core::PlatformId;
+use apex_vault::{entry_meta, Vault, VaultEntryMeta};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::live::LiveAccount;
 use crate::sources::{contained_in, is_valid_publisher};
-use crate::vault::{entry_meta, Vault, VaultEntryMeta};
 
 /// Documented MAX management host.
 pub const MAX_MANAGEMENT_BASE: &str = apex_connectors::max::MAX_MANAGEMENT_BASE;
@@ -201,7 +201,7 @@ impl VaultedConnectionStore {
     pub fn with_vault_key_hex(
         root: impl Into<PathBuf>,
         key_hex: &str,
-    ) -> Result<Self, crate::vault::VaultError> {
+    ) -> Result<Self, apex_vault::VaultError> {
         let root = root.into();
         // The canonical root is only meaningful once the directory exists;
         // creating it here keeps escapes closed on the first write too.
@@ -408,6 +408,9 @@ pub fn platform_bases(
         PlatformId::Admob => lookup(ADMOB_BASE_ENV)
             .filter(|value| !value.trim().is_empty())
             .map(|base| (base, None)),
+        // The billing domain is not a mediation platform: it has no
+        // management/reporting base to validate credentials against.
+        PlatformId::Billing => None,
     }
 }
 

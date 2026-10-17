@@ -217,15 +217,18 @@ infrastructure/production/monitoring/
 ## Quick Commands
 
 ### Check Status
+
+> **Note:** Example commands below use RFC 5737 documentation addresses; replace them with your server addresses before running them.
+
 ```bash
 # View all monitoring containers
 docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E 'prometheus|grafana|alertmanager|exporter|cadvisor'
 
 # Check Prometheus targets
-curl -s http://46.62.252.96:9090/api/v1/targets | jq '.data.activeTargets[].health'
+curl -s http://203.0.113.10:9090/api/v1/targets | jq '.data.activeTargets[].health'
 
 # Query a metric
-curl -s "http://46.62.252.96:9090/api/v1/query?query=pg_database_size_size_bytes" | jq
+curl -s "http://203.0.113.10:9090/api/v1/query?query=pg_database_size_size_bytes" | jq
 ```
 
 ### Restart Services

@@ -1,4 +1,4 @@
-.PHONY: test fmt lint sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop
+.PHONY: test fmt lint sync-floors dogfood dogfood-live clickhouse-dev clickhouse-stop ci-local
 
 test:
 	cd rust && cargo test --workspace
@@ -64,3 +64,9 @@ dogfood:
 dogfood-live:
 	@command -v clickhouse >/dev/null 2>&1 || { echo "dogfood-live: the clickhouse binary is required (start the dev server with 'make clickhouse-dev')"; exit 1; }
 	python3 tools/dogfood/live.py --clickhouse-owned --bin-dir rust/target/debug
+
+# Run the Woodpecker lanes locally in the same pinned images (see
+# docs/Internal/CI/LOCAL_CI.md). Flags pass through ARGS, for example
+# ARGS="--lane dogfood-audit --dry-run".
+ci-local:
+	sh tools/ci/local.sh $(ARGS)

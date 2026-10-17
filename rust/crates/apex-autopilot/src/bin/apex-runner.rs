@@ -1,23 +1,47 @@
-//! `apex-runner` — the scheduled job entrypoint for one publisher.
+//! `apex-runner` — the scheduled job entrypoint for one publisher (the
+//! legacy single-publisher mode) or for every registered publisher (fleet
+//! mode).
 //!
-//! One process serves one publisher's ledger. systemd timers invoke it on a
-//! schedule; the logic of each job lives in the library (`apex_autopilot::cli`
-//! and `apex_autopilot::cycle`) so it is unit tested; this binary only reads
-//! the environment, builds the platform adapter and the runner, prints the
-//! report (human by default, `--json` for the versioned document) and exports
-//! the bounded metrics textfile on every exit path, hard errors included.
+//! In fleet mode the deployment names the vault root the console writes
+//! (`APEX_CONNECTIONS_ROOT`, falling back to the apex-api spelling
+//! `APEX_CREDENTIAL_ROOT`) plus the vault key (`APEX_VAULT_KEY_HEX`) and the
+//! per-publisher ledger root (`APEX_RUNNER_LEDGER_ROOT`); the runner builds
+//! one adapter per publisher whose connection the console validated and loops
+//! every command over the registry, skipping unvalidated publishers with a
+//! typed reason. Without a registry root, `APEX_RUNNER_PUBLISHER` selects one
+//! publisher whose adapter comes from the `APEX_MAX_*` variables and whose
+//! ledger is the single `APEX_RUNNER_LEDGER` file — the legacy
+//! single-publisher mode, unchanged.
+//!
+//! systemd timers invoke it on a schedule; the logic of each job lives in the
+//! library (`apex_autopilot::cli` and `apex_autopilot::cycle`) so it is unit
+//! tested; this binary only reads the environment, builds the platform
+//! adapter(s) and the runner(s), prints the report (human by default,
+//! `--json` for the versioned document) and exports the bounded metrics
+//! textfile on every exit path, hard errors included.
 //!
 //! Commands: `audit`, `cycle`, `daily`, `monthly`, `recheck`, `aa`, `aa-eval`.
-//! Configuration (environment): `APEX_RUNNER_LEDGER`, `APEX_RUNNER_PUBLISHER`,
+//! Configuration (environment): `APEX_RUNNER_LEDGER`,
+//! `APEX_RUNNER_LEDGER_ROOT`, `APEX_RUNNER_PUBLISHER` (legacy mode only),
+//! `APEX_CONNECTIONS_ROOT` (fallback `APEX_CREDENTIAL_ROOT`), the vault root
+//! the console writes, `APEX_VAULT_KEY_HEX`,
 //! `APEX_RUNNER_SIGNING_KEY_HEX`, `APEX_MAX_API_KEY`, `APEX_MAX_REPORT_KEY`,
 //! `APEX_MAX_MANAGEMENT_BASE`, `APEX_MAX_REPORTING_BASE`,
-//! `APEX_RUNNER_WRITABLE`, `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS`,
+//! `APEX_RUNNER_WRITABLE`, `APEX_RUNNER_POLICY`, `APEX_RUNNER_PRIORS` (a file
+//! in legacy mode, a directory of `<publisher>.json` models in fleet mode),
 //! `APEX_RUNNER_SNAPSHOT`, `APEX_DEVELOPER_SITE`, `APEX_EXPECTED_NETWORKS`,
-//! `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`,
+//! `APEX_BILLING_PROFILE` (the seller billing profile the monthly VAT
+//! issuance loads; `APEX_BILLING_VAT_RATE_BP` overrides its domestic rate),
+//! `APEX_ADYEN_API_KEY`, `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_HMAC_KEY`
+//! (hex-encoded binary key; a value that is not hex refuses the run),
 //! `APEX_ADYEN_CHECKOUT_BASE`, `APEX_BILLING_VAT_RATE_BP` (the apex-api name;
 //! the historical `APEX_INVOICE_VAT_BP` still reads as a deprecated fallback),
-//! `APEX_MONITORING_FEE_MICROS` (the apex-api name; the historical
-//! `APEX_MONITORING_MONTHLY_MICROS` still reads as a deprecated fallback),
+//! `APEX_MONITORING_TIER_BASE_MICROS`, `APEX_MONITORING_TIER_MID_MICROS` and
+//! `APEX_MONITORING_TIER_TOP_MICROS` (the monitoring tier prices; monitoring
+//! is on at connection and the tier is chosen from the connection snapshot's
+//! reported 30-day revenue), with `APEX_MONITORING_FEE_MICROS` as the
+//! deprecated base-tier fallback (a legacy `0` still turns monitoring off; a
+//! zero tier price is a typed error),
 //! `APEX_ALERT_FILE`,
 //! `APEX_METRICS_TEXTFILE`, `APEX_CLICKHOUSE_HTTP`,
 //! `APEX_ANALYTICS_ENV` (the apex-api name; the historical
@@ -29,6 +53,12 @@
 //! `APEX_OPERATOR_JOBS_DIR`, `APEX_PAYMENT_EVENTS`, `APEX_PAYMENT_LEDGER`,
 //! `APEX_PAYMENT_RETRIES`, `APEX_PAYMENT_CURSOR` (default
 //! `<APEX_PAYMENT_EVENTS>.cursor`).
+//!
+//! The monthly pass loads the seller profile named by `APEX_BILLING_PROFILE`
+//! and each publisher's customer profile from
+//! `<connections root>/<publisher>.billing.json`; a missing profile refuses
+//! that publisher's invoice with the typed reason in the report. The invoice
+//! register defaults to `.apex/billing/invoices.jsonl`.
 //!
 //! Timers should pass their expected start time so the schedule-lag gauge is
 //! recorded: `--scheduled-at <unix-ms>` or `APEX_SCHEDULED_AT_MS`. Every
@@ -270,22 +300,58 @@ async fn run_job(
     let keypair = Keypair::from_bytes(&apex_autopilot::cli::parse_seed(&cli_required(
         "APEX_RUNNER_SIGNING_KEY_HEX",
     )?)?);
-    let mut ledger = Ledger::open(&cli_required("APEX_RUNNER_LEDGER")?, keypair)
-        .map_err(|e| format!("ledger: {e}"))?;
-    let ops =
-        apex_autopilot::cli::build_max_ops(|name| std::env::var(name).ok(), transport.clone())
+    // Fleet mode: the deployment names the vault root the console writes, so
+    // every command loops over the registered publishers. Without it the
+    // legacy single-publisher mode reads `APEX_RUNNER_PUBLISHER` and the
+    // single `APEX_RUNNER_LEDGER` file exactly as before.
+    let registry_root =
+        apex_autopilot::registry::vault_root_from_env(&|name| std::env::var(name).ok());
+    let outcome = match registry_root {
+        Some(root) => {
+            let key_hex = cli_required(apex_autopilot::registry::VAULT_KEY_ENV)?;
+            let vault = apex_vault::Vault::from_hex_key(&key_hex).map_err(|error| {
+                format!(
+                    "{} is not a valid vault key: {error}",
+                    apex_autopilot::registry::VAULT_KEY_ENV
+                )
+            })?;
+            let registry = apex_autopilot::registry::PublisherRegistry::load(&root, &vault)
+                .map_err(|error| error.to_string())?;
+            let ledger_root = cli_required(apex_autopilot::registry::LEDGER_ROOT_ENV)?;
+            let fleet = apex_autopilot::cli::build_fleet(
+                |name| std::env::var(name).ok(),
+                &registry,
+                std::path::Path::new(&ledger_root),
+                &root,
+                &keypair,
+                transport,
+                instrumentation,
+            )
+            .map_err(|e| format!("configuration: {e}"))?;
+            apex_autopilot::cli::dispatch_fleet(command, args, &fleet, now_unix_ms)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        None => {
+            let mut ledger = Ledger::open(&cli_required("APEX_RUNNER_LEDGER")?, keypair)
+                .map_err(|e| format!("ledger: {e}"))?;
+            let ops = apex_autopilot::cli::build_max_ops(
+                |name| std::env::var(name).ok(),
+                transport.clone(),
+            )
             .map_err(|e| format!("max adapter: {e}"))?;
-    let runner = apex_autopilot::cli::build_runner(
-        |name| std::env::var(name).ok(),
-        ops,
-        transport,
-        instrumentation,
-    )
-    .map_err(|e| format!("configuration: {e}"))?;
-
-    let outcome = apex_autopilot::cli::dispatch(command, args, &runner, &mut ledger, now_unix_ms)
-        .await
-        .map_err(|e| e.to_string())?;
+            let runner = apex_autopilot::cli::build_runner(
+                |name| std::env::var(name).ok(),
+                ops,
+                transport,
+                instrumentation,
+            )
+            .map_err(|e| format!("configuration: {e}"))?;
+            apex_autopilot::cli::dispatch(command, args, &runner, &mut ledger, now_unix_ms)
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
     if as_json {
         println!("{}", outcome.json);
     } else {

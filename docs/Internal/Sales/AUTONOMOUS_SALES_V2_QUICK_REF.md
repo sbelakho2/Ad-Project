@@ -8,14 +8,14 @@
 
 | Server | IP | Role | Key Service |
 |--------|-----|------|-------------|
-| App Server | 46.62.252.96 | Proxy | control-plane (4000) → forwards to test server |
-| **Test Server** | 157.90.126.205 | **Execution** | sales-api (4001), edge-worker (3500) |
-| DB Server | 77.42.44.35 | Database | PostgreSQL (via App Server tunnel only) |
+| App Server | 203.0.113.10 | Proxy | control-plane (4000) → forwards to test server |
+| **Test Server** | 203.0.113.11 | **Execution** | sales-api (4001), edge-worker (3500) |
+| DB Server | 203.0.113.12 | Database | PostgreSQL (via App Server tunnel only) |
 
 ## API Endpoints
 
 **Via App Server proxy:** `https://admin.apexmediation.ee/api/autonomous/`  
-**Direct to Test Server:** `http://157.90.126.205:4001/api/autonomous/` (internal only)
+**Direct to Test Server:** `http://203.0.113.11:4001/api/autonomous/` (internal only)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

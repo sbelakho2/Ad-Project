@@ -60,8 +60,12 @@ pub struct GateInput {
     pub account: AccountVerdict,
     /// Publisher is in the randomized holdout.
     pub held_out: bool,
-    /// Sending-domain state.
+    /// Sending-domain state (the summary across domains).
     pub sender: SenderState,
+    /// A ready-made reason for a failed sender state, when the summary
+    /// needs one (multi-domain deployments). `None` uses the default
+    /// "sending domain is {state}" wording.
+    pub sender_reason: Option<String>,
     /// Sends left under today's cap.
     pub cap_left: u32,
     /// The message passed grounding validation.
@@ -149,7 +153,10 @@ pub fn decide(input: &GateInput) -> Decision {
         deny = true;
     }
     if !input.sender.may_send() {
-        reasons.push(format!("sending domain is {}", input.sender.as_str()));
+        reasons.push(match &input.sender_reason {
+            Some(reason) => reason.clone(),
+            None => format!("sending domain is {}", input.sender.as_str()),
+        });
         deny = true;
     } else if input.cap_left == 0 {
         reasons.push("daily cap reached".to_string());
@@ -197,6 +204,7 @@ mod tests {
             account: AccountVerdict::Allowed,
             held_out: false,
             sender: SenderState::Healthy,
+            sender_reason: None,
             cap_left: 10,
             grounded: true,
             variant_available: true,
@@ -230,6 +238,7 @@ mod tests {
             account: AccountVerdict::Denied("busy".into()),
             held_out: true,
             sender: SenderState::Quarantined,
+            sender_reason: None,
             cap_left: 0,
             grounded: false,
             variant_available: false,
@@ -248,6 +257,27 @@ mod tests {
             ..ok()
         });
         assert_eq!(capped.reasons, vec!["daily cap reached".to_string()]);
+        // A multi-domain summary can supply its own wording; a single domain
+        // keeps the default phrasing.
+        let summarized = decide(&GateInput {
+            sender: SenderState::Quarantined,
+            sender_reason: Some(
+                "no sending domain may send (a.example: quarantined; b.example: paused)".into(),
+            ),
+            ..ok()
+        });
+        assert_eq!(
+            summarized.reasons,
+            vec![
+                "no sending domain may send (a.example: quarantined; b.example: paused)"
+                    .to_string()
+            ]
+        );
+        let single = decide(&GateInput {
+            sender: SenderState::Paused,
+            ..ok()
+        });
+        assert_eq!(single.reasons, vec!["sending domain is paused".to_string()]);
     }
 
     #[test]

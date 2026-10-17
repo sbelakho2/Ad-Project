@@ -1,0 +1,5 @@
+# reseller inventory: some networks sell only through partners
+applovin.com, pub-1, RESELLER
+applovin.com, pub-2, DIRECT
+google.com, pub-3, DIRECT, f08c47fec0942fa0
+unity3d.com, 99, reseller

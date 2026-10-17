@@ -1,25 +1,50 @@
-//! Credential vault: AES-256-GCM at rest for publisher platform keys.
+//! apex-vault — AES-256-GCM at rest for publisher platform credentials.
 //!
-//! The marketing claim ("Network credentials from publishers are kept encrypted
-//! under AES-256-GCM") is anchored to this module and its tests. The key comes
-//! from a deployment secret (`APEX_VAULT_KEY`, 64 lowercase hex characters) and
-//! never from the repository; ciphertext format is `nonce hex + "." + ct hex`
-//! so a stored blob is self-contained and versioned by construction.
+//! The marketing claim ("Network credentials from publishers are kept
+//! encrypted under AES-256-GCM") is anchored to this crate and its tests. The
+//! key comes from a deployment secret (`APEX_VAULT_KEY_HEX`, 64 lowercase hex
+//! characters) and never from the repository; the ciphertext format is
+//! `nonce hex + "." + ct hex` so a stored blob is self-contained and versioned
+//! by construction.
+//!
+//! # Consumers
+//!
+//! - `apex-api` writes and reads `<root>/<publisher>.blob` through this crate
+//!   (the console connection flows, the live read-only audit store); the
+//!   deployment names the root with `APEX_CREDENTIAL_ROOT`.
+//! - `apex-autopilot` reads the same blobs to build its per-publisher runner
+//!   registry (the deployment names the root with `APEX_CONNECTIONS_ROOT`,
+//!   falling back to the apex-api spelling).
+//!
+//! Every entry point keeps the frozen public shape: [`Vault`] does
+//! encrypt/decrypt, [`entry_meta`] returns the masked evidence record, and
+//! [`VaultError`] is the typed refusal taxonomy.
+
+#![forbid(unsafe_code)]
+// Production code is held to the strict workspace lints; tests may unwrap/expect/panic
+// because a panicking test IS a failing test.
+#![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use serde::Serialize;
 
-#[derive(Debug, thiserror::Error)]
+/// A vault refusal. Every failure mode is typed; none of them ever renders
+/// key material or plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum VaultError {
+    /// The key is not 64 lowercase hex characters (32 bytes).
     #[error("vault key must be 64 lowercase hex characters (32 bytes)")]
     BadKey,
+    /// The blob is not `nonce-hex "." ciphertext-hex`.
     #[error("ciphertext is not in nonce.ciphertext hex format")]
     BadFormat,
+    /// Decryption failed: wrong key or tampered ciphertext.
     #[error("decryption failed (wrong key or tampered ciphertext)")]
     Decrypt,
 }
 
+/// The AES-256-GCM cipher with its deployment key.
 pub struct Vault {
     cipher: Aes256Gcm,
 }
@@ -62,6 +87,8 @@ impl Vault {
         format!("{}.{}", hex::encode(nonce_bytes), hex::encode(ciphertext))
     }
 
+    /// Decrypt a stored blob. A malformed blob and a failed authentication are
+    /// distinct typed refusals.
     pub fn decrypt(&self, blob: &str) -> Result<String, VaultError> {
         let (nonce_hex, ct_hex) = blob.split_once('.').ok_or(VaultError::BadFormat)?;
         let nonce_bytes = hex::decode(nonce_hex).map_err(|_| VaultError::BadFormat)?;
@@ -80,10 +107,13 @@ impl Vault {
 /// Evidence record the console can surface without revealing the secret.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct VaultEntryMeta {
+    /// The ciphertext length in bytes (text form).
     pub ciphertext_len: usize,
+    /// The frozen scheme label.
     pub scheme: &'static str,
 }
 
+/// The masked evidence of a stored blob: scheme and ciphertext length only.
 pub fn entry_meta(blob: &str) -> VaultEntryMeta {
     VaultEntryMeta {
         ciphertext_len: blob.len(),

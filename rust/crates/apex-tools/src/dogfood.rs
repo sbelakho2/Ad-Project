@@ -20,10 +20,22 @@ pub fn orphan_gate(
         .iter()
         .filter(|f| f.kind.as_deref() == Some("code"))
         .collect();
+    // Compile each suite's cover globs once: every code file is matched
+    // against them, and a regex compilation per (file, glob) pair dominates
+    // the gate. An invalid glob never matches, like the one-shot matcher.
+    let compiled: Vec<Vec<Regex>> = suites
+        .iter()
+        .map(|covers| {
+            covers
+                .iter()
+                .filter_map(|pattern| glob::compile(pattern))
+                .collect()
+        })
+        .collect();
     let claimed = |path: &str| {
-        suites
+        compiled
             .iter()
-            .any(|covers| covers.iter().any(|g| glob::matches(g, path)))
+            .any(|covers| covers.iter().any(|matcher| matcher.is_match(path)))
     };
     let orphans: Vec<&str> = code_files
         .iter()
@@ -213,10 +225,12 @@ pub fn maybe_ignore_marker(text: &str, marker: &Regex) -> Result<Vec<usize>, Str
 /// Does this file define test cases? Markers are language-aware: the JS `it`
 /// and test forms, the Kotlin test-function prefix, and the C# `[Test]`
 /// attribute would otherwise fire on production names like `setTestMode` or
-/// `TestModeAdLoader` in other languages.
+/// `TestModeAdLoader` in other languages. The pattern table is static, so
+/// every pattern compiles once per process ([`crate::util::cached_re`]) and
+/// the gate can run over the whole tree without recompiling.
 pub fn defines_test_cases(rel: &str, text: &str) -> Result<bool, String> {
     let ext = rel.rsplit('.').next().unwrap_or("");
-    let hit = |pat: &str| re(pat).map(|r| r.is_match(text));
+    let hit = |pat: &'static str| crate::util::cached_re(pat).map(|r| r.is_match(text));
     match ext {
         "rs" => Ok(hit(
             r"#\[((tokio::)?test|test_case|rstest|test_log::test|parameterized)\]",
@@ -707,5 +721,84 @@ mod stub_pattern_tests {
         assert!(!flagged("android:text=\"Ad placeholder\""));
         assert!(!flagged("fatalError(\"init(coder:) not implemented\")"));
         assert!(flagged(concat!("// TO", "DO: wire this")));
+    }
+    /// Regression: test-case detection used to compile its marker regexes
+    /// once per file. The thread-local compile counter proves the memoized
+    /// patterns are reused; this test fails on the pre-fix implementation
+    /// where every call recompiles.
+    #[test]
+    fn test_case_detection_compiles_each_pattern_once() {
+        let samples = [
+            ("a.rs", "#[test] fn x() { assert!(true); }"),
+            ("a.ts", "it('works', () => { expect(1).toBe(1); });"),
+            ("a.py", "def test_x():\n    assert True\n"),
+            ("a.kt", "@Test fun x() {}"),
+            ("a.swift", "class XTests: XCTestCase {}"),
+        ];
+        for (rel, text) in samples {
+            let _ = defines_test_cases(rel, text).expect("detect");
+        }
+        let before = crate::util::regex_compile_count();
+        for i in 0..300 {
+            let (rel, text) = samples[i % samples.len()];
+            let _ = defines_test_cases(rel, text).expect("detect");
+        }
+        assert_eq!(
+            crate::util::regex_compile_count(),
+            before,
+            "detection must reuse the compiled marker patterns"
+        );
+    }
+
+    /// The orphan gate's compiled matchers must decide exactly like the
+    /// one-shot per-path scan; the reference compiles up front so the
+    /// comparison is about the claim predicate, not compilation.
+    #[test]
+    fn orphan_gate_equals_the_naive_claim_scan_at_ten_thousand_files() {
+        let files: Vec<crate::classify::ManifestFile> = (0..10_000)
+            .map(|i| crate::classify::ManifestFile {
+                path: format!("src/file_{i:05}.rs"),
+                domain: Some("d".to_string()),
+                kind: Some("code".to_string()),
+                status: "planned".to_string(),
+                reason: None,
+                suite: None,
+            })
+            .collect();
+        let manifest = Manifest {
+            policy: "p".to_string(),
+            generated_at: "0".to_string(),
+            counts: std::collections::BTreeMap::new(),
+            files,
+        };
+        let suites = vec![
+            vec!["src/file_*2.rs".to_string(), "src/file_*7.rs".to_string()],
+            vec!["**/file_1*.rs".to_string()],
+        ];
+        let compiled: Vec<Vec<Regex>> = suites
+            .iter()
+            .map(|covers| {
+                covers
+                    .iter()
+                    .filter_map(|pattern| glob::compile(pattern))
+                    .collect()
+            })
+            .collect();
+        let claimed = |path: &str| {
+            compiled
+                .iter()
+                .any(|covers| covers.iter().any(|matcher| matcher.is_match(path)))
+        };
+        let naive_orphans = manifest
+            .files
+            .iter()
+            .filter(|file| file.status == "planned" && !claimed(&file.path))
+            .count();
+        let naive_percent = naive_orphans as f64 / manifest.files.len() as f64 * 100.0;
+        // Just below the naive ceiling: the gate must fail with the same
+        // verdict the naive scan computed.
+        assert!(orphan_gate(&manifest, &suites, naive_percent - 0.01).is_err());
+        // At the ceiling: the gate passes.
+        assert!(orphan_gate(&manifest, &suites, naive_percent).is_ok());
     }
 }

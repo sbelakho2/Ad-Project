@@ -1,0 +1,11 @@
+{
+  "file": "google-cert.txt",
+  "note": "The google.com certification authority id is tracked: a missing or wrong id is an error, but the record is still accepted (the frozen sales parser records the error and keeps the record).",
+  "errors": [
+    {"line": 1, "kind": "WrongGoogleCertId"},
+    {"line": 3, "kind": "WrongGoogleCertId"}
+  ],
+  "records": 3,
+  "variables": 0,
+  "domains": ["google.com"]
+}

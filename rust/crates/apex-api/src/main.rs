@@ -21,11 +21,32 @@
 //! - `APEX_ADYEN_HMAC_KEY` (and optionally `APEX_ADYEN_API_KEY`,
 //!   `APEX_ADYEN_MERCHANT_ACCOUNT`, `APEX_ADYEN_CHECKOUT_BASE` to build the
 //!   client) — the webhook verifies each `notificationItems` item's
-//!   `additionalData.hmacSignature` against this key; without it the endpoint
-//!   answers `503 adyen_webhook_not_configured`;
+//!   `additionalData.hmacSignature` against this key. Adyen publishes the key
+//!   as hex text while signatures are computed over the raw key bytes, so the
+//!   binary hex-decodes the value before wiring it into the verifier and
+//!   refuses to start (naming this variable) when it is not valid hex; without
+//!   it the endpoint answers `503 adyen_webhook_not_configured`;
 //! - `APEX_LEDGER_TOKENS_FILE` — a JSON object of publisher to ledger token;
 //!   without it no ledger is readable over HTTP (the routes answer
-//!   `503 ledger_auth_not_configured`);
+//!   `503 ledger_auth_not_configured`). These tokens are also the console's
+//!   only credential: every console page resolves its publisher from the live
+//!   session opened through the change-log access panel, so no page ever
+//!   serves a deployment-wide publisher. A file that does not exist yet is
+//!   valid configuration and is created (with mode 0600) by the first
+//!   free-audit submission, which adds the submission publisher's entry;
+//!   existing entries are never touched;
+//! - `APEX_SIGNIN_TTL_HOURS` — lifetime of a self-serve one-time sign-in link
+//!   in hours (default 72; must be an integer between 1 and 720, anything else
+//!   refuses startup with a typed error). An accepted `POST /free-audit`
+//!   appends one link row (SHA-256 hash only; the opaque token is never
+//!   stored) to `signin.jsonl` beside the leads file and signs the link in
+//!   through `GET /console/signin?token=`. The link is emailed through the
+//!   transactional sink when `APEX_NOTIFY_SINK=email` (with
+//!   `APEX_NOTIFY_FROM`) is configured; without it the link creation is
+//!   logged as a warning and the audit still succeeds. `APEX_CONSOLE_URL`
+//!   (optional) is the public console base the emailed link starts with.
+//!   Without `APEX_LEADS_FILE` there is no leads root, so the sign-in route
+//!   answers the documented `503` not-configured panel;
 //! - `APEX_COLLECTION_FILE` — the append-only collection log the Adyen
 //!   webhook records accepted events into (replay-protected); the console
 //!   billing pages read the same file for payment facts. Without it the
@@ -36,12 +57,21 @@
 //!   `req_…` confirmation ids. Without the env salt the file store generates
 //!   32 random bytes once into `<APEX_LEADS_FILE>.salt` (mode 0600) and reuses
 //!   them, so ids stay stable across restarts and per deployment;
+//! - `APEX_WATCH_ROOT` — the setup-watch subscriber root behind the public
+//!   `GET`/`POST /watch` sign-up, default `.apex/watch`; the store is the
+//!   JSONL file `subscribers.jsonl` there. `APEX_WATCH_CHECKOUT_URL`
+//!   (optional) is the payment link the `/watch/requested` confirmation
+//!   shows; without it the page says a payment link will be emailed;
+//! - `APEX_SALES_OUTCOMES_FILE` — the frozen sales-outcomes appender's file
+//!   (default `.apex/sales/outcomes.jsonl`), one JSON object per line in the
+//!   shape `{"atUnixMs":…,"publisher":…,"kind":"connected"|"paid"|"watch_signup","ref":…}`
+//!   written write-once per `(kind, ref)` with a `<file>.seen.jsonl`
+//!   sidecar. The appender is best effort: an accepted connection, payment
+//!   event or watch sign-up never depends on it;
 //! - `APEX_CONSOLE_PUBLISHER_NAME` (default `Publisher workspace`) and
 //!   `APEX_CONSOLE_CURRENCY` (default `USD`) — the console's workspace label
-//!   and the currency every micros amount is rendered in;
-//! - `APEX_CONSOLE_PUBLISHER` — the workspace publisher the phase-2 console
-//!   surfaces (connections, proposals, experiments, billing, analytics) read;
-//!   without it those pages answer the not-configured panel;
+//!   and the currency every micros amount is rendered in. The label is purely
+//!   cosmetic; the publisher a page reads is always the session's;
 //! - `APEX_PROPOSALS_ROOT` — the directory of the runner's proposal files
 //!   (`<id>.json`) and the console's decision records (`<id>.approval.json`);
 //! - `APEX_ALERT_FILE` — the runner's alert log (`FileAlertSink` JSONL); a
@@ -52,22 +82,30 @@
 //!   `{"policy": {...}}`), read-only behind `/console/settings/policy`;
 //! - `APEX_CONSOLE_CONTACT`, `APEX_CONSOLE_TIMEZONE` (default `UTC`) and
 //!   `APEX_RETENTION_MONTHS` — the account facts shown on `/console/settings`;
-//! - `APEX_BILLING_VAT_RATE_BP`, `APEX_MONITORING_FEE_MICROS` and
-//!   `APEX_MONITORING_SINCE` — the recorded VAT rate and monitoring plan the
-//!   billing pages show (unset means "not recorded"/"Not selected", never a
-//!   fabricated zero);
+//! - `APEX_BILLING_VAT_RATE_BP` — the recorded VAT rate the billing pages
+//!   show (unset means "not recorded", never a fabricated zero). Plan facts
+//!   are not environment state: the console reads the recorded plan state
+//!   files (`<connections root>/<publisher>.monitoring.json` /
+//!   `<publisher>.managed.json`) the runner bills from, so the monitoring
+//!   page shows the tier, price, next billing date and cancel action of the
+//!   real plan (unset/unrecorded means "not recorded"). The runner's
+//!   `APEX_MONITORING_TIER_*` price overrides are documented in the runner's
+//!   environment list; the console never reads them;
 //! - `APEX_CLICKHOUSE_HTTP` and `APEX_CLICKHOUSE_DB` (plus
 //!   `APEX_ANALYTICS_ENV`, default `production`) — the analytics reader and
 //!   `apex_analytics::AnalyticsClient` sink; when unset the sink logs and
 //!   `/console/analytics` renders the honest not-available state.
 //!
 //! Metrics: `GET /metrics` serves the hand-rolled counters plus the bounded
-//! `apex-metrics` registry render (route-template request series), and when
-//! `APEX_METRICS_TEXTFILE` names a path, a background task exports the
-//! registry to that path atomically every 15 seconds (and once more after
-//! the graceful shutdown signal below), for node_exporter's textfile
-//! collector. The periodic write bounds both the export cost and the file's
-//! staleness; per-request writes would couple latency to disk I/O.
+//! `apex-metrics` registry render (route-template request series) on the
+//! API's own bind for the operator scrape; the public edge
+//! (`infrastructure/caddy/Caddyfile`) refuses the path, so metrics are only
+//! reachable on the loopback/control boundary. When `APEX_METRICS_TEXTFILE`
+//! names a path, a background task exports the registry to that path
+//! atomically every 15 seconds (and once more after the graceful shutdown
+//! signal below), for node_exporter's textfile collector. The periodic write
+//! bounds both the export cost and the file's staleness; per-request writes
+//! would couple latency to disk I/O.
 //!
 //! The binary holds no platform credentials by construction: it serves the
 //! read-only deployment mode. An embedding service can build the same router
@@ -90,6 +128,10 @@ use apex_connectors::transport::{ReqwestTransport, RetryTransport, TokioSleeper}
 const DEFAULT_BIND: &str = "127.0.0.1:8787";
 const DEFAULT_SNAPSHOT_ROOT: &str = ".apex/snapshots";
 const DEFAULT_LEDGER_ROOT: &str = ".apex/ledgers";
+/// The hex-encoded Adyen webhook HMAC key variable. Adyen publishes the key
+/// as hex text; the verifier consumes raw bytes, so the value is decoded
+/// here and a non-hex value refuses startup.
+const ADYEN_HMAC_KEY_ENV: &str = "APEX_ADYEN_HMAC_KEY";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -124,15 +166,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env_value("APEX_ADYEN_CHECKOUT_BASE"),
     ) {
         (Some(api_key), Some(merchant_account), Some(checkout_base)) => {
-            let adyen = apex_billing::AdyenClient::new(
-                api_key,
-                merchant_account,
-                env_value("APEX_ADYEN_HMAC_KEY")
-                    .unwrap_or_default()
-                    .into_bytes(),
-                checkout_base,
-            )
-            .map_err(|error| format!("adyen credentials are invalid: {error}"))?;
+            let hmac_key = match env_value(ADYEN_HMAC_KEY_ENV) {
+                Some(raw) => apex_api::config::decode_hex_env_key(ADYEN_HMAC_KEY_ENV, &raw)?,
+                None => Vec::new(),
+            };
+            let adyen =
+                apex_billing::AdyenClient::new(api_key, merchant_account, hmac_key, checkout_base)
+                    .map_err(|error| format!("adyen credentials are invalid: {error}"))?;
             state = state.with_adyen(Arc::new(adyen));
         }
         (None, None, None) => {}
@@ -143,8 +183,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    if let Some(hmac_key) = env_value("APEX_ADYEN_HMAC_KEY") {
-        state = state.with_adyen_hmac_key(hmac_key.into_bytes());
+    if let Some(raw) = env_value(ADYEN_HMAC_KEY_ENV) {
+        // Adyen's key is hex text over raw bytes; decoding here is what makes
+        // the webhook verifier compare against the actual key.
+        state = state.with_adyen_hmac_key(apex_api::config::decode_hex_env_key(
+            ADYEN_HMAC_KEY_ENV,
+            &raw,
+        )?);
     }
 
     // Collection state: accepted Adyen events are recorded (and
@@ -176,19 +221,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_leads(store);
     }
 
+    // The setup-watch subscriber store: the public sign-up writes through it
+    // and the daily watch service (a separate process) reads the same file.
+    // The default root resolves under the unit's WorkingDirectory.
+    state = state.with_watch(Arc::new(apex_watch::SubscriberStore::from_env(env_value)));
+
+    // The frozen sales-outcomes appender: best effort at every call site.
+    state = state.with_outcomes(Arc::new(apex_api::OutcomesAppender::from_env(env_value)));
+
     // Per-publisher ledger tokens: a JSON object of publisher -> token, read
     // from the file named by `APEX_LEDGER_TOKENS_FILE`. Without it no ledger
-    // is readable over HTTP (the routes answer 503).
+    // is readable over HTTP (the routes answer 503). The file may not exist
+    // yet: an accepted free-audit submission creates the entry for its
+    // publisher, and the live workspace below is the same file, so a
+    // workspace written after boot authorizes without a restart.
     if let Some(path) = env_value("APEX_LEDGER_TOKENS_FILE") {
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|error| format!("APEX_LEDGER_TOKENS_FILE could not be read: {error}"))?;
-        let tokens: HashMap<String, String> = serde_json::from_str(&raw)
-            .map_err(|error| format!("APEX_LEDGER_TOKENS_FILE is not a JSON object: {error}"))?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(format!("APEX_LEDGER_TOKENS_FILE could not be read: {error}").into())
+            }
+        };
+        let tokens: HashMap<String, String> = if raw.trim().is_empty() {
+            HashMap::new()
+        } else {
+            serde_json::from_str(&raw)
+                .map_err(|error| format!("APEX_LEDGER_TOKENS_FILE is not a JSON object: {error}"))?
+        };
         let tokens = tokens
             .into_iter()
             .map(|(publisher, token)| (publisher, token.into_bytes()))
             .collect();
-        state = state.with_ledger_tokens(tokens);
+        state = state
+            .with_ledger_tokens(tokens)
+            .with_workspaces(Arc::new(apex_api::WorkspaceTokens::open(&path)));
+    }
+
+    // Self-serve sign-in: the one-time link log lives beside the leads file
+    // (`<leads root>/signin.jsonl`), so the leads root is its availability
+    // boundary. `APEX_SIGNIN_TTL_HOURS` is validated whether or not the leads
+    // root is configured; `APEX_NOTIFY_SINK=email` (with `APEX_NOTIFY_FROM`)
+    // delivers the links through the transactional email sink.
+    let signin_ttl_hours =
+        apex_api::config::signin_ttl_hours(env_value("APEX_SIGNIN_TTL_HOURS").as_deref())
+            .map_err(|error| error.to_string())?;
+    match env_value("APEX_LEADS_FILE") {
+        Some(leads_path) => {
+            let root = std::path::Path::new(&leads_path)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let mut signin = apex_api::SigninService::open(root).with_ttl_hours(signin_ttl_hours);
+            if let Some(base) = env_value("APEX_CONSOLE_URL") {
+                signin = signin.with_public_base(base);
+            }
+            if let Some(mailer) = apex_api::email_sink_from_env(env_value) {
+                signin = signin.with_mailer(mailer);
+            }
+            state = state.with_signin(Arc::new(signin));
+        }
+        None => {
+            tracing::warn!(
+                "APEX_LEADS_FILE is not set; the console sign-in link is disabled (503)"
+            );
+        }
+    }
+    if state.signin.is_some() && state.workspaces.is_none() {
+        tracing::warn!(
+            "APEX_LEDGER_TOKENS_FILE is not set; free-audit workspaces cannot be recorded and \
+             the workspace pages stay closed (503)"
+        );
     }
 
     match (
@@ -240,13 +344,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The workspace publisher the phase-2 console surfaces read
-    // (`APEX_CONSOLE_PUBLISHER`), and the proposal files the runner writes
-    // (`APEX_PROPOSALS_ROOT`) plus the runner's alert log
-    // (`APEX_ALERT_FILE`, with `APEX_ALERTS_FILE` as a fallback).
-    if let Some(publisher) = env_value("APEX_CONSOLE_PUBLISHER") {
-        state = state.with_workspace_publisher(publisher);
-    }
+    // The proposal files the runner writes (`APEX_PROPOSALS_ROOT`) plus the
+    // runner's alert log (`APEX_ALERT_FILE`, with `APEX_ALERTS_FILE` as a
+    // fallback).
     if let Some(path) = env_value(apex_api::proposals::PROPOSALS_ROOT_ENV) {
         state =
             state.with_proposal_store(Arc::new(apex_api::proposals::FileProposalStore::new(path)));

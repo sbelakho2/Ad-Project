@@ -167,35 +167,7 @@ impl MaxClient {
         })?;
         // Rebuild the platform's own grouped shape: one group per distinct
         // group name, with the country list of that group.
-        let mut groups: Vec<serde_json::Value> = Vec::new();
-        {
-            let mut seen: Vec<String> = Vec::new();
-            for floor in floors {
-                let key = floor.group.clone().unwrap_or_else(|| "default".to_string());
-                if let Some(pos) = seen.iter().position(|name| *name == key) {
-                    let countries = groups[pos]["countries"]["values"]
-                        .as_array_mut()
-                        .ok_or_else(|| PlatformError::Schema {
-                            platform: PlatformId::AppLovinMax,
-                            operation: "updateFloors".into(),
-                            detail: "internal floor group lost its countries list".into(),
-                        })?;
-                    if !countries
-                        .iter()
-                        .any(|v| v.as_str() == Some(floor.country.as_str()))
-                    {
-                        countries.push(serde_json::Value::String(floor.country.clone()));
-                    }
-                    continue;
-                }
-                seen.push(key.clone());
-                groups.push(serde_json::json!({
-                    "country_group_name": key,
-                    "cpm": format_ecpm(floor.floor_ecpm),
-                    "countries": {"type": "INCLUDE", "values": [floor.country.clone()]}
-                }));
-            }
-        }
+        let groups = floor_groups(floors)?;
         let body = serde_json::json!({
             "id": unit.platform_unit_id,
             "name": unit.name,
@@ -715,35 +687,52 @@ fn parse_report_row(row: &serde_json::Value) -> Result<ReportRow, String> {
     })
 }
 
+/// Rebuild the platform's grouped `bid_floors` shape: one group per distinct
+/// group name in first-seen order, its countries deduplicated in first-seen
+/// order, and each group's `cpm` taken from its first floor.
+///
+/// The fold is single-pass: a `Vec::contains`/`position` over the grown
+/// groups and country lists would be quadratic in the submitted floor count.
 fn floor_groups(floors: &[CountryFloor]) -> Result<Vec<serde_json::Value>, PlatformError> {
-    let mut groups: Vec<serde_json::Value> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-    for floor in floors {
-        let key = floor.group.clone().unwrap_or_else(|| "default".to_string());
-        if let Some(pos) = seen.iter().position(|name| *name == key) {
-            let countries = groups[pos]["countries"]["values"]
-                .as_array_mut()
-                .ok_or_else(|| PlatformError::Schema {
-                    platform: PlatformId::AppLovinMax,
-                    operation: "updateFloors".into(),
-                    detail: "internal floor group lost its countries list".into(),
-                })?;
-            if !countries
-                .iter()
-                .any(|v| v.as_str() == Some(floor.country.as_str()))
-            {
-                countries.push(serde_json::Value::String(floor.country.clone()));
-            }
-            continue;
-        }
-        seen.push(key.clone());
-        groups.push(serde_json::json!({
-            "country_group_name": key,
-            "cpm": format_ecpm(floor.floor_ecpm),
-            "countries": {"type": "INCLUDE", "values": [floor.country.clone()]}
-        }));
+    struct Group<'a> {
+        name: &'a str,
+        cpm_micros: i64,
+        countries: Vec<&'a str>,
     }
-    Ok(groups)
+    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut seen_countries: Vec<std::collections::HashSet<&str>> = Vec::new();
+    let mut groups: Vec<Group<'_>> = Vec::new();
+    for floor in floors {
+        let key = floor.group.as_deref().unwrap_or("default");
+        match index.get(key).copied() {
+            Some(pos) => {
+                if seen_countries[pos].insert(floor.country.as_str()) {
+                    groups[pos].countries.push(floor.country.as_str());
+                }
+            }
+            None => {
+                index.insert(key, groups.len());
+                let mut seen = std::collections::HashSet::new();
+                seen.insert(floor.country.as_str());
+                seen_countries.push(seen);
+                groups.push(Group {
+                    name: key,
+                    cpm_micros: floor.floor_ecpm,
+                    countries: vec![floor.country.as_str()],
+                });
+            }
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|group| {
+            serde_json::json!({
+                "country_group_name": group.name,
+                "cpm": format_ecpm(group.cpm_micros),
+                "countries": {"type": "INCLUDE", "values": group.countries}
+            })
+        })
+        .collect())
 }
 
 fn format_ecpm(micros: i64) -> String {
@@ -1052,5 +1041,68 @@ mod tests {
         assert_eq!(format_ecpm(1_000_000), "1");
         assert_eq!(format_ecpm(10_500_000), "10.5");
         assert_eq!(format_ecpm(12_345_678), "12.345678");
+    }
+    /// The pre-optimization floor grouping: a `Vec::contains`/`position`
+    /// scan per floor. Kept verbatim as the reference the single-pass fold
+    /// must equal.
+    fn floor_groups_naive(floors: &[apex_core::platform::CountryFloor]) -> Vec<serde_json::Value> {
+        let mut groups: Vec<serde_json::Value> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for floor in floors {
+            let key = floor.group.clone().unwrap_or_else(|| "default".to_string());
+            if let Some(pos) = seen.iter().position(|name| *name == key) {
+                let countries = groups[pos]["countries"]["values"]
+                    .as_array_mut()
+                    .expect("fixture group keeps its countries list");
+                if !countries
+                    .iter()
+                    .any(|v| v.as_str() == Some(floor.country.as_str()))
+                {
+                    countries.push(serde_json::Value::String(floor.country.clone()));
+                }
+                continue;
+            }
+            seen.push(key.clone());
+            groups.push(serde_json::json!({
+                "country_group_name": key,
+                "cpm": format_ecpm(floor.floor_ecpm),
+                "countries": {"type": "INCLUDE", "values": [floor.country.clone()]}
+            }));
+        }
+        groups
+    }
+
+    #[test]
+    fn floor_grouping_equals_the_naive_scan_at_ten_thousand_floors() {
+        use apex_core::platform::CountryFloor;
+        // 200 groups x 50 floors each, with repeated countries and repeated
+        // group names interleaved: first-seen group order, first-seen country
+        // order and the first floor's cpm must all survive the single pass.
+        let floors: Vec<CountryFloor> = (0..10_000)
+            .map(|i| CountryFloor {
+                country: format!("C{:03}", (i / 200) % 60),
+                floor_ecpm: 1_000_000 + (i as i64 / 50),
+                group: Some(format!("g{:03}", i % 200)),
+            })
+            .collect();
+        // One group with unique countries: the per-country dedup axis.
+        let mut wide = floors.clone();
+        wide.truncate(3_000);
+        for (i, floor) in wide.iter_mut().enumerate() {
+            floor.group = Some("everything".to_string());
+            floor.country = format!("U{i:05}");
+        }
+        for case in [&floors, &wide] {
+            let optimized = floor_groups(case).expect("single-pass grouping");
+            let reference = floor_groups_naive(case);
+            assert_eq!(optimized, reference);
+        }
+        let grouped = floor_groups(&floors).expect("grouping");
+        assert_eq!(grouped.len(), 200, "one entry per distinct group");
+        let first = &grouped[0];
+        assert_eq!(first["country_group_name"], "g000");
+        assert_eq!(first["cpm"], "1"); // 1_000_000 micros = 1.0 unit
+        let countries = first["countries"]["values"].as_array().expect("array");
+        assert!(countries.len() <= 60, "countries dedup inside the group");
     }
 }

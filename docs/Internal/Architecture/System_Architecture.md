@@ -55,9 +55,9 @@ The production environment runs on Hetzner Cloud using a split-server architectu
 
 | Role | IP Address | OS | Key Services |
 |------|------------|----|--------------|
-| **App Server** | `46.62.252.96` | Ubuntu | Caddy, Backend, Console, Website, Redis, Control Plane (proxy) |
-| **DB Server** | `77.42.44.35` | Ubuntu | PostgreSQL 16 (NOT directly accessible) |
-| **Test Server** | `157.90.126.205` | Ubuntu | **Sales API**, Edge Worker, ML Models, Synthetic Load Generators |
+| **App Server** | `203.0.113.10` | Ubuntu | Caddy, Backend, Console, Website, Redis, Control Plane (proxy) |
+| **DB Server** | `203.0.113.12` | Ubuntu | PostgreSQL 16 (NOT directly accessible) |
+| **Test Server** | `203.0.113.11` | Ubuntu | **Sales API**, Edge Worker, ML Models, Synthetic Load Generators |
 
 ### 2.2 Sales Automation Architecture
 
@@ -67,7 +67,7 @@ The production environment runs on Hetzner Cloud using a split-server architectu
 > ALL sales automation work runs on the **Test Server**.
 
 ```
-App Server (46.62.252.96)          Test Server (157.90.126.205)
+App Server (203.0.113.10)          Test Server (203.0.113.11)
 ┌─────────────────────────┐        ┌─────────────────────────┐
 │ Control Plane :4000     │        │ Sales API :4001         │
 │ (Refactored Controllers)│◄──────►│ - Orchestrator          │
@@ -85,7 +85,7 @@ App Server (46.62.252.96)          Test Server (157.90.126.205)
                                    └─────────────────────────┘
                                               │
                                               ▼
-                                   DB Server (77.42.44.35)
+                                   DB Server (203.0.113.12)
                                    └── PostgreSQL :5432 (BRIN)
 ```
 
@@ -247,8 +247,8 @@ pm2 restart website
 
 **Check DB Connection:**
 ```bash
-# From App Server
-psql -h 77.42.44.35 -U apex_app -d apexmediation
+# From App Server (replace 203.0.113.12 with your DB server address)
+psql -h 203.0.113.12 -U apex_app -d apexmediation
 ```
 
 ---
@@ -290,7 +290,7 @@ psql -h 77.42.44.35 -U apex_app -d apexmediation
 ## 7. Troubleshooting
 
 - **"502 Bad Gateway"**: Usually means the Backend or Console container is down. Check `docker ps` and logs.
-- **"Database Connection Error"**: Check if DB server is reachable (`ping 77.42.44.35`) and Postgres is running.
+- **"Database Connection Error"**: Check if DB server is reachable (`ping 203.0.113.12`; replace with your DB server address) and Postgres is running.
 - **"SLO Page Loading Forever"**: Check `/api/public/slo` endpoint response. If null, it means no data in window.
 
 ---

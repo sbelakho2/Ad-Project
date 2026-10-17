@@ -369,7 +369,7 @@ pub async fn submit(
             &request.idempotency_key,
             &correlation,
         );
-        match state.jobs.write(&job) {
+        match state.jobs.write(&job).await {
             Ok(JobWrite::Created(existing) | JobWrite::Duplicate(existing)) => {
                 // An idempotent write returns the existing job when the key
                 // already claimed an identical action (for example after a
@@ -688,11 +688,11 @@ pub async fn object_state(
             Some((format!("change:{target}"), json!({"change_id": target})))
         }
         Capability::JobRetry => {
-            let rows = state.jobs.list().ok()?;
-            let job = rows
-                .iter()
-                .find(|row| row.sort_key() == format!("{target}.json"))
-                .or_else(|| rows.iter().find(|row| row.sort_key() == target))?;
+            // Read the one job by id: in the split-host mode the folder is
+            // not on this host, so the transport answers from the endpoint's
+            // GET instead of a local listing.
+            let job_id = target.strip_suffix(".json").unwrap_or(target);
+            let job = state.jobs.read(job_id).await.ok()?;
             Some((
                 format!("job:{target}"),
                 json!({"job_id": target, "state": job.display_state()}),

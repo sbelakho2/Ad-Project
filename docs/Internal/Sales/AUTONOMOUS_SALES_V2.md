@@ -2,7 +2,7 @@
 
 **Date:** January 2026  
 **Status:** ✅ Deployed to Production (v2.6 - Distributed Architecture)  
-**Test Server API:** `http://157.90.126.205:4001/api/autonomous/` (internal)  
+**Test Server API:** `http://203.0.113.11:4001/api/autonomous/` (internal)  
 **App Server Proxy:** `https://admin.apexmediation.ee/api/autonomous/` (proxies to test server)
 
 ---
@@ -25,7 +25,7 @@
 
 | Do | How |
 |----|-----|
-| **Test Server changes only** | All sales-api, edge-worker, inbound-smtp changes go to Test Server (157.90.126.205) |
+| **Test Server changes only** | All sales-api, edge-worker, inbound-smtp changes go to Test Server (203.0.113.11) |
 | **Check tunnel health first** | `ssh app 'curl -s http://127.0.0.1:4001/health'` - if this fails, tunnel is down |
 | **Read logs before changing** | `journalctl -u control-plane -n 50` on App Server shows proxy errors |
 | **Verify after restart** | Always check `/api/autonomous/health` returns "healthy" status |
@@ -33,7 +33,7 @@
 ### 🔧 Quick Reference - Server Roles
 
 ```
-APP SERVER (46.62.252.96)     TEST SERVER (157.90.126.205)     DB SERVER (77.42.44.35)
+APP SERVER (203.0.113.10)     TEST SERVER (203.0.113.11)     DB SERVER (203.0.113.12)
 ├── control-plane:4000        ├── sales-api:4001 (PM2)         └── PostgreSQL (via tunnel)
 │   └── PROXY ONLY            │   └── ALL EXECUTION
 ├── backend (PM2)             ├── edge-worker:3500 (systemd)
@@ -125,16 +125,16 @@ The system uses a **distributed architecture** where the **Test Server runs ALL 
 
 | Server | IP | Role | Services |
 |--------|-----|------|----------|
-| **App Server** | 46.62.252.96 | **Proxy Client ONLY** | control-plane (port 4000) proxies to test server |
-| **Test Server** | 157.90.126.205 | **Execution Server** | sales-api (port 4001), edge-worker (port 3500), inbound-smtp |
-| **DB Server** | 77.42.44.35 | Database | PostgreSQL (NOT directly accessible) |
+| **App Server** | 203.0.113.10 | **Proxy Client ONLY** | control-plane (port 4000) proxies to test server |
+| **Test Server** | 203.0.113.11 | **Execution Server** | sales-api (port 4001), edge-worker (port 3500), inbound-smtp |
+| **DB Server** | 203.0.113.12 | Database | PostgreSQL (NOT directly accessible) |
 
 > **⚠️ CRITICAL: App Server runs NO sales automation logic.** It is strictly a proxy client.  
 > All orchestration, spintax processing, scoring, and messaging runs on the Test Server.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                   APP SERVER (46.62.252.96)                          │
+│                   APP SERVER (203.0.113.10)                          │
 │                      *** PROXY CLIENT ONLY ***                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
@@ -153,7 +153,7 @@ The system uses a **distributed architecture** where the **Test Server runs ALL 
                             │ SSH Tunnels (secure)
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  TEST SERVER (157.90.126.205)                        │
+│                  TEST SERVER (203.0.113.11)                          │
 │                   *** ALL SALES AUTOMATION RUNS HERE ***             │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
@@ -185,7 +185,7 @@ The system uses a **distributed architecture** where the **Test Server runs ALL 
                             │ SSH Tunnel via App Server
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    DB SERVER (77.42.44.35)                           │
+│                    DB SERVER (203.0.113.12)                          │
 │                    *** NOT DIRECTLY ACCESSIBLE ***                   │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │

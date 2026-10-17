@@ -580,6 +580,7 @@ mod tests {
             http_url: "http://127.0.0.1:1".into(),
             database: "apex_probe".into(),
             request_timeout_ms: 1_500,
+            ..ClickHouseConfig::default()
         })
         .expect("store");
         ClickHouseReader::new(store)

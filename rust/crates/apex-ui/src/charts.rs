@@ -625,6 +625,51 @@ mod tests {
         assert_eq!(ChartColor::Ink.hex(), tokens::INK);
     }
 
+    /// One bar mark per present point and one table row per x label at
+    /// 10_000 points: the render is linear in the input, and a point is
+    /// never drawn or tabulated twice.
+    #[test]
+    fn bar_chart_draws_one_mark_per_point_at_ten_thousand_points() {
+        const N: usize = 10_000;
+        let spec = ChartSpec {
+            title: "Sends".into(),
+            desc: "per day".into(),
+            width: 720,
+            height: 220,
+            y_label: "Sends".into(),
+            x_labels: (0..N)
+                .map(|i| format!("2026-01-{:02}", i % 28 + 1))
+                .collect(),
+            zero_line: false,
+        };
+        let values: Vec<Option<f64>> = (0..N)
+            .map(|i| {
+                if i % 100 == 7 {
+                    None
+                } else {
+                    Some((i % 97) as f64)
+                }
+            })
+            .collect();
+        let present = values.iter().filter(|v| v.is_some()).count();
+        assert_eq!(present, 9_900);
+        let html = bar_chart(&spec, &values, ChartColor::Ink);
+        assert_eq!(
+            html.matches("<rect ").count(),
+            present,
+            "one bar per present point"
+        );
+        // The table is transposed (one row per series, one column per x
+        // label): the header row plus one bar row, and exactly one cell per
+        // x label after the leading value cell.
+        assert_eq!(html.matches("<tr").count(), 2, "header plus the bar row");
+        assert_eq!(
+            html.matches("<td").count(),
+            N,
+            "one cell per x label (the leading value cell is a row header)"
+        );
+    }
+
     #[test]
     fn legend_swatches_use_stylesheet_classes_not_inline_styles() {
         let html = line_chart(
@@ -858,5 +903,79 @@ mod tests {
         );
         assert_eq!(html.matches("<th ").count(), 4);
         assert!(html.contains("<th scope=\"col\">Value</th>"));
+    }
+
+    #[test]
+    fn a_last_point_on_the_left_half_anchors_start_and_empty_series_skip_labels() {
+        // The only present point sits far left of 60% of the width, so the
+        // direct label anchors at "start"; the all-missing series draws no
+        // direct label at all.
+        let html = line_chart(
+            &spec("Lift", &["a", "b"]),
+            &[
+                series("Control", ChartColor::Control, vec![Some(1.0), None]),
+                series("Test", ChartColor::Test, vec![None, None]),
+            ],
+            0.0,
+            2.0,
+        );
+        assert!(html.contains("text-anchor=\"start\""), "{html}");
+        assert!(html.contains(">Control</text>"), "{html}");
+        assert!(!html.contains(">Test</text>"), "no points, no direct label");
+        assert_eq!(html.matches("<circle").count(), 1);
+    }
+
+    #[test]
+    fn fractional_axes_and_single_labels_use_the_helper_paths() {
+        // count == 1 centers the single x position; a fractional y axis
+        // renders with one decimal.
+        let single = line_chart(
+            &spec("Lift", &["a"]),
+            &[series("Test", ChartColor::Test, vec![Some(0.5)])],
+            0.3,
+            1.7,
+        );
+        assert!(single.contains(">0.3</text>"), "{single}");
+        assert!(single.contains(">1.7</text>"), "{single}");
+        assert!(
+            single.contains("text-anchor=\"middle\" font-size=\"12\">a</text>"),
+            "{single}"
+        );
+        let empty = line_chart(&spec("Lift", &[]), &[], 0.0, 1.0);
+        assert!(!empty.contains("chart-legend"), "{empty}");
+        assert!(!empty.contains("text-anchor=\"middle\""), "{empty}");
+    }
+
+    #[test]
+    fn bars_refuse_bad_frames_bad_counts_and_stay_flat_on_zero() {
+        let mut small = spec("Lift", &["a"]);
+        small.width = 60;
+        assert!(bar_chart(&small, &[Some(1.0)], ChartColor::Ink)
+            .contains("Not available (chart size is too small)"));
+        let too_many = bar_chart(
+            &spec("Lift", &["a"]),
+            &[Some(1.0), Some(2.0)],
+            ChartColor::Ink,
+        );
+        assert!(too_many.contains("Not available (bars exceed the x labels)"));
+        // A flat zero series keeps a drawable range and skips NaNs.
+        let flat = bar_chart(
+            &spec("Lift", &["a", "b"]),
+            &[Some(0.0), Some(f64::NAN)],
+            ChartColor::Ink,
+        );
+        assert!(flat.contains("<rect"), "the zero bar still draws: {flat}");
+        assert_eq!(flat.matches("<rect").count(), 1);
+        assert!(flat.contains("Not available (no data)"), "{flat}");
+    }
+
+    #[test]
+    fn a_one_point_sparkline_still_renders_its_single_position() {
+        let single = sparkline(&[Some(2.0)]);
+        assert!(
+            single.contains("<desc>1 points, 0 missing</desc>"),
+            "{single}"
+        );
+        assert!(!single.contains("<polyline"), "one point cannot connect");
     }
 }

@@ -14,12 +14,16 @@ use crate::signing::random_hex_32;
 /// Render `/plan`.
 pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> String {
     let items = plan(&data.snap, &data.learned, &data.config, data.now);
+    // One lookup set for the whole page: a per-item scan of the approval
+    // list would make the plan quadratic in items × approvals.
+    let approvals: std::collections::HashSet<&str> =
+        data.snap.approvals.iter().map(String::as_str).collect();
     let mode = mode_banner(data, transport);
     let body = format!(
         "{mode}\n{}{}{}{}{}{}",
         notices(data),
-        planned_table(data, &items),
-        approvals_panel(meta, data, &items),
+        planned_table(data, &items, &approvals),
+        approvals_panel(meta, &items, &approvals),
         not_planned_table(&items),
         decisions_table(data),
         empty_explainer(&items)
@@ -102,51 +106,65 @@ pub fn verdict_cell(item: &PlanItem, approved: bool) -> Cell {
     }
 }
 
-fn planned_table(data: &RequestData, items: &[PlanItem]) -> String {
+fn planned_table(
+    data: &RequestData,
+    items: &[PlanItem],
+    approvals: &std::collections::HashSet<&str>,
+) -> String {
     let planned: Vec<&PlanItem> = items
         .iter()
         .filter(|item| item.decision.verdict != Verdict::Deny)
         .collect();
+    let multi = data.config.senders.len() > 1;
     let rows: Vec<Vec<Cell>> = planned
         .iter()
         .map(|item| {
-            let approved = data.snap.approvals.contains(&item.touch_id);
-            vec![
+            let approved = approvals.contains(item.touch_id.as_str());
+            let mut row = vec![
                 Cell::Mono(item.touch_id.clone()),
                 Cell::Mono(item.email.clone()),
                 Cell::Link(
                     item.publisher.clone(),
                     format!("/publishers/{}", item.publisher),
                 ),
-                Cell::Num((item.step + 1).to_string()),
-                match &item.arm {
-                    Some(arm) => Cell::Mono(arm.clone()),
-                    None => Cell::Muted(or_not_available("no grounded variant")),
-                },
-                Cell::Num(format!("${:.2}", item.expected_value)),
-                Cell::Num(percent(item.p_interest)),
-                Cell::Text(utc_datetime(item.send_at * 1000)),
-                verdict_cell(item, approved),
-            ]
+            ];
+            if multi {
+                row.push(match &item.sender {
+                    Some(domain) => Cell::Mono(domain.clone()),
+                    None => Cell::Muted(or_not_available("no sending domain")),
+                });
+            }
+            row.push(Cell::Num((item.step + 1).to_string()));
+            row.push(match &item.arm {
+                Some(arm) => Cell::Mono(arm.clone()),
+                None => Cell::Muted(or_not_available("no grounded variant")),
+            });
+            row.push(Cell::Num(format!("${:.2}", item.expected_value)));
+            row.push(Cell::Num(percent(item.p_interest)));
+            row.push(Cell::Text(utc_datetime(item.send_at * 1000)));
+            row.push(verdict_cell(item, approved));
+            row
         })
         .collect();
     let empty = EmptyState {
         reason: "No touch is planned right now: no contact is due, or every due contact is denied by the gate (the Not planned table below lists the reasons).".to_string(),
         action: None,
     };
+    let mut headers = vec!["Touch", "Contact", "Publisher"];
+    if multi {
+        headers.push("From");
+    }
+    headers.extend([
+        "Step",
+        "Arm",
+        "Expected value",
+        "P(interest)",
+        "Send at",
+        "Verdict",
+    ]);
     data_table(
         Some("Planned and deferred touches"),
-        &[
-            "Touch",
-            "Contact",
-            "Publisher",
-            "Step",
-            "Arm",
-            "Expected value",
-            "P(interest)",
-            "Send at",
-            "Verdict",
-        ],
+        &headers,
         &rows,
         Some(empty),
         Some(&shared::count_note(
@@ -159,12 +177,16 @@ fn planned_table(data: &RequestData, items: &[PlanItem]) -> String {
 
 /// The approve forms: one real form per touch waiting for operator approval,
 /// below the table because a table cell never carries a form.
-fn approvals_panel(meta: &PageMeta, data: &RequestData, items: &[PlanItem]) -> String {
+fn approvals_panel(
+    meta: &PageMeta,
+    items: &[PlanItem],
+    approvals: &std::collections::HashSet<&str>,
+) -> String {
     let waiting: Vec<&PlanItem> = items
         .iter()
         .filter(|item| {
             item.decision.verdict == Verdict::NeedsApproval
-                && !data.snap.approvals.contains(&item.touch_id)
+                && !approvals.contains(item.touch_id.as_str())
         })
         .collect();
     if waiting.is_empty() {
@@ -453,5 +475,48 @@ mod tests {
         assert!(html.contains("There is no plan yet"));
         assert!(html.contains("apex-sales import-seeds"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The page's approval lookup is a set; it must answer exactly like the
+    /// linear `Vec::contains` it replaced, over 10_000 recorded approvals and
+    /// 10_000 probes (members, duplicates and near misses included).
+    ///
+    /// The pre-fix page compared `data.snap.approvals.contains(&item.touch_id)`
+    /// per planned item (O(items x approvals)); this pins the replacement
+    /// predicate to that exact answer set, and the measured before/after
+    /// delta lives in the perf harness table.
+    #[test]
+    fn approval_set_lookup_matches_the_linear_scan_at_ten_thousand_entries() {
+        use std::collections::HashSet;
+        let approvals: Vec<String> = (0..10_000)
+            .map(|i| apex_sales::engine::touch_id(&format!("lead{i}@p{i}.example"), 0, 20_745))
+            .chain((0..5).map(|i| {
+                // Duplicates are legal inputs and must not change answers.
+                apex_sales::engine::touch_id(&format!("lead{i}@p{i}.example"), 0, 20_745)
+            }))
+            .collect();
+        let set: HashSet<&str> = approvals.iter().map(String::as_str).collect();
+
+        let probes: Vec<String> = (0..10_000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    apex_sales::engine::touch_id(&format!("lead{i}@p{i}.example"), 0, 20_745)
+                } else {
+                    apex_sales::engine::touch_id(
+                        &format!("someone-else{i}@elsewhere{i}.example"),
+                        0,
+                        20_745,
+                    )
+                }
+            })
+            .collect();
+        let mut members = 0;
+        for probe in &probes {
+            let from_set = set.contains(probe.as_str());
+            let from_scan = approvals.contains(probe);
+            assert_eq!(from_set, from_scan, "{probe}");
+            members += usize::from(from_scan);
+        }
+        assert_eq!(members, 5_000, "the probes really hit both outcomes");
     }
 }

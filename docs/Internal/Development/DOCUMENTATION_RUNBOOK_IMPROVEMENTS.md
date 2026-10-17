@@ -154,7 +154,7 @@ grep -A 10 "How to Simulate" docs/Monitoring/ALERTS.md | head -20
     summary: "Auction latency p95 above 200ms"
     description: "{{ $value }}ms latency on {{ $labels.instance }}"
     runbook: "https://github.com/sbelakho2/apex-mediation-platform/blob/main/docs/runbooks/rtb-high-latency.md"
-    dashboard: "http://46.62.252.96:3001/d/apex-rtb-analytics"  # Hetzner Production
+    dashboard: "http://203.0.113.10:3001/d/apex-rtb-analytics"  # Hetzner Production
 ```
 
 ### Evidence

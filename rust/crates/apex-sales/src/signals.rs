@@ -724,3 +724,155 @@ mod tests {
         }
     }
 }
+
+/// Cross-crate parity with the audit rule.
+///
+/// The app-ads.txt corpus lives once, at
+/// `rust/crates/apex-audit/tests/fixtures/adstxt/`, and is read by both
+/// crates: this parser's test below and the audit rule's integration test
+/// (`apex-audit/tests/app_ads_txt_corpus.rs`) assert against the same
+/// `<stem>.expected.json` sidecars, so "the audit and the sales engine report
+/// the same errors for the same file" is enforced at build time in both
+/// crates. The directory is reached through `CARGO_MANIFEST_DIR/../apex-audit`
+/// because this crate is dependency-free by design and cannot carry the
+/// fixtures itself; CI runs in-repo, where that traversal always resolves.
+#[cfg(test)]
+mod app_ads_txt_corpus_parity {
+    use std::path::PathBuf;
+
+    use crate::json::Value;
+    use crate::signals::{parse_app_ads_txt, AdsTxtErrorKind};
+
+    /// The corpus file stems; the directory must contain exactly the
+    /// `<stem>.txt` and `<stem>.expected.json` pairs for these stems.
+    const CORPUS: [&str; 10] = [
+        "clean-standard",
+        "commented",
+        "variables-only",
+        "crlf-bom",
+        "reseller",
+        "malformed-two-field",
+        "malformed-five-field",
+        "mixed-duplicates",
+        "google-cert",
+        "comments-only",
+    ];
+
+    fn corpus_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../apex-audit/tests/fixtures/adstxt")
+    }
+
+    fn kind_name(kind: AdsTxtErrorKind) -> &'static str {
+        match kind {
+            AdsTxtErrorKind::TooFewFields => "TooFewFields",
+            AdsTxtErrorKind::BadDomain => "BadDomain",
+            AdsTxtErrorKind::EmptyAccountId => "EmptyAccountId",
+            AdsTxtErrorKind::BadRelationship => "BadRelationship",
+            AdsTxtErrorKind::Duplicate => "Duplicate",
+            AdsTxtErrorKind::WrongGoogleCertId => "WrongGoogleCertId",
+        }
+    }
+
+    #[test]
+    fn corpus_directory_matches_the_hardcoded_list() {
+        let mut found: Vec<String> = std::fs::read_dir(corpus_dir())
+            .expect("the shared corpus directory must exist")
+            .map(|entry| {
+                entry
+                    .expect("readable corpus entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf-8 names")
+            })
+            .collect();
+        found.sort();
+        let mut expected: Vec<String> = Vec::new();
+        for stem in CORPUS {
+            expected.push(format!("{stem}.txt"));
+            expected.push(format!("{stem}.expected.json"));
+        }
+        expected.sort();
+        assert_eq!(
+            found, expected,
+            "corpus files drifted from the hardcoded list"
+        );
+        assert!(CORPUS.len() >= 8, "the corpus must hold at least 8 files");
+    }
+
+    #[test]
+    fn corpus_error_sets_equal_the_expected_json() {
+        let dir = corpus_dir();
+        for stem in CORPUS {
+            let file_name = format!("{stem}.txt");
+            let text = std::fs::read_to_string(dir.join(&file_name)).expect("corpus file readable");
+            let expected_text = std::fs::read_to_string(dir.join(format!("{stem}.expected.json")))
+                .expect("sidecar readable");
+            let expected = crate::json::parse(&expected_text).expect("sidecar is valid JSON");
+            assert_eq!(
+                expected.get("file").and_then(Value::as_str),
+                Some(file_name.as_str())
+            );
+
+            let report = parse_app_ads_txt(&text);
+            let expected_errors = expected
+                .get("errors")
+                .and_then(Value::as_array)
+                .expect("sidecar errors array");
+            let actual: Vec<(usize, &'static str)> = report
+                .errors
+                .iter()
+                .map(|error| (error.line, kind_name(error.kind)))
+                .collect();
+            assert_eq!(
+                actual.len(),
+                expected_errors.len(),
+                "{file_name}: error count"
+            );
+            for (index, wanted) in expected_errors.iter().enumerate() {
+                let line = wanted
+                    .get("line")
+                    .and_then(Value::as_i64)
+                    .expect("line number") as usize;
+                let kind = wanted
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .expect("error kind");
+                assert_eq!(actual[index], (line, kind), "{file_name}: error {index}");
+            }
+
+            let records = expected
+                .get("records")
+                .and_then(Value::as_i64)
+                .expect("records count");
+            assert_eq!(report.records.len() as i64, records, "{file_name}: records");
+            let variables = expected
+                .get("variables")
+                .and_then(Value::as_i64)
+                .expect("variables count");
+            assert_eq!(
+                report.variables.len() as i64,
+                variables,
+                "{file_name}: variables"
+            );
+
+            let mut domains: Vec<&str> = report
+                .records
+                .iter()
+                .map(|record| record.domain.as_str())
+                .collect();
+            domains.sort_unstable();
+            domains.dedup();
+            let wanted_domains: Vec<&str> = expected
+                .get("domains")
+                .and_then(Value::as_array)
+                .expect("domains array")
+                .iter()
+                .map(|domain| domain.as_str().expect("domain string"))
+                .collect();
+            assert_eq!(
+                domains, wanted_domains,
+                "{file_name}: accepted-record domains"
+            );
+        }
+    }
+}

@@ -74,6 +74,66 @@ pub enum BillingError {
     #[error("invoice line seq {seq} has an identifier unusable in an Adyen reference: {detail}")]
     UnsafeIdentifier { seq: u64, detail: String },
 
+    /// A required VAT field is missing or empty on a party's profile (or the
+    /// config entry naming where the seller profile lives). `party` is
+    /// `"seller"` or `"customer"`; `field` names the field — for example
+    /// `legalName`, `addressLines`, `country`, `vatNumber`, `vatRateBp` — or
+    /// the environment variable `APEX_BILLING_PROFILE`. A half-empty invoice
+    /// is never rendered.
+    #[error("incomplete {party} billing profile: missing {field}")]
+    MissingProfileField {
+        party: &'static str,
+        field: &'static str,
+    },
+
+    /// The invoice carries no customer profile, so no VAT treatment can be
+    /// stated lawfully.
+    #[error("the invoice carries no customer profile, so no VAT treatment can be stated")]
+    MissingCustomerProfile,
+
+    /// A VAT rate (from the profile JSON or `APEX_BILLING_VAT_RATE_BP`) is
+    /// outside the allowed `0..=10000` basis points.
+    #[error("invalid VAT rate: {detail}")]
+    InvalidVatRate { detail: String },
+
+    /// A VAT number fails the minimal shape check (non-empty, ASCII
+    /// alphanumeric, 4..=14 characters). No VIES call is made.
+    #[error("invalid VAT number for the {party}: {detail}")]
+    InvalidVatNumber { party: &'static str, detail: String },
+
+    /// A country code is not exactly two ASCII letters.
+    #[error("invalid country code for the {party}: {value:?}")]
+    InvalidCountryCode { party: &'static str, value: String },
+
+    /// No VAT treatment has been applied; the renderer refuses to guess one.
+    #[error("no VAT treatment has been applied to this invoice")]
+    VatTreatmentNotApplied,
+
+    /// The stored VAT figures disagree with the treatment and profiles they
+    /// would be rendered from.
+    #[error("invoice figures do not match the applied VAT treatment: {detail}")]
+    InconsistentVat { detail: String },
+
+    /// A lawful VAT invoice needs its gapless register number first.
+    #[error("invoice has no register number: issue it through the invoice register first")]
+    UnregisteredInvoice,
+
+    /// The invoice register is unreadable or not a register: a line that is
+    /// not an invoice, carries no positive number, or repeats a number.
+    #[error("invoice register is unusable: {detail}")]
+    RegisterCorrupt { detail: String },
+
+    /// A flat plan's persisted state file is unreadable or malformed. The
+    /// console and the monthly pass refuse rather than fabricating a plan.
+    #[error("plan state is unusable: {detail}")]
+    PlanStateCorrupt { detail: String },
+
+    /// A stored-method (card-on-file) charge was refused by the provider.
+    /// The typed fallback path creates a payment link instead; the refusal
+    /// is surfaced in the collection line, never silently skipped.
+    #[error("stored payment method charge was refused: {detail}")]
+    StoredChargeRefused { detail: String },
+
     /// The signature header could not be parsed (or a ledger record was not a
     /// billing proof).
     #[error("malformed input: {0}")]

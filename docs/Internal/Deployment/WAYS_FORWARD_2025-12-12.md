@@ -236,7 +236,7 @@ The following items block production launch:
    - **Result:** ✅ Operational documentation complete
 
 2. **Email/Postfix Setup** ✅ (2025-12-12 14:25 UTC):
-   - Configured Postfix MTA on test server (157.90.126.205)
+   - Configured Postfix MTA on test server (203.0.113.11)
    - OpenDKIM with apexmail selector
    - DNS: MX, SPF, DKIM, DMARC, PTR all configured
    - **Result:** ✅ Email automation ready
@@ -359,10 +359,10 @@ All critical blockers have been resolved:
 
 | Tier | Email | Password | SDK Key |
 |------|-------|----------|---------|
-| Free | test@apexmediation.ee | admin123 | ak_test_38dc... |
-| Starter | starter@apexmediation.ee | admin123 | ak_test_5bfd... |
-| Growth | growth@apexmediation.ee | admin123 | ak_test_d509... |
-| Scale | scale@apexmediation.ee | admin123 | ak_test_9b38... |
-| Enterprise | enterprise@apexmediation.ee | admin123 | ak_test_0228... |
+| Free | test@apexmediation.ee | <operator-password-from-the-vault> | ak_test_38dc... |
+| Starter | starter@apexmediation.ee | <operator-password-from-the-vault> | ak_test_5bfd... |
+| Growth | growth@apexmediation.ee | <operator-password-from-the-vault> | ak_test_d509... |
+| Scale | scale@apexmediation.ee | <operator-password-from-the-vault> | ak_test_9b38... |
+| Enterprise | enterprise@apexmediation.ee | <operator-password-from-the-vault> | ak_test_0228... |
 
 All accounts and SDK keys are ready for continued testing.

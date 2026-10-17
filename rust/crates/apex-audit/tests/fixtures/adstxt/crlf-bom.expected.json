@@ -1,0 +1,8 @@
+{
+  "file": "crlf-bom.txt",
+  "note": "CRLF line endings and a UTF-8 BOM: tolerated, no errors.",
+  "errors": [],
+  "records": 2,
+  "variables": 1,
+  "domains": ["applovin.com", "google.com"]
+}

@@ -518,6 +518,7 @@ mod tests {
                 at: NOW - 30 * DAY,
                 email: "maria@studio.example".into(),
                 publisher: "studio.example".into(),
+                from: None,
                 step: 0,
                 arm: "t0-finding".into(),
                 message_id: "m".into(),

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use apex_control::capabilities::{Capability, Role};
 use apex_control::config::ControlConfig;
-use apex_control::data::ControlData;
+use apex_control::data::{ControlData, DurableReader, LiveData, OperationsEvidence};
 use apex_control::fixture_render::{self, FIXTURE_PASSWORD, FIXTURE_TOTP_SECRET};
 use apex_control::pages;
 use apex_control::routes::router;
@@ -54,7 +54,7 @@ fn harness() -> Harness {
     let work_dir = state
         .jobs
         .dir()
-        .parent()
+        .and_then(std::path::Path::parent)
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
     let clock = TestClock::new(apex_control::fixtures::DEMO_NOW_MS);
@@ -252,7 +252,7 @@ async fn form_for(
 }
 
 /// The target used for one capability in the matrix.
-fn target_for(capability: Capability, state: &ControlState) -> String {
+async fn target_for(capability: Capability, state: &ControlState) -> String {
     match capability {
         Capability::IncidentAcknowledge | Capability::IncidentResolve | Capability::OwnerAssign => {
             "inc_018".to_string()
@@ -273,7 +273,14 @@ fn target_for(capability: Capability, state: &ControlState) -> String {
             );
             // The write is idempotent by key: repeated calls resolve to the
             // one durable job, whose id is the target.
-            state.jobs.write(&job).expect("job").job().job_id.clone()
+            state
+                .jobs
+                .write(&job)
+                .await
+                .expect("job")
+                .job()
+                .job_id
+                .clone()
         }
         Capability::FleetPauseScheduling | Capability::FleetResumeScheduling => {
             "fleet:scheduling".to_string()
@@ -513,7 +520,7 @@ async fn every_role_times_every_capability_is_permitted_or_denied_with_exact_cop
     for (role_index, role) in Role::ALL.into_iter().enumerate() {
         for (capability_index, capability) in Capability::ALL.into_iter().enumerate() {
             let signed = open_session(&harness.state, &format!("probe{role_index}"), role);
-            let target = target_for(capability, &harness.state);
+            let target = target_for(capability, &harness.state).await;
             let key = format!(
                 "{:x}{:x}",
                 role_index as u128 * 1_000 + capability_index as u128,
@@ -821,7 +828,7 @@ async fn duplicate_submits_return_the_same_result_with_one_journal_entry_and_one
             .count(),
         1
     );
-    let jobs = harness.state.jobs.list().expect("jobs");
+    let jobs = harness.state.jobs.list().await.expect("jobs");
     let matching = jobs
         .iter()
         .filter(|job| match job {
@@ -862,7 +869,7 @@ async fn a_reused_key_for_a_different_target_is_a_conflict_and_changes_nothing()
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     let journal_rows = harness.state.journal.read().expect("journal").entries.len();
-    let job_rows = harness.state.jobs.list().expect("jobs").len();
+    let job_rows = harness.state.jobs.list().await.expect("jobs").len();
     // The same key now targets a different account: a fresh, valid form that
     // would execute if the key were not bound to the first action.
     let second = form_for(
@@ -892,7 +899,10 @@ async fn a_reused_key_for_a_different_target_is_a_conflict_and_changes_nothing()
         harness.state.journal.read().expect("journal").entries.len(),
         journal_rows
     );
-    assert_eq!(harness.state.jobs.list().expect("jobs").len(), job_rows);
+    assert_eq!(
+        harness.state.jobs.list().await.expect("jobs").len(),
+        job_rows
+    );
 }
 
 #[tokio::test]
@@ -912,7 +922,7 @@ async fn a_durable_job_claim_for_a_different_action_is_a_conflict() {
         key,
         "corr-stale",
     );
-    harness.state.jobs.write(&stale).expect("stale job");
+    harness.state.jobs.write(&stale).await.expect("stale job");
     let journal_rows = harness.state.journal.read().expect("journal").entries.len();
     let form = form_for(
         &harness.state,
@@ -940,7 +950,7 @@ async fn a_durable_job_claim_for_a_different_action_is_a_conflict() {
         "the conflict writes no journal entry"
     );
     assert_eq!(
-        harness.state.jobs.list().expect("jobs").len(),
+        harness.state.jobs.list().await.expect("jobs").len(),
         1,
         "the durable job claim is unchanged"
     );
@@ -1065,7 +1075,7 @@ async fn concurrent_submits_of_one_key_produce_one_job_and_one_journal_entry() {
         1,
         "one journal entry"
     );
-    let jobs = harness.state.jobs.list().expect("jobs");
+    let jobs = harness.state.jobs.list().await.expect("jobs");
     let durable = jobs
         .iter()
         .filter(|job| match job {
@@ -1191,7 +1201,7 @@ async fn the_job_file_matches_the_frozen_schema() {
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    let jobs = harness.state.jobs.list().expect("jobs");
+    let jobs = harness.state.jobs.list().await.expect("jobs");
     let job = jobs
         .iter()
         .find_map(|job| match job {
@@ -1218,6 +1228,7 @@ async fn the_job_file_matches_the_frozen_schema() {
             .state
             .jobs
             .dir()
+            .expect("local jobs dir")
             .join(format!("{}.json", job.job_id)),
     )
     .expect("job file");
@@ -1307,6 +1318,8 @@ fn unconfigured_state() -> ControlState {
         operators_path: None,
         journal_path: work.join("journal.jsonl"),
         jobs_dir: work.join("jobs"),
+        jobs_remote: None,
+        sync_marker: None,
         environment: "TEST".to_string(),
         ledger_root: work.join("ledgers"),
         invoice_register: work.join("invoices.jsonl"),
@@ -1432,6 +1445,83 @@ async fn fixture_pages_scale_percentages_exactly_once() {
 }
 
 #[tokio::test]
+async fn the_system_page_shows_the_copied_ledger_sync_age_or_the_honest_absence() {
+    let dir = std::env::temp_dir().join(format!(
+        "apex-control-syncpage-{}-{}",
+        std::process::id(),
+        apex_control::signing::random_hex_32()
+    ));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let marker = dir.join("sync-marker.json");
+    let as_of = apex_control::fixtures::DEMO_NOW_MS;
+    std::fs::write(
+        &marker,
+        format!(
+            "{{\"synced_at_unix_ms\":{},\"source\":\"ledger\"}}",
+            as_of - 3 * 3_600_000
+        ),
+    )
+    .expect("write");
+
+    let live_with_marker = |marker: Option<std::path::PathBuf>| {
+        ControlData::Live(Box::new(LiveData {
+            analytics: None,
+            durable: DurableReader::new(dir.join("ledgers"), dir.join("invoices.jsonl")),
+            operations: Ok(OperationsEvidence::default()),
+            sync_marker: marker,
+        }))
+    };
+
+    // Recorded: the exact line, with the fixed as-of clock.
+    let state = fixture_render::fixture_state()
+        .expect("fixture state")
+        .with_data(live_with_marker(Some(marker.clone())));
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+    let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    let expected = format!(
+        "Ledger copy synced: {} (age 3 h)",
+        apex_ui::format::utc_datetime(as_of - 3 * 3_600_000)
+    );
+    assert!(
+        html.contains(&expected),
+        "expected the sync line '{expected}' in: {html}"
+    );
+
+    // Unset and absent both render the honest not-recorded state.
+    for marker in [None, Some(dir.join("absent.json"))] {
+        let state = fixture_render::fixture_state()
+            .expect("fixture state")
+            .with_data(live_with_marker(marker));
+        let signed = open_session(&state, "maya", Role::Operator);
+        let app = router(state);
+        let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            html.contains("Ledger copy synced: not recorded"),
+            "expected the honest absent state in: {html}"
+        );
+    }
+
+    // A malformed marker is a typed unavailable, never a panic: the page
+    // still serves and explains the absence instead of inventing an age.
+    std::fs::write(&marker, "{ not json").expect("write");
+    let state = fixture_render::fixture_state()
+        .expect("fixture state")
+        .with_data(live_with_marker(Some(marker)));
+    let signed = open_session(&state, "maya", Role::Operator);
+    let app = router(state);
+    let (status, html) = get(&app, "/control/system", Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("Ledger copy synced: not recorded (the sync marker did not parse"),
+        "expected the typed unreadable reason in: {html}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn font_assets_are_served_from_the_router() {
     let harness = harness();
     let app = app(&harness);
@@ -1487,6 +1577,8 @@ async fn a_configured_but_invalid_operator_file_refuses_startup() {
         operators_path: Some(work.join("operators.json")),
         journal_path: work.join("journal.jsonl"),
         jobs_dir: work.join("jobs"),
+        jobs_remote: None,
+        sync_marker: None,
         environment: "TEST".to_string(),
         ledger_root: work.join("ledgers"),
         invoice_register: work.join("invoices.jsonl"),

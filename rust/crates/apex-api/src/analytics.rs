@@ -793,6 +793,7 @@ mod tests {
                     http_url: "http://127.0.0.1:9".to_string(),
                     database: "unreachable".to_string(),
                     request_timeout_ms: 200,
+                    ..ClickHouseConfig::default()
                 })
                 .expect("config"),
             ),

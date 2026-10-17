@@ -23,6 +23,11 @@ pub struct CycleJobReport {
     pub applied: u32,
     pub skipped: u32,
     pub awaiting_approval: u32,
+    /// Proposals held because the platform adapter has not verified the
+    /// operation as writable (`verify-live`): one typed reason per held
+    /// proposal, `awaiting live verification for <platform>: <operation>`.
+    /// The pass continues past a held proposal.
+    pub awaiting_verification: Vec<String>,
 }
 
 /// Run one write cycle from `snapshot_path`: load the audit snapshot, load
@@ -43,7 +48,15 @@ pub async fn run(
     let snapshot: Snapshot = serde_json::from_str(&raw)
         .map_err(|error| crate::model::PlanError::Validation(format!("snapshot json: {error}")))?;
     let priors = runner.runner_priors().cloned().unwrap_or_default();
-    let proposals = crate::proposals::floor_proposals(&snapshot, &priors, runner.policy());
+    // The cycle's timestamp seeds the Thompson draws, so a replay of the same
+    // cycle reproduces the same plan (the same seam `settle` seeds its
+    // bootstrap with).
+    let proposals = crate::proposals::floor_proposals(
+        &snapshot,
+        &priors,
+        runner.policy(),
+        now_unix_ms.max(0) as u64,
+    );
     let mut report = CycleJobReport {
         proposed: proposals.len(),
         ..CycleJobReport::default()
@@ -64,6 +77,7 @@ pub async fn run(
     report.applied = outcome.applied;
     report.skipped = outcome.skipped;
     report.awaiting_approval = outcome.awaiting_approval;
+    report.awaiting_verification = outcome.awaiting_verification.clone();
 
     // A proposal held for approval is a durable fact and a customer message:
     // `proposal_created` lands in analytics and the approval request goes to
@@ -242,6 +256,10 @@ mod tests {
             .expect("cycle");
         assert!(report.proposed > 0, "the model proposes a floor move");
         assert!(report.applied >= 1, "the write loop started experiments");
+        assert!(
+            report.awaiting_verification.is_empty(),
+            "a verified writable operation records no hold"
+        );
         assert!(ledger
             .records()
             .iter()
@@ -250,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cycle_with_no_prior_support_proposes_nothing() {
+    async fn a_cycle_from_a_fresh_account_proposes_from_the_default_prior() {
         let dir = std::env::temp_dir().join(format!("apex-cycle0-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -266,8 +284,57 @@ mod tests {
         let report = run(&runner, &mut ledger, &snapshot_path, 1)
             .await
             .expect("cycle");
-        assert_eq!(report.proposed, 0);
-        assert_eq!(report.applied, 0);
+        assert!(
+            report.proposed > 0,
+            "the skeptical prior now proposes via the Thompson draw"
+        );
+        assert!(report.applied > 0, "the write loop starts the proposal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_cycle_holds_operations_the_adapter_has_not_verified() {
+        // The committed AdMob fixture proposes country-floor moves against an
+        // AdMob adapter whose verified write set holds none of them: every
+        // proposal is held with its typed reason, the report carries the
+        // holds and the pass exits Ok instead of aborting — the exact live
+        // defect this pins.
+        let dir = std::env::temp_dir().join(format!("apex-cycle-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot_path = dir.join("admob.json");
+        std::fs::write(
+            &snapshot_path,
+            include_str!("../../apex-api/fixtures/admob.json"),
+        )
+        .unwrap();
+
+        let ops = Arc::new(RecordingOps::new());
+        ops.set_platform(PlatformId::Admob);
+        ops.set_writable("setCountryFloor", false);
+        let runner = Runner::new(
+            ops,
+            AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        );
+        let mut ledger = InMemoryLedger::new(Keypair::from_bytes(&[5u8; 32]));
+
+        let report = run(&runner, &mut ledger, &snapshot_path, 1_700_000_000_000)
+            .await
+            .expect("the cycle continues past unverified operations");
+        assert!(report.proposed > 0, "the fixture proposes floor moves");
+        assert_eq!(report.applied, 0, "nothing is written unverified");
+        assert_eq!(report.skipped, report.proposed as u32);
+        assert_eq!(
+            report.awaiting_verification.len(),
+            report.proposed,
+            "one typed hold per proposal"
+        );
+        assert!(report
+            .awaiting_verification
+            .iter()
+            .all(|reason| reason == "awaiting live verification for Admob: setCountryFloor"));
+        assert!(ledger.records().is_empty(), "a held cycle writes nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

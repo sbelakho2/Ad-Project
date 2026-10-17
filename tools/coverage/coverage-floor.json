@@ -181,9 +181,11 @@
     "apex-metrics": 94,
     "apex-notify": 88,
     "apex-sales": 85,
-    "apex-sales-web": 84
+    "apex-sales-web": 84,
+    "apex-vault": 83,
+    "apex-watch": 84
    },
-   "__note": "apex-sales-web added (owner-only sales workspace UI over the engine state). Measured with the rust 1.88 CI toolchain: RUSTUP_TOOLCHAIN=1.88 cargo llvm-cov -p apex-sales-web --summary-only -> TOTAL 91.52 percent lines / 84.12 percent functions (both binary entry points included at 0 percent), so the floor is the integer floor of the lines/functions minimum: 84."
+   "__note": "apex-vault added (the AES-256-GCM credential vault extracted from apex-api). Measured with the rust 1.88 CI toolchain: RUSTUP_TOOLCHAIN=1.88 cargo llvm-cov -p apex-vault --summary-only -> TOTAL 95.83 percent lines / 83.33 percent functions, so the floor is the integer floor of the lines/functions minimum: 83."
   }
  ],
  "domains": {
@@ -202,6 +204,8 @@
   "apex-metrics": 94,
   "apex-notify": 88,
   "apex-sales": 85,
-  "apex-sales-web": 84
+  "apex-sales-web": 84,
+  "apex-vault": 83,
+  "apex-watch": 84
  }
 }

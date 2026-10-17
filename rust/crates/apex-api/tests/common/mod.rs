@@ -25,8 +25,19 @@ use tower::ServiceExt;
 /// The publisher materialised by [`write_pub1_ledger`].
 pub const PUBLISHER: &str = "pub1";
 
+/// The second publisher the multi-session console tests materialise.
+pub const PUBLISHER2: &str = "pub2";
+/// The ledger token `/console/ledger` requires for [`PUBLISHER2`].
+pub const LEDGER_TOKEN2: &str = "ledger-token-pub2";
+
+/// The bearer token the `/v1/cycle` and `POST /v1/audit/{platform}` tests
+/// configure (`APEX_LIVE_AUDIT_TOKEN` in the real binary).
+pub const API_TOKEN: &str = "api-token-test";
+
 /// Webhook HMAC key of the pinned vector.
 pub const WEBHOOK_HMAC_KEY: &[u8] = b"hmac_api_test";
+/// The same key in Adyen's wire form: lowercase hex of [`WEBHOOK_HMAC_KEY`].
+pub const WEBHOOK_HMAC_KEY_HEX: &str = "686d61635f6170695f74657374";
 /// base64(HMAC-SHA256 over the eight signed fields of the pinned item below).
 pub const WEBHOOK_SIGNATURE: &str = "DCVYHJK+/X/7a7OmfIVJTaIZylmJtM+z6OT1b5Ky/D0=";
 
@@ -178,6 +189,22 @@ pub fn post_form(uri: &str, body: &str) -> Request<Body> {
     )
 }
 
+/// A POST carrying `Authorization: Bearer <token>`.
+pub fn post_with_bearer(uri: &str, token: &str, body: &[u8]) -> Request<Body> {
+    post_with_header(uri, "authorization", &format!("Bearer {token}"), body)
+}
+
+/// A JSON POST carrying `Authorization: Bearer <token>`.
+pub fn post_json_with_bearer(uri: &str, token: &str, body: &[u8]) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_vec()))
+        .expect("request")
+}
+
 /// A GET carrying one `Cookie` header.
 pub fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
     Request::builder()
@@ -248,6 +275,59 @@ pub fn seed_keypair(seed: u8) -> Keypair {
 /// The key allow-list for [`PUBLISHER`].
 pub fn pub1_keys() -> HashMap<String, VerifyingKey> {
     HashMap::from([(PUBLISHER.to_string(), seed_keypair(7).verifying_key())])
+}
+
+/// The key allow-list for both test publishers.
+pub fn two_publisher_keys() -> HashMap<String, VerifyingKey> {
+    HashMap::from([
+        (PUBLISHER.to_string(), seed_keypair(7).verifying_key()),
+        (PUBLISHER2.to_string(), seed_keypair(9).verifying_key()),
+    ])
+}
+
+/// A live auditor over an empty account store and a transport that refuses
+/// every call: the constructor needs concrete plumbing, but the bearer-token
+/// gate on `/v1/cycle` and `POST /v1/audit/{platform}` never reaches it.
+pub fn token_auditor(token: &str) -> Arc<apex_api::LiveAuditor> {
+    #[derive(Debug)]
+    struct RefusingTransport;
+
+    #[async_trait::async_trait]
+    impl apex_connectors::transport::Transport for RefusingTransport {
+        async fn request(
+            &self,
+            _request: apex_connectors::transport::HttpRequest,
+        ) -> Result<
+            apex_connectors::transport::HttpResponse,
+            apex_connectors::transport::TransportError,
+        > {
+            Err(apex_connectors::transport::TransportError::Network(
+                "the token-only test transport refuses every call".to_string(),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoAccounts;
+
+    #[async_trait::async_trait]
+    impl apex_api::LiveAccountStore for NoAccounts {
+        async fn account(
+            &self,
+            _publisher: &str,
+        ) -> Result<apex_api::LiveAccount, apex_api::ApiError> {
+            Err(apex_api::ApiError::NotFound)
+        }
+    }
+
+    Arc::new(
+        apex_api::LiveAuditor::new(
+            Arc::new(NoAccounts),
+            Arc::new(RefusingTransport),
+            Arc::new(apex_api::FixedClock::new(1_700_000_000)),
+        )
+        .with_token(token),
+    )
 }
 
 /// The ledger token `/v1/ledger/{PUBLISHER}` and `/console/ledger` require.

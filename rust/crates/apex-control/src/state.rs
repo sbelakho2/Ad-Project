@@ -23,7 +23,7 @@ use crate::config::{ConfigError, ControlConfig, Operators};
 use crate::data::ControlData;
 use crate::events::EventEmitter;
 use crate::governance::GovernanceStore;
-use crate::jobs::JobStore;
+use crate::jobs::JobTransport;
 use crate::journal::{ActionJournal, JournalIndex, RememberedResult};
 use crate::login::PendingLogins;
 use crate::rate_limit::AttemptLimiter;
@@ -85,6 +85,9 @@ pub enum StateError {
     /// The journal could not be read back at startup.
     #[error("the action journal could not be read at startup: {0}")]
     Journal(String),
+    /// The operator-jobs transport could not be built.
+    #[error("the operator-jobs transport could not be built: {0}")]
+    Jobs(String),
 }
 
 /// The complete dependency set of the operator control plane.
@@ -110,8 +113,8 @@ pub struct ControlState {
     /// per key, so the duplicate check and the durable records are one
     /// critical section ([`ControlState::claim_submission`]).
     claims: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
-    /// Durable operator jobs.
-    pub jobs: JobStore,
+    /// Durable operator jobs (local folder or the split-host endpoint).
+    pub jobs: JobTransport,
     /// Object versions for stale-state checks.
     pub versions: Arc<ObjectVersions>,
     /// The read layer.
@@ -166,6 +169,12 @@ impl ControlState {
         let emitter =
             EventEmitter::build(config.clickhouse.as_ref(), &config.environment, BUILD_LABEL)
                 .map_err(|error| StateError::Journal(format!("analytics emitter: {error}")))?;
+        let jobs = match &config.jobs_remote {
+            Some(remote) => {
+                JobTransport::remote(remote).map_err(|error| StateError::Jobs(error.to_string()))?
+            }
+            None => JobTransport::local(config.jobs_dir.clone()),
+        };
         Ok(Self {
             sessions: Arc::new(OperatorSessions::bounded()),
             pending: Arc::new(PendingLogins::bounded()),
@@ -173,7 +182,7 @@ impl ControlState {
             journal,
             index: Arc::new(Mutex::new(index)),
             claims: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            jobs: JobStore::new(config.jobs_dir.clone()),
+            jobs,
             versions: Arc::new(ObjectVersions::bounded()),
             governance: Arc::new(GovernanceStore::new(
                 config.policies_path.clone(),
@@ -301,6 +310,8 @@ mod tests {
             operators_path: operators.then(|| dir.join("operators.json")),
             journal_path: dir.join("journal.jsonl"),
             jobs_dir: dir.join("jobs"),
+            jobs_remote: None,
+            sync_marker: None,
             environment: "TEST".to_string(),
             ledger_root: dir.join("ledgers"),
             invoice_register: dir.join("invoices.jsonl"),

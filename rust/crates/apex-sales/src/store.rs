@@ -7,6 +7,7 @@
 //! | `events.jsonl` | touches, outcomes, suppressions, resets | append-only history |
 //! | `decisions.jsonl` | every gate decision with reasons | audit log, never read back |
 //! | `approvals.jsonl` | operator approvals of planned touches | append-only |
+//! | `ingest-seen.jsonl` | maildir files the reply ingest already processed | seen set |
 //!
 //! Nothing is ever rewritten. Every model is rebuilt from these files on
 //! each run ([`crate::engine::learn`]), so the engine's state is a pure
@@ -36,6 +37,10 @@ pub enum Event {
         email: String,
         /// Publisher key.
         publisher: String,
+        /// The from-domain that sent it. `None` on history recorded before
+        /// domains existed or sent by a single-domain configuration; such
+        /// touches belong to the first configured sender.
+        from: Option<String>,
         /// Sequence step (0 = first touch).
         step: usize,
         /// Template / arm id.
@@ -70,10 +75,13 @@ pub enum Event {
         /// Publisher, if publisher-level.
         publisher: Option<String>,
     },
-    /// Operator reset of the sending domain's health after an investigation.
+    /// Operator reset of sending-domain health after an investigation. The
+    /// domain is named when one domain is reset; `None` resets every domain.
     HealthReset {
         /// When.
         at: UnixSecs,
+        /// The domain, when only one was reset.
+        domain: Option<String>,
     },
 }
 
@@ -84,7 +92,7 @@ impl Event {
             Event::Touch { at, .. }
             | Event::Outcome { at, .. }
             | Event::Suppress { at, .. }
-            | Event::HealthReset { at } => *at,
+            | Event::HealthReset { at, .. } => *at,
         }
     }
 
@@ -95,22 +103,37 @@ impl Event {
                 at,
                 email,
                 publisher,
+                from,
                 step,
                 arm,
                 message_id,
                 local_hour,
                 predicted,
-            } => Value::object(vec![
-                ("type", Value::str("touch")),
-                ("at", Value::num(*at as f64)),
-                ("email", Value::str(email.clone())),
-                ("publisher", Value::str(publisher.clone())),
-                ("step", Value::num(*step as f64)),
-                ("arm", Value::str(arm.clone())),
-                ("messageId", Value::str(message_id.clone())),
-                ("localHour", Value::num(*local_hour)),
-                ("predicted", predicted.map_or(Value::Null, Value::Number)),
-            ]),
+            } => {
+                let mut pairs = vec![
+                    ("type".to_string(), Value::str("touch")),
+                    ("at".to_string(), Value::num(*at as f64)),
+                    ("email".to_string(), Value::str(email.clone())),
+                    ("publisher".to_string(), Value::str(publisher.clone())),
+                ];
+                // The sending domain is recorded only when one was assigned
+                // (multi-domain configurations); single-domain history stays
+                // byte-for-byte as it was.
+                if let Some(domain) = from {
+                    pairs.push(("from".to_string(), Value::str(domain.clone())));
+                }
+                pairs.extend([
+                    ("step".to_string(), Value::num(*step as f64)),
+                    ("arm".to_string(), Value::str(arm.clone())),
+                    ("messageId".to_string(), Value::str(message_id.clone())),
+                    ("localHour".to_string(), Value::num(*local_hour)),
+                    (
+                        "predicted".to_string(),
+                        predicted.map_or(Value::Null, Value::Number),
+                    ),
+                ]);
+                Value::Object(pairs)
+            }
             Event::Outcome {
                 at,
                 email,
@@ -135,10 +158,16 @@ impl Event {
                 ("email", Value::opt_str(email.as_deref())),
                 ("publisher", Value::opt_str(publisher.as_deref())),
             ]),
-            Event::HealthReset { at } => Value::object(vec![
-                ("type", Value::str("health_reset")),
-                ("at", Value::num(*at as f64)),
-            ]),
+            Event::HealthReset { at, domain } => {
+                let mut pairs = vec![
+                    ("type".to_string(), Value::str("health_reset")),
+                    ("at".to_string(), Value::num(*at as f64)),
+                ];
+                if let Some(d) = domain {
+                    pairs.push(("domain".to_string(), Value::str(d.clone())));
+                }
+                Value::Object(pairs)
+            }
         }
     }
 
@@ -151,6 +180,7 @@ impl Event {
                 at,
                 email: s("email")?,
                 publisher: s("publisher")?,
+                from: s("from"),
                 step: usize::try_from(v.get("step").and_then(Value::as_i64)?).ok()?,
                 arm: s("arm")?,
                 message_id: s("messageId")?,
@@ -169,7 +199,10 @@ impl Event {
                 email: s("email"),
                 publisher: s("publisher"),
             },
-            "health_reset" => Event::HealthReset { at },
+            "health_reset" => Event::HealthReset {
+                at,
+                domain: s("domain"),
+            },
             _ => return None,
         })
     }
@@ -410,6 +443,11 @@ impl StateDir {
         )
     }
 
+    /// Record one maildir file as processed by the reply ingest.
+    pub fn put_ingest_seen(&self, v: &Value) -> std::io::Result<()> {
+        self.append("ingest-seen.jsonl", v)
+    }
+
     fn lines(&self, file: &str) -> std::io::Result<Vec<String>> {
         match std::fs::read_to_string(self.root.join(file)) {
             Ok(text) => Ok(text.lines().map(str::to_string).collect()),
@@ -519,6 +557,7 @@ mod tests {
                 at: 5,
                 email: "a@b.io".into(),
                 publisher: "b.io".into(),
+                from: Some("one.example".into()),
                 step: 1,
                 arm: "t1-bump".into(),
                 message_id: "m@x".into(),
@@ -537,7 +576,14 @@ mod tests {
                 email: None,
                 publisher: Some("b.io".into()),
             },
-            Event::HealthReset { at: 8 },
+            Event::HealthReset {
+                at: 8,
+                domain: Some("one.example".into()),
+            },
+            Event::HealthReset {
+                at: 9,
+                domain: None,
+            },
         ];
         for e in events {
             assert_eq!(Event::from_json(&e.to_json()), Some(e));
@@ -570,9 +616,22 @@ mod tests {
                 consent: false,
             })
             .unwrap();
-        store.put_event(&Event::HealthReset { at: 9 }).unwrap();
-        store.put_event(&Event::HealthReset { at: 3 }).unwrap();
+        store
+            .put_event(&Event::HealthReset {
+                at: 9,
+                domain: None,
+            })
+            .unwrap();
+        store
+            .put_event(&Event::HealthReset {
+                at: 3,
+                domain: Some("one.example".into()),
+            })
+            .unwrap();
         store.put_approval("touch-1", 4).unwrap();
+        store
+            .put_ingest_seen(&Value::object(vec![("file", Value::str("m1.eml"))]))
+            .unwrap();
         store
             .put_decision(&Value::object(vec![("v", Value::num(1))]))
             .unwrap();
@@ -591,6 +650,8 @@ mod tests {
         );
         assert_eq!(snap.approvals, vec!["touch-1".to_string()]);
         assert_eq!(snap.skipped_lines, 1);
+        let seen = std::fs::read_to_string(dir.join("ingest-seen.jsonl")).unwrap();
+        assert!(seen.contains("\"file\":\"m1.eml\""), "{seen}");
         assert_eq!(store.root(), dir.as_path());
         let _ = std::fs::remove_dir_all(&dir);
         let empty = StateDir::open(temp_dir("empty")).unwrap();

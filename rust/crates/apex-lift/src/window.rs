@@ -421,9 +421,14 @@ mod tests {
         let mut test = series(&days.map(|d| (d, 343_333)));
         test[1].second_pull_revenue = None;
         let window = build_window(&control, &test, 7, 0.25);
+        // The extra problem proves the filter ignores every non-burn-in kind.
+        let extra = WindowProblem::MissingDay {
+            day: "2026-10-11".into(),
+        };
         let burn_in: Vec<&str> = window
             .problems
             .iter()
+            .chain(std::iter::once(&extra))
             .filter_map(|p| match p {
                 WindowProblem::BurnIn { day } => Some(day.as_str()),
                 _ => None,
@@ -659,5 +664,138 @@ mod tests {
             .problems
             .iter()
             .any(|p| matches!(p, WindowProblem::Sequence { .. })));
+    }
+
+    #[test]
+    fn date_helpers_cover_rollovers_and_invalid_shapes() {
+        assert!(parse_day("2026-10-05-00").is_none(), "extra parts refuse");
+        assert!(!is_next_day("2026-10-02", "2026-10-01-02"));
+        assert!(!is_next_day("garbage", "2026-10-01"));
+        assert!(is_next_day("2026-10-31", "2026-11-01"), "31-day rollover");
+        assert!(is_next_day("2026-11-30", "2026-12-01"), "30-day rollover");
+        assert!(is_next_day("2026-12-31", "2027-01-01"), "year rollover");
+        assert!(is_next_day("2024-02-28", "2024-02-29"), "leap February");
+        assert!(is_next_day("2026-02-27", "2026-02-28"), "plain February");
+        assert_eq!(days_in_month(2026, 13), 30, "unknown months fall back");
+    }
+
+    #[test]
+    fn mismatched_arms_and_zero_values_are_missing_days() {
+        // The arms disagree on the third day's label: that day is missing.
+        let control = series(&[
+            ("2026-10-01", 1_000_000),
+            ("2026-10-02", 1_000_000),
+            ("2026-10-03", 1_000_000),
+        ]);
+        let test = series(&[
+            ("2026-10-01", 1_000_000),
+            ("2026-10-02", 1_000_000),
+            ("2026-10-04", 1_000_000),
+        ]);
+        let window = build_window(&control, &test, 7, 0.25);
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::MissingDay { day } if day == "2026-10-03")));
+        assert!(!window.complete);
+
+        // Zero revenue without user counts is a zero daily value, which is
+        // missing rather than an incident (every prior day is zero too).
+        let zero = series(&[
+            ("2026-10-01", 0),
+            ("2026-10-02", 0),
+            ("2026-10-03", 0),
+            ("2026-10-04", 0),
+        ]);
+        let window = build_window(&zero, &zero, 7, 0.25);
+        assert!(window.days.is_empty());
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::MissingDay { day } if day == "2026-10-04")));
+
+        // A test day with zero active users yields no test value at all.
+        let names = [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-04",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+        ];
+        let control: Vec<ArmDay> = names
+            .iter()
+            .map(|name| day(name, 1_000_000, Some(1000)))
+            .collect();
+        let mut test = control.clone();
+        test[4].users = Some(0);
+        let window = build_window(&control, &test, 7, 0.25);
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::MissingDay { day } if day == "2026-10-05")));
+    }
+
+    #[test]
+    fn a_test_arm_without_a_second_pull_is_not_final() {
+        let names = [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-04",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+        ];
+        let control = series(&names.map(|name| (name, 1_000_000)));
+        let mut test = control.clone();
+        test[5].second_pull_revenue = None;
+        let window = build_window(&control, &test, 7, 0.25);
+        assert!(window
+            .problems
+            .iter()
+            .any(|p| matches!(p, WindowProblem::NotFinal { day } if day == "2026-10-06")));
+        assert!(!window.complete);
+    }
+
+    #[test]
+    fn fill_deltas_need_both_arms_to_report_fill() {
+        let names = [
+            "2026-10-01",
+            "2026-10-02",
+            "2026-10-03",
+            "2026-10-04",
+            "2026-10-05",
+            "2026-10-06",
+            "2026-10-07",
+            "2026-10-08",
+            "2026-10-09",
+            "2026-10-10",
+        ];
+        let mut control = series(&names.map(|name| (name, 1_000_000)));
+        let mut test = control.clone();
+        control[6].fill = Some(0.9);
+        test[6].fill = Some(0.8);
+        let window = build_window(&control, &test, 7, 0.25);
+        let seventh = window
+            .days
+            .iter()
+            .find(|day| day.day == "2026-10-07")
+            .expect("the seventh is analyzed");
+        let delta = seventh.fill_delta.expect("both arms report fill");
+        assert!((delta + 0.1).abs() < 1e-12, "{delta}");
+        // Every other kept day has no fill on one side and stays absent.
+        assert!(window
+            .days
+            .iter()
+            .filter(|day| day.day != "2026-10-07")
+            .all(|day| day.fill_delta.is_none()));
     }
 }

@@ -170,4 +170,19 @@ mod tests {
         };
         assert_eq!(candidate_split(&unknown), Some(0.25));
     }
+
+    #[test]
+    fn floors_that_round_to_zero_and_zero_percentiles_are_dropped() {
+        // Every +/- move of a zero floor rounds to zero and is dropped.
+        assert!(floor_candidates("t1", 0, None).is_empty());
+        // An empty winning-price list yields no percentile candidates.
+        assert_eq!(floor_candidates("t1", 1_000_000, Some(&[])).len(), 4);
+        // A list whose 5th percentile is zero produces no candidate for it
+        // while the 10th and 20th percentiles still appear.
+        let mut prices: Vec<Micros> = vec![0; 5];
+        prices.extend((1..=95).map(|i| i * 10_000));
+        let generated = floor_candidates("t1", 1_000_000, Some(&prices));
+        assert_eq!(generated.len(), 6);
+        assert!(generated[4..].iter().all(|c| c.proposed_ecpm > 0));
+    }
 }

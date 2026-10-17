@@ -5,8 +5,17 @@
 //! which every management call then carries. The token is cached and refreshed
 //! before it expires; a management call never mints a token per request.
 //!
-//! The read/write surface is the documented v4 Instances and Groups APIs under
-//! `/partners/publisher/mediation/{instances,groups}/v4`, keyed by the app key.
+//! The read/write surface is the documented v4 Instances and Groups APIs, which
+//! take the app key **in the path**: instances at
+//! `/levelPlay/network/instances/v4/{appKey}/` and groups at
+//! `/levelPlay/groups/v4/{appKey}`. The app key is percent-encoded as a single
+//! path segment, so a hostile key cannot forge path or query structure.
+//!
+//! Reporting reads the v1 API at `/levelPlay/reporting/v1` with the `abTest`
+//! breakdown and the `activeUsers` metric, shaped like the MAX reporting
+//! client (query-parameter request, `code`/`count`/`results` envelope, typed
+//! rows, fail-closed parsing).
+//!
 //! Parsing is tolerant of the field spellings the API has used across versions
 //! (`instanceId`/`id`, `instanceName`/`name`, `adapterNetwork`/`network`,
 //! `price`/`priceEcpm`/`floorPrice`) but never invents data: a missing required
@@ -25,16 +34,19 @@ use crate::transport::{HttpMethod, HttpRequest, PlatformCaller, Transport, Trans
 
 /// Where the bearer token is minted.
 pub const LEVELPLAY_AUTH_PATH: &str = "/partners/publisher/auth";
-/// The v4 Instances API.
-pub const LEVELPLAY_INSTANCES_V4: &str = "/partners/publisher/mediation/instances/v4";
-/// The v4 Groups API.
-pub const LEVELPLAY_GROUPS_V4: &str = "/partners/publisher/mediation/groups/v4";
+/// The v4 Instances API; the app key is the next path segment (trailing `/`).
+pub const LEVELPLAY_INSTANCES_V4: &str = "/levelPlay/network/instances/v4";
+/// The v4 Groups API; the app key is the next path segment.
+pub const LEVELPLAY_GROUPS_V4: &str = "/levelPlay/groups/v4";
+/// The v1 Reporting API (query parameters carry the app key, breakdown and
+/// metric selection).
+pub const LEVELPLAY_REPORTING_V1: &str = "/levelPlay/reporting/v1";
 /// Bearer lifetime assumed for a freshly minted token, refreshed this many
 /// seconds before expiry.
 const TOKEN_LIFETIME_SECS: i64 = 1_800;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 60;
 
-pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 5] = [
+pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 7] = [
     EndpointMeta::new(
         "auth",
         CoreMethod::Post,
@@ -43,6 +55,18 @@ pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 5] = [
     ),
     EndpointMeta::new(
         "listWaterfall",
+        CoreMethod::Get,
+        SourceVerification::VerifyLive,
+        true,
+    ),
+    EndpointMeta::new(
+        "listGroups",
+        CoreMethod::Get,
+        SourceVerification::VerifyLive,
+        true,
+    ),
+    EndpointMeta::new(
+        "reportAbTestActiveUsers",
         CoreMethod::Get,
         SourceVerification::VerifyLive,
         true,
@@ -66,6 +90,14 @@ pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 5] = [
         false,
     ),
 ];
+
+/// One row of the reporting v1 response: an A/B test arm (the `abTest`
+/// breakdown) and its active users (the `activeUsers` metric).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbTestActiveUsersRow {
+    pub ab_test: String,
+    pub active_users: u64,
+}
 
 #[derive(Clone)]
 struct CachedToken {
@@ -194,9 +226,20 @@ impl LevelPlayClient {
         ))
     }
 
+    /// `/levelPlay/network/instances/v4/{appKey}/`, the app key percent-encoded
+    /// as one path segment.
     fn instances_path(&self) -> String {
         format!(
-            "{LEVELPLAY_INSTANCES_V4}?appKey={}",
+            "{LEVELPLAY_INSTANCES_V4}/{}/",
+            crate::encode_query_component(&self.app_key)
+        )
+    }
+
+    /// `/levelPlay/groups/v4/{appKey}`, the app key percent-encoded as one path
+    /// segment.
+    fn groups_path(&self) -> String {
+        format!(
+            "{LEVELPLAY_GROUPS_V4}/{}",
             crate::encode_query_component(&self.app_key)
         )
     }
@@ -275,10 +318,7 @@ impl LevelPlayClient {
     ) -> Result<WaterfallEntry, PlatformError> {
         let price = validate_ecpm(price_ecpm)?;
         let caller = self.caller().await?;
-        let path = format!(
-            "{LEVELPLAY_INSTANCES_V4}?appKey={}",
-            crate::encode_query_component(&self.app_key)
-        );
+        let path = self.instances_path();
         let key = levelplay_price_key(ad_unit_id, entry_id, price);
         caller
             .call(
@@ -311,10 +351,7 @@ impl LevelPlayClient {
         }
         let price = validate_ecpm(price_ecpm)?;
         let caller = self.caller().await?;
-        let path = format!(
-            "{LEVELPLAY_INSTANCES_V4}?appKey={}",
-            crate::encode_query_component(&self.app_key)
-        );
+        let path = self.instances_path();
         let key = levelplay_create_key(ad_unit_id, network, instance_name, price);
         let data = caller
             .call(
@@ -342,8 +379,8 @@ impl LevelPlayClient {
     ) -> Result<(), PlatformError> {
         let caller = self.caller().await?;
         let path = format!(
-            "{LEVELPLAY_INSTANCES_V4}?appKey={}&instanceId={}",
-            crate::encode_query_component(&self.app_key),
+            "{}?instanceId={}",
+            self.instances_path(),
             crate::encode_query_component(entry_id)
         );
         let key = levelplay_remove_key(ad_unit_id, entry_id);
@@ -353,18 +390,93 @@ impl LevelPlayClient {
         Ok(())
     }
 
-    /// The app's mediation groups (v4). Returned as raw JSON: the audit reads
-    /// `floorPrice` and `countriesRate` from each group.
+    /// The app's mediation groups (v4), keyed by the path app key. Returned as
+    /// raw JSON: the audit reads `floorPrice` and `countriesRate` from each
+    /// group.
     pub async fn list_groups(&self) -> Result<serde_json::Value, PlatformError> {
         let caller = self.caller().await?;
-        let path = format!(
-            "{LEVELPLAY_GROUPS_V4}?appKey={}",
-            crate::encode_query_component(&self.app_key)
-        );
+        let path = self.groups_path();
         caller
             .call("listGroups", HttpMethod::Get, &path, None, None)
             .await
     }
+
+    /// Active users per A/B test arm over the inclusive window
+    /// `[start_date, end_date]` (reporting v1, `abTest` breakdown,
+    /// `activeUsers` metric).
+    ///
+    /// The response follows the report envelope convention shared with the MAX
+    /// reporting client: an in-body `code` that must be 200, a `results` array
+    /// whose rows carry `abTest` and `activeUsers`. Numbers may arrive as JSON
+    /// numbers or decimal strings; anything else is a typed refusal, never a
+    /// silent zero.
+    pub async fn ab_test_active_users(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<AbTestActiveUsersRow>, PlatformError> {
+        let caller = self.caller().await?;
+        let path = format!(
+            "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=abTest&metrics=activeUsers&startDate={}&endDate={}",
+            crate::encode_query_component(&self.app_key),
+            crate::encode_query_component(start_date),
+            crate::encode_query_component(end_date),
+        );
+        let data = caller
+            .call(
+                "reportAbTestActiveUsers",
+                HttpMethod::Get,
+                &path,
+                None,
+                None,
+            )
+            .await?;
+        let code = data
+            .get("code")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(200);
+        if code != 200 {
+            return Err(PlatformError::Http {
+                platform: PlatformId::LevelPlay,
+                operation: "reportAbTestActiveUsers".into(),
+                status: u16::try_from(code).unwrap_or(500),
+            });
+        }
+        let results = data
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                self.schema("reportAbTestActiveUsers", "response has no 'results' array")
+            })?;
+        let mut out = Vec::with_capacity(results.len());
+        for row in results {
+            out.push(
+                parse_ab_test_active_users(row)
+                    .map_err(|detail| self.schema("reportAbTestActiveUsers", detail))?,
+            );
+        }
+        Ok(out)
+    }
+}
+
+/// Parse one reporting v1 row into the typed shape.
+fn parse_ab_test_active_users(row: &serde_json::Value) -> Result<AbTestActiveUsersRow, String> {
+    let ab_test = row
+        .get("abTest")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("report row missing 'abTest': {row}"))?;
+    let active_users_raw = row
+        .get("activeUsers")
+        .and_then(crate::max::number_to_string)
+        .ok_or_else(|| format!("report row missing 'activeUsers': {row}"))?;
+    let active_users = active_users_raw
+        .parse::<u64>()
+        .map_err(|e| format!("activeUsers '{active_users_raw}': {e}"))?;
+    Ok(AbTestActiveUsersRow {
+        ab_test: ab_test.to_string(),
+        active_users,
+    })
 }
 
 /// Extract the token from an auth response: a bare JSON string or an object

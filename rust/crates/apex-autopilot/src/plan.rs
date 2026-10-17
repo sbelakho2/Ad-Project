@@ -267,6 +267,7 @@ pub async fn run_cycle_observed(
     let mut applied_this_cycle: u32 = 0;
     let mut skipped_this_cycle: u32 = 0;
     let mut awaiting_approval: u32 = 0;
+    let mut awaiting_verification: Vec<String> = Vec::new();
 
     for proposal in proposals {
         if applied_today >= policy.max_actions_per_day {
@@ -299,9 +300,20 @@ pub async fn run_cycle_observed(
 
         let operation = operation_of(&proposal.action);
         if !ops.writable(operation).await {
-            return Err(PlanError::EndpointNotWritable {
-                operation: operation.to_string(),
-            });
+            // Platform-capability-aware hold: the adapter's verified write
+            // set does not (yet) include this operation, so the change is
+            // never applied. The typed awaiting state rides the same
+            // `Skipped` decision record the other gates use and names the
+            // operation and platform; the pass continues to the remaining
+            // proposals instead of aborting on one unverified endpoint.
+            skipped_this_cycle += 1;
+            let reason = format!(
+                "awaiting live verification for {:?}: {operation}",
+                ops.platform()
+            );
+            awaiting_verification.push(reason.clone());
+            outcomes.push(ActionOutcome::Skipped { reason });
+            continue;
         }
 
         // Approval mode: report the proposal and stop before any write or
@@ -496,5 +508,6 @@ pub async fn run_cycle_observed(
         applied: applied_this_cycle,
         skipped: skipped_this_cycle,
         awaiting_approval,
+        awaiting_verification,
     })
 }

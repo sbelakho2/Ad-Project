@@ -23,3 +23,6 @@ tokio = { version = "1", features = ["rt", "macros", "fs", "io-util", "io-std"] 
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# A local TLS server for the hermetic certificate-verification test; the
+# same rustls the production reqwest client already builds with.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

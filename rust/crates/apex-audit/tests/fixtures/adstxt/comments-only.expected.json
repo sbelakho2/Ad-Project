@@ -1,0 +1,8 @@
+{
+  "file": "comments-only.txt",
+  "note": "A file of comments and blank lines: nothing is recorded, nothing is malformed.",
+  "errors": [],
+  "records": 0,
+  "variables": 0,
+  "domains": []
+}

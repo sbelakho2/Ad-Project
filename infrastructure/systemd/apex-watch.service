@@ -1,0 +1,17 @@
+[Unit]
+Description=Apex watch — daily app-ads.txt check, diff and alert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+# State lives in .apex/watch under the state root; the subscriber file the
+# public sign-up writes is read from the same path.
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/watch.env
+ExecStart=/usr/local/bin/apex-watch daily
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ReadWritePaths=/var/lib/apex

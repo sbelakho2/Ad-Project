@@ -1,0 +1,13 @@
+#!/bin/sh
+printf 'ssh %s\n' "$*" >> "${FAKE_CAPTURE_DIR:?}/ssh.argv"
+last=""
+for a in "$@"; do
+  last="$a"
+done
+if [ "${FAKE_SSH_PROBE_FAIL:-0}" = 1 ] && [ "$last" = "true" ]; then
+  exit 255
+fi
+if [ -n "${FAKE_SSH_STDOUT:-}" ]; then
+  printf '%s\n' "$FAKE_SSH_STDOUT"
+fi
+exit "${FAKE_SSH_EXIT:-0}"

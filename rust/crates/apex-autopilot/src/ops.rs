@@ -38,6 +38,13 @@ pub struct ExperimentRequest {
 
 #[async_trait]
 pub trait PlatformOps: Send + Sync {
+    /// The platform behind this adapter. The report's mode line, the fleet's
+    /// mode aggregation and the fee-eligibility gate read it; adapters for
+    /// platforms other than AppLovin MAX override it.
+    fn platform(&self) -> apex_core::PlatformId {
+        apex_core::PlatformId::AppLovinMax
+    }
+
     /// Verify-live gate: may the autopilot write through this operation?
     async fn writable(&self, operation: &str) -> bool;
 
@@ -122,6 +129,7 @@ pub trait PlatformOps: Send + Sync {
 /// nothing is mocked away at the type level.
 #[derive(Debug, Default)]
 pub struct RecordingOps {
+    platform: Mutex<Option<apex_core::PlatformId>>,
     writable: Mutex<std::collections::HashMap<String, bool>>,
     change_in_test_arm: Mutex<bool>,
     apply_script: Mutex<VecDeque<Result<(), PlatformError>>>,
@@ -140,6 +148,15 @@ pub struct RecordingOps {
 impl RecordingOps {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The platform this scripted adapter reports; without an override it is
+    /// AppLovin MAX, the platform the default test actions target.
+    pub fn set_platform(&self, platform: apex_core::PlatformId) -> &Self {
+        if let Ok(mut slot) = self.platform.lock() {
+            *slot = Some(platform);
+        }
+        self
     }
 
     /// All operations default to writable; mark specific operations verify-live.
@@ -258,6 +275,14 @@ fn push_log(log: &Mutex<Vec<String>>, entry: String) {
 
 #[async_trait]
 impl PlatformOps for RecordingOps {
+    fn platform(&self) -> apex_core::PlatformId {
+        self.platform
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .unwrap_or(apex_core::PlatformId::AppLovinMax)
+    }
+
     async fn writable(&self, operation: &str) -> bool {
         push_log(&self.log, format!("writable:{operation}"));
         self.writable

@@ -290,8 +290,11 @@ fn run(
                     crate::pages::domains::RESET_PHRASE
                 )));
             }
-            dir.put_event(&Event::HealthReset { at: now })
-                .map_err(|error| ActionError::Io(error.to_string()))?;
+            dir.put_event(&Event::HealthReset {
+                at: now,
+                domain: None,
+            })
+            .map_err(|error| ActionError::Io(error.to_string()))?;
             Ok(ActionResultRecord {
                 operation_id,
                 action: kind.as_str().to_string(),

@@ -42,17 +42,15 @@ fn connection_dir(dir: &common::TempDir) -> String {
     dir.path().join("credentials").display().to_string()
 }
 
-/// State with a workspace publisher, a vault-backed connection store and an
-/// optional analytics access.
+/// State with a vault-backed connection store and an optional analytics
+/// access; the console publisher is always the live session's.
 fn console_state(dir: &common::TempDir, analytics: Option<AnalyticsAccess>) -> AppState {
     let store = apex_api::connections::VaultedConnectionStore::with_vault_key_hex(
         connection_dir(dir),
         VAULT_KEY,
     )
     .expect("vault key");
-    let mut state = file_state(dir.path(), pub1_keys())
-        .with_workspace_publisher(PUBLISHER)
-        .with_connection_store(Arc::new(store));
+    let mut state = file_state(dir.path(), pub1_keys()).with_connection_store(Arc::new(store));
     if let Some(analytics) = analytics {
         state = state.with_analytics(analytics);
     }
@@ -64,15 +62,41 @@ async fn app(state: AppState) -> axum::Router {
 }
 
 #[tokio::test]
-async fn connections_without_a_workspace_publisher_render_the_503_panel() {
+async fn connections_without_console_credentials_or_a_session_keep_their_states() {
+    // No configured ledger tokens at all: no session can ever be opened, so
+    // the page keeps the not-configured panel.
     let dir = TempDir::new("p2-conn-nopub");
-    let router = app(file_state(dir.path(), pub1_keys())).await;
+    let no_auth = apex_api::AppState::new(
+        Arc::new(apex_api::JsonFileAuditSource::new(dir.path())),
+        Arc::new(apex_api::FileLedgerSource::new(
+            dir.path(),
+            std::collections::HashMap::new(),
+        )),
+    );
+    let router = app(no_auth).await;
     let response = send(&router, get("/console/connections")).await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(response
         .body
         .contains("This view is not available in this deployment."));
     assert!(!response.body.contains("<script"));
+
+    // With credentials configured but no session, the stable access panel is
+    // the recovery point; with the session, the page renders.
+    let router = app(console_state(&dir, None)).await;
+    let anonymous = send(&router, get("/console/connections")).await;
+    assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        anonymous
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/console/ledger")
+    );
+    let cookie = open_ledger_session(&router).await;
+    let page = send(&router, get_with_cookie("/console/connections", &cookie)).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("pub1 / as of"), "{}", page.body);
 }
 
 #[tokio::test]
@@ -296,9 +320,7 @@ fn write_proposal(dir: &common::TempDir, id: &str, expires_at: Option<i64>) {
 
 fn proposal_state(dir: &common::TempDir) -> AppState {
     let store = apex_api::proposals::FileProposalStore::new(dir.path());
-    file_state(dir.path(), pub1_keys())
-        .with_workspace_publisher(PUBLISHER)
-        .with_proposal_store(Arc::new(store))
+    file_state(dir.path(), pub1_keys()).with_proposal_store(Arc::new(store))
 }
 
 #[tokio::test]
@@ -308,7 +330,8 @@ async fn proposal_index_lists_proposals_with_states_and_caps_the_files() {
     write_proposal(&dir, "p_0248", None);
     std::fs::write(dir.path().join("not-a-proposal.txt"), b"x").expect("write");
     let router = app(proposal_state(&dir)).await;
-    let response = send(&router, get("/console/proposals")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(&router, get_with_cookie("/console/proposals", &cookie)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert!(response.body.contains("p_0247"));
     assert!(response.body.contains("p_0248"));
@@ -327,10 +350,12 @@ async fn proposal_index_lists_proposals_with_states_and_caps_the_files() {
     // A non-proposal file is skipped by name, not parsed: nothing to report.
     assert!(!response.body.contains("could not be read"));
 
-    // Without a store the route keeps the not-configured state.
-    let bare = file_state(dir.path(), pub1_keys()).with_workspace_publisher(PUBLISHER);
+    // Without a store the route keeps the not-configured state (the session
+    // is the gate; the store state is what the authenticated user sees).
+    let bare = file_state(dir.path(), pub1_keys());
     let router = app(bare).await;
-    let response = send(&router, get("/console/proposals")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(&router, get_with_cookie("/console/proposals", &cookie)).await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -448,8 +473,9 @@ async fn unknown_and_unconfigured_proposals_keep_their_states() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert!(missing.body.contains("No proposal matches this address."));
 
-    let bare = app(file_state(dir.path(), pub1_keys()).with_workspace_publisher(PUBLISHER)).await;
-    let unconfigured = send(&bare, get("/console/proposals/p_0247")).await;
+    let bare = app(file_state(dir.path(), pub1_keys())).await;
+    let cookie = open_ledger_session(&bare).await;
+    let unconfigured = send(&bare, get_with_cookie("/console/proposals/p_0247", &cookie)).await;
     assert_eq!(unconfigured.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -782,16 +808,21 @@ fn experiment_fixture(dir: &common::TempDir) {
 async fn experiments_render_the_runner_states_from_verified_records() {
     let dir = TempDir::new("p2-experiments");
     experiment_fixture(&dir);
-    let router = app(file_state(dir.path(), pub1_keys()).with_workspace_publisher(PUBLISHER)).await;
+    let router = app(file_state(dir.path(), pub1_keys())).await;
+    let cookie = open_ledger_session(&router).await;
 
-    let list = send(&router, get("/console/experiments")).await;
+    let list = send(&router, get_with_cookie("/console/experiments", &cookie)).await;
     assert_eq!(list.status, StatusCode::OK);
     assert!(list.body.contains(">Kept<"));
     assert!(list.body.contains("View fee basis"));
     assert!(list.body.contains("Pending data means waiting."));
     assert!(!list.body.contains("<script"));
 
-    let detail = send(&router, get("/console/experiments/exp_0246")).await;
+    let detail = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246", &cookie),
+    )
+    .await;
     assert_eq!(detail.status, StatusCode::OK);
     assert!(detail.body.contains("exp_0246 / rw_de_01"));
     assert!(detail.body.contains("Observed lift and uncertainty"));
@@ -799,13 +830,29 @@ async fn experiments_render_the_runner_states_from_verified_records() {
     assert!(detail.body.contains("3 of 14 analysis days final"));
     assert!(detail.body.contains("The decision rule passed."));
 
-    let bad_filter = send(&router, get("/console/experiments?filter=nope")).await;
+    let bad_filter = send(
+        &router,
+        get_with_cookie("/console/experiments?filter=nope", &cookie),
+    )
+    .await;
     assert_eq!(bad_filter.status, StatusCode::BAD_REQUEST);
-    let bad_tab = send(&router, get("/console/experiments/exp_0246?tab=nope")).await;
+    let bad_tab = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246?tab=nope", &cookie),
+    )
+    .await;
     assert_eq!(bad_tab.status, StatusCode::BAD_REQUEST);
-    let unknown = send(&router, get("/console/experiments/exp_missing")).await;
+    let unknown = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_missing", &cookie),
+    )
+    .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
-    let no_incident = send(&router, get("/console/experiments/exp_0246/incident")).await;
+    let no_incident = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246/incident", &cookie),
+    )
+    .await;
     assert_eq!(no_incident.status, StatusCode::NOT_FOUND);
 }
 
@@ -819,15 +866,17 @@ async fn a_failed_rollback_alert_surfaces_the_recovery_state() {
         "{\"kind\":\"failedRollback\",\"experiment_id\":\"exp_0246\",\"detail\":\"rollback also failed\"}\n",
     )
     .expect("alerts");
-    let router = app(file_state(dir.path(), pub1_keys())
-        .with_workspace_publisher(PUBLISHER)
-        .with_alerts_path(&alerts))
-    .await;
+    let router = app(file_state(dir.path(), pub1_keys()).with_alerts_path(&alerts)).await;
+    let cookie = open_ledger_session(&router).await;
 
-    let list = send(&router, get("/console/experiments")).await;
+    let list = send(&router, get_with_cookie("/console/experiments", &cookie)).await;
     assert!(list.body.contains("Restore failed"));
     assert!(list.body.contains("Open incident"));
-    let incident = send(&router, get("/console/experiments/exp_0246/incident")).await;
+    let incident = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246/incident", &cookie),
+    )
+    .await;
     assert_eq!(incident.status, StatusCode::OK);
     assert!(incident.body.contains("This test needs intervention"));
     assert!(incident
@@ -837,7 +886,11 @@ async fn a_failed_rollback_alert_surfaces_the_recovery_state() {
         .body
         .contains("Restore not confirmed / incident inc_"));
     assert!(incident.body.contains("Operator investigating"));
-    let detail = send(&router, get("/console/experiments/exp_0246")).await;
+    let detail = send(
+        &router,
+        get_with_cookie("/console/experiments/exp_0246", &cookie),
+    )
+    .await;
     assert!(detail.body.contains("Restore failed"));
     assert!(detail.body.contains("View incident details"));
 }
@@ -854,15 +907,20 @@ fn billing_fixture(dir: &common::TempDir) {
 async fn billing_register_and_invoice_reproduce_signed_amounts() {
     let dir = TempDir::new("p2-billing");
     billing_fixture(&dir);
-    let router = app(file_state(dir.path(), pub1_keys()).with_workspace_publisher(PUBLISHER)).await;
+    let router = app(file_state(dir.path(), pub1_keys())).await;
+    let cookie = open_ledger_session(&router).await;
 
-    let register = send(&router, get("/console/billing")).await;
+    let register = send(&router, get_with_cookie("/console/billing", &cookie)).await;
     assert_eq!(register.status, StatusCode::OK);
     assert!(register.body.contains("USD / October 2026"));
     assert!(register.body.contains("$300.00"));
     assert!(register.body.contains("Invoice is still a draft."));
 
-    let invoice = send(&router, get("/console/billing/invoices/2026-10")).await;
+    let invoice = send(
+        &router,
+        get_with_cookie("/console/billing/invoices/2026-10", &cookie),
+    )
+    .await;
     assert_eq!(invoice.status, StatusCode::OK);
     assert!(invoice.body.contains("October 2026 fee calculation"));
     assert!(invoice.body.contains("Eligible scope revenue"));
@@ -872,9 +930,17 @@ async fn billing_register_and_invoice_reproduce_signed_amounts() {
         .body
         .contains("Not available (no VAT rate is recorded for this workspace)"));
 
-    let unknown = send(&router, get("/console/billing/invoices/2025-01")).await;
+    let unknown = send(
+        &router,
+        get_with_cookie("/console/billing/invoices/2025-01", &cookie),
+    )
+    .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
-    let garbage = send(&router, get("/console/billing/invoices/nonsense")).await;
+    let garbage = send(
+        &router,
+        get_with_cookie("/console/billing/invoices/nonsense", &cookie),
+    )
+    .await;
     assert_eq!(garbage.status, StatusCode::NOT_FOUND);
 }
 
@@ -882,11 +948,28 @@ async fn billing_register_and_invoice_reproduce_signed_amounts() {
 async fn settings_render_and_the_theme_form_sets_the_documented_cookie() {
     let dir = TempDir::new("p2-settings");
     let router = app(console_state(&dir, None)).await;
-    let page = send(&router, get("/console/settings")).await;
+
+    // Without a session the settings page redirects to the access panel.
+    let anonymous = send(&router, get("/console/settings")).await;
+    assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        anonymous
+            .headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/console/ledger")
+    );
+
+    let cookie = open_ledger_session(&router).await;
+    let page = send(&router, get_with_cookie("/console/settings", &cookie)).await;
     assert_eq!(page.status, StatusCode::OK);
     assert!(page
         .body
         .contains("Ask your account team to change these values."));
+    assert!(
+        page.body.contains("pub1"),
+        "the session's publisher is shown"
+    );
 
     // Without a session the settings POST redirects to the access panel.
     let refused = send(&router, post_form("/console/settings/theme", "theme=dark")).await;
@@ -899,8 +982,6 @@ async fn settings_render_and_the_theme_form_sets_the_documented_cookie() {
         Some("/console/ledger")
     );
 
-    let cookie = open_ledger_session(&router).await;
-    let page = send(&router, get_with_cookie("/console/settings", &cookie)).await;
     let csrf = common::extract_csrf(&page.body);
     let themed = send(
         &router,
@@ -916,15 +997,14 @@ async fn settings_render_and_the_theme_form_sets_the_documented_cookie() {
     assert!(set_cookie.contains("apex_theme=dark"), "{set_cookie}");
     assert!(set_cookie.contains("Path=/console"));
 
-    // The cookie drives the rendered theme on the next request.
+    // The cookie drives the rendered theme on the next request, always with
+    // the live session.
     let dark = send(
         &router,
-        get_with_cookie(
-            "/console/settings",
-            "apex_theme=dark; apex_ledger_session=x",
-        ),
+        get_with_cookie("/console/settings", &format!("{cookie}; apex_theme=dark")),
     )
     .await;
+    assert_eq!(dark.status, StatusCode::OK, "{}", dark.body);
     assert!(dark.body.contains("data-theme=\"dark\""));
 
     let invalid = send(
@@ -1028,9 +1108,14 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         serde_json::to_vec_pretty(&policy).expect("policy json"),
     )
     .expect("write policy");
-    std::env::set_var("APEX_POLICY_FILE", &policy_file);
     let router = app(console_state(&dir, None)).await;
-    let policy_page = send(&router, get("/console/settings/policy")).await;
+    let cookie = open_ledger_session(&router).await;
+    std::env::set_var("APEX_POLICY_FILE", &policy_file);
+    let policy_page = send(
+        &router,
+        get_with_cookie("/console/settings/policy", &cookie),
+    )
+    .await;
     std::env::remove_var("APEX_POLICY_FILE");
     assert_eq!(policy_page.status, StatusCode::OK);
     assert!(policy_page
@@ -1041,18 +1126,143 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         .body
         .contains("The signed order is the authority"));
 
-    let monitoring = send(&router, get("/console/settings/monitoring")).await;
+    let monitoring = send(
+        &router,
+        get_with_cookie("/console/settings/monitoring", &cookie),
+    )
+    .await;
     assert_eq!(monitoring.status, StatusCode::OK);
     assert!(monitoring.body.contains("Monitoring plan"));
-    assert!(monitoring.body.contains("Not selected"));
+    assert!(monitoring.body.contains("Not recorded"));
     assert!(monitoring.body.contains("Per-platform reporting health"));
     assert!(monitoring.body.contains("A rollback that failed to revert"));
+    assert!(
+        !monitoring.body.contains("Cancel monitoring"),
+        "nothing is recorded, so nothing can be cancelled"
+    );
+
+    // Cancelling without a recorded plan is a refusal, never a fabricated
+    // plan. The token comes from a page that renders a form (the monitoring
+    // page offers none while nothing is recorded).
+    let access = send(
+        &router,
+        get_with_cookie("/console/settings/access", &cookie),
+    )
+    .await;
+    let csrf = common::extract_csrf(&access.body);
+    let refused = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/monitoring/cancel",
+            &format!("csrf_token={csrf}&action=cancel"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+
+    // The runner records the plan at connection; the page then shows the
+    // tier, the price and the cancel action, and the POST records the
+    // cancellation on the same state file (the plan line keeps billing the
+    // current period and stops after it).
+    let state_path = dir.path().join("credentials").join("pub1.monitoring.json");
+    apex_billing::MonitoringPlan::default()
+        .activate(350_000 * 1_000_000, "2026-05-01")
+        .save(&state_path)
+        .expect("recorded plan");
+    let page = send(
+        &router,
+        get_with_cookie("/console/settings/monitoring", &cookie),
+    )
+    .await;
+    assert!(page.body.contains("Included"), "{}", page.body);
+    assert!(page.body.contains(">Mid<"), "{}", page.body);
+    assert!(page.body.contains("$1,500.00"), "{}", page.body);
+    assert!(page.body.contains("Since 2026-05-01"), "{}", page.body);
+    assert!(page
+        .body
+        .contains("Cancels any time; the plan stops after the current month"));
+    assert!(page.body.contains("/console/settings/monitoring/cancel"));
+    let csrf = common::extract_csrf(&page.body);
+    let cancelled = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/monitoring/cancel",
+            &format!("csrf_token={csrf}&action=cancel"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
+    let state = apex_billing::PlanState::load(&state_path)
+        .expect("loadable")
+        .expect("kept");
+    assert!(state.cancelled(), "cancelled-not-deleted");
+    assert!(state.stops_after.is_some(), "the stop period is recorded");
+    let detail = send(
+        &router,
+        get_with_cookie("/console/settings/monitoring", &cookie),
+    )
+    .await;
+    assert!(detail.body.contains("Cancelled"), "{}", detail.body);
+    assert!(detail.body.contains("Cancelled; the plan bills"));
+    assert!(
+        !detail.body.contains("Cancel monitoring"),
+        "no double cancel"
+    );
+
+    // The billing settings page shows the managed line, its written scope
+    // and the (absent, until recorded) cancel action.
+    let billing = send(
+        &router,
+        get_with_cookie("/console/settings/billing", &cookie),
+    )
+    .await;
+    assert_eq!(billing.status, StatusCode::OK);
+    assert!(billing.body.contains("Managed ad ops"));
+    assert!(billing.body.contains("From $2,500.00 per month"));
+    for item in apex_billing::MANAGED_SCOPE {
+        assert!(billing.body.contains(item), "scope item missing: {item}");
+    }
+    assert!(!billing.body.contains("Cancel managed plan"));
+
+    // A recorded managed plan renders its price and the cancel action; the
+    // POST keeps the record with the stop period.
+    let managed_path = dir.path().join("credentials").join("pub1.managed.json");
+    apex_billing::ManagedPlan::default()
+        .activate(2_000_000 * 1_000_000, "2026-06-01")
+        .save(&managed_path)
+        .expect("recorded managed");
+    let billing = send(
+        &router,
+        get_with_cookie("/console/settings/billing", &cookie),
+    )
+    .await;
+    assert!(billing.body.contains("$5,000.00"), "{}", billing.body);
+    assert!(billing.body.contains("Cancel managed plan"));
+    let csrf = common::extract_csrf(&billing.body);
+    let cancelled = send(
+        &router,
+        post_form_with_cookie(
+            "/console/settings/billing/managed/cancel",
+            &format!("csrf_token={csrf}&action=cancel"),
+            &cookie,
+        ),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
+    let managed = apex_billing::PlanState::load(&managed_path)
+        .expect("loadable")
+        .expect("kept");
+    assert!(managed.cancelled());
+    assert!(managed.stops_after.is_some());
 }
 
 #[tokio::test]
 async fn analytics_without_a_store_is_503_with_the_reason_and_no_numbers() {
     let dir = TempDir::new("p2-analytics-off");
     let router = app(console_state(&dir, None)).await;
+    let cookie = open_ledger_session(&router).await;
     for view in [
         "",
         "?view=revenue",
@@ -1060,19 +1270,31 @@ async fn analytics_without_a_store_is_503_with_the_reason_and_no_numbers() {
         "?view=fees",
         "?view=data-quality",
     ] {
-        let response = send(&router, get(&format!("/console/analytics{view}"))).await;
+        let response = send(
+            &router,
+            get_with_cookie(&format!("/console/analytics{view}"), &cookie),
+        )
+        .await;
         assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(response
             .body
             .contains("the analytics store is not configured in this deployment"));
         assert!(!response.body.contains("$0.00"));
     }
-    let unknown = send(&router, get("/console/analytics?view=nope")).await;
+    let unknown = send(
+        &router,
+        get_with_cookie("/console/analytics?view=nope", &cookie),
+    )
+    .await;
     assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
     assert!(unknown
         .body
         .contains("not one of: revenue, lift, fees, data-quality"));
-    let bad_platform = send(&router, get("/console/analytics?platform=myspace")).await;
+    let bad_platform = send(
+        &router,
+        get_with_cookie("/console/analytics?platform=myspace", &cookie),
+    )
+    .await;
     assert_eq!(bad_platform.status, StatusCode::BAD_REQUEST);
 }
 
@@ -1084,6 +1306,7 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
     seed_report_days(&store).await;
     let analytics = AnalyticsAccess::enabled(reader_over(&store), client_over(&store));
     let router = app(console_state(&dir, Some(analytics))).await;
+    let cookie = open_ledger_session(&router).await;
 
     let now_ms = apex_analytics::UtcMillis::system_now()
         .expect("clock")
@@ -1093,7 +1316,11 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
         .next()
         .unwrap_or_default()
         .to_string();
-    let response = send(&router, get("/console/analytics?view=revenue")).await;
+    let response = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue", &cookie),
+    )
+    .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     assert!(response.body.contains("Revenue and reporting coverage"));
     assert!(response.body.contains("currency USD"));
@@ -1112,7 +1339,11 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
     );
 
     // The CSV export is the same rows with UTC days verbatim.
-    let csv = send(&router, get("/console/analytics?view=revenue&format=csv")).await;
+    let csv = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue&format=csv", &cookie),
+    )
+    .await;
     assert_eq!(csv.status, StatusCode::OK);
     assert!(csv.content_type().starts_with("text/csv"));
     assert!(csv.body.starts_with("day,platform,revenue_micros,currency"));
@@ -1131,7 +1362,11 @@ async fn analytics_memory_seeded_reads_render_currency_scope_as_of_and_gaps() {
     );
 
     // The data-quality tab renders the stale source with the oldest gap.
-    let quality = send(&router, get("/console/analytics?view=data-quality")).await;
+    let quality = send(
+        &router,
+        get_with_cookie("/console/analytics?view=data-quality", &cookie),
+    )
+    .await;
     assert_eq!(quality.status, StatusCode::OK);
     assert!(quality.body.contains("levelplay"));
     assert!(quality.body.contains("10 days"));
@@ -1191,7 +1426,12 @@ async fn analytics_unreachable_store_renders_the_reason_not_numbers() {
     });
     assert!(analytics.is_enabled());
     let router = app(console_state(&dir, Some(analytics))).await;
-    let response = send(&router, get("/console/analytics?view=revenue")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue", &cookie),
+    )
+    .await;
     assert_eq!(response.status, StatusCode::OK);
     assert!(response.body.contains("the analytics store did not answer"));
     assert!(!response.body.contains("$0.00"));
@@ -1202,7 +1442,12 @@ async fn analytics_csv_without_a_store_is_503_text_not_html() {
     // Not configured: the CSV export is a machine answer, never an HTML page.
     let dir = TempDir::new("p2-analytics-csv-off");
     let router = app(console_state(&dir, None)).await;
-    let response = send(&router, get("/console/analytics?view=revenue&format=csv")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue&format=csv", &cookie),
+    )
+    .await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.content_type(), "text/plain; charset=utf-8");
     assert!(
@@ -1216,7 +1461,11 @@ async fn analytics_csv_without_a_store_is_503_text_not_html() {
         .body
         .contains("the analytics store is not configured in this deployment"));
     // The HTML view keeps its honest panel for a browser.
-    let html = send(&router, get("/console/analytics?view=revenue")).await;
+    let html = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue", &cookie),
+    )
+    .await;
     assert_eq!(html.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(html.body.contains("This view is not available right now."));
 
@@ -1228,7 +1477,12 @@ async fn analytics_csv_without_a_store_is_503_text_not_html() {
         _ => None,
     });
     let router = app(console_state(&dir, Some(analytics))).await;
-    let response = send(&router, get("/console/analytics?view=lift&format=csv")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(
+        &router,
+        get_with_cookie("/console/analytics?view=lift&format=csv", &cookie),
+    )
+    .await;
     assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.content_type(), "text/plain; charset=utf-8");
     assert!(response.body.contains("the analytics store did not answer"));
@@ -1349,7 +1603,12 @@ async fn analytics_real_clickhouse_reads_when_configured() {
         Some(AnalyticsAccess::enabled(reader, client)),
     ))
     .await;
-    let response = send(&router, get("/console/analytics?view=revenue")).await;
+    let cookie = open_ledger_session(&router).await;
+    let response = send(
+        &router,
+        get_with_cookie("/console/analytics?view=revenue", &cookie),
+    )
+    .await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
     let as_of_label = apex_ui::format::utc_datetime(
         apex_analytics::UtcMillis::system_now()

@@ -24,6 +24,7 @@
 //! A positive interim estimate never turns a row green and never creates a
 //! fee; only the recorded decision does.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use apex_autopilot::alerts::Alert;
@@ -319,9 +320,21 @@ pub fn project(
     now_unix_ms: i64,
 ) -> Vec<ExperimentView> {
     let mut views: Vec<ExperimentView> = Vec::new();
-    let index_of = |views: &mut Vec<ExperimentView>, id: &str| -> usize {
-        if let Some(index) = views.iter().position(|view| view.experiment_id == id) {
-            return index;
+    // The id-to-index map keeps every lookup O(1): a linear scan per record
+    // would make the projection quadratic in experiments × records.
+    let mut index_by_id: HashMap<String, usize> = HashMap::new();
+    // Indices, in view order, of the experiments a DataPull or Guardrail
+    // belongs to: those with a recorded start and no result yet. Both
+    // transitions are one-way (a start is only ever added, a result only ever
+    // set), so a sorted set of open indices is exact and keeps the
+    // most-recently-seen experiment one `next_back` away.
+    let mut open: BTreeSet<usize> = BTreeSet::new();
+    let index_of = |views: &mut Vec<ExperimentView>,
+                    index_by_id: &mut HashMap<String, usize>,
+                    id: &str|
+     -> usize {
+        if let Some(index) = index_by_id.get(id) {
+            return *index;
         }
         views.push(ExperimentView {
             experiment_id: id.to_string(),
@@ -343,7 +356,9 @@ pub fn project(
             incident: None,
             previous_settings_recorded: false,
         });
-        views.len() - 1
+        let index = views.len() - 1;
+        index_by_id.insert(id.to_string(), index);
+        index
     };
 
     for record in records {
@@ -355,11 +370,12 @@ pub fn project(
                 experiment_id,
                 ..
             } => {
-                let index = index_of(&mut views, experiment_id);
+                let index = index_of(&mut views, &mut index_by_id, experiment_id);
                 let view = &mut views[index];
                 view.platform = Some(*platform);
                 view.started_at_unix_ms = Some(*at_unix_ms);
                 view.started_seq = Some(*seq);
+                open.insert(index);
             }
             LedgerRecord::LiftRecord {
                 seq,
@@ -384,7 +400,7 @@ pub fn project(
                         guardrail_thresholds,
                         ..
                     } => {
-                        let index = index_of(&mut views, &experiment_id);
+                        let index = index_of(&mut views, &mut index_by_id, &experiment_id);
                         let view = &mut views[index];
                         view.scope = Some(scope);
                         view.test_share = Some(split);
@@ -400,21 +416,13 @@ pub fn project(
                         // record order: the runner writes them inside the
                         // experiment's analysis flow, so the most recently
                         // seen experiment without a result owns them.
-                        if let Some(view) = views
-                            .iter_mut()
-                            .rev()
-                            .find(|view| view.result.is_none() && view.started_at_unix_ms.is_some())
-                        {
-                            view.data_pull_days.push(day);
+                        if let Some(&index) = open.iter().next_back() {
+                            views[index].data_pull_days.push(day);
                         }
                     }
                     LiftRecord::Guardrail(guardrail) => {
-                        if let Some(view) = views
-                            .iter_mut()
-                            .rev()
-                            .find(|view| view.started_at_unix_ms.is_some() && view.result.is_none())
-                        {
-                            view.guardrails.push(guardrail);
+                        if let Some(&index) = open.iter().next_back() {
+                            views[index].guardrails.push(guardrail);
                         }
                     }
                     LiftRecord::Result {
@@ -427,7 +435,7 @@ pub fn project(
                         decision,
                         lambda,
                     } => {
-                        let index = index_of(&mut views, &experiment_id);
+                        let index = index_of(&mut views, &mut index_by_id, &experiment_id);
                         let view = &mut views[index];
                         let point_bp = if mean_log.is_finite() {
                             Some((mean_log.exp_m1() * 10_000.0).round() as i64)
@@ -446,6 +454,7 @@ pub fn project(
                             payload_sha256: payload_sha256.clone(),
                             at_unix_ms: *at_unix_ms,
                         });
+                        open.remove(&index);
                     }
                     LiftRecord::MonthlyBilling(_) | LiftRecord::BillingChange(_) => {}
                 }
@@ -456,16 +465,22 @@ pub fn project(
 
     // The runner's failed-rollback alerts become the restore-failed
     // incidents; the reference is derived from the alert's own bytes so it is
-    // stable across renders.
+    // stable across renders. The incident time is the newest record time for
+    // the experiment, precomputed here in one pass so many alerts do not each
+    // re-walk the ledger.
+    let newest_by_experiment = newest_record_times(records);
     for alert in alerts {
         if let Alert::FailedRollback {
             experiment_id,
             detail,
         } = alert
         {
-            let index = index_of(&mut views, experiment_id);
+            let index = index_of(&mut views, &mut index_by_id, experiment_id);
             let reference = incident_reference(experiment_id, detail);
-            let recorded_at = recorded_at_of(records, experiment_id, now_unix_ms);
+            let recorded_at = newest_by_experiment
+                .get(experiment_id.as_str())
+                .copied()
+                .unwrap_or(now_unix_ms);
             views[index].incident = Some(IncidentView {
                 reference,
                 recorded_at_unix_ms: recorded_at,
@@ -476,7 +491,18 @@ pub fn project(
     }
 
     // The latest recorded change for an incident's scope is the "previous
-    // settings are recorded" row of the recovery state.
+    // settings are recorded" row of the recovery state. Incident views are
+    // indexed by scope first so each change record touches only the views of
+    // its own ad unit (a scan of every incident per record would be quadratic
+    // in records × incidents).
+    let mut incidents_by_scope: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, view) in views.iter().enumerate() {
+        if view.incident.is_some() {
+            if let Some(scope) = view.scope.clone() {
+                incidents_by_scope.entry(scope).or_default().push(index);
+            }
+        }
+    }
     for record in records {
         if let LedgerRecord::ChangeApplied {
             at_unix_ms,
@@ -488,10 +514,11 @@ pub fn project(
             if prev_value.trim().is_empty() {
                 continue;
             }
-            for view in views.iter_mut().filter(|view| view.incident.is_some()) {
-                if view.scope.as_deref() != Some(ad_unit_id.as_str()) {
-                    continue;
-                }
+            let Some(indices) = incidents_by_scope.get(ad_unit_id.as_str()) else {
+                continue;
+            };
+            for &index in indices {
+                let view = &mut views[index];
                 let Some(incident) = &mut view.incident else {
                     continue;
                 };
@@ -579,36 +606,44 @@ pub fn incident_reference(experiment_id: &str, detail: &str) -> String {
     format!("inc_{}", &digest[..10])
 }
 
-/// The incident time: the newest record time for the experiment, falling back
-/// to the newest record in the ledger.
-fn recorded_at_of(records: &[LedgerRecord], experiment_id: &str, now_unix_ms: i64) -> i64 {
-    let mut newest: Option<i64> = None;
+/// The newest record time per experiment id, from one pass over the ledger.
+///
+/// This is the single-pass form of "the incident time: the newest record time
+/// for the experiment": each record that belongs to an experiment (a start, an
+/// observation, or a lift payload naming it) advances that experiment's
+/// newest time, and the map is consulted once per alert instead of re-walking
+/// the whole ledger per alert.
+fn newest_record_times(records: &[LedgerRecord]) -> HashMap<String, i64> {
+    let mut newest: HashMap<String, i64> = HashMap::new();
     for record in records {
-        let belongs = match record {
+        let belongs: Option<String> = match record {
             LedgerRecord::ExperimentStarted {
                 experiment_id: id, ..
             }
             | LedgerRecord::ExperimentObserved {
                 experiment_id: id, ..
-            } => id == experiment_id,
-            LedgerRecord::LiftRecord { payload, .. } => serde_json::from_str::<LiftRecord>(payload)
-                .map(|lift| match lift {
-                    LiftRecord::PreRegistration {
+            } => Some(id.clone()),
+            LedgerRecord::LiftRecord { payload, .. } => {
+                match serde_json::from_str::<LiftRecord>(payload) {
+                    Ok(LiftRecord::PreRegistration {
                         experiment_id: id, ..
-                    }
-                    | LiftRecord::Result {
+                    })
+                    | Ok(LiftRecord::Result {
                         experiment_id: id, ..
-                    } => id == experiment_id,
-                    _ => false,
-                })
-                .unwrap_or(false),
-            _ => false,
+                    }) => Some(id),
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        if belongs {
-            newest = Some(newest.map_or(record.at_unix_ms(), |t| t.max(record.at_unix_ms())));
+        if let Some(id) = belongs {
+            newest
+                .entry(id)
+                .and_modify(|time| *time = (*time).max(record.at_unix_ms()))
+                .or_insert_with(|| record.at_unix_ms());
         }
     }
-    newest.unwrap_or(now_unix_ms)
+    newest
 }
 
 /// One history entry: a signed record of the experiment.
@@ -678,6 +713,7 @@ pub fn platform_label(platform: Option<PlatformId>) -> &'static str {
         Some(PlatformId::AppLovinMax) => "AppLovin MAX",
         Some(PlatformId::LevelPlay) => "LevelPlay",
         Some(PlatformId::Admob) => "AdMob",
+        Some(PlatformId::Billing) => "Billing",
         None => "Not available",
     }
 }
@@ -1038,5 +1074,281 @@ mod tests {
         assert_eq!(RESTORE_FAILED_HEADLINE, "This test needs intervention");
         assert_eq!(INCIDENT_NEXT_STEP, "Operator investigating");
         assert_eq!(PREVIOUS_STATE_NEXT_STEP, "Review before manual action");
+    }
+
+    /// The pre-fix projection, kept verbatim as the naive reference: linear
+    /// `index_of`, reverse scans for pulls/guardrails, a per-alert ledger
+    /// walk and a per-record incident scan. The optimized projection must
+    /// agree with it record-for-record at n = 10_000.
+    fn project_naive(
+        records: &[LedgerRecord],
+        alerts: &[Alert],
+        now_unix_ms: i64,
+    ) -> Vec<ExperimentView> {
+        let mut views: Vec<ExperimentView> = Vec::new();
+        let index_of = |views: &mut Vec<ExperimentView>, id: &str| -> usize {
+            if let Some(index) = views.iter().position(|view| view.experiment_id == id) {
+                return index;
+            }
+            views.push(ExperimentView {
+                experiment_id: id.to_string(),
+                platform: None,
+                state: ExperimentStateView::Registered,
+                scope: None,
+                metric: None,
+                test_share: None,
+                burn_in_days: None,
+                window_days: None,
+                rule_version: None,
+                rate_bp: None,
+                started_at_unix_ms: None,
+                data_pull_days: Vec::new(),
+                result: None,
+                guardrails: Vec::new(),
+                guardrail_thresholds: None,
+                started_seq: None,
+                incident: None,
+                previous_settings_recorded: false,
+            });
+            views.len() - 1
+        };
+        for record in records {
+            match record {
+                LedgerRecord::ExperimentStarted {
+                    seq,
+                    at_unix_ms,
+                    platform,
+                    experiment_id,
+                    ..
+                } => {
+                    let index = index_of(&mut views, experiment_id);
+                    let view = &mut views[index];
+                    view.platform = Some(*platform);
+                    view.started_at_unix_ms = Some(*at_unix_ms);
+                    view.started_seq = Some(*seq);
+                }
+                LedgerRecord::LiftRecord {
+                    seq,
+                    at_unix_ms,
+                    payload,
+                    payload_sha256,
+                    ..
+                } => {
+                    let Ok(lift) = serde_json::from_str::<LiftRecord>(payload) else {
+                        continue;
+                    };
+                    match lift {
+                        LiftRecord::PreRegistration {
+                            experiment_id,
+                            scope,
+                            split,
+                            metric,
+                            burn_in_days,
+                            window_days,
+                            code_version_hash,
+                            rate_bp,
+                            guardrail_thresholds,
+                            ..
+                        } => {
+                            let index = index_of(&mut views, &experiment_id);
+                            let view = &mut views[index];
+                            view.scope = Some(scope);
+                            view.test_share = Some(split);
+                            view.metric = Some(metric);
+                            view.burn_in_days = Some(burn_in_days);
+                            view.window_days = Some(window_days);
+                            view.rule_version = Some(code_version_hash);
+                            view.rate_bp = Some(rate_bp);
+                            view.guardrail_thresholds = Some(guardrail_thresholds);
+                        }
+                        LiftRecord::DataPull { day, .. } => {
+                            if let Some(view) = views.iter_mut().rev().find(|view| {
+                                view.result.is_none() && view.started_at_unix_ms.is_some()
+                            }) {
+                                view.data_pull_days.push(day);
+                            }
+                        }
+                        LiftRecord::Guardrail(guardrail) => {
+                            if let Some(view) = views.iter_mut().rev().find(|view| {
+                                view.started_at_unix_ms.is_some() && view.result.is_none()
+                            }) {
+                                view.guardrails.push(guardrail);
+                            }
+                        }
+                        LiftRecord::Result {
+                            experiment_id,
+                            daily_log_ratios,
+                            mean_log,
+                            lower_90,
+                            lower_99,
+                            bootstrap_lower,
+                            decision,
+                            lambda,
+                        } => {
+                            let index = index_of(&mut views, &experiment_id);
+                            let view = &mut views[index];
+                            let point_bp = if mean_log.is_finite() {
+                                Some((mean_log.exp_m1() * 10_000.0).round() as i64)
+                            } else {
+                                None
+                            };
+                            view.result = Some(ExperimentResultView {
+                                observed_lift_bp: point_bp,
+                                lower_90,
+                                lower_99,
+                                bootstrap_lower,
+                                decision,
+                                lambda,
+                                daily_log_ratios,
+                                seq: *seq,
+                                payload_sha256: payload_sha256.clone(),
+                                at_unix_ms: *at_unix_ms,
+                            });
+                        }
+                        LiftRecord::MonthlyBilling(_) | LiftRecord::BillingChange(_) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        for alert in alerts {
+            if let Alert::FailedRollback {
+                experiment_id,
+                detail,
+            } = alert
+            {
+                let index = index_of(&mut views, experiment_id);
+                let reference = incident_reference(experiment_id, detail);
+                let recorded_at = recorded_at_of_naive(records, experiment_id, now_unix_ms);
+                views[index].incident = Some(IncidentView {
+                    reference,
+                    recorded_at_unix_ms: recorded_at,
+                    previous_state: "Test still reported active".to_string(),
+                    previous_recorded_at_unix_ms: None,
+                });
+            }
+        }
+        for record in records {
+            if let LedgerRecord::ChangeApplied {
+                at_unix_ms,
+                ad_unit_id,
+                prev_value,
+                ..
+            } = record
+            {
+                if prev_value.trim().is_empty() {
+                    continue;
+                }
+                for view in views.iter_mut().filter(|view| view.incident.is_some()) {
+                    if view.scope.as_deref() != Some(ad_unit_id.as_str()) {
+                        continue;
+                    }
+                    let Some(incident) = &mut view.incident else {
+                        continue;
+                    };
+                    if *at_unix_ms > incident.recorded_at_unix_ms {
+                        continue;
+                    }
+                    view.previous_settings_recorded = true;
+                    if incident
+                        .previous_recorded_at_unix_ms
+                        .is_none_or(|current| *at_unix_ms > current)
+                    {
+                        incident.previous_recorded_at_unix_ms = Some(*at_unix_ms);
+                    }
+                }
+            }
+        }
+        for view in &mut views {
+            view.state = resolve_state(view, now_unix_ms);
+        }
+        views.sort_by(|a, b| a.experiment_id.cmp(&b.experiment_id));
+        views
+    }
+
+    fn recorded_at_of_naive(
+        records: &[LedgerRecord],
+        experiment_id: &str,
+        now_unix_ms: i64,
+    ) -> i64 {
+        let mut newest: Option<i64> = None;
+        for record in records {
+            let belongs = match record {
+                LedgerRecord::ExperimentStarted {
+                    experiment_id: id, ..
+                }
+                | LedgerRecord::ExperimentObserved {
+                    experiment_id: id, ..
+                } => id == experiment_id,
+                LedgerRecord::LiftRecord { payload, .. } => {
+                    serde_json::from_str::<LiftRecord>(payload)
+                        .map(|lift| match lift {
+                            LiftRecord::PreRegistration {
+                                experiment_id: id, ..
+                            }
+                            | LiftRecord::Result {
+                                experiment_id: id, ..
+                            } => id == experiment_id,
+                            _ => false,
+                        })
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+            if belongs {
+                newest = Some(newest.map_or(record.at_unix_ms(), |t| t.max(record.at_unix_ms())));
+            }
+        }
+        newest.unwrap_or(now_unix_ms)
+    }
+
+    #[test]
+    fn the_projection_agrees_with_the_naive_reference_at_ten_thousand_records() {
+        // 1_000 experiments x 10 records: starts, registrations, pulls
+        // (including a burn-in pull before the analysis window), guardrails,
+        // results for half, and billing records that the projection ignores.
+        let mut drafts = Vec::with_capacity(10_000);
+        for e in 0..1_000 {
+            let id = format!("exp_{e:04}");
+            drafts.push(started(&id, NOW - 30 * DAY_MS));
+            drafts.push(preregistration(&id));
+            drafts.push(data_pull("2026-09-01")); // burn-in pull
+            drafts.push(data_pull("2026-10-10"));
+            drafts.push(data_pull("2026-10-11"));
+            drafts.push(lift_record(
+                r#"{"type":"guardrail","day":"2026-10-12","guardrail":"fastHarm","inputs":{"pointLift":-0.061},"action":"rollback"}"#,
+            ));
+            if e % 2 == 0 {
+                drafts.push(result_record(&id, if e % 4 == 0 { "keep" } else { "stop" }));
+            } else {
+                drafts.push(data_pull("2026-10-12"));
+            }
+            drafts.push(data_pull("2026-10-13"));
+            drafts.push(lift_record(
+                r#"{"type":"monthlyBilling","changeId":"ch_1","month":"2026-10","scopeRevenue":100,"lambda":0.03,"factor":1.03,"incremental":10,"logShare":1.0,"rateBp":2000,"feeMicros":1000,"billedDays":30,"monthDays":30}"#,
+            ));
+            drafts.push(preregistration(&id));
+        }
+        assert_eq!(drafts.len(), 10_000);
+        let alerts: Vec<Alert> = (0..20)
+            .map(|i| Alert::FailedRollback {
+                experiment_id: format!("exp_{:04}", i * 47),
+                detail: format!("rollback call failed: {i}"),
+            })
+            .collect();
+
+        let fixed = project(&drafts, &alerts, NOW);
+        let naive = project_naive(&drafts, &alerts, NOW);
+        assert_eq!(fixed.len(), 1_000);
+        assert_eq!(
+            fixed, naive,
+            "the optimized projection must agree with the naive reference"
+        );
+        // The incident rows really are populated (the naive reference walks
+        // the ledger per alert, so agreement is not vacuous).
+        assert_eq!(
+            fixed.iter().filter(|view| view.incident.is_some()).count(),
+            20
+        );
     }
 }

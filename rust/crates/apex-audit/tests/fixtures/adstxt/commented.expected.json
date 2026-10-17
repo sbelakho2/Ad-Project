@@ -1,0 +1,8 @@
+{
+  "file": "commented.txt",
+  "note": "Comment handling: full-line, commented-out records and inline comments; none of the commented domains count.",
+  "errors": [],
+  "records": 1,
+  "variables": 1,
+  "domains": ["metaads.com"]
+}

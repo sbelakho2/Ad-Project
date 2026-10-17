@@ -12,7 +12,7 @@
 //! attributed money uses the signature-free integer formula
 //! `R x (1 - 1 / F)` with F = 1 + bound (page 77).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::envelope::{DomainEvent, EventType};
 use crate::projections::OperatorQueueRow;
@@ -399,6 +399,19 @@ pub fn fee_rows(
         .collect();
     let mut accumulators: BTreeMap<(String, String), FeeAccumulator> = BTreeMap::new();
     let mut paid_invoices: BTreeSet<String> = BTreeSet::new();
+    // The periods with a provisional report day for the scoped publisher,
+    // folded once: the per-change pending check below must not rescan every
+    // report day for every fee row (quadratic over the window).
+    let provisional_periods: HashSet<&str> = report_days
+        .iter()
+        .filter(|row| {
+            !scope.publisher_id.is_empty()
+                && row.publisher_id == scope.publisher_id
+                && row.day.len() >= 7
+                && row.finality == "provisional"
+        })
+        .map(|row| &row.day[..7])
+        .collect();
     for event in &scoped {
         if event.event_type == EventType::PaymentReconciled {
             if let Some(invoice_id) = event.payload.invoice_id.clone() {
@@ -489,13 +502,8 @@ pub fn fee_rows(
                 .invoice_ref
                 .as_ref()
                 .is_some_and(|invoice| paid_invoices.contains(invoice));
-            let pending_period = report_days.iter().any(|row| {
-                !scope.publisher_id.is_empty()
-                    && row.publisher_id == scope.publisher_id
-                    && row.day.len() >= 7
-                    && &row.day[..7] == accumulator.period.as_str()
-                    && row.finality == "provisional"
-            });
+            let pending_period = !scope.publisher_id.is_empty()
+                && provisional_periods.contains(accumulator.period.as_str());
             let state = if accumulator.credited {
                 FeeState::Credited
             } else if paid {
@@ -592,6 +600,14 @@ pub fn data_quality(
     report_days: &[ReportDayRow],
     dedup_rejects: Option<u64>,
 ) -> DataQuality {
+    // The aggregates fold over the scoped slice with borrowed keys: the
+    // original passes cloned platform, account and day per row into owned
+    // maps and sets, which dominated the read once a 90-day window covers
+    // every account. Every aggregate below is a count or an explicitly
+    // ordered output, so borrowing changes no result; the one scan builds
+    // the compact scoped view. (Measured alternative: a single interleaved
+    // pass over borrowed hash keys was slower — one tree/set per aggregate
+    // stays cache-friendly and costs no hashing.)
     let scoped: Vec<&ReportDayRow> = report_days
         .iter()
         .filter(|row| report_day_in_scope(scope, row))
@@ -600,9 +616,9 @@ pub fn data_quality(
         .iter()
         .map(|row| {
             (
-                row.platform.clone(),
-                row.platform_account_id.clone(),
-                row.day.clone(),
+                row.platform.as_str(),
+                row.platform_account_id.as_str(),
+                row.day.as_str(),
             )
         })
         .collect::<BTreeSet<_>>()
@@ -630,12 +646,12 @@ pub fn data_quality(
                 (Some(from), Some(to)) => (to.day_index() - from.day_index() + 1).max(0) as u64,
                 _ => 0,
             };
-            let mut per_account: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+            let mut per_account: BTreeMap<(&str, &str), BTreeSet<&str>> = BTreeMap::new();
             for row in &scoped {
                 per_account
-                    .entry((row.platform.clone(), row.platform_account_id.clone()))
+                    .entry((row.platform.as_str(), row.platform_account_id.as_str()))
                     .or_default()
-                    .insert(row.day.clone());
+                    .insert(row.day.as_str());
             }
             Some(
                 per_account
@@ -650,22 +666,23 @@ pub fn data_quality(
         }
     };
 
-    // Stale sources.
-    let mut sources: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+    // Stale sources, in the deterministic (platform, account) order.
+    let mut sources: BTreeMap<(&str, &str), Option<&str>> = BTreeMap::new();
     for row in &scoped {
-        let key = (row.platform.clone(), row.platform_account_id.clone());
-        let entry = sources.entry(key).or_insert(None);
+        let entry = sources
+            .entry((row.platform.as_str(), row.platform_account_id.as_str()))
+            .or_insert(None);
         if row.finality == "final" {
             match entry {
-                Some(current) if current.as_str() >= row.day.as_str() => {}
-                _ => *entry = Some(row.day.clone()),
+                Some(current) if *current >= row.day.as_str() => {}
+                _ => *entry = Some(row.day.as_str()),
             }
         }
     }
     let as_of_day = scope.as_of.day_index();
     let mut stale_sources: Vec<StaleSource> = Vec::new();
     for ((platform, platform_account_id), last_final_day) in sources {
-        let freshness_days = last_final_day.as_deref().and_then(|day| {
+        let freshness_days = last_final_day.and_then(|day| {
             UtcMillis::parse_rfc3339(&format!("{day}T00:00:00Z"))
                 .ok()
                 .map(|at| as_of_day - at.day_index())
@@ -675,9 +692,9 @@ pub fn data_quality(
             .unwrap_or(true);
         if stale {
             stale_sources.push(StaleSource {
-                platform,
-                platform_account_id,
-                last_final_day,
+                platform: platform.to_string(),
+                platform_account_id: platform_account_id.to_string(),
+                last_final_day: last_final_day.map(str::to_string),
                 freshness_days,
             });
         }
@@ -850,8 +867,8 @@ fn account_of(event: &DomainEvent) -> Option<String> {
 }
 
 /// The stages each account has reached, from lifecycle events.
-fn reached_stages(
-    events: &[DomainEvent],
+fn reached_stages<'a>(
+    events: impl Iterator<Item = &'a DomainEvent>,
     cohort_month: Option<&str>,
 ) -> (
     BTreeSet<String>,
@@ -863,7 +880,7 @@ fn reached_stages(
     let mut accepted_leads: BTreeSet<String> = BTreeSet::new();
     for event in events {
         if let Some(month) = cohort_month {
-            if month_of(event) != Some(month.to_string()) {
+            if month_of(event).as_deref() != Some(month) {
                 continue;
             }
         }
@@ -895,29 +912,30 @@ fn month_of(event: &DomainEvent) -> Option<String> {
 }
 
 /// Growth cohorts by request month.
+///
+/// The scoped events are grouped by month once (one `month_of` allocation per
+/// event) and each month's cohort folds only its own events; the previous
+/// shape rescanned the whole slice per month.
 pub fn growth_cohorts(scope: &QueryScope, events: &[DomainEvent]) -> Vec<GrowthCohortRow> {
-    let scoped: Vec<DomainEvent> = events
-        .iter()
-        .filter(|event| event_in_scope(scope, event))
-        .cloned()
-        .collect();
     let mut months: BTreeSet<String> = BTreeSet::new();
-    for event in &scoped {
+    let mut by_month: BTreeMap<String, Vec<&DomainEvent>> = BTreeMap::new();
+    for event in events.iter().filter(|event| event_in_scope(scope, event)) {
+        let Some(month) = month_of(event) else {
+            continue;
+        };
         if event.event_type == EventType::AuditRequestAccepted {
-            if let Some(month) = month_of(event) {
-                months.insert(month);
-            }
+            months.insert(month.clone());
         }
+        by_month.entry(month).or_default().push(event);
     }
     months
         .into_iter()
         .map(|month| {
-            let events: Vec<DomainEvent> = scoped
-                .iter()
-                .filter(|event| month_of(event).as_deref() == Some(month.as_str()))
-                .cloned()
-                .collect();
-            let (leads, reached, accounts) = reached_stages(&events, None);
+            let month_events = by_month
+                .get(&month)
+                .map(|events| events.iter().copied())
+                .unwrap_or_default();
+            let (leads, reached, accounts) = reached_stages(month_events, None);
             let stage_count = |index: usize| -> u64 {
                 accounts
                     .iter()
@@ -957,7 +975,7 @@ pub fn activation_funnel(
         .filter(|event| event_in_scope(scope, event))
         .cloned()
         .collect();
-    let (_, reached, accounts) = reached_stages(&scoped, Some(cohort_month));
+    let (_, reached, accounts) = reached_stages(scoped.iter(), Some(cohort_month));
     let mut stages = vec![FunnelStageRow {
         stage: "requested".to_string(),
         accounts: accounts.len() as u64,
@@ -1232,5 +1250,525 @@ pub(crate) fn effective_day_bound(argument: &str, scope_bound: Option<&str>) -> 
         scope_bound.unwrap_or_default().to_string()
     } else {
         argument.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::envelope::EventType;
+    use crate::test_support::{payload_for, valid_event_builder};
+
+    const N: usize = 10_000;
+
+    fn scope() -> QueryScope {
+        QueryScope::new(
+            "northstar",
+            UtcMillis::parse_rfc3339("2026-10-15T09:10:00.000Z").expect("as-of"),
+        )
+        .with_day_range("2026-08-01", "2026-10-14")
+    }
+
+    fn fee_event(i: usize, publisher: &str, period: &str) -> DomainEvent {
+        let mut payload = payload_for(EventType::FeeComputed);
+        payload.change_id = Some(format!("ch_{i:06}"));
+        payload.period = Some(period.to_string());
+        payload.currency = Some("USD".into());
+        payload.source_amount_micros = Some(51_500_000_000);
+        payload.bound_bp = Some(300);
+        payload.rate_bp = Some(2_000);
+        payload.active_days = Some(30);
+        valid_event_builder(EventType::FeeComputed)
+            .with_event_id(format!("fee_{i:07}"))
+            .with_publisher_id(publisher)
+            .with_occurred_at(UtcMillis::from_unix_millis(1_790_000_000_000 + i as i64))
+            .with_received_at(UtcMillis::from_unix_millis(1_790_000_000_000 + i as i64))
+            .with_payload(payload)
+            .build()
+            .expect("fee event")
+    }
+
+    fn report_day(i: usize, publisher: &str, day: String, finality: &str) -> ReportDayRow {
+        ReportDayRow {
+            publisher_id: publisher.to_string(),
+            platform: "applovin_max".to_string(),
+            platform_account_id: format!("acc_{:05}", i % 97),
+            day,
+            finality: finality.to_string(),
+            revenue_micros: if i.is_multiple_of(11) {
+                None
+            } else {
+                Some(1_500_000)
+            },
+            impressions: Some(1_000),
+            currency: if i.is_multiple_of(13) {
+                None
+            } else {
+                Some("USD".to_string())
+            },
+            country: Some("DE".to_string()),
+            ad_unit_id: Some(format!("unit_{:02}", i % 8)),
+            format: Some("rewarded".to_string()),
+            source_digest: Some("d".to_string()),
+        }
+    }
+
+    fn day_for(i: usize) -> String {
+        match i % 6 {
+            0 => "2026-08-01".to_string(),
+            1 => "2026-09-15".to_string(),
+            2 => "2026-10-14".to_string(),
+            3 => "2026-07-31".to_string(),
+            4 => "2026-10-15".to_string(),
+            _ => format!("2026-09-{:02}", 1 + i % 28),
+        }
+    }
+
+    /// The pre-optimization fee fold: the pending state rescans every report
+    /// day for every accumulated change. Kept verbatim as the reference the
+    /// single-fold implementation must equal.
+    fn fee_rows_naive(
+        scope: &QueryScope,
+        events: &[DomainEvent],
+        report_days: &[ReportDayRow],
+    ) -> Vec<FeeRow> {
+        let scoped: Vec<&DomainEvent> = events
+            .iter()
+            .filter(|event| event_in_scope(scope, event))
+            .collect();
+        let mut accumulators: BTreeMap<(String, String), FeeAccumulator> = BTreeMap::new();
+        let mut paid_invoices: BTreeSet<String> = BTreeSet::new();
+        for event in &scoped {
+            if event.event_type == EventType::PaymentReconciled {
+                if let Some(invoice_id) = event.payload.invoice_id.clone() {
+                    paid_invoices.insert(invoice_id);
+                }
+            }
+            let (Some(change_id), Some(period)) = (
+                event.payload.change_id.clone(),
+                event.payload.period.clone(),
+            ) else {
+                continue;
+            };
+            let accumulator = accumulators
+                .entry((change_id, period.clone()))
+                .or_insert_with(|| FeeAccumulator {
+                    period,
+                    ..FeeAccumulator::default()
+                });
+            let candidate = (
+                event.occurred_at_utc,
+                event.source.as_str(),
+                event.event_id.clone(),
+            );
+            let strictly_newer = match &accumulator.latest_key {
+                Some(current) => candidate > *current,
+                None => true,
+            };
+            if !strictly_newer {
+                continue;
+            }
+            accumulator.latest_key = Some(candidate);
+            match event.event_type {
+                EventType::FeeComputed => {
+                    if let Some(currency) = event.payload.currency.clone() {
+                        accumulator.currency = Some(currency);
+                    }
+                    accumulator.source_amount_micros = event.payload.source_amount_micros;
+                    accumulator.bound_bp = event.payload.bound_bp;
+                    accumulator.rate_bp = event.payload.rate_bp;
+                    accumulator.active_days = event.payload.active_days;
+                    if let Some(proofs) = &event.payload.proof_hashes {
+                        accumulator.proof_refs = proofs.clone();
+                    }
+                }
+                EventType::FeeHeld => {
+                    accumulator.held = true;
+                    if accumulator.currency.is_none() {
+                        accumulator.currency = event.payload.currency.clone();
+                    }
+                }
+                EventType::FeeInvoiceIssued | EventType::FeeCredited => {
+                    if event.event_type == EventType::FeeCredited {
+                        accumulator.credited = true;
+                    } else {
+                        accumulator.invoiced = true;
+                    }
+                    if let Some(invoice_id) = event.payload.invoice_id.clone() {
+                        accumulator.invoice_ref = Some(invoice_id);
+                    }
+                    if event.payload.amount_micros.is_some() {
+                        accumulator.invoice_amount_micros = event.payload.amount_micros;
+                    }
+                    if accumulator.currency.is_none() {
+                        accumulator.currency = event.payload.currency.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rows: Vec<FeeRow> = accumulators
+            .into_iter()
+            .map(|((change_id, period), accumulator)| {
+                let currency = accumulator.currency.clone().unwrap_or_default();
+                let derived_amount = match (
+                    accumulator.source_amount_micros,
+                    accumulator.bound_bp,
+                    accumulator.rate_bp,
+                ) {
+                    (Some(source), Some(bound), Some(rate)) => {
+                        attributed_increment_micros(source, bound)
+                            .and_then(|increment| fee_before_tax_micros(increment, rate))
+                    }
+                    _ => None,
+                };
+                let amount_micros = accumulator.invoice_amount_micros.or(derived_amount);
+                let paid = accumulator
+                    .invoice_ref
+                    .as_ref()
+                    .is_some_and(|invoice| paid_invoices.contains(invoice));
+                let pending_period = report_days.iter().any(|row| {
+                    !scope.publisher_id.is_empty()
+                        && row.publisher_id == scope.publisher_id
+                        && row.day.len() >= 7
+                        && &row.day[..7] == accumulator.period.as_str()
+                        && row.finality == "provisional"
+                });
+                let state = if accumulator.credited {
+                    FeeState::Credited
+                } else if paid {
+                    FeeState::Paid
+                } else if accumulator.invoiced {
+                    FeeState::Invoiced
+                } else if accumulator.held {
+                    FeeState::Held
+                } else if pending_period {
+                    FeeState::Pending
+                } else {
+                    FeeState::Estimated
+                };
+                FeeRow {
+                    change_id,
+                    period,
+                    state,
+                    amount: amount_micros.map(|micros| Money::new(micros, currency.clone())),
+                    source_amount: accumulator
+                        .source_amount_micros
+                        .map(|micros| Money::new(micros, currency.clone())),
+                    bound_bp: accumulator.bound_bp,
+                    rate_bp: accumulator.rate_bp,
+                    active_days: accumulator.active_days,
+                    invoice_ref: accumulator.invoice_ref,
+                    proof_refs: accumulator.proof_refs,
+                }
+            })
+            .collect();
+        rows.sort_by(|left, right| {
+            left.period
+                .cmp(&right.period)
+                .then(left.change_id.cmp(&right.change_id))
+        });
+        rows
+    }
+
+    /// The pre-optimization data-quality fold: five passes over the scoped
+    /// rows. Kept verbatim as the reference.
+    fn data_quality_naive(
+        scope: &QueryScope,
+        report_days: &[ReportDayRow],
+        dedup_rejects: Option<u64>,
+    ) -> DataQuality {
+        let scoped: Vec<&ReportDayRow> = report_days
+            .iter()
+            .filter(|row| report_day_in_scope(scope, row))
+            .collect();
+        let matched_source_days = scoped
+            .iter()
+            .map(|row| {
+                (
+                    row.platform.clone(),
+                    row.platform_account_id.clone(),
+                    row.day.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .len() as u64;
+        let provisional_days = scoped
+            .iter()
+            .filter(|row| row.finality == "provisional")
+            .count() as u64;
+        let unmapped_rows = scoped
+            .iter()
+            .filter(|row| row.revenue_micros.is_none() || row.currency.is_none())
+            .count() as u64;
+        let mut unavailable = Vec::new();
+        if dedup_rejects.is_none() {
+            unavailable
+                .push("dedup_rejects: this store cannot report raw duplicate rows".to_string());
+        }
+        let missing_days = match (scope.from_day.as_deref(), scope.to_day.as_deref()) {
+            (Some(from), Some(to)) => {
+                let parse =
+                    |text: &str| UtcMillis::parse_rfc3339(&format!("{text}T00:00:00Z")).ok();
+                let range_days = match (parse(from), parse(to)) {
+                    (Some(from), Some(to)) => (to.day_index() - from.day_index() + 1).max(0) as u64,
+                    _ => 0,
+                };
+                let mut per_account: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+                for row in &scoped {
+                    per_account
+                        .entry((row.platform.clone(), row.platform_account_id.clone()))
+                        .or_default()
+                        .insert(row.day.clone());
+                }
+                Some(
+                    per_account
+                        .values()
+                        .map(|days| range_days.saturating_sub(days.len() as u64))
+                        .sum(),
+                )
+            }
+            _ => {
+                unavailable.push("missing_days: no day range was requested".to_string());
+                None
+            }
+        };
+        let mut sources: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+        for row in &scoped {
+            let key = (row.platform.clone(), row.platform_account_id.clone());
+            let entry = sources.entry(key).or_insert(None);
+            if row.finality == "final" {
+                match entry {
+                    Some(current) if current.as_str() >= row.day.as_str() => {}
+                    _ => *entry = Some(row.day.clone()),
+                }
+            }
+        }
+        let as_of_day = scope.as_of.day_index();
+        let mut stale_sources: Vec<StaleSource> = Vec::new();
+        for ((platform, platform_account_id), last_final_day) in sources {
+            let freshness_days = last_final_day.as_deref().and_then(|day| {
+                UtcMillis::parse_rfc3339(&format!("{day}T00:00:00Z"))
+                    .ok()
+                    .map(|at| as_of_day - at.day_index())
+            });
+            let stale = freshness_days
+                .map(|days| days > FRESHNESS_STALE_DAYS)
+                .unwrap_or(true);
+            if stale {
+                stale_sources.push(StaleSource {
+                    platform,
+                    platform_account_id,
+                    last_final_day,
+                    freshness_days,
+                });
+            }
+        }
+        DataQuality {
+            publisher_id: scope.publisher_id.clone(),
+            as_of: scope.as_of.to_rfc3339_millis(),
+            matched_source_days,
+            missing_days,
+            provisional_days,
+            dedup_rejects,
+            unmapped_rows,
+            stale_sources,
+            unavailable,
+        }
+    }
+
+    /// The pre-optimization cohort fold: one full rescan of the scoped events
+    /// per month. Kept verbatim as the reference.
+    fn growth_cohorts_naive(scope: &QueryScope, events: &[DomainEvent]) -> Vec<GrowthCohortRow> {
+        fn month_of_naive(event: &DomainEvent) -> Option<String> {
+            let day = event.occurred_at_utc.to_day_string();
+            day.get(..7).map(str::to_string)
+        }
+        fn reached_naive(
+            events: &[DomainEvent],
+            cohort_month: Option<&str>,
+        ) -> (
+            BTreeSet<String>,
+            BTreeMap<String, BTreeSet<String>>,
+            BTreeSet<String>,
+        ) {
+            let mut accepted_accounts: BTreeSet<String> = BTreeSet::new();
+            let mut reached: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            let mut accepted_leads: BTreeSet<String> = BTreeSet::new();
+            for event in events {
+                if let Some(month) = cohort_month {
+                    if month_of_naive(event) != Some(month.to_string()) {
+                        continue;
+                    }
+                }
+                match event.event_type {
+                    EventType::AuditRequestAccepted => {
+                        if let Some(lead_id) = event.payload.lead_id.clone() {
+                            accepted_leads.insert(lead_id);
+                        }
+                        if let Some(account) = account_of(event) {
+                            accepted_accounts.insert(account.clone());
+                            reached.entry(account).or_default();
+                        }
+                    }
+                    EventType::AccountStageChanged => {
+                        if let Some(account) = account_of(event) {
+                            let stage = event.payload.next_stage.clone().unwrap_or_default();
+                            reached.entry(account).or_default().insert(stage);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (accepted_leads, reached, accepted_accounts)
+        }
+        let scoped: Vec<DomainEvent> = events
+            .iter()
+            .filter(|event| event_in_scope(scope, event))
+            .cloned()
+            .collect();
+        let mut months: BTreeSet<String> = BTreeSet::new();
+        for event in &scoped {
+            if event.event_type == EventType::AuditRequestAccepted {
+                if let Some(month) = month_of_naive(event) {
+                    months.insert(month);
+                }
+            }
+        }
+        months
+            .into_iter()
+            .map(|month| {
+                let events: Vec<DomainEvent> = scoped
+                    .iter()
+                    .filter(|event| month_of_naive(event).as_deref() == Some(month.as_str()))
+                    .cloned()
+                    .collect();
+                let (leads, reached, accounts) = reached_naive(&events, None);
+                let stage_count = |index: usize| -> u64 {
+                    accounts
+                        .iter()
+                        .filter(|account| {
+                            reached.get(*account).is_some_and(|stages| {
+                                stages
+                                    .iter()
+                                    .any(|stage| FUNNEL_STAGES[index..].contains(&stage.as_str()))
+                            })
+                        })
+                        .count() as u64
+                };
+                let qualified = stage_count(0);
+                GrowthCohortRow {
+                    cohort_month: month.clone(),
+                    accepted: leads.len() as u64,
+                    accepted_accounts: accounts.len() as u64,
+                    qualified,
+                    connected: stage_count(1),
+                    audit_delivered: stage_count(2),
+                    paid: stage_count(3),
+                    mature: cohort_is_mature(&month, scope.as_of),
+                    qualification_rate_bp: rate_basis_points(qualified, accounts.len() as u64),
+                }
+            })
+            .collect()
+    }
+
+    fn scope_wide() -> QueryScope {
+        QueryScope::operator_wide(
+            UtcMillis::parse_rfc3339("2026-10-15T09:10:00.000Z").expect("as-of"),
+        )
+    }
+
+    fn month_time(i: usize) -> UtcMillis {
+        let month = 1 + (i % 12);
+        let year = 2025 + (i % 24) / 12;
+        let day = 1 + (i % 28);
+        UtcMillis::parse_rfc3339(&format!("{year}-{month:02}-{day:02}T09:00:00.000Z"))
+            .expect("month time")
+    }
+
+    #[test]
+    fn fee_rows_fold_equals_the_naive_report_day_scan() {
+        let scope = scope();
+        let events: Vec<DomainEvent> = (0..N)
+            .map(|i| {
+                let period = if i % 3 == 0 { "2026-08" } else { "2026-09" };
+                let publisher = if i % 17 == 0 { "other" } else { "northstar" };
+                fee_event(i, publisher, period)
+            })
+            .collect();
+        // 400 report days: several publishers' provisional and final rows,
+        // plus out-of-range and short-day rows the naive scan must also see.
+        let days: Vec<ReportDayRow> = (0..400)
+            .map(|i| {
+                let publisher = match i % 3 {
+                    0 => "northstar",
+                    1 => "other",
+                    _ => "third",
+                };
+                let finality = if i % 5 == 0 { "final" } else { "provisional" };
+                let day = match i % 7 {
+                    0 => "2026-08-31".to_string(),
+                    1 => "2026-09-01".to_string(),
+                    2 => "2026-10-14".to_string(),
+                    3 => "bad".to_string(),
+                    _ => format!("2026-09-{:02}", 1 + i % 28),
+                };
+                report_day(i, publisher, day, finality)
+            })
+            .collect();
+        let optimized = fee_rows(&scope, &events, &days);
+        let reference = fee_rows_naive(&scope, &events, &days);
+        assert_eq!(optimized, reference);
+        assert!(optimized.iter().any(|row| row.state == FeeState::Pending));
+    }
+
+    #[test]
+    fn data_quality_fold_equals_the_naive_multi_pass_badge() {
+        let scope = scope();
+        let days: Vec<ReportDayRow> = (0..N)
+            .map(|i| {
+                let publisher = if i % 5 == 0 { "other" } else { "northstar" };
+                let finality = match i % 4 {
+                    0 => "final",
+                    1 => "provisional",
+                    _ => "partial",
+                };
+                report_day(i, publisher, day_for(i), finality)
+            })
+            .collect();
+        let optimized = data_quality(&scope, &days, Some(7));
+        let reference = data_quality_naive(&scope, &days, Some(7));
+        assert_eq!(optimized, reference);
+        // The no-range path reports the honest unavailable reason on both.
+        let wide = QueryScope::operator_wide(scope.as_of);
+        assert_eq!(
+            data_quality(&wide, &days, None),
+            data_quality_naive(&wide, &days, None)
+        );
+    }
+
+    #[test]
+    fn growth_cohorts_fold_equals_the_naive_per_month_rescan() {
+        let scope = scope_wide();
+        let events: Vec<DomainEvent> = (0..N)
+            .map(|i| {
+                let mut payload = payload_for(EventType::AuditRequestAccepted);
+                payload.lead_id = Some(format!("lead_{i:07}"));
+                valid_event_builder(EventType::AuditRequestAccepted)
+                    .with_event_id(format!("acc_{i:07}"))
+                    .with_occurred_at(month_time(i))
+                    .with_received_at(month_time(i))
+                    .with_object("account", format!("acct_{i:07}"))
+                    .with_payload(payload)
+                    .build()
+                    .expect("accepted event")
+            })
+            .collect();
+        let optimized = growth_cohorts(&scope, &events);
+        let reference = growth_cohorts_naive(&scope, &events);
+        assert_eq!(optimized, reference);
+        assert!(optimized.len() > 1, "the fixture spans several months");
     }
 }

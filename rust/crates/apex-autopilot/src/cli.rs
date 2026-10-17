@@ -74,6 +74,38 @@ fn nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// A configuration value documented as hex that failed to decode. The error
+/// names the variable so an operator log points at the exact setting; it
+/// mirrors apex-api's `HexKeyError` for the same variable (same class, same
+/// message text).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{variable} is not valid hex: {reason}")]
+pub struct HexKeyError {
+    variable: String,
+    reason: String,
+}
+
+impl HexKeyError {
+    /// The environment variable that carried the invalid value.
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+}
+
+/// Decode a hex-encoded binary key from configuration: Adyen publishes the
+/// webhook HMAC key as hex text while signatures are computed over the raw
+/// key bytes, so a value that is not hex must refuse the run (feeding the
+/// text bytes to the verifier would fail every signature silently). An empty
+/// value decodes to an empty key; whitespace around the payload is
+/// tolerated. This is the same read apex-api performs for
+/// `APEX_ADYEN_HMAC_KEY`.
+pub fn decode_hex_env_key(variable: &str, raw: &str) -> Result<Vec<u8>, HexKeyError> {
+    hex::decode(raw.trim()).map_err(|error| HexKeyError {
+        variable: variable.to_string(),
+        reason: error.to_string(),
+    })
+}
+
 /// The calendar month just closed, as `(YYYY-MM, YYYY-MM-01, day count)`.
 pub fn previous_month(now_unix_ms: i64) -> Result<(String, String, u32), String> {
     let today = now_unix_ms.div_euclid(86_400_000);
@@ -178,34 +210,44 @@ fn parse_vat_rate(name: &str, raw: &str) -> Result<u16, String> {
     Ok(bp as u16)
 }
 
-/// The monitoring plan fee in micros, mirroring apex-api
-/// (`APEX_MONITORING_FEE_MICROS` is the primary name; the historical
-/// `APEX_MONITORING_MONTHLY_MICROS` is a deprecated fallback announced once).
-/// apex-api treats a non-positive fee as "not selected", so the runner
-/// mirrors that exactly; a malformed value is a typed error.
-pub fn monitoring_fee_micros(env: &impl Fn(&str) -> Option<String>) -> Result<Option<i64>, String> {
-    const PRIMARY: &str = "APEX_MONITORING_FEE_MICROS";
-    const DEPRECATED: &str = "APEX_MONITORING_MONTHLY_MICROS";
-    match env_nonempty(env, PRIMARY) {
-        Some(raw) => parse_monitoring_fee(PRIMARY, &raw),
-        None => match env_nonempty(env, DEPRECATED) {
-            Some(raw) => {
-                eprintln!(
-                    "apex-runner: {DEPRECATED} is deprecated; use {PRIMARY} (the apex-api name)"
-                );
-                parse_monitoring_fee(DEPRECATED, &raw)
-            }
-            None => Ok(None),
-        },
+/// The monitoring tier prices. Monitoring is ON by default (there is no
+/// opt-in switch): the `APEX_MONITORING_TIER_*` overrides shape the tier
+/// table used for tests and deployments, and the historical
+/// `APEX_MONITORING_FEE_MICROS` is the deprecated base-tier fallback,
+/// announced once. Only a legacy value of `0` (or less) turns monitoring off
+/// — the old "not selected" off switch stays honored. A malformed value is a
+/// typed error, never a silently unset price.
+pub fn monitoring_prices(
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<apex_billing::MonitoringPrices>, String> {
+    apex_billing::MonitoringPrices::from_env(env, &mut |message| {
+        eprintln!("apex-runner: {message}");
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// The autopilot policy from `APEX_RUNNER_POLICY`, or the conservative
+/// default. A malformed policy is a typed error, never a silent default.
+fn policy_from_env(
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<crate::model::AutopilotPolicy, String> {
+    match env("APEX_RUNNER_POLICY") {
+        Some(raw) if !raw.trim().is_empty() => {
+            serde_json::from_str::<crate::model::AutopilotPolicy>(&raw)
+                .map_err(|e| format!("policy: {e}"))
+        }
+        _ => Ok(crate::model::AutopilotPolicy::conservative()),
     }
 }
 
-fn parse_monitoring_fee(name: &str, raw: &str) -> Result<Option<i64>, String> {
-    let fee: i64 = raw
-        .trim()
-        .parse()
-        .map_err(|_| format!("{name} must be a number"))?;
-    Ok((fee > 0).then_some(fee))
+/// Where the bucket-model (priors) state comes from in this mode.
+enum PriorsSource<'a> {
+    /// `APEX_RUNNER_PRIORS` names one JSON file: the legacy single-publisher
+    /// deployment.
+    File,
+    /// `APEX_RUNNER_PRIORS` names a directory of `<publisher>.json` files:
+    /// each registered publisher learns into its own model.
+    Directory(&'a str),
 }
 
 /// Build a [`Runner`](crate::Runner) from the environment: policy, publisher,
@@ -218,37 +260,190 @@ pub fn build_runner(
     instrumentation: &Instrumentation,
 ) -> Result<crate::runner::Runner, String> {
     use apex_lift::guardrails::FillFormat;
-    let policy = match env("APEX_RUNNER_POLICY") {
-        Some(raw) if !raw.trim().is_empty() => {
-            serde_json::from_str::<crate::model::AutopilotPolicy>(&raw)
-                .map_err(|e| format!("policy: {e}"))?
-        }
-        _ => crate::model::AutopilotPolicy::conservative(),
-    };
-    let mut runner = crate::runner::Runner::new(ops, policy, FillFormat::Rewarded);
+    let policy = policy_from_env(&env)?;
     let publisher = env_nonempty(&env, "APEX_RUNNER_PUBLISHER");
+    let mut runner = crate::runner::Runner::new(ops, policy, FillFormat::Rewarded);
     if let Some(publisher) = &publisher {
         runner = runner.with_publisher(publisher.clone());
     }
+    let ledger_path = env_nonempty(&env, "APEX_RUNNER_LEDGER").map(std::path::PathBuf::from);
+    let signing_key = env_nonempty(&env, "APEX_RUNNER_SIGNING_KEY_HEX")
+        .and_then(|seed| parse_seed(&seed).ok())
+        .map(|seed| apex_proof::Keypair::from_bytes(&seed));
+    // The connections root resolves through the same fallbacks the fleet mode
+    // uses (`APEX_CONNECTIONS_ROOT`, then the apex-api spelling
+    // `APEX_CREDENTIAL_ROOT`), so a legacy deployment that names it records
+    // monitoring state exactly as the fleet path does. Without it the monthly
+    // pass records the typed monitoring-skip reason instead of aborting.
+    let connections_root = crate::registry::vault_root_from_env(&env);
+    runner = configure_runner(
+        &env,
+        runner,
+        publisher.as_deref(),
+        PriorsSource::File,
+        true,
+        ledger_path.as_deref().zip(signing_key.as_ref()),
+        connections_root.as_deref(),
+        transport,
+        instrumentation,
+    )?;
+    Ok(runner)
+}
+
+/// Build one fleet publisher's runner: the platform adapter comes from the
+/// vaulted keys the registry decrypted, everything else reads the same
+/// environment names the legacy single-publisher runner reads. In a
+/// multi-publisher fleet the fleet-level collaborators (verified payment
+/// events, projection refresh) are NOT attached — `dispatch_fleet` runs them
+/// once per run; the exactly-one-publisher registry keeps them per publisher
+/// so its reports stay byte-identical to the legacy mode.
+#[allow(clippy::too_many_arguments)]
+fn build_publisher_runner(
+    env: &impl Fn(&str) -> Option<String>,
+    registered: &crate::registry::RunnablePublisher,
+    ledger_root: &std::path::Path,
+    vault_root: &std::path::Path,
+    signing_key: &apex_proof::Keypair,
+    transport: std::sync::Arc<dyn apex_connectors::transport::Transport>,
+    instrumentation: &Instrumentation,
+    fleet_level: bool,
+) -> Result<crate::runner::Runner, String> {
+    use apex_lift::guardrails::FillFormat;
+    let policy = policy_from_env(env)?;
+    let credentials = &registered.credentials;
+    let writable = || split_csv(env_nonempty(env, "APEX_RUNNER_WRITABLE"));
+    // The platform adapter comes from the vaulted keys the registry
+    // decrypted: the report key and bases for MAX, the secret key / refresh
+    // token / app key set for LevelPlay, the access token and account id for
+    // AdMob. The registry validated the key set per platform before this
+    // runner was built.
+    let ops: std::sync::Arc<dyn crate::ops::PlatformOps> = match registered.platform.as_str() {
+        crate::registry::MAX_WIRE => {
+            let report_key = credentials.report_key.as_deref().ok_or_else(|| {
+                format!(
+                    "{}: the vaulted MAX key set has no reporting key",
+                    registered.publisher
+                )
+            })?;
+            let reporting_base = credentials
+                .reporting_base_url
+                .clone()
+                .unwrap_or_else(|| apex_connectors::max::MAX_REPORTING_BASE.to_string());
+            let ops = crate::live_max::MaxPlatformOps::new(
+                &credentials.api_key,
+                report_key,
+                &credentials.base_url,
+                &reporting_base,
+                std::sync::Arc::clone(&transport),
+                std::sync::Arc::new(crate::live_max::SystemWall),
+                writable(),
+            )
+            .map_err(|error| format!("{}: max adapter: {error}", registered.publisher))?;
+            std::sync::Arc::new(ops)
+        }
+        crate::registry::LEVELPLAY_WIRE => {
+            let refresh_token = credentials.refresh_token.as_deref().ok_or_else(|| {
+                format!(
+                    "{}: the vaulted LevelPlay key set has no refresh token",
+                    registered.publisher
+                )
+            })?;
+            let ops = crate::live_levelplay::LevelPlayPlatformOps::new(
+                &credentials.api_key,
+                refresh_token,
+                &credentials.account_id,
+                &credentials.base_url,
+                std::sync::Arc::clone(&transport),
+                std::sync::Arc::new(crate::live_max::SystemWall),
+                writable(),
+            )
+            .map_err(|error| format!("{}: levelplay adapter: {error}", registered.publisher))?;
+            std::sync::Arc::new(ops)
+        }
+        crate::registry::ADMOB_WIRE => {
+            let ops = crate::live_admob::AdmobPlatformOps::new(
+                &credentials.api_key,
+                &credentials.account_id,
+                &credentials.base_url,
+                std::sync::Arc::clone(&transport),
+                writable(),
+            )
+            .map_err(|error| format!("{}: admob adapter: {error}", registered.publisher))?;
+            std::sync::Arc::new(ops)
+        }
+        other => {
+            return Err(format!(
+                "{}: no runner adapter for platform '{other}'",
+                registered.publisher
+            ))
+        }
+    };
+    let runner = crate::runner::Runner::new(ops, policy, FillFormat::Rewarded)
+        .with_publisher(registered.publisher.clone());
+    let ledger_path = ledger_root.join(format!("{}.jsonl", registered.publisher));
+    let mut runner = configure_runner(
+        env,
+        runner,
+        Some(&registered.publisher),
+        PriorsSource::Directory(&registered.publisher),
+        fleet_level,
+        Some((ledger_path.as_path(), signing_key)),
+        Some(vault_root),
+        transport,
+        instrumentation,
+    )?;
+    if !fleet_level {
+        // Multi-publisher fleet: one pass claims only its own jobs.
+        runner = runner.with_owner_scoped_operator_jobs(true);
+    }
+    Ok(runner)
+}
+
+/// Apply the shared environment configuration to a runner. `fleet_level`
+/// controls the once-per-run collaborators; `verifier` attaches the ledger
+/// verifier for a known ledger path and signing key.
+#[allow(clippy::too_many_arguments)]
+fn configure_runner(
+    env: &impl Fn(&str) -> Option<String>,
+    mut runner: crate::runner::Runner,
+    publisher: Option<&str>,
+    priors: PriorsSource<'_>,
+    fleet_level: bool,
+    verifier: Option<(&std::path::Path, &apex_proof::Keypair)>,
+    connections_root: Option<&std::path::Path>,
+    transport: std::sync::Arc<dyn apex_connectors::transport::Transport>,
+    instrumentation: &Instrumentation,
+) -> Result<crate::runner::Runner, String> {
     // The billing configuration reads the same names apex-api reads. The
     // historical runner-only names stay as deprecated fallbacks and are
     // announced on stderr when used, so a deployment never silently runs on
     // two divergent spellings.
-    if let Some(bp) = vat_rate_bp(&env)? {
+    if let Some(bp) = vat_rate_bp(env)? {
         runner = runner.with_vat_rate(bp);
     }
-    if let Some(fee) = monitoring_fee_micros(&env)? {
-        runner = runner.with_monitoring(apex_billing::MonitoringPlan {
-            monthly_fee_micros: fee,
-        });
+    // Monitoring is ON at connection: every configured runner carries the
+    // tier table, and the monthly pass bills the recorded plan line. Only
+    // the legacy zero disables it.
+    if let Some(prices) = monitoring_prices(env)? {
+        runner = runner.with_monitoring(apex_billing::MonitoringPlan::new(prices));
     }
+    // The Adyen HMAC key is hex on the wire: decode it before the client is
+    // built, and refuse a present-but-unparsable value outright (a wrong key
+    // would fail every notification signature closed but silently). A blank
+    // value reads as unset, exactly like the rest of the configuration.
+    let adyen_hmac = match env("APEX_ADYEN_HMAC_KEY") {
+        Some(raw) if !raw.trim().is_empty() => Some(
+            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", &raw).map_err(|error| error.to_string())?,
+        ),
+        _ => None,
+    };
     if let (Some(api_key), Some(merchant)) = (
         env("APEX_ADYEN_API_KEY"),
         env("APEX_ADYEN_MERCHANT_ACCOUNT"),
     ) {
-        let hmac = env("APEX_ADYEN_HMAC_KEY").unwrap_or_default().into_bytes();
+        let hmac = adyen_hmac.unwrap_or_default();
         let base = env_or(
-            &env,
+            env,
             "APEX_ADYEN_CHECKOUT_BASE",
             "https://checkout-test.adyen.com",
         );
@@ -256,10 +451,17 @@ pub fn build_runner(
             .map_err(|e| format!("adyen client: {e}"))?;
         runner = runner.with_adyen(std::sync::Arc::new(client), transport);
     }
-    if let Some(path) = env_nonempty(&env, "APEX_RUNNER_PRIORS") {
+    if let Some(path) = env_nonempty(env, "APEX_RUNNER_PRIORS") {
         // A missing priors file is "no priors yet" (the defaults); a file
         // that exists but cannot be read is a typed error, never silently
-        // replaced by defaults.
+        // replaced by defaults. In fleet mode the path names a directory and
+        // each publisher reads its own `<publisher>.json` model.
+        let path = match priors {
+            PriorsSource::File => std::path::PathBuf::from(path),
+            PriorsSource::Directory(publisher) => {
+                std::path::PathBuf::from(&path).join(format!("{publisher}.json"))
+            }
+        };
         let priors = match std::fs::read_to_string(&path) {
             Ok(raw) if !raw.trim().is_empty() => {
                 serde_json::from_str::<apex_lift::priors::LiftPriors>(&raw)
@@ -269,11 +471,11 @@ pub fn build_runner(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 apex_lift::priors::LiftPriors::default()
             }
-            Err(error) => return Err(format!("priors at {path}: {error}")),
+            Err(error) => return Err(format!("priors at {}: {error}", path.display())),
         };
         runner = runner.with_priors(priors, &path);
     }
-    if let Some(path) = env_nonempty(&env, "APEX_ALERT_FILE") {
+    if let Some(path) = env_nonempty(env, "APEX_ALERT_FILE") {
         let sink: std::sync::Arc<dyn crate::alerts::AlertSink> =
             std::sync::Arc::new(crate::alerts::FileAlertSink::new(path));
         runner = runner.with_alerts(sink);
@@ -283,48 +485,50 @@ pub fn build_runner(
         // The instrumentation handle is built before the publisher is known;
         // stamp it here so every emitted event carries the tenant. Without
         // this the store refuses the whole batch (required field).
-        let events = match &publisher {
+        let events = match publisher {
             Some(publisher) => {
-                std::sync::Arc::new((**events).clone().with_publisher(publisher.clone()))
+                std::sync::Arc::new((**events).clone().with_publisher(publisher.to_string()))
             }
             None => events.clone(),
         };
         runner = runner.with_events(events);
     }
-    if let Some(projections) = &instrumentation.projections {
-        runner = runner.with_projections(projections.clone());
+    if fleet_level {
+        if let Some(projections) = &instrumentation.projections {
+            runner = runner.with_projections(projections.clone());
+        }
     }
     if let Some(notify) = &instrumentation.notify {
         runner = runner.with_notifications(notify.clone());
     }
     runner = runner.with_operator_jobs(env_or(
-        &env,
+        env,
         crate::operator_jobs::JOBS_DIR_ENV,
         crate::operator_jobs::DEFAULT_JOBS_DIR,
     ));
-    if let Some(events) = env_nonempty(&env, "APEX_PAYMENT_EVENTS") {
-        runner = runner.with_payment_events(
-            events,
-            env_nonempty(&env, "APEX_PAYMENT_LEDGER").map(std::path::PathBuf::from),
-            env_nonempty(&env, "APEX_PAYMENT_RETRIES").map(std::path::PathBuf::from),
-        );
-    }
-    if let Some(cursor) = env_nonempty(&env, crate::payment_events::PAYMENT_CURSOR_ENV) {
-        runner = runner.with_payment_cursor(cursor);
+    if fleet_level {
+        if let Some(events) = env_nonempty(env, "APEX_PAYMENT_EVENTS") {
+            runner = runner.with_payment_events(
+                events,
+                env_nonempty(env, "APEX_PAYMENT_LEDGER").map(std::path::PathBuf::from),
+                env_nonempty(env, "APEX_PAYMENT_RETRIES").map(std::path::PathBuf::from),
+            );
+        }
+        if let Some(cursor) = env_nonempty(env, crate::payment_events::PAYMENT_CURSOR_ENV) {
+            runner = runner.with_payment_cursor(cursor);
+        }
     }
     // The verifier re-reads the ledger file the runner writes; without the
     // path and key it is absent, and the report says "appended" without
     // claiming a verification.
-    if let (Some(path), Some(seed)) = (
-        env_nonempty(&env, "APEX_RUNNER_LEDGER"),
-        env_nonempty(&env, "APEX_RUNNER_SIGNING_KEY_HEX"),
-    ) {
-        if let Ok(seed) = parse_seed(&seed) {
-            let key = apex_proof::Keypair::from_bytes(&seed);
-            runner = runner.with_verifier(std::sync::Arc::new(
-                crate::verify::FileLedgerVerifier::new(path, key.verifying_key()),
-            ));
-        }
+    if let Some((ledger_path, signing_key)) = verifier {
+        runner = runner.with_verifier(std::sync::Arc::new(crate::verify::FileLedgerVerifier::new(
+            ledger_path,
+            signing_key.verifying_key(),
+        )));
+    }
+    if let Some(root) = connections_root {
+        runner = runner.with_connections_root(root);
     }
     Ok(runner)
 }
@@ -360,6 +564,440 @@ pub fn build_max_ops(
     )
     .map_err(|e| format!("max adapter: {e}"))?;
     Ok(std::sync::Arc::new(ops))
+}
+
+/// One runnable publisher in a fleet run: its runner and its per-publisher
+/// ledger at `<APEX_RUNNER_LEDGER_ROOT>/<publisher>.jsonl` (the naming
+/// apex-api and apex-control read).
+#[derive(Debug)]
+pub struct FleetPublisher {
+    /// The publisher name.
+    pub publisher: String,
+    /// The runner built from this publisher's vaulted keys.
+    pub runner: crate::runner::Runner,
+    /// The per-publisher ledger path.
+    pub ledger_path: std::path::PathBuf,
+}
+
+/// One registry skip as the fleet report carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSkip {
+    /// The publisher name.
+    pub publisher: String,
+    /// The typed reason, rendered.
+    pub reason: String,
+}
+
+/// The verified payment-event configuration for the fleet-level daily pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetPayments {
+    /// The append-only collection file (`APEX_PAYMENT_EVENTS`).
+    pub events_path: std::path::PathBuf,
+    /// The consumed-offset cursor; default `<collection>.cursor`.
+    pub cursor_path: Option<std::path::PathBuf>,
+    /// The collected-reference ledger (`APEX_PAYMENT_LEDGER`).
+    pub ledger_path: Option<std::path::PathBuf>,
+    /// The scheduled-retry file (`APEX_PAYMENT_RETRIES`).
+    pub retries_path: Option<std::path::PathBuf>,
+}
+
+/// A fleet run: one runner per runnable registry publisher plus the skip list
+/// and the fleet-level collaborators that run once per run.
+#[derive(Debug)]
+pub struct Fleet {
+    /// The runnable publishers (sorted).
+    pub publishers: Vec<FleetPublisher>,
+    /// The skipped publishers with typed reasons (sorted).
+    pub skipped: Vec<FleetSkip>,
+    /// The process telemetry handle (fleet-level collaborators use it too).
+    pub telemetry: crate::telemetry::RunnerTelemetry,
+    /// The unstamped analytics emitter; per-publisher runners carry their own
+    /// stamped handles.
+    pub events: Option<std::sync::Arc<crate::events::RunnerEvents>>,
+    /// The notification plan (messages are already publisher-scoped).
+    pub notify: Option<std::sync::Arc<crate::notify::NotifyPlan>>,
+    /// The fleet-level projection refresh, when the analytics store is
+    /// configured.
+    pub projections: Option<crate::projections_job::RunnerProjections>,
+    /// The fleet-level verified payment events, when configured.
+    pub payments: Option<FleetPayments>,
+    /// The fleet signing key every per-publisher ledger is opened with.
+    pub signing_key: apex_proof::Keypair,
+}
+
+impl Fleet {
+    /// Exactly one runnable publisher and no skips: the reports keep the
+    /// single-publisher shape and the runner keeps the fleet-level
+    /// collaborators attached.
+    pub fn is_singleton(&self) -> bool {
+        self.publishers.len() == 1 && self.skipped.is_empty()
+    }
+}
+
+/// Build the fleet from a loaded registry: one configured runner per runnable
+/// publisher, the skip list rendered, and the fleet-level payment
+/// configuration read once from the environment. The exactly-one-publisher
+/// fleet attaches the fleet-level collaborators to its single runner (the
+/// committed single-publisher shape); a multi-publisher fleet runs them once
+/// in [`dispatch_fleet`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_fleet(
+    env: impl Fn(&str) -> Option<String>,
+    registry: &crate::registry::PublisherRegistry,
+    ledger_root: &std::path::Path,
+    vault_root: &std::path::Path,
+    signing_key: &apex_proof::Keypair,
+    transport: std::sync::Arc<dyn apex_connectors::transport::Transport>,
+    instrumentation: &Instrumentation,
+) -> Result<Fleet, String> {
+    let singleton = registry.is_singleton();
+    let mut publishers = Vec::new();
+    for registered in registry.runnable() {
+        let runner = build_publisher_runner(
+            &env,
+            registered,
+            ledger_root,
+            vault_root,
+            signing_key,
+            std::sync::Arc::clone(&transport),
+            instrumentation,
+            singleton,
+        )?;
+        publishers.push(FleetPublisher {
+            publisher: registered.publisher.clone(),
+            runner,
+            ledger_path: ledger_root.join(format!("{}.jsonl", registered.publisher)),
+        });
+    }
+    let skipped = registry
+        .skipped()
+        .map(|skip| FleetSkip {
+            publisher: skip.publisher.clone(),
+            reason: skip.reason.to_string(),
+        })
+        .collect();
+    let payments = if singleton {
+        // Attached to the single runner instead.
+        None
+    } else {
+        env_nonempty(&env, "APEX_PAYMENT_EVENTS").map(|events| FleetPayments {
+            events_path: std::path::PathBuf::from(events),
+            cursor_path: env_nonempty(&env, crate::payment_events::PAYMENT_CURSOR_ENV)
+                .map(std::path::PathBuf::from),
+            ledger_path: env_nonempty(&env, "APEX_PAYMENT_LEDGER").map(std::path::PathBuf::from),
+            retries_path: env_nonempty(&env, "APEX_PAYMENT_RETRIES").map(std::path::PathBuf::from),
+        })
+    };
+    Ok(Fleet {
+        publishers,
+        skipped,
+        telemetry: instrumentation.telemetry.clone(),
+        events: instrumentation.events.clone(),
+        notify: instrumentation.notify.clone(),
+        projections: if singleton {
+            None
+        } else {
+            instrumentation.projections.clone()
+        },
+        payments,
+        signing_key: signing_key.clone(),
+    })
+}
+
+/// Dispatch one command over the fleet.
+///
+/// Every runnable publisher's command runs against its own runner and its own
+/// ledger file (each ledger verifies as its own chain). A fleet with exactly
+/// one publisher and no skips returns that publisher's outcome verbatim, so
+/// the committed single-publisher output stays byte-identical; otherwise the
+/// report carries the pinned top-level fields (`schema_version`, `command`,
+/// `mode`, `publisher: null`, `run_reference`), a `publishers` array with one
+/// block per publisher, a `skipped` array with the typed reasons, and an
+/// aggregate `ledger` block. Fleet-level work runs once per run: the
+/// projection refresh and the verified payment events (their publisher is
+/// read from each reference) for the daily command.
+pub async fn dispatch_fleet(
+    command: &str,
+    args: &[String],
+    fleet: &Fleet,
+    now_unix_ms: i64,
+) -> Result<DispatchOutcome, String> {
+    let mut outcomes: Vec<(String, DispatchOutcome)> = Vec::new();
+    for publisher in &fleet.publishers {
+        let mut ledger =
+            apex_proof::Ledger::open(&publisher.ledger_path, fleet.signing_key.clone())
+                .map_err(|error| format!("ledger for {}: {error}", publisher.publisher))?;
+        let outcome = dispatch(command, args, &publisher.runner, &mut ledger, now_unix_ms).await?;
+        outcomes.push((publisher.publisher.clone(), outcome));
+    }
+    if fleet.is_singleton() {
+        return Ok(outcomes
+            .pop()
+            .map(|(_, outcome)| outcome)
+            .ok_or("singleton fleet has no publisher")?);
+    }
+
+    // Fleet-level work: once per run, never once per publisher.
+    let mut extras_lines: Vec<String> = Vec::new();
+    let mut extras_json = serde_json::Map::new();
+    let mut extra_failed = false;
+    if command == "daily" {
+        if let Some(payments) = &fleet.payments {
+            let (_report, lines, json) = fleet_payment_pass(fleet, payments, now_unix_ms).await?;
+            extras_lines.extend(lines);
+            extras_json.insert("payment_events".into(), json);
+        }
+        if let Some(projections) = &fleet.projections {
+            let batch_id = crate::projections_job::daily_batch_id(now_unix_ms);
+            match projections
+                .refresh(&batch_id, Some(&fleet.telemetry), now_unix_ms)
+                .await
+            {
+                Ok(refresh) => {
+                    extras_lines.push(refresh.summary());
+                    let lag: serde_json::Map<String, serde_json::Value> = refresh
+                        .lag_seconds
+                        .iter()
+                        .map(|(name, seconds)| (name.clone(), serde_json::json!(seconds)))
+                        .collect();
+                    extras_json.insert(
+                        "projections".into(),
+                        serde_json::json!({
+                            "batch_id": refresh.batch_id,
+                            "published_version": refresh.published_version,
+                            "projections": refresh.projections,
+                            "rows": refresh.rows,
+                            "switched": refresh.switched,
+                            "lag_seconds": lag,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    eprintln!("apex-runner: projection refresh failed: {error}");
+                    extras_lines.push(format!("Projections: refresh failed ({error})"));
+                    extras_json.insert("projection_failure".into(), serde_json::json!(error));
+                    extra_failed = true;
+                }
+            }
+        }
+    }
+
+    let reference = run_reference(now_unix_ms);
+    let mut lines = vec![format!(
+        "Fleet: {} publisher(s) / {} skipped",
+        outcomes.len(),
+        fleet.skipped.len()
+    )];
+    let mut publisher_blocks = Vec::new();
+    let mut any_appended = false;
+    let mut records_appended: u64 = 0;
+    let mut failed = extra_failed;
+    for (publisher, outcome) in &outcomes {
+        failed |= outcome.failed;
+        let mut block: Vec<&str> = outcome.human.lines().collect();
+        // Drop the per-publisher scope line and the run reference: the fleet
+        // header names every publisher and the run reference prints once.
+        if !block.is_empty() {
+            block.remove(0);
+        }
+        if block
+            .last()
+            .map(|line| line.starts_with("Run reference: "))
+            .unwrap_or(false)
+        {
+            block.pop();
+        }
+        lines.push(format!("Publisher: {publisher}"));
+        lines.extend(block.iter().map(|line| (*line).to_string()));
+
+        let document: serde_json::Value = serde_json::from_str(&outcome.json)
+            .map_err(|error| format!("{publisher} report: {error}"))?;
+        let mut object = document.as_object().cloned().unwrap_or_default();
+        for key in ["schema_version", "command", "mode", "run_reference"] {
+            object.remove(key);
+        }
+        object.insert(
+            "publisher".into(),
+            serde_json::Value::from(publisher.clone()),
+        );
+        if let Some(ledger) = object.get("ledger") {
+            if ledger["appended"] == serde_json::Value::Bool(true) {
+                any_appended = true;
+            }
+            records_appended =
+                records_appended.saturating_add(ledger["records_appended"].as_u64().unwrap_or(0));
+        }
+        publisher_blocks.push(serde_json::Value::Object(object));
+    }
+    lines.extend(extras_lines);
+    for skip in &fleet.skipped {
+        lines.push(format!("Skipped: {}: {}", skip.publisher, skip.reason));
+    }
+    lines.push(format!("Run reference: {reference}"));
+
+    // The fleet's mode is its publishers' platform when every runnable
+    // publisher shares one; a fleet mixing platforms (or with no runnable
+    // publisher at all) reports `fleet` instead of claiming a platform.
+    let mut platforms: Vec<apex_core::PlatformId> = fleet
+        .publishers
+        .iter()
+        .map(|publisher| publisher.runner.platform_ops().platform())
+        .collect();
+    platforms.sort_by_key(|platform| mode_of(*platform));
+    platforms.dedup();
+    let mode = match platforms.as_slice() {
+        [only] => mode_of(*only).to_string(),
+        _ => "fleet".to_string(),
+    };
+    let skipped: Vec<serde_json::Value> = fleet
+        .skipped
+        .iter()
+        .map(|skip| {
+            serde_json::json!({
+                "publisher": skip.publisher,
+                "reason": skip.reason,
+            })
+        })
+        .collect();
+    let mut json = serde_json::Map::new();
+    json.insert(
+        "schema_version".into(),
+        serde_json::Value::from(REPORT_SCHEMA_VERSION),
+    );
+    json.insert("command".into(), serde_json::Value::from(command));
+    json.insert("mode".into(), serde_json::Value::from(mode));
+    json.insert("publisher".into(), serde_json::Value::Null);
+    json.insert("run_reference".into(), serde_json::Value::from(reference));
+    json.insert(
+        "publishers".into(),
+        serde_json::Value::Array(publisher_blocks),
+    );
+    json.insert("skipped".into(), serde_json::Value::Array(skipped));
+    json.insert(
+        "ledger".into(),
+        serde_json::json!({
+            "appended": any_appended,
+            "records_appended": records_appended,
+        }),
+    );
+    for (key, value) in extras_json {
+        json.insert(key, value);
+    }
+    Ok(DispatchOutcome {
+        human: lines.join("\n"),
+        json: serde_json::Value::Object(json).to_string(),
+        failed,
+    })
+}
+
+/// The fleet-level verified payment pass: one cursor over the collection
+/// file, events (and retries) grouped by the publisher named in their
+/// reference (`apex-fee:<publisher>:...`, `INV-<month>-<publisher>`), each
+/// group processed with its own publisher so the customer messages stay
+/// scoped. The cursor advances once, after every group processed.
+async fn fleet_payment_pass(
+    fleet: &Fleet,
+    payments: &FleetPayments,
+    now_unix_ms: i64,
+) -> Result<
+    (
+        crate::payment_events::PaymentsReport,
+        Vec<String>,
+        serde_json::Value,
+    ),
+    String,
+> {
+    let events_path = &payments.events_path;
+    let cursor_path = payments
+        .cursor_path
+        .clone()
+        .unwrap_or_else(|| crate::payment_events::default_cursor_path(events_path));
+    let offset = crate::payment_events::read_consumed_offset(&cursor_path)
+        .map_err(|error| error.to_string())?;
+    let (observed, consumed) =
+        crate::payment_events::read_new_collection_events(events_path, offset)
+            .map_err(|error| error.to_string())?;
+    let payment_ledger = match &payments.ledger_path {
+        Some(path) => {
+            crate::payment_events::read_payment_ledger(path).map_err(|error| error.to_string())?
+        }
+        None => Vec::new(),
+    };
+    let retries = match &payments.retries_path {
+        Some(path) => crate::payment_events::read_scheduled_retries(path)
+            .map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    let mut by_publisher: std::collections::BTreeMap<
+        String,
+        (
+            Vec<apex_billing::CollectionEvent>,
+            Vec<crate::payment_events::ScheduledRetry>,
+        ),
+    > = std::collections::BTreeMap::new();
+    for event in observed {
+        let publisher = crate::payment_events::publisher_of_reference(&event.merchant_reference)
+            .unwrap_or_default();
+        by_publisher.entry(publisher).or_default().0.push(event);
+    }
+    for retry in retries {
+        let publisher = crate::payment_events::publisher_of_reference(&retry.invoice_reference)
+            .unwrap_or_default();
+        by_publisher.entry(publisher).or_default().1.push(retry);
+    }
+    let mut total = crate::payment_events::PaymentsReport::default();
+    for (publisher, (events, retries)) in by_publisher {
+        let report = crate::payment_events::process_payment_events(
+            &events,
+            &payment_ledger,
+            &retries,
+            fleet.notify.as_deref(),
+            fleet.events.as_deref(),
+            Some(&fleet.telemetry),
+            &publisher,
+            now_unix_ms,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        total.received += report.received;
+        total.failed += report.failed;
+        total.retries += report.retries;
+        total.reconciled += report.reconciled;
+        total.refunded += report.refunded;
+        total.disputed += report.disputed;
+        total.skipped += report.skipped;
+    }
+    if consumed != offset {
+        crate::payment_events::write_consumed_offset(&cursor_path, consumed)
+            .map_err(|error| error.to_string())?;
+    }
+    let mut lines = Vec::new();
+    if total.any() {
+        let mut line = format!(
+            "Payment events: {} received / {} failed",
+            total.received, total.failed
+        );
+        if total.reconciled > 0 {
+            line.push_str(&format!(" / {} reconciled", total.reconciled));
+        }
+        if total.refunded > 0 {
+            line.push_str(&format!(" / {} refunded", total.refunded));
+        }
+        if total.disputed > 0 {
+            line.push_str(&format!(" / {} disputed", total.disputed));
+        }
+        lines.push(line);
+    }
+    let json = serde_json::json!({
+        "received": total.received,
+        "failed": total.failed,
+        "retries": total.retries,
+        "reconciled": total.reconciled,
+        "refunded": total.refunded,
+        "disputed": total.disputed,
+        "skipped": total.skipped,
+    });
+    Ok((total, lines, json))
 }
 
 /// The audit rule-group coverage of a snapshot: how many of the engine's
@@ -493,11 +1131,31 @@ struct CommandReport {
     failed: bool,
 }
 
-fn scope_line(publisher: &str) -> String {
+/// The bounded JSON mode label of a platform's reports.
+fn mode_of(platform: apex_core::PlatformId) -> &'static str {
+    match platform {
+        apex_core::PlatformId::AppLovinMax => "max",
+        apex_core::PlatformId::LevelPlay => "levelplay",
+        apex_core::PlatformId::Admob => "admob",
+        apex_core::PlatformId::Billing => "billing",
+    }
+}
+
+/// The human mode label of a platform's reports.
+fn mode_label(platform: apex_core::PlatformId) -> &'static str {
+    match platform {
+        apex_core::PlatformId::AppLovinMax => "MAX",
+        apex_core::PlatformId::LevelPlay => "LevelPlay",
+        apex_core::PlatformId::Admob => "AdMob",
+        apex_core::PlatformId::Billing => "Billing",
+    }
+}
+
+fn scope_line(platform: apex_core::PlatformId, publisher: &str) -> String {
     if publisher.trim().is_empty() {
-        "Mode: MAX / Publisher: not configured".to_string()
+        format!("Mode: {} / Publisher: not configured", mode_label(platform))
     } else {
-        format!("Mode: MAX / Publisher: {publisher}")
+        format!("Mode: {} / Publisher: {}", mode_label(platform), publisher)
     }
 }
 
@@ -688,7 +1346,8 @@ pub async fn dispatch(
     }
 
     let publisher = runner.publisher_id().to_string();
-    let mut lines = vec![scope_line(&publisher)];
+    let platform = runner.platform_ops().platform();
+    let mut lines = vec![scope_line(platform, &publisher)];
     lines.extend(report.lines.clone());
     lines.push(ledger_line(appended, check.as_ref()));
     lines.push(format!("Run reference: {}", run_reference(now_unix_ms)));
@@ -699,7 +1358,7 @@ pub async fn dispatch(
         serde_json::Value::from(REPORT_SCHEMA_VERSION),
     );
     json.insert("command".into(), serde_json::Value::from(report.command));
-    json.insert("mode".into(), serde_json::Value::from("max"));
+    json.insert("mode".into(), serde_json::Value::from(mode_of(platform)));
     json.insert(
         "publisher".into(),
         if publisher.is_empty() {
@@ -891,27 +1550,63 @@ async fn dispatch_inner(
         "cycle" => {
             let snapshot = flag(args, "--snapshot")
                 .ok_or("cycle requires --snapshot (or APEX_RUNNER_SNAPSHOT)")?;
+            // The monitoring activation seam, exact: a publisher reaches a
+            // cycle only once its console connection validated, so this is
+            // the connection moment for the flat plan. The tier is chosen
+            // from the snapshot's reported 30-day revenue and recorded;
+            // later cycles never re-tier a recorded plan and never
+            // resurrect a cancelled one.
+            let activated = runner
+                .activate_monitoring_from_snapshot(std::path::Path::new(&snapshot), now_unix_ms)
+                .map_err(|e| format!("monitoring activation: {e}"))?;
             let report =
                 crate::cycle::run(runner, ledger, std::path::Path::new(&snapshot), now_unix_ms)
                     .await
                     .map_err(|e| format!("cycle: {e}"))?;
+            let mut lines = vec![format!(
+                "Cycle: proposed {} applied {} awaiting approval {}",
+                report.proposed, report.applied, report.awaiting_approval
+            )];
+            // Proposals held by the adapter's verified write set: the typed
+            // awaiting state is reported verbatim, identical reasons folded
+            // with their count (the JSON keeps one entry per proposal); the
+            // pass itself continues.
+            let mut held: Vec<(&str, u32)> = Vec::new();
+            for reason in &report.awaiting_verification {
+                match held.iter_mut().find(|(seen, _)| *seen == reason) {
+                    Some((_, count)) => *count += 1,
+                    None => held.push((reason.as_str(), 1)),
+                }
+            }
+            for (reason, count) in held {
+                if count > 1 {
+                    lines.push(format!("Skipped: {reason} ({count} proposals)"));
+                } else {
+                    lines.push(format!("Skipped: {reason}"));
+                }
+            }
+            if let Some(tier) = activated {
+                lines.push(format!(
+                    "Monitoring: activated at the {} tier (${}/month)",
+                    tier.label(),
+                    tier.default_fee_micros() / 1_000_000
+                ));
+            }
+            let mut cycle = serde_json::json!({
+                "proposed": report.proposed,
+                "applied": report.applied,
+                "awaiting_approval": report.awaiting_approval,
+                "monitoring_activated": activated.map(|tier| tier.label()),
+            });
+            if !report.awaiting_verification.is_empty() {
+                cycle["awaiting_verification"] =
+                    serde_json::json!(report.awaiting_verification.clone());
+            }
             Ok(CommandReport {
                 command: "cycle",
                 job_type: apex_metrics::vocab::JobType::Cycle,
-                lines: vec![format!(
-                    "Cycle: proposed {} applied {} awaiting approval {}",
-                    report.proposed, report.applied, report.awaiting_approval
-                )],
-                json: [(
-                    "cycle".to_string(),
-                    serde_json::json!({
-                        "proposed": report.proposed,
-                        "applied": report.applied,
-                        "awaiting_approval": report.awaiting_approval,
-                    }),
-                )]
-                .into_iter()
-                .collect(),
+                lines,
+                json: [("cycle".to_string(), cycle)].into_iter().collect(),
                 failed: false,
             })
         }
@@ -933,17 +1628,79 @@ async fn dispatch_inner(
                 .run_monthly(ledger, &publisher, &month, &start, days, now_unix_ms)
                 .await
                 .map_err(|e| format!("monthly: {e}"))?;
-            let mut lines = vec![
-                format!("Billing: {} fee(s) for {}", report.fees.len(), report.month),
-                format!(
-                    "Invoice: {} gross {}",
-                    report.invoice_reference,
-                    usd(report.invoice_total_micros)
-                ),
-            ];
+            let mut lines = vec![format!(
+                "Billing: {} fee(s) for {}",
+                report.fees.len(),
+                report.month
+            )];
+            // Monitoring on but its state root unconfigured: the pass records
+            // the typed skip and bills no plan line instead of aborting.
+            if let Some(reason) = &report.monitoring_skipped {
+                lines.push(format!("Monitoring: skipped ({reason})"));
+            }
+            let mut billing = serde_json::json!({
+                "month": report.month,
+                "fees": report.fees.len(),
+                "invoice_reference": report.invoice_reference,
+                "invoice_gross_micros": report.invoice_total_micros,
+                "payment_links": report.payment_links.len(),
+                "card_charges": report.card_charges.len(),
+                "collected": report.collected,
+            });
+            if let Some(reason) = &report.monitoring_skipped {
+                billing["monitoring_skipped"] = serde_json::Value::from(reason.clone());
+            }
+            for ineligible in &report.fee_ineligible {
+                lines.push(format!(
+                    "Fee ineligible: {}: {}",
+                    ineligible.platform.as_str(),
+                    ineligible.reason
+                ));
+            }
+            if !report.fee_ineligible.is_empty() {
+                billing["fee_ineligible"] = serde_json::json!(report
+                    .fee_ineligible
+                    .iter()
+                    .map(|ineligible| serde_json::json!({
+                        "platform": ineligible.platform.as_str(),
+                        "reason": ineligible.reason,
+                    }))
+                    .collect::<Vec<_>>());
+            }
+            match &report.invoice_refusal {
+                Some(reason) => {
+                    // A refused invoice is a hold, not a charge: the typed
+                    // reason stands where the invoice line would be, and no
+                    // half-empty document is printed.
+                    lines.push(format!("Invoice: refused ({reason})"));
+                    billing["invoice_refusal"] = serde_json::Value::from(reason.clone());
+                }
+                None => {
+                    lines.push(format!(
+                        "Invoice: {} gross {}",
+                        report.invoice_reference,
+                        usd(report.invoice_total_micros)
+                    ));
+                    if let Some(rendered) = &report.rendered_invoice {
+                        // The rendered VAT document is the invoice output:
+                        // it prints in full, register line included.
+                        lines.push(rendered.trim_end().to_string());
+                    }
+                }
+            }
+            if let Some(number) = report.invoice_number {
+                billing["invoice_number"] = serde_json::Value::from(number);
+            }
+            if let Some(rendered) = &report.rendered_invoice {
+                billing["rendered_invoice"] = serde_json::Value::from(rendered.clone());
+            }
             lines.push(if report.collected {
+                // Both collection channels are stated: every billed line
+                // landed on a card charge or a link, and a link can carry a
+                // typed fallback reason from a refused stored-method charge.
                 format!(
-                    "Collection: {} payment link(s) created",
+                    "Collection: {} card charge(s) / {} payment link(s) created",
+                    report.card_charges.len(),
                     report.payment_links.len()
                 )
             } else {
@@ -953,24 +1710,14 @@ async fn dispatch_inner(
                 command: "monthly",
                 job_type: apex_metrics::vocab::JobType::Monthly,
                 lines,
-                json: [(
-                    "billing".to_string(),
-                    serde_json::json!({
-                        "month": report.month,
-                        "fees": report.fees.len(),
-                        "invoice_reference": report.invoice_reference,
-                        "invoice_gross_micros": report.invoice_total_micros,
-                        "payment_links": report.payment_links.len(),
-                        "collected": report.collected,
-                    }),
-                )]
-                .into_iter()
-                .collect(),
+                json: [("billing".to_string(), billing)].into_iter().collect(),
                 failed: false,
             })
         }
         "recheck" => {
-            let due = runner.due_rechecks(ledger, now_unix_ms);
+            let due = runner
+                .due_rechecks(ledger, now_unix_ms)
+                .map_err(|error| format!("recheck: {error}"))?;
             let mut lines = vec![format!("Due work: {} re-check(s)", due.len())];
             let mut items = Vec::new();
             for item in &due {
@@ -1023,12 +1770,7 @@ async fn dispatch_inner(
                 test_group_allocation: 50,
             };
             let id = runner
-                .start_aa(
-                    ledger,
-                    apex_core::PlatformId::AppLovinMax,
-                    &spec,
-                    now_unix_ms,
-                )
+                .start_aa(ledger, runner.platform_ops().platform(), &spec, now_unix_ms)
                 .await
                 .map_err(|e| format!("aa: {e}"))?;
             Ok(CommandReport {
@@ -1122,6 +1864,63 @@ mod tests {
     }
 
     #[test]
+    fn the_adyen_hmac_key_decodes_hex_and_refuses_bad_input() {
+        // The key is hex text over raw bytes: "6b6579" is the binary key
+        // b"key", never the text itself.
+        let decoded = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "6b6579").expect("hex");
+        assert_eq!(decoded, b"key");
+        assert_ne!(decoded, "6b6579".as_bytes());
+        // Uppercase hex and surrounding whitespace decode to the same bytes.
+        assert_eq!(
+            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", " 6B6579 ").expect("uppercase hex"),
+            b"key"
+        );
+        assert_eq!(
+            decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "").expect("empty"),
+            Vec::<u8>::new()
+        );
+        // Both failure modes the deployment can hit are refused with the
+        // typed error naming the variable: odd length and non-hex bytes.
+        for bad in ["abc", "zz", "0x6b", "6b 65"] {
+            let error = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", bad).expect_err(bad);
+            assert_eq!(error.variable(), "APEX_ADYEN_HMAC_KEY");
+            assert!(error.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_notification_signature_verifies_under_the_decoded_key() {
+        // The key the environment carries as hex must be the exact binary
+        // key the billing signature verifier consumes: sign a notification
+        // with the decoded bytes and verify it, exactly as the boundary
+        // would, then refuse the same item under any other key.
+        let key = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "0102030405060708090a0b0c0d0e0f10")
+            .expect("hex key");
+        assert_eq!(key.len(), 16, "hex decodes to binary, not ASCII");
+        let unsigned = apex_billing::NotificationItem {
+            psp_reference: "PSP1".into(),
+            original_reference: String::new(),
+            merchant_account_code: "ApexMerchant".into(),
+            merchant_reference: "apex-fee:pub:exp:2026-10".into(),
+            amount_value: 12_345,
+            amount_currency: "USD".into(),
+            event_code: "AUTHORISATION".into(),
+            success: "true".into(),
+            hmac_signature: String::new(),
+            payment_method: String::new(),
+            stored_payment_method_id: String::new(),
+        };
+        let mut signed = unsigned.clone();
+        signed.hmac_signature = apex_billing::sign_notification_item(&key, &unsigned);
+        apex_billing::verify_notification_item(&key, &signed).expect("signature verifies");
+        let other = decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "ff").expect("hex key");
+        assert!(
+            apex_billing::verify_notification_item(&other, &signed).is_err(),
+            "a different key refuses the same item"
+        );
+    }
+
+    #[test]
     fn scheduled_at_reads_the_flag_then_the_environment() {
         let args = vec![
             "daily".to_string(),
@@ -1204,28 +2003,63 @@ mod tests {
         assert!(vat_rate_bp(&env).is_err());
         assert_eq!(vat_rate_bp(&|_| None).unwrap(), None);
 
-        // Monitoring mirrors apex-api: > 0 selects the plan, otherwise the
-        // plan is not selected; malformed values are typed errors.
+        // Monitoring is ON by default with the published tiers; the
+        // historical name is the deprecated base-tier fallback and only its
+        // zero keeps the old off switch. Malformed values are typed errors.
+        assert_eq!(
+            monitoring_prices(&|_| None).unwrap(),
+            Some(apex_billing::MonitoringPrices::DEFAULT)
+        );
         let env = |name: &str| match name {
-            "APEX_MONITORING_FEE_MICROS" => Some("500000000".to_string()),
+            "APEX_MONITORING_TIER_BASE_MICROS" => Some("600000000".to_string()),
             _ => None,
         };
-        assert_eq!(monitoring_fee_micros(&env).unwrap(), Some(500_000_000));
+        let prices = monitoring_prices(&env).unwrap().expect("on");
+        assert_eq!(prices.base_micros, 600_000_000);
+        assert_eq!(prices.mid_micros, 1_500_000_000, "default tier untouched");
         let env = |name: &str| match name {
-            "APEX_MONITORING_MONTHLY_MICROS" => Some("500000000".to_string()),
+            "APEX_MONITORING_TIER_MID_MICROS" => Some("1600000000".to_string()),
             _ => None,
         };
-        assert_eq!(monitoring_fee_micros(&env).unwrap(), Some(500_000_000));
+        assert_eq!(
+            monitoring_prices(&env).unwrap().expect("on").mid_micros,
+            1_600_000_000
+        );
+        let env = |name: &str| match name {
+            "APEX_MONITORING_TIER_TOP_MICROS" => Some("3100000000".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            monitoring_prices(&env).unwrap().expect("on").top_micros,
+            3_100_000_000
+        );
+        let env = |name: &str| match name {
+            "APEX_MONITORING_FEE_MICROS" => Some("550000000".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            monitoring_prices(&env).unwrap().expect("on").base_micros,
+            550_000_000,
+            "the legacy name still feeds the base tier"
+        );
         let env = |name: &str| match name {
             "APEX_MONITORING_FEE_MICROS" => Some("0".to_string()),
             _ => None,
         };
-        assert_eq!(monitoring_fee_micros(&env).unwrap(), None);
+        assert_eq!(monitoring_prices(&env).unwrap(), None, "legacy off switch");
         let env = |name: &str| match name {
             "APEX_MONITORING_FEE_MICROS" => Some("lots".to_string()),
             _ => None,
         };
-        assert!(monitoring_fee_micros(&env).is_err());
+        assert!(monitoring_prices(&env).is_err());
+        let env = |name: &str| match name {
+            "APEX_MONITORING_TIER_TOP_MICROS" => Some("0".to_string()),
+            _ => None,
+        };
+        assert!(
+            monitoring_prices(&env).is_err(),
+            "a zero tier price is a refusal"
+        );
     }
 
     #[test]
@@ -1251,50 +2085,6 @@ mod tests {
 
     #[tokio::test]
     async fn build_runner_honors_the_environment() {
-        struct NoOps;
-        #[async_trait::async_trait]
-        impl crate::ops::PlatformOps for NoOps {
-            async fn writable(&self, _op: &str) -> bool {
-                false
-            }
-            async fn start_experiment(
-                &self,
-                _r: &crate::ops::ExperimentRequest,
-            ) -> Result<String, apex_core::PlatformError> {
-                Ok(String::new())
-            }
-            async fn experiment(
-                &self,
-                _id: &str,
-            ) -> Result<apex_core::ExperimentResult, apex_core::PlatformError> {
-                Err(apex_core::PlatformError::Validation("none".into()))
-            }
-            async fn promote_experiment(&self, _id: &str) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn deprecate_experiment(
-                &self,
-                _id: &str,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn apply(
-                &self,
-                _a: &crate::model::Action,
-                _k: &str,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn rollback(
-                &self,
-                _a: &crate::model::Action,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            fn call_log(&self) -> Vec<String> {
-                Vec::new()
-            }
-        }
         struct NoTransport;
         #[async_trait::async_trait]
         impl apex_connectors::transport::Transport for NoTransport {
@@ -1321,7 +2111,7 @@ mod tests {
         let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
         assert!(build_runner(
             env,
-            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
@@ -1339,7 +2129,7 @@ mod tests {
         };
         let error = build_runner(
             env,
-            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
@@ -1351,7 +2141,7 @@ mod tests {
         };
         assert!(build_runner(
             env,
-            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
@@ -1370,7 +2160,7 @@ mod tests {
             .any(|line| line.contains("notifications are disabled")));
 
         use crate::ops::PlatformOps as _;
-        let no_ops = NoOps;
+        let no_ops = NullOps;
         assert!(no_ops.scope_revenue("u", "a", "b").await.is_err());
         assert!(no_ops.experiment_days("x").await.is_err());
         assert!(no_ops.current_settings("u").await.is_err());
@@ -1390,16 +2180,33 @@ mod tests {
             "APEX_RUNNER_PUBLISHER" => Some("pub1".to_string()),
             "APEX_ADYEN_API_KEY" => Some("k".to_string()),
             "APEX_ADYEN_MERCHANT_ACCOUNT" => Some("m".to_string()),
-            "APEX_ADYEN_HMAC_KEY" => Some("h".to_string()),
+            // `key` hex-encoded: the decode path accepts a real key.
+            "APEX_ADYEN_HMAC_KEY" => Some("6b6579".to_string()),
             _ => None,
         };
         let runner = build_runner(
             env,
-            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
         .expect("runner");
+        // A present key that is not hex refuses the runner, naming the
+        // variable, instead of reaching the signature verifier as ASCII.
+        let bad_key = |name: &str| match name {
+            "APEX_ADYEN_API_KEY" => Some("k".to_string()),
+            "APEX_ADYEN_MERCHANT_ACCOUNT" => Some("m".to_string()),
+            "APEX_ADYEN_HMAC_KEY" => Some("not-hex".to_string()),
+            _ => None,
+        };
+        let error = build_runner(
+            bad_key,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect_err("bad hex refuses the runner");
+        assert!(error.contains("APEX_ADYEN_HMAC_KEY"), "{error}");
         assert!(format!("{runner:?}").contains("Runner"));
         assert!(runner.telemetry().is_some());
         assert!(runner.verifier().is_none(), "no ledger path in this env");
@@ -1410,6 +2217,24 @@ mod tests {
         crate::calendar::day_number("2026-10-15").unwrap() * 86_400_000 + (8 * 60 + 10) * 60_000
     }
 
+    /// The seller billing profile the golden monthly runs load; with zero
+    /// fees no invoice is issued, so the committed output shape is unchanged.
+    fn golden_billing_profile() -> apex_billing::BillingProfile {
+        apex_billing::BillingProfile {
+            legal_name: "Apex Media OÜ".into(),
+            address_lines: vec!["Sepapaja tn 6".into()],
+            country: "EE".into(),
+            vat_number: "EE123456789".into(),
+            vat_rate_bp: 2_000,
+        }
+    }
+
+    /// A per-process register path for the golden runners (no golden run has
+    /// fees, so no line is ever written).
+    fn golden_register_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("apex-cli-register-{}.jsonl", std::process::id()))
+    }
+
     fn golden_runner() -> crate::runner::Runner {
         let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
         crate::runner::Runner::new(
@@ -1418,6 +2243,8 @@ mod tests {
             apex_lift::guardrails::FillFormat::Rewarded,
         )
         .with_publisher("northstar")
+        .with_billing_profile(golden_billing_profile())
+        .with_register_path(golden_register_path())
     }
 
     async fn run(
@@ -1473,50 +2300,6 @@ mod tests {
     #[tokio::test]
     async fn build_runner_stamps_the_publisher_on_the_event_handle() {
         use apex_analytics::store::{EventStore as _, ProjectionStore as _};
-        struct NoOps;
-        #[async_trait::async_trait]
-        impl crate::ops::PlatformOps for NoOps {
-            async fn writable(&self, _op: &str) -> bool {
-                false
-            }
-            async fn start_experiment(
-                &self,
-                _r: &crate::ops::ExperimentRequest,
-            ) -> Result<String, apex_core::PlatformError> {
-                Ok(String::new())
-            }
-            async fn experiment(
-                &self,
-                _id: &str,
-            ) -> Result<apex_core::ExperimentResult, apex_core::PlatformError> {
-                Err(apex_core::PlatformError::Validation("none".into()))
-            }
-            async fn promote_experiment(&self, _id: &str) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn deprecate_experiment(
-                &self,
-                _id: &str,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn apply(
-                &self,
-                _a: &crate::model::Action,
-                _k: &str,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            async fn rollback(
-                &self,
-                _a: &crate::model::Action,
-            ) -> Result<(), apex_core::PlatformError> {
-                Ok(())
-            }
-            fn call_log(&self) -> Vec<String> {
-                Vec::new()
-            }
-        }
         struct NoTransport;
         #[async_trait::async_trait]
         impl apex_connectors::transport::Transport for NoTransport {
@@ -1559,7 +2342,7 @@ mod tests {
         };
         let runner = build_runner(
             env,
-            std::sync::Arc::new(NoOps),
+            std::sync::Arc::new(NullOps),
             std::sync::Arc::new(NoTransport),
             &instrumentation,
         )
@@ -1775,6 +2558,7 @@ mod tests {
                     "invoice_reference": "INV-2026-09-northstar",
                     "invoice_gross_micros": 0,
                     "payment_links": 0,
+                    "card_charges": 0,
                     "collected": false,
                 },
                 "ledger": {
@@ -1784,6 +2568,1159 @@ mod tests {
                     "verified": serde_json::Value::Null,
                 },
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_monthly_with_the_root_env_records_monitoring_like_fleet() {
+        // The legacy single-publisher configuration honors the same
+        // connections-root fallbacks the fleet mode uses: with the root
+        // named, the monthly pass records and bills the plan exactly as the
+        // fleet path does instead of aborting.
+        let dir = fleet_dir("legacy-monitoring");
+        let seller = dir.join("seller.json");
+        std::fs::write(
+            &seller,
+            serde_json::to_string(&golden_billing_profile()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("northstar.billing.json"),
+            serde_json::json!({
+                "legalName": "Northstar OÜ",
+                "addressLines": ["Telliskivi 1"],
+                "country": "EE"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let root = dir.clone();
+        let seller_env = seller.clone();
+        let env = move |name: &str| match name {
+            "APEX_RUNNER_PUBLISHER" => Some("northstar".to_string()),
+            "APEX_CONNECTIONS_ROOT" => Some(root.display().to_string()),
+            "APEX_BILLING_PROFILE" => Some(seller_env.display().to_string()),
+            _ => None,
+        };
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let runner = build_runner(
+            env,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("runner")
+        .with_billing_profile(golden_billing_profile())
+        .with_register_path(dir.join("invoices.jsonl"));
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[5u8; 32]));
+        let outcome = dispatch("monthly", &[], &runner, &mut ledger, golden_now())
+            .await
+            .expect("monthly");
+        assert!(!outcome.failed, "{outcome:?}");
+        // The plan state is recorded under the env-named root (the
+        // connection-month base activation fleet records the same way).
+        let state = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
+            .expect("loadable")
+            .expect("recorded");
+        assert!(state.active);
+        assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Base));
+        assert_eq!(state.monthly_fee_micros, 500_000_000);
+        // The plan line is billed and no skip appears.
+        assert!(
+            !outcome.human.contains("Monitoring: skipped"),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert!(json["billing"]["monitoring_skipped"].is_null());
+        assert_eq!(json["billing"]["fees"], 0);
+        let rendered = json["billing"]["rendered_invoice"]
+            .as_str()
+            .expect("rendered");
+        assert!(
+            rendered.contains("monitoring:2026-09: net 500000000 micros"),
+            "{rendered}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_monthly_without_the_root_env_records_the_typed_skip() {
+        // The exact live defect: legacy mode (publisher env, no registry
+        // root), monitoring on, a billing profile set. The pass must exit 0
+        // with the typed skip reason and no plan line billed.
+        let dir = fleet_dir("legacy-no-root");
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PUBLISHER" => Some("northstar".to_string()),
+            _ => None,
+        };
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let runner = build_runner(
+            env,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("runner")
+        .with_billing_profile(golden_billing_profile())
+        .with_register_path(dir.join("invoices.jsonl"));
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[5u8; 32]));
+        let outcome = dispatch("monthly", &[], &runner, &mut ledger, golden_now())
+            .await
+            .expect("the monthly pass continues without a state root");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(
+            outcome
+                .human
+                .contains("Monitoring: skipped (monitoring state root not configured)"),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(
+            json["billing"]["monitoring_skipped"],
+            "monitoring state root not configured"
+        );
+        assert_eq!(json["billing"]["fees"], 0);
+        assert!(json["billing"]["rendered_invoice"].is_null());
+        assert!(
+            !dir.join("northstar.monitoring.json").exists(),
+            "no plan state is fabricated without a root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    // Fleet mode: the registry, the per-publisher ledgers and the composed
+    // multi-publisher reports.
+    // ------------------------------------------------------------------
+
+    const FLEET_KEY_A: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const FLEET_VAULT_KEY: &str =
+        "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100";
+
+    fn fleet_dir(label: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("apex-cli-fleet-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_vaulted_publisher(
+        root: &std::path::Path,
+        publisher: &str,
+        api_key: &str,
+        state: &str,
+    ) {
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault key");
+        let account = serde_json::json!({
+            "developer_site": "studio.example.com",
+            "expected_networks": [],
+            "ad_unit_ids": [],
+            "bidder_accounts": [],
+            "platforms": {
+                "applovin_max": {
+                    "api_key": api_key,
+                    "account_id": "acct-1",
+                    "base_url": "https://api.example.test",
+                    "report_key": "report-key",
+                    "reporting_base_url": null,
+                    "refresh_token": null
+                }
+            }
+        });
+        std::fs::write(
+            root.join(format!("{publisher}.blob")),
+            vault.encrypt(&account.to_string()),
+        )
+        .expect("blob");
+        let meta = serde_json::json!({
+            "platforms": { "applovin_max": { "state": state } }
+        });
+        std::fs::write(
+            root.join(format!("{publisher}.connections.json")),
+            meta.to_string(),
+        )
+        .expect("meta");
+    }
+
+    fn test_policy() -> crate::model::AutopilotPolicy {
+        crate::model::AutopilotPolicy {
+            window_days: 7,
+            interim_look: false,
+            extension_allowed: false,
+            ..crate::model::AutopilotPolicy::conservative()
+        }
+    }
+
+    fn constant_days(control: i64, test: i64) -> crate::ops::ExperimentDays {
+        let arm_day = |day: &str, revenue: i64| apex_lift::window::ArmDay {
+            day: day.to_string(),
+            revenue,
+            users: None,
+            second_pull_revenue: Some(revenue),
+            second_pull_users: None,
+            fill: None,
+        };
+        crate::ops::ExperimentDays {
+            control: (0..10)
+                .map(|i| arm_day(&format!("2026-10-{:02}", i + 1), control / 4 * 3))
+                .collect(),
+            test: (0..10)
+                .map(|i| arm_day(&format!("2026-10-{:02}", i + 1), test / 4))
+                .collect(),
+        }
+    }
+
+    fn fleet_ops(experiment: &str) -> std::sync::Arc<crate::ops::RecordingOps> {
+        let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
+        ops.set_change_in_test_arm(true);
+        ops.script_start(vec![Ok(experiment.to_string())]);
+        ops.put_experiment(
+            experiment,
+            apex_core::ExperimentResult {
+                experiment_id: experiment.to_string(),
+                state: apex_core::ExperimentState::Running,
+                results: vec![],
+                lift_percent_bp: None,
+                confidence: None,
+                winner_variant_id: None,
+            },
+        );
+        ops.put_experiment_days(experiment, constant_days(4_000_000, 4_400_000));
+        ops.put_scope_revenue("u1", 1_000_000_000);
+        ops
+    }
+
+    async fn start_one_change(
+        ops: &std::sync::Arc<crate::ops::RecordingOps>,
+        ledger: &mut apex_proof::Ledger,
+        at: i64,
+    ) {
+        crate::plan::run_cycle(
+            ops.as_ref(),
+            ledger,
+            &test_policy(),
+            &[],
+            vec![crate::model::Proposal {
+                action: crate::model::Action::SetCountryFloor {
+                    ad_unit_id: "u1".into(),
+                    country: "ee".into(),
+                    floor_ecpm: 2_500_000,
+                },
+                rationale: "raise EE".into(),
+                expected_effect_bp: 500,
+                prev_value: "{}".into(),
+            }],
+            at,
+        )
+        .await
+        .expect("cycle");
+    }
+
+    async fn keep_one_change(
+        ops: &std::sync::Arc<crate::ops::RecordingOps>,
+        ledger: &mut apex_proof::Ledger,
+        at: i64,
+    ) {
+        start_one_change(ops, ledger, at).await;
+        let runner = crate::runner::Runner::new(
+            ops.clone(),
+            test_policy(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        );
+        runner.run_daily(ledger, at + 1).await.expect("daily");
+    }
+
+    /// A platform adapter that refuses every call: the configuration tests
+    /// only need the runner built, never an operation.
+    struct NullOps;
+
+    #[async_trait::async_trait]
+    impl crate::ops::PlatformOps for NullOps {
+        async fn writable(&self, _op: &str) -> bool {
+            false
+        }
+        async fn start_experiment(
+            &self,
+            _r: &crate::ops::ExperimentRequest,
+        ) -> Result<String, apex_core::PlatformError> {
+            Ok(String::new())
+        }
+        async fn experiment(
+            &self,
+            _id: &str,
+        ) -> Result<apex_core::ExperimentResult, apex_core::PlatformError> {
+            Err(apex_core::PlatformError::Validation("none".into()))
+        }
+        async fn promote_experiment(&self, _id: &str) -> Result<(), apex_core::PlatformError> {
+            Ok(())
+        }
+        async fn deprecate_experiment(&self, _id: &str) -> Result<(), apex_core::PlatformError> {
+            Ok(())
+        }
+        async fn apply(
+            &self,
+            _a: &crate::model::Action,
+            _k: &str,
+        ) -> Result<(), apex_core::PlatformError> {
+            Ok(())
+        }
+        async fn rollback(
+            &self,
+            _a: &crate::model::Action,
+        ) -> Result<(), apex_core::PlatformError> {
+            Ok(())
+        }
+        fn call_log(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    /// A transport that refuses every call: the fleet construction tests
+    /// never reach the network.
+    struct NoTransport;
+
+    #[async_trait::async_trait]
+    impl apex_connectors::transport::Transport for NoTransport {
+        async fn request(
+            &self,
+            _request: apex_connectors::transport::HttpRequest,
+        ) -> Result<
+            apex_connectors::transport::HttpResponse,
+            apex_connectors::transport::TransportError,
+        > {
+            Err(apex_connectors::transport::TransportError::Network(
+                "none".into(),
+            ))
+        }
+    }
+
+    fn empty_fleet(
+        publishers: Vec<FleetPublisher>,
+        skipped: Vec<FleetSkip>,
+        signing_key: apex_proof::Keypair,
+    ) -> Fleet {
+        let registry = std::sync::Arc::new(apex_metrics::Registry::new());
+        Fleet {
+            publishers,
+            skipped,
+            telemetry: crate::telemetry::RunnerTelemetry::new(registry),
+            events: None,
+            notify: None,
+            projections: None,
+            payments: None,
+            signing_key,
+        }
+    }
+
+    /// Vault one publisher whose validated connection belongs to `platform`.
+    fn write_vaulted_platform_publisher(
+        root: &std::path::Path,
+        publisher: &str,
+        platform: &str,
+        credentials: serde_json::Value,
+        state: &str,
+    ) {
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault key");
+        let account = serde_json::json!({
+            "developer_site": "studio.example.com",
+            "expected_networks": [],
+            "ad_unit_ids": [],
+            "bidder_accounts": [],
+            "platforms": { platform: credentials }
+        });
+        std::fs::write(
+            root.join(format!("{publisher}.blob")),
+            vault.encrypt(&account.to_string()),
+        )
+        .expect("blob");
+        let meta = serde_json::json!({
+            "platforms": { platform: { "state": state } }
+        });
+        std::fs::write(
+            root.join(format!("{publisher}.connections.json")),
+            meta.to_string(),
+        )
+        .expect("meta");
+    }
+
+    #[tokio::test]
+    async fn a_validated_levelplay_connection_builds_the_runner_and_runs_its_passes() {
+        let root = fleet_dir("levelplay-runner");
+        write_vaulted_platform_publisher(
+            &root,
+            "studio",
+            "levelplay",
+            serde_json::json!({
+                "api_key": "secret-key",
+                "account_id": "app-key-1",
+                "base_url": "https://platform.ironsrc.com",
+                "refresh_token": "refresh-token"
+            }),
+            "validated",
+        );
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(
+            registry.runnable().count(),
+            1,
+            "a validated LevelPlay connection runs now"
+        );
+
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let built = build_fleet(
+            |name| match name {
+                "APEX_RUNNER_WRITABLE" => Some("updateEntryPrice".to_string()),
+                _ => None,
+            },
+            &registry,
+            &ledger_root,
+            &root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        assert_eq!(built.publishers.len(), 1);
+        assert!(built.skipped.is_empty());
+        assert!(built.is_singleton());
+        let runner = &built.publishers[0].runner;
+        assert_eq!(
+            runner.platform_ops().platform(),
+            apex_core::PlatformId::LevelPlay
+        );
+        assert!(runner.platform_ops().writable("updateEntryPrice").await);
+
+        // The singleton fleet returns the per-publisher outcome verbatim, so
+        // its scope line and mode name LevelPlay.
+        let outcome = dispatch_fleet("daily", &[], &built, golden_now() + 2)
+            .await
+            .expect("fleet daily");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(
+            outcome
+                .human
+                .starts_with("Mode: LevelPlay / Publisher: studio\n"),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["mode"], "levelplay");
+        assert_eq!(json["publisher"], "studio");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_validated_admob_connection_runs_reporting_only_until_configured() {
+        let root = fleet_dir("admob-runner");
+        write_vaulted_platform_publisher(
+            &root,
+            "studio",
+            "admob",
+            serde_json::json!({
+                "api_key": "access-token",
+                "account_id": "accounts/pub-1234567890",
+                "base_url": "https://admob.googleapis.com"
+            }),
+            "validated",
+        );
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 1);
+
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+
+        // Without the write allow-list the cycle's verify-live gate refuses:
+        // the AdMob publisher monitors, it starts no experiments.
+        let built = build_fleet(
+            |_| None,
+            &registry,
+            &ledger_root,
+            &root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        let runner = &built.publishers[0].runner;
+        assert_eq!(
+            runner.platform_ops().platform(),
+            apex_core::PlatformId::Admob
+        );
+        assert!(!runner.platform_ops().writable("updateMediationGroup").await);
+        let outcome = dispatch_fleet("daily", &[], &built, golden_now() + 2)
+            .await
+            .expect("fleet daily");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(outcome
+            .human
+            .starts_with("Mode: AdMob / Publisher: studio\n"));
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["mode"], "admob");
+        assert_eq!(json["reporting_pulls"]["completed"], 0);
+        assert_eq!(json["platform_operations"]["unresolved"], 0);
+
+        // With the write configured, the experiment lifecycle gate opens.
+        let built = build_fleet(
+            |name| match name {
+                "APEX_RUNNER_WRITABLE" => Some("updateMediationGroup".to_string()),
+                _ => None,
+            },
+            &registry,
+            &ledger_root,
+            &root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        assert!(
+            built.publishers[0]
+                .runner
+                .platform_ops()
+                .writable("updateMediationGroup")
+                .await
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn the_monthly_report_surfaces_a_fee_ineligible_kept_change() {
+        use apex_core::{ExperimentMetric, PlatformId};
+        use apex_lift::billing::ADMOB_NO_MEASUREMENT_REASON;
+        use apex_lift::records::LiftRecord;
+
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[9u8; 32]));
+        ledger
+            .append(apex_proof::LedgerRecord::ExperimentStarted {
+                seq: 0,
+                at_unix_ms: golden_now(),
+                platform: PlatformId::Admob,
+                experiment_id: "exp_ab".into(),
+                spec: apex_core::ExperimentSpec {
+                    name: "exp_ab".into(),
+                    ad_unit_id: "u1".into(),
+                    metric: ExperimentMetric::Revenue,
+                    variants: 2,
+                    change_description: "mediation eCPM".into(),
+                    test_group_allocation: 25,
+                },
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            })
+            .expect("started");
+        let prereg = LiftRecord::PreRegistration {
+            experiment_id: "exp_ab".into(),
+            scope: "g1/u1".into(),
+            before_value: serde_json::json!(1_000_000),
+            after_value: serde_json::json!(1_200_000),
+            split: 0.25,
+            metric: "revenue_per_user".into(),
+            burn_in_days: 3,
+            window_days: 14,
+            looks: 1,
+            extension_allowed: false,
+            guardrail_thresholds: serde_json::json!({}),
+            code_version_hash: "deadbeef".into(),
+            rate_bp: 2_000,
+        };
+        let payload = prereg.canonical_json().expect("json");
+        let sha = prereg.sha256_hex().expect("sha");
+        ledger
+            .append(apex_proof::LedgerRecord::lift_record(
+                golden_now(),
+                &sha,
+                &payload,
+            ))
+            .expect("prereg");
+        let result = LiftRecord::Result {
+            experiment_id: "exp_ab".into(),
+            daily_log_ratios: vec![0.1],
+            mean_log: 0.1,
+            lower_90: 0.05,
+            lower_99: 0.02,
+            bootstrap_lower: 0.01,
+            decision: "keep".into(),
+            lambda: 0.03,
+        };
+        let payload = result.canonical_json().expect("json");
+        let sha = result.sha256_hex().expect("sha");
+        ledger
+            .append(apex_proof::LedgerRecord::lift_record(
+                golden_now() + 1,
+                &sha,
+                &payload,
+            ))
+            .expect("result");
+
+        let runner = golden_runner();
+        let outcome = dispatch("monthly", &[], &runner, &mut ledger, golden_now() + 2)
+            .await
+            .expect("monthly");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(
+            outcome.human.contains(&format!(
+                "Fee ineligible: admob: {ADMOB_NO_MEASUREMENT_REASON}"
+            )),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(
+            json["billing"]["fee_ineligible"],
+            serde_json::json!([{
+                "platform": "admob",
+                "reason": ADMOB_NO_MEASUREMENT_REASON,
+            }])
+        );
+        assert_eq!(json["billing"]["fees"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_fleet_daily_run_writes_two_independent_ledger_chains() {
+        // Two publishers whose validated connections exist in the vault root;
+        // the registry decrypts both key sets.
+        let root = fleet_dir("daily-two");
+        write_vaulted_publisher(&root, "northstar", "management-key-north", "validated");
+        write_vaulted_publisher(&root, "aurora", "management-key-aurora", "validated");
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 2);
+        let keys: Vec<(String, String)> = registry
+            .runnable()
+            .map(|publisher| {
+                (
+                    publisher.publisher.clone(),
+                    publisher.credentials.api_key.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("aurora".to_string(), "management-key-aurora".to_string()),
+                ("northstar".to_string(), "management-key-north".to_string()),
+            ],
+            "both vaulted key sets decrypted"
+        );
+
+        // The per-publisher runners (one kept change each) write through the
+        // real fleet dispatcher into their own ledger files.
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let mut publishers = Vec::new();
+        for (index, registered) in registry.runnable().enumerate() {
+            let experiment = format!("exp-{index}");
+            let ops = fleet_ops(&experiment);
+            let ledger_path = ledger_root.join(format!("{}.jsonl", registered.publisher));
+            {
+                let mut ledger =
+                    apex_proof::Ledger::open(&ledger_path, signing_key.clone()).unwrap();
+                // The experiment is running when the fleet daily pass starts:
+                // that pass is what pulls and settles it.
+                start_one_change(&ops, &mut ledger, golden_now()).await;
+            }
+            let runner = crate::runner::Runner::new(
+                ops,
+                test_policy(),
+                apex_lift::guardrails::FillFormat::Rewarded,
+            )
+            .with_publisher(registered.publisher.clone());
+            publishers.push(FleetPublisher {
+                publisher: registered.publisher.clone(),
+                runner,
+                ledger_path,
+            });
+        }
+        let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
+        assert!(!fleet.is_singleton());
+        let outcome = dispatch_fleet("daily", &[], &fleet, golden_now() + 2)
+            .await
+            .expect("fleet daily");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(
+            outcome
+                .human
+                .starts_with("Fleet: 2 publisher(s) / 0 skipped\n"),
+            "{}",
+            outcome.human
+        );
+        assert!(outcome.human.contains("Publisher: aurora\n"));
+        assert!(outcome.human.contains("Publisher: northstar\n"));
+        assert!(outcome.human.ends_with(&format!(
+            "Run reference: {}",
+            run_reference(golden_now() + 2)
+        )));
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["command"], "daily");
+        assert_eq!(json["mode"], "max");
+        assert_eq!(json["publisher"], serde_json::Value::Null);
+        assert_eq!(json["skipped"], serde_json::json!([]));
+        let blocks = json["publishers"].as_array().expect("publishers");
+        assert_eq!(blocks.len(), 2, "{json}");
+        assert_eq!(blocks[0]["publisher"], "aurora");
+        assert_eq!(blocks[1]["publisher"], "northstar");
+        assert!(
+            json["ledger"]["records_appended"].as_u64().unwrap() >= 2,
+            "{json}"
+        );
+
+        // Each ledger is its own verified chain carrying only its own facts.
+        for (publisher, experiment) in [("aurora", "exp-0"), ("northstar", "exp-1")] {
+            let path = ledger_root.join(format!("{publisher}.jsonl"));
+            let records = apex_proof::Ledger::read_verified(&path, &signing_key.verifying_key())
+                .expect("each ledger verifies as its own chain");
+            assert!(records.len() >= 2, "{publisher}: {} records", records.len());
+            let started: Vec<String> = records
+                .iter()
+                .filter_map(|record| match record {
+                    apex_proof::LedgerRecord::ExperimentStarted { experiment_id, .. } => {
+                        Some(experiment_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(started, vec![experiment.to_string()], "{publisher}");
+        }
+        // The daily append advanced both ledgers independently.
+        for publisher in ["aurora", "northstar"] {
+            let block = blocks
+                .iter()
+                .find(|block| block["publisher"] == publisher)
+                .expect("publisher block");
+            assert_eq!(block["ledger"]["appended"], true, "{publisher}");
+            assert!(
+                block["ledger"]["records_appended"].as_u64().unwrap() >= 1,
+                "{publisher}"
+            );
+        }
+
+        // build_fleet configures the same two publishers from the registry
+        // (their adapters come from the vaulted keys; no call is made here).
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let built = build_fleet(
+            |_| None,
+            &registry,
+            &ledger_root,
+            &root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        assert_eq!(built.publishers.len(), 2);
+        assert!(built.skipped.is_empty());
+        assert!(!built.is_singleton());
+        assert!(built.publishers.iter().all(|publisher| publisher
+            .ledger_path
+            .ends_with(format!("{}.jsonl", publisher.publisher))));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn unvalidated_and_undecryptable_publishers_are_skipped_with_reasons() {
+        let root = fleet_dir("skips");
+        write_vaulted_publisher(&root, "northstar", "management-key", "validated");
+        // A blob + meta whose connection was never validated.
+        write_vaulted_publisher(&root, "pending", "management-key", "unvalidated");
+        // A validated meta whose blob was written under another vault key.
+        let other_vault = apex_vault::Vault::from_hex_key(FLEET_KEY_A).expect("vault");
+        std::fs::write(root.join("wrongkey.blob"), other_vault.encrypt("{}")).expect("blob");
+        let meta = serde_json::json!({
+            "platforms": { "applovin_max": { "state": "validated" } }
+        });
+        std::fs::write(root.join("wrongkey.connections.json"), meta.to_string()).expect("meta");
+
+        let vault = apex_vault::Vault::from_hex_key(FLEET_VAULT_KEY).expect("vault");
+        let registry = crate::registry::PublisherRegistry::load(&root, &vault).expect("registry");
+        assert_eq!(registry.runnable().count(), 1);
+
+        let ops = fleet_ops("exp-1");
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let registered = registry.runnable().next().expect("northstar");
+        let runner = crate::runner::Runner::new(
+            ops,
+            test_policy(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_publisher(registered.publisher.clone());
+        let publishers = vec![FleetPublisher {
+            publisher: registered.publisher.clone(),
+            runner,
+            ledger_path: ledger_root.join(format!("{}.jsonl", registered.publisher)),
+        }];
+        let skipped: Vec<FleetSkip> = registry
+            .skipped()
+            .map(|skip| FleetSkip {
+                publisher: skip.publisher.clone(),
+                reason: skip.reason.to_string(),
+            })
+            .collect();
+        let fleet = empty_fleet(publishers, skipped, signing_key.clone());
+        let outcome = dispatch_fleet("daily", &[], &fleet, golden_now())
+            .await
+            .expect("fleet daily");
+        assert!(
+            outcome
+                .human
+                .starts_with("Fleet: 1 publisher(s) / 2 skipped\n"),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            outcome
+                .human
+                .contains("Skipped: pending: no validated platform connection"),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            outcome.human.contains(
+                "Skipped: wrongkey: credential decrypt failed: decryption failed (wrong key or tampered ciphertext)"
+            ),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(
+            json["skipped"],
+            serde_json::json!([
+                {
+                    "publisher": "pending",
+                    "reason": "no validated platform connection",
+                },
+                {
+                    "publisher": "wrongkey",
+                    "reason": "credential decrypt failed: decryption failed (wrong key or tampered ciphertext)",
+                },
+            ])
+        );
+        assert_eq!(json["publishers"].as_array().expect("blocks").len(), 1);
+        assert_eq!(json["publishers"][0]["publisher"], "northstar");
+        // A skipped publisher never gets a ledger file.
+        assert!(ledger_root.join("northstar.jsonl").exists());
+        assert!(!ledger_root.join("pending.jsonl").exists());
+        assert!(!ledger_root.join("wrongkey.jsonl").exists());
+
+        // build_fleet carries the same skip list and configures the one
+        // runnable publisher from the registry.
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let built = build_fleet(
+            |_| None,
+            &registry,
+            &ledger_root,
+            &root,
+            &signing_key,
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("fleet built");
+        assert_eq!(built.publishers.len(), 1);
+        assert_eq!(
+            built.skipped,
+            vec![
+                FleetSkip {
+                    publisher: "pending".into(),
+                    reason: "no validated platform connection".into(),
+                },
+                FleetSkip {
+                    publisher: "wrongkey".into(),
+                    reason:
+                        "credential decrypt failed: decryption failed (wrong key or tampered ciphertext)"
+                            .into(),
+                },
+            ]
+        );
+        assert!(built.payments.is_none());
+        assert!(!built.is_singleton());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_fleet_monthly_run_issues_invoices_per_publisher_and_surfaces_refusals() {
+        let root = fleet_dir("monthly");
+        // Only northstar has a customer profile; aurora's invoice must refuse.
+        std::fs::write(
+            root.join("northstar.billing.json"),
+            serde_json::to_string_pretty(&apex_billing::CustomerProfile {
+                legal_name: "Nurme OÜ".into(),
+                address_lines: vec!["Narva mnt 5".into()],
+                country: "EE".into(),
+                vat_number: Some("EE987654321".into()),
+            })
+            .unwrap(),
+        )
+        .expect("customer profile");
+        let register_path = root.join("invoices.jsonl");
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let at = 1_700_000_000_000; // 2023-11-14, inside the billed month
+        let mut publishers = Vec::new();
+        for (index, publisher) in ["aurora", "northstar"].iter().enumerate() {
+            let ops = fleet_ops(&format!("exp-{index}"));
+            let ledger_path = ledger_root.join(format!("{publisher}.jsonl"));
+            {
+                let mut ledger =
+                    apex_proof::Ledger::open(&ledger_path, signing_key.clone()).unwrap();
+                keep_one_change(&ops, &mut ledger, at).await;
+            }
+            let runner = crate::runner::Runner::new(
+                ops,
+                test_policy(),
+                apex_lift::guardrails::FillFormat::Rewarded,
+            )
+            .with_publisher(*publisher)
+            .with_billing_profile(golden_billing_profile())
+            .with_connections_root(&root)
+            .with_register_path(&register_path);
+            publishers.push(FleetPublisher {
+                publisher: (*publisher).to_string(),
+                runner,
+                ledger_path,
+            });
+        }
+        let fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
+        let args: Vec<String> = [
+            "--month",
+            "2023-11",
+            "--start",
+            "2023-11-01",
+            "--days",
+            "30",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
+        let outcome = dispatch_fleet("monthly", &args, &fleet, at + 2)
+            .await
+            .expect("fleet monthly");
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        let blocks = json["publishers"].as_array().expect("blocks");
+        assert_eq!(blocks.len(), 2, "{json}");
+        let northstar = blocks
+            .iter()
+            .find(|block| block["publisher"] == "northstar")
+            .expect("northstar block");
+        let aurora = blocks
+            .iter()
+            .find(|block| block["publisher"] == "aurora")
+            .expect("aurora block");
+        let number = northstar["billing"]["invoice_number"]
+            .as_u64()
+            .expect("issued number");
+        assert!(number >= 1);
+        assert!(northstar["billing"]["rendered_invoice"]
+            .as_str()
+            .expect("rendered")
+            .starts_with(&format!("VAT invoice No. {number} for 2023-11\n")));
+        assert_eq!(
+            aurora["billing"]["invoice_refusal"],
+            serde_json::json!(
+                "the invoice carries no customer profile, so no VAT treatment can be stated"
+            )
+        );
+        assert!(aurora["billing"]["invoice_number"].is_null());
+        assert!(
+            northstar["billing"]["invoice_refusal"].is_null()
+                || northstar["billing"]["invoice_refusal"].as_str().is_none(),
+            "{northstar}"
+        );
+        // Exactly one register line: the refused publisher consumed none.
+        let raw = std::fs::read_to_string(&register_path).expect("register");
+        assert_eq!(raw.lines().count(), 1, "{raw}");
+        assert!(raw.contains(&format!("\"number\":{number}")), "{raw}");
+        assert!(
+            outcome
+                .human
+                .contains("Invoice: refused (the invoice carries no customer profile"),
+            "{}",
+            outcome.human
+        );
+        // Both per-publisher ledger files verify as independent chains.
+        for publisher in ["aurora", "northstar"] {
+            apex_proof::Ledger::verify(
+                ledger_root.join(format!("{publisher}.jsonl")),
+                &signing_key.verifying_key(),
+            )
+            .expect("chain verifies");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_fleet_daily_pass_processes_payment_events_once_grouped_by_publisher() {
+        let root = fleet_dir("fleet-payments");
+        let signing_key = apex_proof::Keypair::from_bytes(&[7u8; 32]);
+        let ledger_root = root.join("ledgers");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        let mut publishers = Vec::new();
+        for publisher in ["aurora", "northstar"] {
+            let runner = crate::runner::Runner::new(
+                std::sync::Arc::new(crate::ops::RecordingOps::new()),
+                test_policy(),
+                apex_lift::guardrails::FillFormat::Rewarded,
+            )
+            .with_publisher(publisher);
+            publishers.push(FleetPublisher {
+                publisher: publisher.to_string(),
+                runner,
+                ledger_path: ledger_root.join(format!("{publisher}.jsonl")),
+            });
+        }
+        let collection = root.join("collection.jsonl");
+        let mut raw = String::new();
+        for (psp, reference) in [
+            ("psp_1", "apex-fee:northstar:ch_0246:2026-10"),
+            ("psp_2", "apex-fee:aurora:ch_0247:2026-10"),
+        ] {
+            raw.push_str(
+                &serde_json::to_string(&apex_billing::CollectionEvent {
+                    at_unix_ms: golden_now(),
+                    event_code: "AUTHORISATION".into(),
+                    psp_reference: psp.into(),
+                    merchant_reference: reference.into(),
+                    success: "true".into(),
+                    amount_value: 300,
+                    amount_currency: "USD".into(),
+                    stored_payment_method_id: String::new(),
+                })
+                .unwrap(),
+            );
+            raw.push('\n');
+        }
+        std::fs::write(&collection, &raw).unwrap();
+        let mut fleet = empty_fleet(publishers, Vec::new(), signing_key.clone());
+        fleet.payments = Some(FleetPayments {
+            events_path: collection.clone(),
+            cursor_path: None,
+            ledger_path: None,
+            retries_path: None,
+        });
+        let outcome = dispatch_fleet("daily", &[], &fleet, golden_now())
+            .await
+            .expect("fleet daily");
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(
+            json["payment_events"]["received"], 2,
+            "both publishers' events were processed"
+        );
+        assert_eq!(json["payment_events"]["failed"], 0);
+        assert!(
+            outcome
+                .human
+                .contains("Payment events: 2 received / 0 failed"),
+            "{}",
+            outcome.human
+        );
+        // One cursor advanced once, to the end of the collection.
+        let cursor = crate::payment_events::default_cursor_path(&collection);
+        assert_eq!(
+            crate::payment_events::read_consumed_offset(&cursor).unwrap(),
+            std::fs::metadata(&collection).unwrap().len()
+        );
+        // The next run consumes nothing new (the cursor is the only one).
+        let repeat = dispatch_fleet("daily", &[], &fleet, golden_now() + 1)
+            .await
+            .expect("second fleet daily");
+        let repeat_json: serde_json::Value = serde_json::from_str(&repeat.json).expect("json");
+        assert_eq!(repeat_json["payment_events"]["received"], 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_env_mode_builds_and_dispatches_one_publisher() {
+        // No registry root, only the publisher env: the legacy mode.
+        let env = |name: &str| match name {
+            "APEX_RUNNER_PUBLISHER" => Some("northstar".to_string()),
+            _ => None,
+        };
+        assert!(crate::registry::vault_root_from_env(&env).is_none());
+        let instrumentation = build_instrumentation(|_| None).expect("instrumentation");
+        let runner = build_runner(
+            env,
+            std::sync::Arc::new(NullOps),
+            std::sync::Arc::new(NoTransport),
+            &instrumentation,
+        )
+        .expect("legacy runner");
+        assert_eq!(runner.publisher_id(), "northstar");
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[3u8; 32]));
+        let outcome = dispatch("daily", &[], &runner, &mut ledger, golden_now())
+            .await
+            .expect("legacy daily");
+        // The committed single-publisher shape is exactly what the legacy
+        // mode still emits.
+        assert_eq!(
+            outcome.human,
+            "Mode: MAX / Publisher: northstar\n\
+             Reporting pulls: 0 completed\n\
+             Decisions: 0 pending / 0 kept\n\
+             Platform operations: no unresolved result\n\
+             Ledger: no new records\n\
+             Run reference: job_20261015_0810"
+        );
+        assert!(outcome.json.contains("\"publisher\":\"northstar\""));
+        assert!(!outcome.json.contains("\"publishers\""));
+    }
+
+    #[tokio::test]
+    async fn audit_coverage_names_the_rule_groups_its_inputs_could_not_feed() {
+        use apex_audit::Snapshot;
+        let empty = Snapshot {
+            platform: apex_core::PlatformId::AppLovinMax,
+            fetched_at_unix_ms: golden_now(),
+            ad_units: Vec::new(),
+            waterfall: Vec::new(),
+            mediation_groups: Vec::new(),
+            bidder_accounts: Vec::new(),
+            country_revenue: Vec::new(),
+            app_ads_txt: apex_audit::AppAdsTxt {
+                present: false,
+                lines: Vec::new(),
+                expected_networks: Vec::new(),
+            },
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+        };
+        let (covered, expected, missing) = audit_coverage(&empty);
+        assert_eq!((covered, expected), (0, 5));
+        assert_eq!(
+            missing,
+            vec![
+                "stale_floor".to_string(),
+                "missing_country_floor".to_string(),
+                "disabled_bidder_with_account".to_string(),
+                "reporting_gap".to_string(),
+                "app_ads_txt".to_string(),
+            ]
+        );
+        assert!(
+            audit_rule_version().starts_with('v'),
+            "{}",
+            audit_rule_version()
         );
     }
 
@@ -1873,6 +3810,9 @@ mod tests {
         assert!(err.contains("cycle"), "{err}");
 
         // monthly with a publisher proceeds and bills nothing.
+        let runner = runner
+            .with_billing_profile(golden_billing_profile())
+            .with_register_path(golden_register_path());
         let err = dispatch("monthly", &[], &runner, &mut ledger, 1).await;
         assert!(err.is_ok(), "{err:?}");
 
@@ -1892,6 +3832,154 @@ mod tests {
         .await
         .expect_err("zero scheduled-at");
         assert!(err.contains("positive unix-millisecond timestamp"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_cycle_command_activates_monitoring_from_the_connection_snapshot() {
+        use apex_audit::Snapshot;
+        let dir = std::env::temp_dir().join(format!("apex-cli-activate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot_path = dir.join("snapshot.json");
+        let snapshot = Snapshot {
+            platform: apex_core::PlatformId::AppLovinMax,
+            fetched_at_unix_ms: golden_now(),
+            ad_units: Vec::new(),
+            waterfall: Vec::new(),
+            mediation_groups: Vec::new(),
+            bidder_accounts: Vec::new(),
+            country_revenue: Vec::new(),
+            app_ads_txt: apex_audit::AppAdsTxt {
+                present: false,
+                lines: Vec::new(),
+                expected_networks: Vec::new(),
+            },
+            // $350k of reported 30-day revenue: the mid tier.
+            platform_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 350_000 * 1_000_000,
+                impressions_30d: 0,
+            },
+            mediation_totals_30d: apex_audit::RevenueTotals {
+                revenue_30d: 0,
+                impressions_30d: 0,
+            },
+        };
+        std::fs::write(&snapshot_path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let runner = golden_runner()
+            .with_monitoring(apex_billing::MonitoringPlan::default())
+            .with_connections_root(&dir);
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[3u8; 32]));
+        let args = vec![
+            "--snapshot".to_string(),
+            snapshot_path.display().to_string(),
+        ];
+        let outcome = dispatch("cycle", &args, &runner, &mut ledger, golden_now())
+            .await
+            .expect("cycle");
+        // The connection moment: the plan is on at the snapshot's tier.
+        assert!(
+            outcome
+                .human
+                .contains("Monitoring: activated at the Mid tier ($1500/month)"),
+            "{}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["cycle"]["monitoring_activated"], "Mid");
+        let state = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
+            .expect("loadable")
+            .expect("recorded");
+        assert!(state.active);
+        assert_eq!(state.tier, Some(apex_billing::MonitoringTier::Mid));
+        assert_eq!(state.monthly_fee_micros, 1_500_000_000);
+        assert_eq!(state.revenue_30d, Some(350_000 * 1_000_000));
+
+        // A later cycle never re-tiers the recorded plan.
+        let outcome = dispatch(
+            "cycle",
+            &args,
+            &runner,
+            &mut ledger,
+            golden_now() + 86_400_000,
+        )
+        .await
+        .expect("second cycle");
+        assert!(!outcome.human.contains("Monitoring: activated"));
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert!(json["cycle"]["monitoring_activated"].is_null());
+
+        // A cancelled plan is never resurrected by a cycle.
+        let mut cancelled = state;
+        cancelled.cancel("2026-10");
+        cancelled
+            .save(&dir.join("northstar.monitoring.json"))
+            .unwrap();
+        let outcome = dispatch(
+            "cycle",
+            &args,
+            &runner,
+            &mut ledger,
+            golden_now() + 172_800_000,
+        )
+        .await
+        .expect("third cycle");
+        assert!(!outcome.human.contains("Monitoring: activated"));
+        let back = apex_billing::PlanState::load(&dir.join("northstar.monitoring.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.stops_after.as_deref(), Some("2026-10"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_cycle_report_records_a_capability_hold_against_the_admob_fixture() {
+        // The exact live defect: fleet/AdMob mode consuming the committed
+        // AdMob fixture, whose MAX-style floor proposals are not in the
+        // AdMob verified write set. The pass exits 0, records the typed
+        // awaiting state and never surfaces the historical hard error.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../apex-api/fixtures/admob.json");
+        let ops = std::sync::Arc::new(crate::ops::RecordingOps::new());
+        ops.set_platform(apex_core::PlatformId::Admob);
+        ops.set_writable("setCountryFloor", false);
+        let runner = crate::runner::Runner::new(
+            ops,
+            crate::model::AutopilotPolicy::conservative(),
+            apex_lift::guardrails::FillFormat::Rewarded,
+        )
+        .with_publisher("northstar")
+        .with_billing_profile(golden_billing_profile())
+        .with_register_path(golden_register_path());
+        let mut ledger =
+            apex_proof::InMemoryLedger::new(apex_proof::Keypair::from_bytes(&[5u8; 32]));
+        let args = vec!["--snapshot".to_string(), fixture.display().to_string()];
+        let outcome = dispatch("cycle", &args, &runner, &mut ledger, golden_now())
+            .await
+            .expect("the cycle continues past unverified operations");
+        assert!(!outcome.failed, "{outcome:?}");
+        assert!(
+            outcome
+                .human
+                .contains("Skipped: awaiting live verification for Admob: setCountryFloor"),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            !outcome.human.contains("not writable"),
+            "the historical hard error never returns: {}",
+            outcome.human
+        );
+        let json: serde_json::Value = serde_json::from_str(&outcome.json).expect("json");
+        assert_eq!(json["cycle"]["applied"], 0);
+        assert!(json["cycle"]["proposed"].as_u64().unwrap_or(0) > 0);
+        let holds = json["cycle"]["awaiting_verification"]
+            .as_array()
+            .expect("the typed awaiting record is present");
+        assert!(!holds.is_empty());
+        assert!(holds
+            .iter()
+            .all(|reason| reason == "awaiting live verification for Admob: setCountryFloor"));
     }
 
     #[tokio::test]

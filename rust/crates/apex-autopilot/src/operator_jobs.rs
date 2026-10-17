@@ -147,16 +147,22 @@ impl OperatorJobsReport {
     }
 }
 
-/// Consume every queued job in `dir`.
+/// Consume every queued job in `dir` that `belongs` to this pass (in the
+/// legacy single-publisher mode `belongs` accepts everything; the fleet daily
+/// pass claims only jobs whose target its own ledger owns, so one publisher
+/// never re-reads another publisher's experiment and an orphaned job stays
+/// visible as skipped instead of being consumed by the wrong adapter).
 ///
 /// A corrupt file is reported on stderr and counted as failed; it is never
 /// rewritten (the control plane's bytes are not ours to guess at). The rest
 /// of the directory is still consumed: one bad file must not starve the
 /// queue.
+#[allow(clippy::too_many_arguments)]
 pub async fn consume_operator_jobs(
     dir: &Path,
     ops: &dyn PlatformOps,
     due_rechecks: &dyn Fn(&str) -> bool,
+    belongs: &dyn Fn(&OperatorJob) -> bool,
     notifier: Option<&NotifyPlan>,
     telemetry: Option<&RunnerTelemetry>,
     publisher: &str,
@@ -220,6 +226,12 @@ pub async fn consume_operator_jobs(
         };
         if state != JobState::Queued {
             // Deduplication: a terminal or claimed job is a no-op forever.
+            report.skipped += 1;
+            continue;
+        }
+        if !belongs(&job) {
+            // Not this pass's job: leave it queued for its owner (or for an
+            // operator when no owner exists), and say so in the counts.
             report.skipped += 1;
             continue;
         }
@@ -461,6 +473,7 @@ mod tests {
             &dir,
             ops.as_ref(),
             &due,
+            &|_| true,
             None,
             None,
             "northstar",
@@ -500,6 +513,7 @@ mod tests {
             &dir,
             ops.as_ref(),
             &due,
+            &|_| true,
             None,
             None,
             "northstar",
@@ -520,6 +534,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jobs_that_do_not_belong_are_left_queued_for_their_owner() {
+        let dir = std::env::temp_dir().join(format!("apex-opsjobs-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        job_file(&dir, "opj_000000000011", "retry_read", "exp_0247", "queued");
+        job_file(
+            &dir,
+            "opj_000000000012",
+            "retry_read",
+            "exp_other",
+            "queued",
+        );
+        let ops = ops_with(apex_core::ExperimentState::Running);
+        let belongs = |job: &OperatorJob| job.target == "exp_0247";
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &belongs,
+            None,
+            None,
+            "northstar",
+            1,
+        )
+        .await
+        .expect("consume");
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.skipped, 1);
+        let mine: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000011.json")).unwrap(),
+        )
+        .unwrap();
+        let other: OperatorJob = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opj_000000000012.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mine.state, "completed");
+        assert_eq!(other.state, "queued", "another owner's job is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn a_restore_reconcile_completes_when_the_platform_confirms_the_stop() {
         let dir = std::env::temp_dir().join(format!("apex-opsjobs-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -532,10 +588,18 @@ mod tests {
             "queued",
         );
         let ops = ops_with(apex_core::ExperimentState::Stopped);
-        let report =
-            consume_operator_jobs(&dir, ops.as_ref(), &|_| false, None, None, "northstar", 1)
-                .await
-                .expect("consume");
+        let report = consume_operator_jobs(
+            &dir,
+            ops.as_ref(),
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1,
+        )
+        .await
+        .expect("consume");
         assert_eq!(report.completed, 1);
         let job: OperatorJob = serde_json::from_str(
             &std::fs::read_to_string(dir.join("opj_00000000000a.json")).unwrap(),
@@ -551,9 +615,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("apex-opsjobs-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ops = RecordingOps::new();
-        let report = consume_operator_jobs(&dir, &ops, &|_| false, None, None, "northstar", 1)
-            .await
-            .expect("missing dir");
+        let report = consume_operator_jobs(
+            &dir,
+            &ops,
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1,
+        )
+        .await
+        .expect("missing dir");
         assert_eq!(report, OperatorJobsReport::default());
 
         std::fs::create_dir_all(&dir).unwrap();
@@ -573,9 +646,18 @@ mod tests {
         );
         std::fs::write(dir.join("corrupt.json"), "not json").unwrap();
         std::fs::write(dir.join("ignored.txt"), "not a job").unwrap();
-        let report = consume_operator_jobs(&dir, &ops, &|_| false, None, None, "northstar", 1)
-            .await
-            .expect("consume");
+        let report = consume_operator_jobs(
+            &dir,
+            &ops,
+            &|_| false,
+            &|_| true,
+            None,
+            None,
+            "northstar",
+            1,
+        )
+        .await
+        .expect("consume");
         assert_eq!(report.skipped, 2, "running and completed are left alone");
         assert_eq!(report.failed, 1, "corrupt file is counted");
         let _ = std::fs::remove_dir_all(&dir);

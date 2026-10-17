@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-**ApexMail** is a zero-cost, self-hosted email system using direct SMTP delivery via Postfix on `mail.apexmediation.ee`. It provides full control over email delivery with DKIM signing, SPF validation, and comprehensive tracking. The system runs on the Test Server (157.90.126.205).
+**ApexMail** is a zero-cost, self-hosted email system using direct SMTP delivery via Postfix on `mail.apexmediation.ee`. It provides full control over email delivery with DKIM signing, SPF validation, and comprehensive tracking. The system runs on the Test Server (203.0.113.11).
 
 ---
 
@@ -10,7 +10,7 @@
 
 | Component | Server | Status | Details |
 |-----------|--------|--------|---------|  
-| **ApexMail Service** | Test Server (157.90.126.205) | ✅ Running | Port 4001 (sales-api) |
+| **ApexMail Service** | Test Server (203.0.113.11) | ✅ Running | Port 4001 (sales-api) |
 | **Inbound SMTP** | Test Server | ✅ Running | Port 2525 (systemd) |
 | **Postfix MTA** | Test Server | ✅ Running | Port 25/587 with DKIM |
 | **OpenDKIM** | Test Server | ✅ Running | Selector: apexmail |
@@ -33,14 +33,16 @@ EMAIL_FROM_NAME=ApexMediation
 
 ### DNS Records (apexmediation.ee)
 
+> **Note:** The values below use RFC 5737 documentation addresses; replace them with your server addresses before applying them.
+
 | Record | Type | Value |
 |--------|------|-------|
 | MX | @ | `10 mail.apexmediation.ee` |
-| A | mail | `157.90.126.205` |
-| TXT | @ | `v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all` |
+| A | mail | `203.0.113.11` |
+| TXT | @ | `v=spf1 ip4:203.0.113.11 ip4:203.0.113.10 -all` |
 | TXT | apexmail._domainkey | DKIM public key |
 | TXT | _dmarc | `v=DMARC1; p=reject; rua=mailto:dmarc@apexmediation.ee; pct=100` |
-| PTR | 157.90.126.205 | `mail.apexmediation.ee` |
+| PTR | 203.0.113.11 | `mail.apexmediation.ee` |
 
 ### Previous Resend Usage
 

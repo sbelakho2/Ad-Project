@@ -1,0 +1,9 @@
+[Unit]
+Description=Pull the Apex sync objects every 15 minutes, offset from the push
+
+[Timer]
+OnCalendar=*:5,20,35,50
+Persistent=true
+
+[Install]
+WantedBy=timers.target

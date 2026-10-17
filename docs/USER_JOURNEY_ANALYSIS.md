@@ -7,7 +7,7 @@ This document analyzes the complete user journey through the Apex Mediation plat
 > Note: this document contains historical findings from Dec 2025. Several items originally marked "missing" (notably `/api/v1/team/*` and `/api/v1/settings/*`) are now implemented and mounted in the backend router. If you are auditing current sell-readiness, treat this as an archive and cross-check against the current backend route inventory and console integration docs.
 
 **Analysis Date**: December 18, 2025  
-**Server**: 46.62.252.96 (production)  
+**Server**: 203.0.113.10 (production)  
 **Last Test Run**: December 18, 2025 18:36 UTC
 
 ---

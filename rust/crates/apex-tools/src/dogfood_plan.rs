@@ -31,7 +31,7 @@
 //!   "services": {
 //!     "apex-api": {
 //!       "routes": [ { "path": "/healthz", "methods": ["GET"] } ],
-//!       "fixture_pages": 60,
+//!       "fixture_pages": 62,
 //!       "required": [
 //!         { "surface": "GET /healthz", "classes": ["surface-parity"] }
 //!       ]
@@ -39,6 +39,16 @@
 //!   }
 //! }
 //! ```
+//!
+//! A publisher-console GET that refuses anonymous reads is declared with
+//! `"session_required": true` on its route entry (the live harness asserts
+//! the anonymous `303 /console/ledger` and the documented public exceptions
+//! from this marker). The marker is validated here: it may appear only on a
+//! declared `apex-api` console `GET`, only as `true` (a `false` value is a
+//! schema drift, not a way to spell "public"), and never on one of the
+//! documented public console paths in [`PUBLIC_CONSOLE_GETS`]; a marker on a
+//! public route is a hard failure because it would declare a gate the product
+//! does not have.
 //!
 //! `tools/dogfood/live-baseline.json` records the measured requirement
 //! baseline and an append-only removal ledger:
@@ -129,10 +139,31 @@ struct DeclaredService {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeclaredRoute {
     path: String,
     methods: Vec<String>,
+    #[serde(default)]
+    session_required: Option<bool>,
 }
+
+/// The documented publisher-console GET paths that deliberately stay public:
+/// the access panel and its redirects, the marketing flows, the one-time
+/// sign-in link, the setup-watch form and its confirmation. A
+/// `session_required` marker on one of these contradicts the product's own
+/// documentation and is refused.
+pub const PUBLIC_CONSOLE_GETS: [&str; 10] = [
+    "/console",
+    "/console/",
+    "/console/ledger",
+    "/console/signin",
+    "/free-audit",
+    "/free-audit/",
+    "/audit-requested/",
+    "/watch",
+    "/watch/",
+    "/watch/requested",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 struct RequiredCell {
@@ -412,6 +443,60 @@ fn check_fixture_parity(
     }
 }
 
+/// Validate every `session_required` marker: present only as `true`, only on
+/// a declared `apex-api` console `GET`, and never on a documented public
+/// console path. The marker is the recorded expectation the live harness
+/// asserts (anonymous `303 /console/ledger`, session `200`), so a marker the
+/// product cannot honor — or one on a route that is documented public — must
+/// fail here, before any live run repeats it.
+fn check_session_required(surfaces: &SurfacesFile, problems: &mut Vec<String>) {
+    for (service, declared) in &surfaces.services {
+        for route in &declared.routes {
+            match route.session_required {
+                None => continue,
+                Some(false) => {
+                    problems.push(format!(
+                        "{SURFACES_REL}: {service} {}: session_required is present but false; the marker records a real gate, so it must be true when present",
+                        route.path
+                    ));
+                    continue;
+                }
+                Some(true) => {}
+            }
+            if service != "apex-api" {
+                problems.push(format!(
+                    "{SURFACES_REL}: {service} {}: session_required marks the publisher console only; service '{service}' has no such gate",
+                    route.path
+                ));
+                continue;
+            }
+            let is_console = route.path == "/" || route.path.starts_with("/console");
+            if !is_console {
+                problems.push(format!(
+                    "{SURFACES_REL}: {service} {}: session_required may only mark a publisher-console route (the console serves '/' and '/console/...')",
+                    route.path
+                ));
+            }
+            if !route
+                .methods
+                .iter()
+                .any(|method| method.eq_ignore_ascii_case("GET"))
+            {
+                problems.push(format!(
+                    "{SURFACES_REL}: {service} {}: session_required must reference a declared GET route",
+                    route.path
+                ));
+            }
+            if PUBLIC_CONSOLE_GETS.contains(&route.path.as_str()) {
+                problems.push(format!(
+                    "{SURFACES_REL}: {service} {}: session_required marks a documented public route; the console exception list stays public",
+                    route.path
+                ));
+            }
+        }
+    }
+}
+
 /// Expand the per-service `required` cells into
 /// `"<service>|<surface>|<class>"` ids, validating every class and surface
 /// reference on the way.
@@ -569,6 +654,7 @@ pub fn dogfood_plan(repo: &Repo) -> Result<(), String> {
     }
     let declared_surfaces = check_route_parity(&surfaces, &registered, &mut problems);
     check_fixture_parity(&surfaces, &fixture_counts, &mut problems);
+    check_session_required(&surfaces, &mut problems);
     let required_cells = expand_required_cells(&surfaces, &declared_surfaces, &mut problems);
     let baseline: Option<BaselineFile> = if repo.exists(BASELINE_REL) {
         Some(
@@ -799,10 +885,12 @@ mod tests {
                         DeclaredRoute {
                             path: "/a".into(),
                             methods: vec!["GET".into()],
+                            session_required: None,
                         },
                         DeclaredRoute {
                             path: "/stale".into(),
                             methods: vec!["POST".into()],
+                            session_required: None,
                         },
                     ],
                     fixture_pages: 0,
@@ -852,6 +940,7 @@ mod tests {
                     routes: vec![DeclaredRoute {
                         path: "/a".into(),
                         methods: vec!["GET".into()],
+                        session_required: None,
                     }],
                     fixture_pages: 0,
                     required: vec![
@@ -942,6 +1031,168 @@ mod tests {
         let mut problems = Vec::new();
         check_baseline(&stale, &required, &mut problems);
         assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn session_required_markers_are_validated_against_the_product_gate() {
+        let surfaces =
+            |service: &str, path: &str, methods: &[&str], marker: Option<bool>| SurfacesFile {
+                probe_classes: full_probe_list().iter().map(|c| c.to_string()).collect(),
+                services: [(
+                    service.to_string(),
+                    DeclaredService {
+                        routes: vec![DeclaredRoute {
+                            path: path.into(),
+                            methods: methods.iter().map(|m| (*m).into()).collect(),
+                            session_required: marker,
+                        }],
+                        fixture_pages: 0,
+                        required: vec![],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            };
+
+        // The valid case: an apex-api console GET records the gate.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-api", "/console/audit", &["GET"], Some(true)),
+            &mut problems,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        // A marker on a documented public route fails.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-api", "/console/ledger", &["GET"], Some(true)),
+            &mut problems,
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("documented public route"),
+            "{problems:?}"
+        );
+
+        // A marker must reference a declared GET route.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-api", "/console/settings/theme", &["POST"], Some(true)),
+            &mut problems,
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("declared GET route")),
+            "{problems:?}"
+        );
+
+        // `session_required: false` is schema drift: the marker records a
+        // real gate, so it is present only as true.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-api", "/console/audit", &["GET"], Some(false)),
+            &mut problems,
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("present but false")),
+            "{problems:?}"
+        );
+
+        // The publisher console is the only service with this gate.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-control", "/console/audit", &["GET"], Some(true)),
+            &mut problems,
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("publisher console only")),
+            "{problems:?}"
+        );
+
+        // A non-console path cannot carry the marker.
+        let mut problems = Vec::new();
+        check_session_required(
+            &surfaces("apex-api", "/healthz", &["GET"], Some(true)),
+            &mut problems,
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("publisher-console route")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_route_fields_are_schema_drift_not_silent_ignores() {
+        let err = serde_json::from_str::<SurfacesFile>(
+            r#"{"probe_classes":[],"services":{"apex-api":{"routes":[{"path":"/a","methods":["GET"],"session_require":true}],"fixture_pages":0,"required":[]}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn session_required_marker_round_trips_through_the_end_to_end_gate() {
+        let (repo, root) = temp_repo("session-marker");
+        write_services(&root);
+        write(
+            &root.join(SOURCES[0].1),
+            "pub fn router() {\n    Router::new().route(\"/console/audit\", get(root))\n}\n",
+        );
+        let mut declared: serde_json::Value = serde_json::from_str(&end_to_end_surfaces()).unwrap();
+        declared["services"]["apex-api"]["routes"] = serde_json::json!([
+            {"path": "/console/audit", "methods": ["GET"], "session_required": true}
+        ]);
+        declared["services"]["apex-api"]["required"] = serde_json::json!([
+            {"surface": "GET /console/audit", "classes": ["surface-parity"]}
+        ]);
+        write(
+            &root.join(SURFACES_REL),
+            &serde_json::to_string(&declared).unwrap(),
+        );
+        write(
+            &root.join(BASELINE_REL),
+            r#"{"cells":["apex-api|GET /console/audit|surface-parity"],"removals":[]}"#,
+        );
+        assert_eq!(dogfood_plan(&repo), Ok(()));
+
+        // The same marker on the documented public access panel fails the
+        // whole gate.
+        declared["services"]["apex-api"]["routes"] = serde_json::json!([
+            {"path": "/console/ledger", "methods": ["GET"], "session_required": true}
+        ]);
+        declared["services"]["apex-api"]["required"] = serde_json::json!([
+            {"surface": "GET /console/ledger", "classes": ["surface-parity"]}
+        ]);
+        write(
+            &root.join(SOURCES[0].1),
+            "pub fn router() {\n    Router::new().route(\"/console/ledger\", get(root))\n}\n",
+        );
+        write(
+            &root.join(SURFACES_REL),
+            &serde_json::to_string(&declared).unwrap(),
+        );
+        write(
+            &root.join(BASELINE_REL),
+            r#"{"cells":["apex-api|GET /console/ledger|surface-parity"],"removals":[]}"#,
+        );
+        let err = dogfood_plan(&repo).unwrap_err();
+        assert!(err.contains("documented public route"), "{err}");
+
+        // A typo'd marker field is a parse failure, never a silently ignored
+        // declaration.
+        declared["services"]["apex-api"]["routes"] = serde_json::json!([
+            {"path": "/console/audit", "methods": ["GET"], "session_require": true}
+        ]);
+        write(
+            &root.join(SURFACES_REL),
+            &serde_json::to_string(&declared).unwrap(),
+        );
+        let err = dogfood_plan(&repo).unwrap_err();
+        assert!(err.contains("unknown field"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn write(path: &std::path::Path, text: &str) {

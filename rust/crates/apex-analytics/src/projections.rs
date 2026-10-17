@@ -484,12 +484,18 @@ pub fn compute_customer_daily(report_days: &[ReportDayRow]) -> Vec<CustomerDaily
 }
 
 /// Compute the platform daily projection.
+///
+/// The distinct-account counts fold through sets: a linear `contains` over
+/// the accumulated account list would make one day cell quadratic in its
+/// account count, and a rebuild folds every day of the 90-day window at once.
 pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDailyRow> {
     struct Accumulator {
         revenue_micros: i64,
         impressions: Option<u64>,
-        final_accounts: Vec<String>,
-        provisional_accounts: Vec<String>,
+        // Only the distinct counts are read, so hashing suffices; the
+        // previous `Vec::contains` was quadratic in the cell's account count.
+        final_accounts: std::collections::HashSet<String>,
+        provisional_accounts: std::collections::HashSet<String>,
     }
     let mut map: BTreeMap<(String, String, String), Accumulator> = BTreeMap::new();
     for row in report_days {
@@ -501,8 +507,8 @@ pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDaily
         let accumulator = map.entry(key).or_insert_with(|| Accumulator {
             revenue_micros: 0,
             impressions: Some(0),
-            final_accounts: Vec::new(),
-            provisional_accounts: Vec::new(),
+            final_accounts: std::collections::HashSet::new(),
+            provisional_accounts: std::collections::HashSet::new(),
         });
         accumulator.revenue_micros = accumulator.revenue_micros.saturating_add(revenue_micros);
         accumulator.impressions = match (accumulator.impressions, row.impressions) {
@@ -516,9 +522,7 @@ pub fn compute_platform_daily(report_days: &[ReportDayRow]) -> Vec<PlatformDaily
         } else {
             continue;
         };
-        if !accounts.contains(&row.platform_account_id) {
-            accounts.push(row.platform_account_id.clone());
-        }
+        accounts.insert(row.platform_account_id.clone());
     }
     map.into_iter()
         .map(
@@ -1927,5 +1931,96 @@ mod tests {
         assert!(!ProjectionName::OperatorQueues.carries_money());
         let totals = ProjectionTotals::of(ProjectionName::OperatorQueues, &[]);
         assert_eq!(totals.revenue_micros, None);
+    }
+    /// The pre-optimization platform fold: a linear `contains` over the grown
+    /// account list per row. Kept verbatim as the reference.
+    fn platform_daily_naive(report_days: &[crate::store::ReportDayRow]) -> Vec<PlatformDailyRow> {
+        struct Accumulator {
+            revenue_micros: i64,
+            impressions: Option<u64>,
+            final_accounts: Vec<String>,
+            provisional_accounts: Vec<String>,
+        }
+        let mut map: BTreeMap<(String, String, String), Accumulator> = BTreeMap::new();
+        for row in report_days {
+            let (Some(revenue_micros), Some(currency)) =
+                (row.revenue_micros, row.currency.as_deref())
+            else {
+                continue;
+            };
+            let key = (row.platform.clone(), row.day.clone(), currency.to_string());
+            let accumulator = map.entry(key).or_insert_with(|| Accumulator {
+                revenue_micros: 0,
+                impressions: Some(0),
+                final_accounts: Vec::new(),
+                provisional_accounts: Vec::new(),
+            });
+            accumulator.revenue_micros = accumulator.revenue_micros.saturating_add(revenue_micros);
+            accumulator.impressions = match (accumulator.impressions, row.impressions) {
+                (Some(sum), Some(value)) => sum.checked_add(value),
+                _ => None,
+            };
+            let accounts = if row.finality == "final" {
+                &mut accumulator.final_accounts
+            } else if row.finality == "provisional" {
+                &mut accumulator.provisional_accounts
+            } else {
+                continue;
+            };
+            if !accounts.contains(&row.platform_account_id) {
+                accounts.push(row.platform_account_id.clone());
+            }
+        }
+        map.into_iter()
+            .map(
+                |((platform, day, currency), accumulator)| PlatformDailyRow {
+                    platform,
+                    day,
+                    currency,
+                    revenue_micros: accumulator.revenue_micros,
+                    impressions: accumulator.impressions,
+                    final_accounts: accumulator.final_accounts.len() as u32,
+                    provisional_accounts: accumulator.provisional_accounts.len() as u32,
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn platform_daily_counts_equal_the_naive_linear_scan() {
+        // 10,000 rows in one (platform, day, currency) cell: the distinct
+        // account count must not depend on the fold used.
+        let mut rows = Vec::new();
+        for i in 0..10_000 {
+            rows.push(crate::store::ReportDayRow {
+                publisher_id: format!("p{}", i % 3),
+                platform: "applovin_max".to_string(),
+                platform_account_id: format!("acc_{i:05}"),
+                day: "2026-09-30".to_string(),
+                finality: if i % 4 == 0 { "final" } else { "provisional" }.to_string(),
+                revenue_micros: Some(1_000),
+                impressions: Some(10),
+                currency: Some("USD".to_string()),
+                country: None,
+                ad_unit_id: None,
+                format: None,
+                source_digest: None,
+            });
+        }
+        // Duplicate accounts and an unknown finality exercise the dedup and
+        // skip branches.
+        let mut duplicate = rows[0].clone();
+        duplicate.day = "2026-09-30".to_string();
+        duplicate.finality = "partial".to_string();
+        rows.push(duplicate);
+        rows.push(rows[1].clone());
+        let optimized = compute_platform_daily(&rows);
+        let reference = platform_daily_naive(&rows);
+        assert_eq!(optimized, reference);
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(
+            optimized[0].final_accounts + optimized[0].provisional_accounts,
+            10_000
+        );
     }
 }

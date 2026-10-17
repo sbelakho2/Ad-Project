@@ -84,7 +84,7 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
     let monitoring_card = match view.monitoring.fee_micros {
         Some(fee) => kpi_card(
             "Monitoring",
-            "Selected",
+            view.monitoring.selected_label(),
             &format!(
                 "{} per month{}",
                 money_fixed(fee, &view.currency),
@@ -98,8 +98,8 @@ pub fn render_billing(ctx: &ConsoleCtx, data: &BillingPageData<'_>) -> String {
         ),
         None => kpi_card(
             "Monitoring",
-            "Not selected",
-            &format!("{} this month", money_fixed(0, &view.currency)),
+            "Not recorded",
+            "No plan is recorded for this workspace.",
             None,
         ),
     };
@@ -403,11 +403,12 @@ fn payments_section(view: &BillingView, period: &str) -> String {
 }
 
 fn changes_section(view: &BillingView, period: &str, lines: &[&BillingFeeLine]) -> String {
-    let change_ids: Vec<&str> = lines.iter().map(|line| line.change_id.as_str()).collect();
+    let change_ids: std::collections::HashSet<&str> =
+        lines.iter().map(|line| line.change_id.as_str()).collect();
     let rows: Vec<Vec<Cell>> = view
         .billing_changes
         .iter()
-        .filter(|change| change_ids.contains(&change.change_id.as_str()))
+        .filter(|change| change_ids.contains(change.change_id.as_str()))
         .map(|change| {
             vec![
                 Cell::Text(change.day.clone()),
@@ -518,10 +519,7 @@ mod tests {
             &[],
             payments,
             1_792_055_400_000,
-            MonitoringView {
-                fee_micros: None,
-                since: None,
-            },
+            MonitoringView::not_recorded(),
             "USD",
         );
         view.fee_lines = lines;
@@ -583,8 +581,8 @@ mod tests {
         assert!(html.contains("$300.00"));
         assert!(html.contains("One qualifying kept change"));
         assert!(html.contains(">Monitoring<"));
-        assert!(html.contains("Not selected"));
-        assert!(html.contains("$0.00 this month"));
+        assert!(html.contains("Not recorded"));
+        assert!(html.contains("No plan is recorded for this workspace."));
         assert!(html.contains(">Payment status<"));
         assert!(html.contains("Preview"));
         assert!(html.contains("Invoice is still a draft."));
@@ -680,6 +678,7 @@ mod tests {
                 success: "true".to_string(),
                 amount_value: 22_500,
                 amount_currency: "USD".to_string(),
+                stored_payment_method_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -717,6 +716,7 @@ mod tests {
                 success: "true".to_string(),
                 amount_value: 22_500,
                 amount_currency: "USD".to_string(),
+                stored_payment_method_id: String::new(),
             }],
         );
         let html = render_invoice(
@@ -756,6 +756,7 @@ mod tests {
                 success: "true".to_string(),
                 amount_value: 300,
                 amount_currency: "EUR".to_string(),
+                stored_payment_method_id: String::new(),
             }],
         );
         // The register page notes the exclusion against the period.
@@ -809,5 +810,46 @@ mod tests {
         );
         assert!(!html.contains("<script"));
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    /// The invoice's changes section selects the change records whose ids the
+    /// period's fee lines name. At 10_000 recorded changes and 2_000 fee
+    /// lines the set-based section must render exactly the 2_000 matching
+    /// rows.
+    ///
+    /// The pre-fix section compared `change_ids.contains` on a `Vec`
+    /// (O(changes x lines)); this pins the selection (row count and
+    /// membership) that the set must reproduce.
+    #[test]
+    fn the_changes_section_selects_exactly_the_periods_lines_at_scale() {
+        let lines: Vec<BillingFeeLine> = (0..2_000)
+            .map(|i| line(&format!("ch_{i:05}"), "2026-09", 1_000_000))
+            .collect();
+        let mut view = view_with(lines, Vec::new());
+        view.billing_changes = (0..10_000)
+            .map(|i| BillingChangeView {
+                change_id: format!("ch_{i:05}"),
+                day: "2026-10-05".to_string(),
+                reason: "publisher override".to_string(),
+                billed_lambda: 0.0,
+                seq: 0,
+            })
+            .collect();
+
+        let period_lines = view.lines_for("2026-09");
+        assert_eq!(period_lines.len(), 2_000);
+        let html = changes_section(&view, "2026-09", &period_lines);
+        assert_eq!(
+            html.matches("seq 0").count(),
+            2_000,
+            "exactly the period's changes are rendered"
+        );
+        assert!(html.contains("ch_00000"));
+        assert!(html.contains("ch_01999"));
+        assert!(
+            !html.contains("ch_02000"),
+            "non-period changes are excluded"
+        );
+        assert!(!html.contains("ch_09999"));
     }
 }

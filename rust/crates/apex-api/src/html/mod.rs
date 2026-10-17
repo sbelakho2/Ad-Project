@@ -33,6 +33,7 @@ pub mod ledger;
 pub mod overview;
 pub mod proposals;
 pub mod settings;
+pub mod watch_html;
 
 use apex_ui::shell::{self, Area, PageCtx, Theme};
 

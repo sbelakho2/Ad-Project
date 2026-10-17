@@ -9,6 +9,17 @@
 //! filled from real data is refused rather than sent with a gap, and
 //! rendered text containing a banned fake-personalization phrase is refused.
 //!
+//! # Offers
+//!
+//! The first offer is the free read-only audit. The second offer is Setup
+//! Watch, whose variant carries a per-publisher checkout link built from
+//! [`crate::engine::Config::watch_checkout_url`] by appending the publisher
+//! key, exactly the way the contact's token is appended to the unsubscribe
+//! base URL. With no checkout base configured the variant is simply
+//! unavailable: [`available_templates_for_step`] leaves it out, so the
+//! bandit never enumerates or serves it. The price text is
+//! [`WATCH_PRICE_TEXT`], one constant documented against billing.
+//!
 //! # Compliance
 //!
 //! Every message identifies the sender with a postal address, says why the
@@ -45,11 +56,23 @@ pub struct Template {
     pub body: &'static str,
 }
 
-/// The default templates: three first-touch angles and two follow-ups.
+/// The Setup Watch price copy, the only place a price appears in the copy.
+///
+/// The amounts are billing's, not the engine's: this string must match
+/// `apex_billing::subscription::watch_plan` (the $99 / $199 monthly Setup
+/// Watch lines) before a watch variant is sent. The engine does not import
+/// billing; when billing changes a price, change this constant in the same
+/// commit. A test below anchors both amounts.
+pub const WATCH_PRICE_TEXT: &str = "$99 per month for one platform, $199 per month for up to three";
+
+/// The default templates: three first-touch angles, the Setup Watch offer
+/// and two follow-ups.
 ///
 /// Placeholders: `{first_name}` (falls back to "there"), `{app}`,
-/// `{domain}`, `{finding}`, `{sender_name}`.
-pub const TEMPLATES: [Template; 6] = [
+/// `{domain}`, `{finding}`, `{sender_name}`, `{watch_price}` (filled from
+/// [`WATCH_PRICE_TEXT`]) and `{watch_link}` (fills only when a checkout URL
+/// is configured).
+pub const TEMPLATES: [Template; 7] = [
     Template {
         id: "t0-finding",
         step: 0,
@@ -67,6 +90,12 @@ pub const TEMPLATES: [Template; 6] = [
         step: 0,
         subject: "{app} ad revenue",
         body: "Hi {first_name},\n\n{finding}.\n\nApex can audit {app}'s mediation setup for free, read-only, and fix what it finds without an SDK change. Interested?\n\n{sender_name}",
+    },
+    Template {
+        id: "t0-watch",
+        step: 0,
+        subject: "{app}: a standing watch on your mediation setup",
+        body: "Hi {first_name},\n\nA public check of {domain} turned up this: {finding}.\n\nBesides the one-off audit, Apex offers Setup Watch: the daily measurement pass, guardrail monitoring and alerts keep running every month whether or not a fix is under test, for {watch_price}. You can start or stop it any month; the checkout page is {watch_link}\n\n{sender_name}",
     },
     Template {
         id: "t1-bump",
@@ -93,7 +122,27 @@ pub fn templates_for_step(step: usize) -> Vec<&'static Template> {
     TEMPLATES.iter().filter(|t| t.step == step).collect()
 }
 
+/// Whether a template carries the Setup Watch checkout link.
+pub fn uses_watch_link(template: &Template) -> bool {
+    template.subject.contains("{watch_link}") || template.body.contains("{watch_link}")
+}
+
+/// Templates for a step that the engine can serve right now. The Setup Watch
+/// variant is left out of the bandit's enumeration entirely unless a
+/// checkout base URL is configured, so an unconfigured offer is never
+/// served.
+pub fn available_templates_for_step(step: usize, watch_checkout: bool) -> Vec<&'static Template> {
+    templates_for_step(step)
+        .into_iter()
+        .filter(|t| watch_checkout || !uses_watch_link(t))
+        .collect()
+}
+
 /// Sender identity and compliance details.
+///
+/// One identity per sending domain: the engine keys the domain's daily cap
+/// and health by [`Sender::domain`], and every message is built with the
+/// identity of the domain that sends it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sender {
     /// Display name, e.g. "Aaron at Apex".
@@ -107,6 +156,13 @@ pub struct Sender {
     /// HTTPS one-click unsubscribe URL base, when configured. The contact's
     /// token is appended.
     pub unsubscribe_url: Option<String>,
+}
+
+impl Sender {
+    /// The from-domain: the health key and the spread key of this identity.
+    pub fn domain(&self) -> &str {
+        self.email.rsplit('@').next().unwrap_or("localhost")
+    }
 }
 
 /// A rendered message, ready for a transport.
@@ -129,6 +185,8 @@ pub enum ComposeError {
     NoApp,
     /// `{domain}` needs a domain.
     NoDomain,
+    /// `{watch_link}` needs a configured checkout base URL.
+    WatchUnavailable,
     /// A placeholder is not known.
     UnknownPlaceholder(String),
     /// The rendered text contains a banned phrase.
@@ -146,12 +204,15 @@ pub fn best_evidence(publisher: &Publisher) -> Option<&Evidence> {
     })
 }
 
-/// Render `template` for `contact` at `publisher`.
+/// Render `template` for `contact` at `publisher`. `watch_checkout_url` is
+/// the Setup Watch checkout base; the publisher key is appended to it, and
+/// a template that carries `{watch_link}` refuses to render without one.
 pub fn render(
     template: &Template,
     publisher: &Publisher,
     contact: &Contact,
     sender: &Sender,
+    watch_checkout_url: Option<&str>,
 ) -> Result<Rendered, ComposeError> {
     let mut cites = Vec::new();
     let mut fill = |text: &str| -> Result<String, ComposeError> {
@@ -186,6 +247,14 @@ pub fn render(
                     e.statement.trim_end_matches('.').to_string()
                 }
                 "sender_name" => sender.name.clone(),
+                "watch_price" => WATCH_PRICE_TEXT.to_string(),
+                "watch_link" => {
+                    format!(
+                        "{}{}",
+                        watch_checkout_url.ok_or(ComposeError::WatchUnavailable)?,
+                        publisher.key
+                    )
+                }
                 other => return Err(ComposeError::UnknownPlaceholder(other.to_string())),
             };
             out.push_str(&value);
@@ -413,9 +482,25 @@ mod tests {
         }
     }
 
+    const WATCH_BASE: &str = "https://apexmediation.ee/watch/";
+
+    fn template(id: &str) -> &'static Template {
+        TEMPLATES
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or(&TEMPLATES[0])
+    }
+
     #[test]
     fn renders_grounded_templates_and_cites_evidence() {
-        let r = render(&TEMPLATES[0], &publisher(), &contact(), &sender()).unwrap();
+        let r = render(
+            &TEMPLATES[0],
+            &publisher(),
+            &contact(),
+            &sender(),
+            Some(WATCH_BASE),
+        )
+        .unwrap();
         assert_eq!(
             r.subject,
             "Word Ölympics: a public check of your app-ads.txt"
@@ -427,13 +512,62 @@ mod tests {
         assert_eq!(r.cites, vec!["ev-ads".to_string()]);
         for t in TEMPLATES.iter() {
             assert!(
-                render(t, &publisher(), &contact(), &sender()).is_ok(),
+                render(t, &publisher(), &contact(), &sender(), Some(WATCH_BASE)).is_ok(),
                 "{}",
                 t.id
             );
         }
-        assert_eq!(templates_for_step(0).len(), 3);
+        assert_eq!(templates_for_step(0).len(), 4);
         assert_eq!(templates_for_step(9).len(), 0);
+        assert_eq!(available_templates_for_step(0, true).len(), 4);
+        assert_eq!(available_templates_for_step(0, false).len(), 3);
+    }
+
+    #[test]
+    fn the_watch_offer_needs_a_checkout_base_and_uses_the_link_pattern() {
+        let watch = template("t0-watch");
+        assert!(uses_watch_link(watch));
+        assert!(!uses_watch_link(template("t0-finding")));
+        // Configured: the checkout base with the publisher key appended,
+        // the same way the unsubscribe token is appended to its base.
+        let r = render(watch, &publisher(), &contact(), &sender(), Some(WATCH_BASE)).unwrap();
+        assert!(r
+            .body
+            .contains("the checkout page is https://apexmediation.ee/watch/studio.example"));
+        assert!(r.body.contains(WATCH_PRICE_TEXT), "{}", r.body);
+        assert_eq!(r.cites, vec!["ev-ads".to_string()]);
+        // Absent: the variant refuses to render, and the bandit enumeration
+        // leaves it out.
+        assert_eq!(
+            render(watch, &publisher(), &contact(), &sender(), None),
+            Err(ComposeError::WatchUnavailable)
+        );
+        assert!(!available_templates_for_step(0, false)
+            .iter()
+            .any(|t| uses_watch_link(t)));
+    }
+
+    #[test]
+    fn copy_discipline_keeps_prices_in_one_constant_and_prose_sentence_case() {
+        // The price is billing's; both amounts live only in the constant.
+        assert!(WATCH_PRICE_TEXT.contains("$99") && WATCH_PRICE_TEXT.contains("$199"));
+        assert_eq!(WATCH_PRICE_TEXT.matches('$').count(), 2);
+        assert!(!WATCH_PRICE_TEXT.to_uppercase().eq(WATCH_PRICE_TEXT));
+        for t in TEMPLATES.iter() {
+            assert!(!t.subject.contains('$'), "{}", t.id);
+            assert!(!t.body.contains('$'), "{}", t.id);
+            for sentence in t.body.split(['.', '!', '?']).map(str::trim) {
+                let mut chars = sentence.chars();
+                let Some(first) = chars.next() else { continue };
+                let lowercases = sentence.chars().filter(|c| c.is_lowercase()).count();
+                assert!(
+                    !first.is_uppercase() || lowercases > 0 || sentence.chars().count() < 2,
+                    "{}: all-caps prose: {sentence}",
+                    t.id
+                );
+            }
+        }
+        assert!(template("t0-watch").body.contains("{watch_price}"));
     }
 
     #[test]
@@ -441,18 +575,28 @@ mod tests {
         let mut bare = publisher();
         bare.evidence.clear();
         assert_eq!(
-            render(&TEMPLATES[0], &bare, &contact(), &sender()),
+            render(&TEMPLATES[0], &bare, &contact(), &sender(), None),
             Err(ComposeError::NoEvidence)
         );
         bare.apps.clear();
         assert_eq!(
-            render(&TEMPLATES[3], &bare, &contact(), &sender()),
+            render(template("t1-bump"), &bare, &contact(), &sender(), None),
             Err(ComposeError::NoApp)
         );
         let mut no_domain = publisher();
         no_domain.domain = None;
         assert_eq!(
-            render(&TEMPLATES[0], &no_domain, &contact(), &sender()),
+            render(&TEMPLATES[0], &no_domain, &contact(), &sender(), None),
+            Err(ComposeError::NoDomain)
+        );
+        assert_eq!(
+            render(
+                template("t0-watch"),
+                &no_domain,
+                &contact(),
+                &sender(),
+                None
+            ),
             Err(ComposeError::NoDomain)
         );
         let bad = Template {
@@ -462,7 +606,7 @@ mod tests {
             body: "",
         };
         assert!(matches!(
-            render(&bad, &publisher(), &contact(), &sender()),
+            render(&bad, &publisher(), &contact(), &sender(), None),
             Err(ComposeError::UnknownPlaceholder(_))
         ));
         let unclosed = Template {
@@ -471,7 +615,7 @@ mod tests {
             subject: "{app",
             body: "",
         };
-        assert!(render(&unclosed, &publisher(), &contact(), &sender()).is_err());
+        assert!(render(&unclosed, &publisher(), &contact(), &sender(), None).is_err());
         let filler = Template {
             id: "x",
             step: 0,
@@ -479,18 +623,25 @@ mod tests {
             body: "",
         };
         assert_eq!(
-            render(&filler, &publisher(), &contact(), &sender()),
+            render(&filler, &publisher(), &contact(), &sender(), None),
             Err(ComposeError::Banned("quick question"))
         );
         let mut anon = contact();
         anon.name = None;
-        let r = render(&TEMPLATES[3], &publisher(), &anon, &sender()).unwrap();
+        let r = render(template("t1-bump"), &publisher(), &anon, &sender(), None).unwrap();
         assert!(r.body.starts_with("Hi there,"));
     }
 
     #[test]
     fn builds_a_compliant_rfc5322_message() {
-        let r = render(&TEMPLATES[0], &publisher(), &contact(), &sender()).unwrap();
+        let r = render(
+            &TEMPLATES[0],
+            &publisher(),
+            &contact(),
+            &sender(),
+            Some(WATCH_BASE),
+        )
+        .unwrap();
         let m = build_message(&r, &contact(), &sender(), "t-abc", 0, "tok123");
         assert!(m.raw.contains("\r\nSubject: =?UTF-8?B?"));
         assert!(m
@@ -510,6 +661,7 @@ mod tests {
         let m = build_message(&r, &contact(), &plain, "t-abc", 0, "tok");
         assert!(m.raw.contains("List-Unsubscribe: <mailto:"));
         assert!(!m.raw.contains("One-Click"));
+        assert_eq!(sender().domain(), "apexmediation.ee");
     }
 
     #[test]

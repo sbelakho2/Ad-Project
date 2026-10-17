@@ -13,6 +13,11 @@ pub enum PlatformId {
     LevelPlay,
     #[serde(rename = "admob")]
     Admob,
+    /// The billing/payments domain (Adyen), not an ad-network mediation
+    /// platform. Billing calls must carry this label: mislabeling them as an
+    /// ad platform pollutes the connector metrics and error text.
+    #[serde(rename = "billing")]
+    Billing,
 }
 
 impl PlatformId {
@@ -21,6 +26,7 @@ impl PlatformId {
             PlatformId::AppLovinMax => "applovin_max",
             PlatformId::LevelPlay => "levelplay",
             PlatformId::Admob => "admob",
+            PlatformId::Billing => "billing",
         }
     }
 }

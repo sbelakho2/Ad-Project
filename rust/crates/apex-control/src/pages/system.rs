@@ -22,6 +22,9 @@ pub struct SystemData {
     /// Overdue job count derived from the same rows (`None` when the read
     /// failed: no fabricated zero).
     pub component_rows: Vec<SystemComponentRow>,
+    /// The copied-ledger sync line: the recorded sync time and age, or the
+    /// honest not-recorded state (see [`crate::data::LedgerCopy`]).
+    pub ledger_copy_line: String,
 }
 
 /// Render the system page.
@@ -75,6 +78,10 @@ pub fn render(meta: &PageMeta, data: &SystemData) -> String {
         copy::TELEMETRY_ABSENT,
         "Availability, latency and error-rate SLIs are reported as not instrumented until a metrics source is wired; the bounded registry (`apex-metrics`) is not present in this workspace.",
         Some((copy::TELEMETRY_ABSENT_ACTION, "/control/system")),
+    ));
+    body.push_str(&format!(
+        "<p class=\"panel-body\">{}</p>",
+        html_escape(&data.ledger_copy_line)
     ));
     let component_cells: Vec<Vec<Cell>> = data
         .component_rows

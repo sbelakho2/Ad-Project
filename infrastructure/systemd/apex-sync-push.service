@@ -1,0 +1,17 @@
+[Unit]
+Description=Apex sync push (console host to object storage)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=apex
+# WorkingDirectory anchors the default APEX_SYNC_* source paths under the
+# state root. The run reads the ledger, invoice and leads files and writes
+# only to the bucket; scratch goes to the private /tmp.
+WorkingDirectory=/var/lib/apex
+EnvironmentFile=/etc/apex/sync.env
+ExecStart=/usr/local/bin/apex-sync-push
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true

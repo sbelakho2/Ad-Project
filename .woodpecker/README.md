@@ -8,8 +8,11 @@ section 9.10).
 
 Lanes:
 
-- `apex-rs-coverage.yml`: one matrix entry per Rust crate, each running
-  llvm-cov, tests, clippy and fmt, then the lcov floor.
+- `apex-rs-coverage.yml`: one matrix entry per Rust crate for the build
+  domain (tests, clippy, fmt). Coverage comes from one workspace-instrumented
+  `cargo llvm-cov --workspace` run in the `apex-core` entry; the 18 floors are
+  gated directly against that merged profile, with `lcov-gate --crate`
+  filtering each domain's records.
 - `dogfood-audit.yml`: manifest, walker parity, orphan ceiling, floor ratchet
   and sync, assertion presence, stub ban, policy bans, mutation smoke and
   floor, docs links, prose ratchet.
@@ -35,6 +38,15 @@ Lanes:
 Floors are single-sourced from `tools/coverage/coverage-floor.json` (ratchet
 only) and mirrored to `tools/coverage/floors.txt` by `apex-tools sync-floors`;
 the dogfood audit fails when they drift or when a code domain has no floor.
+
+The Rust floors are workspace-instrumented: they were calibrated from one
+llvm-cov run whose profile contains every crate's tests, and each domain is
+the subset of the merged lcov under `crates/<domain>/`. A per-crate
+`cargo llvm-cov -p <crate>` run is not comparable: it misses the hits that
+other crates' tests make into the crate and lands below floors the workspace
+run clears. The lane therefore gates the merged profile, never a standalone
+per-crate llvm-cov run; `apex-tools lcov-gate --crate` filters the merged
+records to that domain before applying the floor.
 
 The local equivalent of the audit family is `make dogfood`. Every gate is a
 subcommand of the `apex-tools` binary, and the pipeline inventory check fails

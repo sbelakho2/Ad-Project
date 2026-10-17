@@ -98,6 +98,7 @@ bounded! {
         AppLovinMax => "applovin_max",
         LevelPlay => "levelplay",
         AdMob => "admob",
+        Billing => "billing",
     }
 }
 
@@ -117,10 +118,14 @@ bounded! {
         Auth => "auth",
         CreatePaymentLink => "createPaymentLink",
         ListMediationGroups => "listMediationGroups",
+        CreateMediationAbExperiment => "createMediationAbExperiment",
+        StopMediationAbExperiment => "stopMediationAbExperiment",
         ListWaterfall => "listWaterfall",
         CreateEntry => "createEntry",
+        UpdateEntryPrice => "updateEntryPrice",
         RemoveEntry => "removeEntry",
         ListGroups => "listGroups",
+        ReportAbTestActiveUsers => "reportAbTestActiveUsers",
         CountryRevenue30d => "countryRevenue30d",
         AdUnitRevenue => "adUnitRevenue",
         ExperimentRows => "experimentRows",
@@ -448,6 +453,29 @@ mod tests {
             ConnectorOperation::parse("createPaymentLink"),
             Some(ConnectorOperation::CreatePaymentLink)
         );
+        // The adapter operations the connectors' LevelPlay/AdMob surfaces
+        // meter: groups, the A/B reporting read and the v1beta experiment
+        // calls are metered like every other connector call.
+        for (value, operation) in [
+            ("listGroups", ConnectorOperation::ListGroups),
+            (
+                "reportAbTestActiveUsers",
+                ConnectorOperation::ReportAbTestActiveUsers,
+            ),
+            (
+                "createMediationAbExperiment",
+                ConnectorOperation::CreateMediationAbExperiment,
+            ),
+            (
+                "stopMediationAbExperiment",
+                ConnectorOperation::StopMediationAbExperiment,
+            ),
+            ("updateEntryPrice", ConnectorOperation::UpdateEntryPrice),
+        ] {
+            assert_eq!(ConnectorOperation::parse(value), Some(operation), "{value}");
+            assert_eq!(operation.as_str(), value);
+        }
+        assert_eq!(ConnectorOperation::parse("listGroup"), None);
         assert_eq!(StatusClass::of(301), StatusClass::Redirect);
         assert_eq!(StatusClass::of(599), StatusClass::ServerError);
         assert_eq!(format!("{}", Outcome::Completed), "completed");

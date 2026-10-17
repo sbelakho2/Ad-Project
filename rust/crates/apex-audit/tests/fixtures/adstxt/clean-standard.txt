@@ -1,0 +1,10 @@
+# app-ads.txt for studio.example
+# see https://iabtechlab.com/ads-txt/
+
+applovin.com, com.studio.example, DIRECT # primary account
+google.com, pub-1234567890, DIRECT, f08c47fec0942fa0
+mintegral.com, 1001, RESELLER
+unity3d.com, 1002, RESELLER, 5ef9a4a1c0f9ab89
+
+OWNERDOMAIN=studio.example
+CONTACT=ads@studio.example

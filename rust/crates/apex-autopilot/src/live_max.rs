@@ -6,11 +6,15 @@
 //! the control arm and the live unit stay exactly as they were. A kept result
 //! promotes the experiment to all users, a rollback or void deprecates it.
 //!
-//! Daily pulls come from the Reporting API grouped by `max_ad_unit_test`: rows
-//! with an empty arm label are the control arm, every other row is the test
-//! arm. MAX reports no user counts, so the arm value is revenue divided by the
-//! arm's allocated share (the window does that division), and a day is final
-//! once it is strictly before the pull day.
+//! Daily pulls come from the Reporting API grouped by `max_ad_unit_test`: the
+//! control arm carries the empty label or the literal `Control` (the
+//! reporting docs' own example value, matched case-insensitively and
+//! trimmed); the test arm carries exactly one other label. The experiment
+//! defines exactly two arms, so any second distinct test label fails the pull
+//! typed, naming the labels seen, instead of folding rows into a phantom
+//! third arm. MAX reports no user counts, so the arm value is revenue divided
+//! by the arm's allocated share (the window does that division), and a day is
+//! final once it is strictly before the pull day.
 //!
 //! Every write is gated by a caller-supplied allow-list (the verify-live
 //! gate): by default the adapter refuses all writes rather than guessing that
@@ -139,6 +143,10 @@ impl MaxPlatformOps {
 
 #[async_trait]
 impl PlatformOps for MaxPlatformOps {
+    fn platform(&self) -> PlatformId {
+        PlatformId::AppLovinMax
+    }
+
     async fn writable(&self, operation: &str) -> bool {
         self.writable.get(operation).copied().unwrap_or(false)
     }
@@ -223,19 +231,50 @@ impl PlatformOps for MaxPlatformOps {
 }
 
 /// Split reporting rows into the control and test arms by their
-/// `max_ad_unit_test` label (empty means control). A day's revenue is the
-/// sum of its rows; a provider row that pushes the sum past i64 micros
-/// fails the pull with a typed error instead of wrapping or panicking.
+/// `max_ad_unit_test` label. The control arm is the empty label or the
+/// literal `Control` (case-insensitive, trimmed) that the reporting docs use
+/// in their own example; any other label is the test arm. The experiment
+/// defines exactly two arms, so a second distinct non-empty test label fails
+/// the read typed, naming the labels seen, rather than folding rows into the
+/// wrong arm. A day's revenue is the sum of its rows; a provider row that
+/// pushes the sum past i64 micros fails the pull with a typed error instead
+/// of wrapping or panicking.
+///
+/// The experiment's own test-group name is not available at this call site:
+/// the start call sends the experiment name and allocation, and MAX assigns
+/// the reported label, so the label rule above is the contract. If the spec's
+/// test-group name ever reaches this function, matching it explicitly would
+/// take precedence over the `Control` literal for the test arm.
 fn arms_from_rows(rows: &[ReportRow], today_day: i64) -> Result<ExperimentDays, PlatformError> {
     let mut control: BTreeMap<String, i64> = BTreeMap::new();
     let mut test: BTreeMap<String, i64> = BTreeMap::new();
+    let mut labels_seen: BTreeSet<String> = BTreeSet::new();
+    let mut test_label: Option<String> = None;
     for row in rows {
-        let is_test = row
-            .test_group
-            .as_deref()
-            .map(|label| !label.trim().is_empty())
-            .unwrap_or(false);
-        let map = if is_test { &mut test } else { &mut control };
+        let label = row.test_group.as_deref().unwrap_or("").trim();
+        if !label.is_empty() {
+            labels_seen.insert(label.to_string());
+        }
+        let is_control = label.is_empty() || label.eq_ignore_ascii_case("Control");
+        if !is_control {
+            match test_label.as_deref() {
+                None => test_label = Some(label.to_string()),
+                Some(seen) if seen == label => {}
+                Some(_) => {
+                    let labels: Vec<&str> = labels_seen.iter().map(String::as_str).collect();
+                    return Err(PlatformError::Schema {
+                        platform: PlatformId::AppLovinMax,
+                        operation: "experiment_days".into(),
+                        detail: format!(
+                            "max_ad_unit_test reports {} distinct non-empty labels ({}) but the experiment defines exactly two arms",
+                            labels.len(),
+                            labels.join(", ")
+                        ),
+                    });
+                }
+            }
+        }
+        let map = if is_control { &mut control } else { &mut test };
         let total = map.entry(row.day.clone()).or_default();
         *total = total
             .checked_add(row.revenue)
@@ -352,14 +391,14 @@ mod tests {
     }
 
     #[test]
-    fn arms_split_on_the_test_label_and_mark_final_days() {
+    fn arms_split_on_the_control_label_and_mark_final_days() {
         let today = 20_000;
         let rows = vec![
             ReportRow {
                 day: format_day(today - 2),
                 country: None,
                 ad_unit_id: Some("u1".into()),
-                test_group: Some(String::new()),
+                test_group: Some("Control".into()),
                 revenue: 900,
                 impressions: 3,
             },
@@ -367,7 +406,15 @@ mod tests {
                 day: format_day(today - 2),
                 country: None,
                 ad_unit_id: Some("u1".into()),
-                test_group: Some("test".into()),
+                test_group: Some("Control".into()),
+                revenue: 50,
+                impressions: 1,
+            },
+            ReportRow {
+                day: format_day(today - 2),
+                country: None,
+                ad_unit_id: Some("u1".into()),
+                test_group: Some("Rewarded_B".into()),
                 revenue: 350,
                 impressions: 2,
             },
@@ -375,7 +422,7 @@ mod tests {
                 day: format_day(today - 1),
                 country: None,
                 ad_unit_id: Some("u1".into()),
-                test_group: Some("test".into()),
+                test_group: Some("Rewarded_B".into()),
                 revenue: 100,
                 impressions: 1,
             },
@@ -383,7 +430,7 @@ mod tests {
                 day: format_day(today),
                 country: None,
                 ad_unit_id: Some("u1".into()),
-                test_group: Some("test".into()),
+                test_group: Some("Rewarded_B".into()),
                 revenue: 5,
                 impressions: 1,
             },
@@ -391,13 +438,98 @@ mod tests {
         let arms = arms_from_rows(&rows, today).expect("arms");
         let older = format_day(today - 2);
         assert_eq!(arms.control[0].day, older);
-        assert_eq!(arms.control[0].revenue, 900);
-        assert_eq!(arms.control[0].second_pull_revenue, Some(900));
+        assert_eq!(arms.control[0].revenue, 950, "same-day rows sum per arm");
+        assert_eq!(arms.control[0].second_pull_revenue, Some(950));
         assert_eq!(arms.test[0].revenue, 350);
         assert_eq!(arms.test[0].second_pull_revenue, Some(350));
         // A day strictly before the pull day is final; the pull day is not.
         assert_eq!(arms.test[1].second_pull_revenue, Some(100));
         assert_eq!(arms.test[2].second_pull_revenue, None);
+    }
+
+    #[test]
+    fn control_spellings_and_blanks_route_to_the_control_arm() {
+        let today = 20_000;
+        let day = format_day(today - 1);
+        let rows: Vec<ReportRow> = ["control", "CONTROL", " Control ", " "]
+            .iter()
+            .map(|label| ReportRow {
+                day: day.clone(),
+                country: None,
+                ad_unit_id: Some("u1".into()),
+                test_group: Some((*label).to_string()),
+                revenue: 100,
+                impressions: 1,
+            })
+            .collect();
+        let arms = arms_from_rows(&rows, today).expect("arms");
+        assert_eq!(arms.control.len(), 1);
+        assert_eq!(
+            arms.control[0].revenue, 400,
+            "every spelling sums as control"
+        );
+        assert_eq!(arms.test.len(), 1, "the zero-fill keeps the day shape");
+        assert_eq!(arms.test[0].revenue, 0, "nothing lands in the test arm");
+    }
+
+    #[test]
+    fn a_second_distinct_test_label_fails_the_read_typed() {
+        fn row(label: &str, revenue: i64) -> ReportRow {
+            ReportRow {
+                day: "2026-10-01".into(),
+                country: None,
+                ad_unit_id: Some("u1".into()),
+                test_group: Some(label.to_string()),
+                revenue,
+                impressions: 1,
+            }
+        }
+        let rows = vec![
+            row("Control", 100),
+            row("Rewarded_B", 200),
+            row("Rewarded_C", 300),
+        ];
+        let error = arms_from_rows(&rows, 20_000).expect_err("a third label");
+        match &error {
+            PlatformError::Schema {
+                operation, detail, ..
+            } => {
+                assert_eq!(operation, "experiment_days");
+                for label in ["Control", "Rewarded_B", "Rewarded_C"] {
+                    assert!(detail.contains(label), "names {label}: {detail}");
+                }
+            }
+            other => panic!("expected a typed Schema error, got {other:?}"),
+        }
+        assert!(
+            !error.is_retryable(),
+            "a mislabeled report is not retryable"
+        );
+
+        // Two test labels without a control row are the same defect.
+        let rows = vec![row("Rewarded_B", 200), row("Rewarded_C", 300)];
+        let error = arms_from_rows(&rows, 20_000).expect_err("two test labels");
+        assert!(error.to_string().contains("Rewarded_B"), "{error}");
+        assert!(error.to_string().contains("Rewarded_C"), "{error}");
+    }
+
+    #[test]
+    fn a_single_label_leaves_the_other_arm_zero_filled() {
+        let today = 20_000;
+        let rows = vec![ReportRow {
+            day: format_day(today - 1),
+            country: None,
+            ad_unit_id: Some("u1".into()),
+            test_group: Some(String::new()),
+            revenue: 700,
+            impressions: 2,
+        }];
+        let arms = arms_from_rows(&rows, today).expect("arms");
+        assert_eq!(arms.control.len(), 1);
+        assert_eq!(arms.control[0].revenue, 700);
+        assert_eq!(arms.test.len(), arms.control.len(), "a shared day shape");
+        assert_eq!(arms.test[0].revenue, 0);
+        assert_eq!(arms.test[0].second_pull_revenue, Some(0));
     }
 
     #[test]

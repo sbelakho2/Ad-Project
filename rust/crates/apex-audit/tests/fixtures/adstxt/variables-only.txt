@@ -1,0 +1,7 @@
+OWNERDOMAIN=studio.example
+MANAGERDOMAIN=manager.example
+
+INVENTORYPARTNERDOMAIN=partner.example
+INVENTORYDOMAIN=inventory.example
+CONTACT=mailto:ads@studio.example
+SUBDOMAIN=games.studio.example

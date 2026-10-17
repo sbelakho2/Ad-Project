@@ -17,7 +17,14 @@
 //! - every attempt records `apex_notification_attempts_total` through the
 //!   injected [`apex_metrics::Registry`],
 //! - the webhook payload keeps security-sensitive values out of subjects and
-//!   bodies (provider event keys ride only in the dedup identity).
+//!   bodies (provider event keys ride only in the dedup identity),
+//! - [`sink::EmailSink`] hands the composed RFC 5322 message to the local
+//!   MTA's `sendmail`, the same transport the sales engine uses, with the
+//!   sender from `APEX_NOTIFY_FROM` and the executable from
+//!   `APEX_NOTIFY_SENDMAIL`; a local MTA accepts but never confirms
+//!   delivery, so `accepted` is terminal for that sink. The transactional
+//!   sending domain must be kept apart from the sales engine's domain — DNS
+//!   cannot be enforced from here, so the configuration is the contract.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -31,6 +38,7 @@
 )]
 
 pub mod contacts;
+mod mail;
 pub mod money;
 pub mod notifier;
 pub mod sink;
@@ -69,8 +77,9 @@ pub use money::{
 };
 pub use notifier::{Notifier, NotifyError, NotifyReport};
 pub use sink::{
-    DeliveryMessage, DeliveryReceipt, DeliveryState, FileSink, NotificationSink, SinkError,
-    WebhookSink, WEBHOOK_ENV, WEBHOOK_TOKEN_ENV,
+    select_sink, DeliveryMessage, DeliveryReceipt, DeliveryState, EmailSink, FileSink,
+    NotificationSink, SinkError, WebhookSink, DEFAULT_SENDMAIL, FILE_ENV, FROM_ENV, SENDMAIL_ENV,
+    SINK_ENV, WEBHOOK_ENV, WEBHOOK_TOKEN_ENV,
 };
 pub use state::{DeliveryLog, DeliveryStateRow, StateError, StateKind, STATE_ENV};
 pub use template::{

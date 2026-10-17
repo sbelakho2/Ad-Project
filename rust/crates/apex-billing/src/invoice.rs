@@ -23,6 +23,8 @@ use apex_proof::LedgerRecord;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::BillingError;
+use crate::profile::{BillingProfile, CustomerProfile};
+use crate::vat::{treatment_for, VatTreatment};
 
 /// The billing window an invoice covers. `year_month` is the human-facing
 /// `YYYY-MM` label; `start_unix_ms` is inclusive and `end_unix_ms` exclusive.
@@ -108,6 +110,11 @@ pub struct InvoiceLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoice {
+    /// The gapless sequential number assigned by
+    /// [`crate::InvoiceRegister::issue`]; 0 while the invoice is still an
+    /// unregistered draft. Never reused.
+    #[serde(default)]
+    pub number: u64,
     pub publisher_id: String,
     pub period: BillingPeriod,
     pub line_items: Vec<InvoiceLine>,
@@ -122,12 +129,28 @@ pub struct Invoice {
     /// Gross total collected: net + VAT.
     #[serde(default)]
     pub gross_micros: Micros,
+    /// The customer's legal identity, required before a VAT document can be
+    /// rendered (see [`Invoice::with_customer`]). Optional because callers
+    /// predating the VAT work may not have it yet; the renderer refuses
+    /// rather than printing blanks.
+    #[serde(default)]
+    pub customer: Option<CustomerProfile>,
+    /// The decided VAT treatment (see [`Invoice::apply_vat_treatment`]).
+    /// [`VatTreatment::NotApplied`] marks a draft the renderer and the
+    /// register refuse.
+    #[serde(default)]
+    pub vat_treatment: VatTreatment,
 }
 
 impl Invoice {
     /// Apply a VAT rate to the invoice: VAT is computed per line (round
     /// half-up to the micro) and added to the net to form the gross. A
     /// non-positive rate marks the invoice as not subject to VAT.
+    ///
+    /// This is the low-level rate application; it does not decide *which*
+    /// treatment applies. Use [`Invoice::apply_vat_treatment`] for that — an
+    /// invoice carrying only a rate stays [`VatTreatment::NotApplied`] and
+    /// [`Invoice::render_vat_invoice`] refuses it.
     #[must_use]
     pub fn with_vat(mut self, vat_rate_bp: u16) -> Self {
         self.vat_rate_bp = vat_rate_bp;
@@ -142,25 +165,167 @@ impl Invoice {
         self
     }
 
+    /// Attach the customer's legal identity to the invoice. The renderer
+    /// needs it (typed refusal without it); the register refuses to issue an
+    /// invoice without it.
+    #[must_use]
+    pub fn with_customer(mut self, customer: CustomerProfile) -> Self {
+        self.customer = Some(customer);
+        self
+    }
+
+    /// Append one flat plan line (monitoring, managed ad ops, setup watch):
+    /// the checked net total grows by the line's fee, exactly as the lift
+    /// lines were summed. Call before the VAT treatment is applied so the
+    /// line is taxed with every other line; the totals arithmetic is the
+    /// same `checked_add` shape as [`compute_invoice`]'s.
+    pub fn push_plan_line(&mut self, line: InvoiceLine) -> Result<(), BillingError> {
+        self.total_micros = self
+            .total_micros
+            .checked_add(line.fee_micros)
+            .ok_or(BillingError::Overflow)?;
+        self.line_items.push(line);
+        Ok(())
+    }
+
+    /// Decide and apply the VAT treatment for the attached customer against
+    /// `seller`'s profile: the domestic rate, "reverse charge", or no VAT
+    /// outside the EU (see [`crate::vat`] for the exact rules, the in-crate
+    /// EU table, and the documented no-VIES policy). Validates both profiles
+    /// first, so a missing field is a typed refusal naming it; the decided
+    /// treatment is recorded on the invoice.
+    pub fn apply_vat_treatment(mut self, seller: &BillingProfile) -> Result<Self, BillingError> {
+        let customer = self
+            .customer
+            .as_ref()
+            .ok_or(BillingError::MissingCustomerProfile)?;
+        let treatment = treatment_for(seller, customer)?;
+        // `treatment_for` returns only decided treatments: the domestic rate,
+        // reverse charge, or no VAT outside the EU.
+        let rate_bp = if treatment == VatTreatment::Domestic {
+            seller.vat_rate_bp
+        } else {
+            0
+        };
+        self = self.with_vat(rate_bp);
+        self.vat_treatment = treatment;
+        Ok(self)
+    }
+
     /// Render the invoice as the human-facing VAT document Adyen's invoice
     /// template and the customer see.
-    pub fn render_vat_invoice(&self) -> String {
+    ///
+    /// This is the compliance gate: it refuses with a typed error instead of
+    /// printing a half-empty document when the register number is missing,
+    /// either party's profile is incomplete, no treatment was applied, or the
+    /// stored figures do not re-derive from the applied treatment. The
+    /// "reverse charge" wording stands exactly where the tax would otherwise
+    /// be stated; a non-EU customer has no VAT line at all.
+    ///
+    /// The re-derivation compares against the *current* seller profile, so a
+    /// profile change (country or domestic rate) makes historical re-renders
+    /// refuse rather than silently state a different rate: the register line
+    /// stays the immutable record.
+    pub fn render_vat_invoice(&self, seller: &BillingProfile) -> Result<String, BillingError> {
+        if self.number == 0 {
+            return Err(BillingError::UnregisteredInvoice);
+        }
+        seller.validate()?;
+        let customer = self
+            .customer
+            .as_ref()
+            .ok_or(BillingError::MissingCustomerProfile)?;
+        customer.validate()?;
+        if self.vat_treatment == VatTreatment::NotApplied {
+            return Err(BillingError::VatTreatmentNotApplied);
+        }
+        let expected = treatment_for(seller, customer)?;
+        if self.vat_treatment != expected {
+            return Err(BillingError::InconsistentVat {
+                detail: format!(
+                    "the invoice states {} but the parties' profiles derive {expected}",
+                    self.vat_treatment
+                ),
+            });
+        }
+        let expected_rate = if expected == VatTreatment::Domestic {
+            seller.vat_rate_bp
+        } else {
+            0
+        };
+        if self.vat_rate_bp != expected_rate {
+            return Err(BillingError::InconsistentVat {
+                detail: format!(
+                    "rate {} bp does not match the {expected} treatment ({expected_rate} bp)",
+                    self.vat_rate_bp
+                ),
+            });
+        }
+        let mut vat_total: Micros = 0;
+        for line in &self.line_items {
+            let vat = vat_micros(line.fee_micros, self.vat_rate_bp);
+            if line.vat_micros != vat || line.gross_micros != line.fee_micros.saturating_add(vat) {
+                return Err(BillingError::InconsistentVat {
+                    detail: format!(
+                        "line #{} carries VAT {} micros / gross {} micros",
+                        line.seq, line.vat_micros, line.gross_micros
+                    ),
+                });
+            }
+            vat_total = vat_total.saturating_add(vat);
+        }
+        if self.vat_micros != vat_total
+            || self.gross_micros != self.total_micros.saturating_add(vat_total)
+        {
+            return Err(BillingError::InconsistentVat {
+                detail: format!(
+                    "invoice totals carry VAT {} micros / gross {} micros",
+                    self.vat_micros, self.gross_micros
+                ),
+            });
+        }
+
         let mut out = String::new();
         out.push_str(&format!(
-            "Apex invoice {} for {}\n",
-            self.period.year_month, self.publisher_id
+            "VAT invoice No. {} for {}\n",
+            self.number, self.period.year_month
         ));
+        out.push_str("Seller:\n");
+        out.push_str(&format!("{}\n", seller.legal_name));
+        for line in &seller.address_lines {
+            out.push_str(&format!("{line}\n"));
+        }
+        out.push_str(&format!("{}\n", seller.country));
+        out.push_str(&format!("VAT number: {}\n", seller.vat_number));
+        out.push_str("Customer:\n");
+        out.push_str(&format!("{}\n", customer.legal_name));
+        for line in &customer.address_lines {
+            out.push_str(&format!("{line}\n"));
+        }
+        out.push_str(&format!("{}\n", customer.country));
+        if let Some(vat_number) = &customer.vat_number {
+            out.push_str(&format!("VAT number: {vat_number}\n"));
+        }
+        out.push_str("Line items:\n");
         for line in &self.line_items {
             out.push_str(&format!(
                 "  #{} {}: net {} micros, VAT {} micros, gross {} micros\n",
                 line.seq, line.experiment_id, line.fee_micros, line.vat_micros, line.gross_micros
             ));
         }
-        out.push_str(&format!(
-            "  net {} micros\n  VAT ({} bp) {} micros\n  gross {} micros\n",
-            self.total_micros, self.vat_rate_bp, self.vat_micros, self.gross_micros
-        ));
-        out
+        out.push_str(&format!("Net total: {} micros\n", self.total_micros));
+        if self.vat_treatment == VatTreatment::Domestic {
+            out.push_str(&format!(
+                "VAT ({} bp): {} micros\n",
+                self.vat_rate_bp, self.vat_micros
+            ));
+        } else if self.vat_treatment == VatTreatment::ReverseCharge {
+            // The stated-tax position, exactly as the reverse charge is
+            // worded on an intra-EU B2B invoice.
+            out.push_str("VAT: reverse charge\n");
+        }
+        out.push_str(&format!("Gross total: {} micros\n", self.gross_micros));
+        Ok(out)
     }
 }
 
@@ -231,6 +396,7 @@ pub fn compute_invoice(
     }
 
     Ok(Invoice {
+        number: 0,
         publisher_id: publisher_id.to_string(),
         period,
         line_items,
@@ -238,6 +404,8 @@ pub fn compute_invoice(
         vat_rate_bp: 0,
         vat_micros: 0,
         gross_micros: total_micros,
+        customer: None,
+        vat_treatment: VatTreatment::NotApplied,
     })
 }
 
@@ -317,6 +485,7 @@ pub fn compute_invoice_from_basis(
     }
 
     Ok(Invoice {
+        number: 0,
         publisher_id: publisher_id.to_string(),
         period,
         line_items,
@@ -324,6 +493,8 @@ pub fn compute_invoice_from_basis(
         vat_rate_bp: 0,
         vat_micros: 0,
         gross_micros: total_micros,
+        customer: None,
+        vat_treatment: VatTreatment::NotApplied,
     })
 }
 
@@ -402,12 +573,17 @@ fn verify_proof(proof: &BillingProofRecord) -> Result<Micros, BillingError> {
             ),
         });
     }
-    let recomputed = lift_fee_micros(proof.proven_lift, proof.rate_bp).map_err(|reason| {
-        BillingError::TamperedProof {
-            seq: proof.seq,
-            reason,
+    let recomputed = match lift_fee_micros(proof.proven_lift, proof.rate_bp) {
+        Ok(fee) => fee,
+        // Unreachable with the rate band and positivity already checked, but
+        // a refusal is never silently dropped.
+        Err(reason) => {
+            return Err(BillingError::TamperedProof {
+                seq: proof.seq,
+                reason,
+            })
         }
-    })?;
+    };
     if recomputed != proof.fee_micros {
         return Err(BillingError::TamperedProof {
             seq: proof.seq,

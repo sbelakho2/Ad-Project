@@ -300,7 +300,8 @@ git checkout v1.2.2
 
 ```bash
 git checkout <known-good-ref>
-DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
+# Replace 203.0.113.11 with your test server address
+DEPLOY_SERVER=203.0.113.11 ./scripts/deploy-all.sh backend
 ```
 
 #### Database Migrations
@@ -388,11 +389,11 @@ git push --delete origin v1.2.3
 # Check synthetic probes
 gh run list --workflow=synthetic-probes.yml
 
-# View Grafana dashboards (Hetzner Production)
-open http://46.62.252.96:3001/d/apex-rtb-analytics
+# View Grafana dashboards (Hetzner Production; replace 203.0.113.10 with your monitoring host)
+open http://203.0.113.10:3001/d/apex-rtb-analytics
 
 # Check error rates
-curl 'http://46.62.252.96:9090/api/v1/query?query=rate(http_request_duration_seconds_count{status_code=~"5.."}[5m])'
+curl 'http://203.0.113.10:9090/api/v1/query?query=rate(http_request_duration_seconds_count{status_code=~"5.."}[5m])'
 ```
 
 ## Troubleshooting

@@ -177,6 +177,29 @@ fn decide_window(
     Ok((window, guardrails, ratios, estimate, decision))
 }
 
+/// The typed refusal when `experiment_id` already has a terminal record: an
+/// `experimentObserved`, a rollback of its change, or a signed lift `Result`
+/// carrying its registered name. The settle path returns it, and the daily
+/// scan reports it before pulling, so repeated passes append nothing for an
+/// experiment that can never settle again.
+pub(crate) fn settled_refusal(
+    ledger: &dyn LedgerLog,
+    experiment_id: &str,
+    change_seq: u64,
+) -> Option<PlanError> {
+    let settled_name = started_experiment_name(ledger, experiment_id).unwrap_or_default();
+    let settled = ledger.records().iter().any(|record| match record {
+        LedgerRecord::ExperimentObserved {
+            experiment_id: e, ..
+        } => e == experiment_id,
+        LedgerRecord::RollbackPerformed { rolled_back_seq, .. } => *rolled_back_seq == change_seq,
+        LedgerRecord::LiftRecord { payload, .. } => parse_lift_record(payload)
+            .is_some_and(|r| matches!(r, apex_lift::records::LiftRecord::Result { experiment_id: e, .. } if e == settled_name)),
+        _ => false,
+    });
+    settled.then(|| PlanError::Validation(format!("experiment {experiment_id} is already settled")))
+}
+
 /// Settle one experiment through the Apex Lift Engine.
 #[allow(clippy::too_many_arguments)]
 pub async fn settle_experiment(
@@ -233,19 +256,8 @@ pub async fn settle_experiment(
         ));
     }
 
-    let already_settled = ledger.records().iter().any(|record| match record {
-        LedgerRecord::ExperimentObserved {
-            experiment_id: e, ..
-        } => e == experiment_id,
-        LedgerRecord::RollbackPerformed { rolled_back_seq, .. } => *rolled_back_seq == change_seq,
-        LedgerRecord::LiftRecord { payload, .. } => parse_lift_record(payload)
-            .is_some_and(|r| matches!(r, apex_lift::records::LiftRecord::Result { experiment_id: e, .. } if e == started_experiment_name(ledger, experiment_id).as_deref().unwrap_or_default())),
-        _ => false,
-    });
-    if already_settled {
-        return Err(PlanError::Validation(format!(
-            "experiment {experiment_id} is already settled"
-        )));
+    if let Some(refusal) = settled_refusal(ledger, experiment_id, change_seq) {
+        return Err(refusal);
     }
 
     let prereg = signed_pre_registration(ledger, experiment_id)?;

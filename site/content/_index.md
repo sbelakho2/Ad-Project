@@ -26,7 +26,7 @@ Begin with read access. Review a proposed change before granting write access. W
 
 ## A fee you can trace.
 
-Lift fees are 15% to 20% of qualifying incremental revenue. The calculation uses a conservative positive lift bound and a signed record of the result. Optional monitoring is a separate $500 monthly plan. Read the [pricing details](/pricing/) before you continue.
+Lift fees are 15% to 20% of qualifying incremental revenue. The calculation uses a conservative positive lift bound and a signed record of the result. Monitoring is included from $500 a month, cancel any time. Read the [pricing details](/pricing/) before you continue.
 
 ## Start with your current setup.
 

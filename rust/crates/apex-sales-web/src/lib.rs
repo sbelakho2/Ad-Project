@@ -45,6 +45,7 @@ pub mod actions;
 pub mod assets;
 pub mod config;
 pub mod data;
+pub mod entry;
 pub mod favicon;
 pub mod fixture_render;
 pub mod pages;

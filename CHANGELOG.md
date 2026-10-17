@@ -348,14 +348,14 @@ All claims in documentation verified against actual implementation code:
 # Deploy backend/console (from local machine)
 tar -czvf /tmp/deploy.tar.gz --exclude='node_modules' --exclude='.next' \
   backend/src console/src control-plane/src website/src
-scp -i ~/.ssh/hetzner-db-mac /tmp/deploy.tar.gz root@46.62.252.96:/opt/adproject/
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "cd /opt/adproject && \
+scp -i ~/.ssh/hetzner-db-mac /tmp/deploy.tar.gz root@203.0.113.10:/opt/adproject/
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "cd /opt/adproject && \
   tar -xzvf deploy.tar.gz && \
   docker compose -f docker-compose.hetzner.yml build backend console && \
   docker compose -f docker-compose.hetzner.yml up -d"
 
 # Restart control-plane
-ssh root@46.62.252.96 "cd /opt/adproject/control-plane && npm install && npm run build && systemctl restart control-plane"
+ssh root@203.0.113.10 "cd /opt/adproject/control-plane && npm install && npm run build && systemctl restart control-plane"
 ```
 
 ### Service Status (Verified)
@@ -366,7 +366,7 @@ ssh root@46.62.252.96 "cd /opt/adproject/control-plane && npm install && npm run
 | Console | ✅ Running | 3000 | https://console.apexmediation.ee |
 | Website | ✅ Running | 3002 | https://apexmediation.ee |
 | Control Plane | ✅ Running | 4000 | localhost:4000 (IP-restricted) |
-| PostgreSQL | ✅ Up | 5432 | DB Server 77.42.44.35 |
+| PostgreSQL | ✅ Up | 5432 | DB Server 203.0.113.12 |
 | Redis | ✅ Up | 6379 | System service (not Docker) |
 | Grafana | ✅ Up | 3001 | localhost:3001 |
 | Prometheus | ✅ Up | 9090 | localhost:9090 |
@@ -619,7 +619,7 @@ Updated `/docs/SSAI/SSAI_TODO.md` - All 300+ items marked complete ✅
 
 ### PgBouncer Connection Pooling Added
 
-- Installed on app server (46.62.252.96:6432)
+- Installed on app server (203.0.113.10:6432)
 - Transaction pooling mode (most efficient)
 - 1000 client connections → 25 PostgreSQL connections
 - New `adproject` user with MD5 auth for pooler compatibility
@@ -758,8 +758,8 @@ See [Control Plane Architecture](docs/Architecture/CONTROL_PLANE.md) for:
 
 | Component | Old (DigitalOcean) | New (Hetzner) |
 |-----------|-------------------|---------------|
-| App Server | 164.90.232.151 | 46.62.252.96 |
-| DB Server | (same droplet) | 77.42.44.35 |
+| App Server | 164.90.232.151 | 203.0.113.10 |
+| DB Server | (same droplet) | 203.0.113.12 |
 | Database | DO Managed Postgres | PostgreSQL 16 (self-hosted) |
 | TLS | Nginx + Certbot | Caddy (auto Let's Encrypt) |
 | SSH | `deploy@164.90.232.151` | `root@<IP>` with `~/.ssh/hetzner-db-mac` |
@@ -859,16 +859,16 @@ See [evidence-2025-12-13/infrastructure-validation-report.md](evidence-2025-12-1
 | Document | Changes |
 |----------|---------|
 | `docs/Monitoring/MONITORING_INFRASTRUCTURE.md` | Added cross-references to related docs |
-| `docs/Architecture/HETZNER_POSTGRES_DESIGN.md` | Fixed server IPs (App: 46.62.252.96, DB: 77.42.44.35), added monitoring stack, updated status to "Deployed" |
+| `docs/Architecture/HETZNER_POSTGRES_DESIGN.md` | Fixed server IPs (App: 203.0.113.10, DB: 203.0.113.12), added monitoring stack, updated status to "Deployed" |
 | `docs/Internal/Infrastructure/production-deployment.md` | Added Hetzner section at top, updated as primary production |
 | `docs/Internal/Monitoring/GRAFANA_DASHBOARDS.md` | Added deprecation notice pointing to new authoritative doc, updated branding from "Rival" to "ApexMediation" |
 | `docs/Internal/Monitoring/ALERTS.md` | Added deprecation notice, added Hetzner production alert section, updated branding |
-| `docs/runbooks/ROLLBACK.md` | Updated all IPs from DigitalOcean (164.90.232.151) to Hetzner (46.62.252.96), added monitoring checks |
+| `docs/runbooks/ROLLBACK.md` | Updated all IPs from DigitalOcean (164.90.232.151) to Hetzner (203.0.113.10), added monitoring checks |
 
 ### Branding Updates
 
 - Changed "Rival ad platform" → "ApexMediation platform" throughout
-- Updated production URLs from `grafana.rival.com` → `46.62.252.96:3001`
+- Updated production URLs from `grafana.rival.com` → `203.0.113.10:3001`
 - Updated SSH credentials from DO deploy user → Hetzner root
 
 ### Cross-References Added
@@ -890,9 +890,9 @@ All monitoring/infrastructure docs now cross-reference each other:
 
 | Service | URL | Credentials |
 |---------|-----|-------------|
-| **Grafana** | http://46.62.252.96:3001 | `admin` / `ApexGrafana2025!` |
-| **Prometheus** | http://46.62.252.96:9090 | No auth (internal) |
-| **Alertmanager** | http://46.62.252.96:9093 | No auth (internal) |
+| **Grafana** | http://203.0.113.10:3001 | `admin` / `<operator-password-from-the-vault>` |
+| **Prometheus** | http://203.0.113.10:9090 | No auth (internal) |
+| **Alertmanager** | http://203.0.113.10:9093 | No auth (internal) |
 
 ### Prometheus Scrape Targets (All Healthy ✅)
 
@@ -1294,7 +1294,7 @@ Created test accounts for all pricing tiers with SDK keys and validated RTB bidd
 | Scale | scale@apexmediation.ee | ak_test_9b38... | ✅ Working |
 | Enterprise | enterprise@apexmediation.ee | ak_test_02285... | ✅ Working |
 
-**All passwords:** `admin123`
+**All passwords:** `<operator-password-from-the-vault>`
 
 ### SDK Key Generation
 - Created properly hashed SDK keys for each tier using bcrypt + SHA256 digest

@@ -1,8 +1,10 @@
 # PITR Recovery
 
+> **Note:** The example commands below use RFC 5737 documentation addresses for the jump host and the DB server; replace them with your server addresses before running them.
+
 ## Overview
 
-Our database server (77.42.44.35) has WAL archiving enabled, allowing point-in-time recovery to any moment within the configured retention window.
+Our database server (203.0.113.12) has WAL archiving enabled, allowing point-in-time recovery to any moment within the configured retention window.
 
 ## Configuration
 
@@ -32,7 +34,7 @@ If `/var/backups/postgresql/wal/` grows too quickly to keep a 7-day window on th
 
 ### Prerequisites
 
-1. SSH access to DB server (77.42.44.35) via jump host (46.62.252.96)
+1. SSH access to DB server (203.0.113.12) via jump host (203.0.113.10)
 2. Base backup taken with `pg_basebackup`
 3. WAL archives available in `/var/backups/postgresql/wal/`
 4. Target recovery time determined
@@ -40,26 +42,26 @@ If `/var/backups/postgresql/wal/` grows too quickly to keep a 7-day window on th
 ### Step 1: Stop PostgreSQL
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo systemctl stop postgresql@16-main'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo systemctl stop postgresql@16-main'"
 ```
 
 ### Step 2: Backup Current Data Directory
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres mv /var/lib/postgresql/16/main /var/lib/postgresql/16/main.backup'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres mv /var/lib/postgresql/16/main /var/lib/postgresql/16/main.backup'"
 ```
 
 ### Step 3: Restore Base Backup
 
 ```bash
 # If using pg_basebackup restoration
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres tar -xzf /path/to/base_backup.tar.gz -C /var/lib/postgresql/16/'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres tar -xzf /path/to/base_backup.tar.gz -C /var/lib/postgresql/16/'"
 ```
 
 ### Step 4: Create recovery.signal File
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres touch /var/lib/postgresql/16/main/recovery.signal'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres touch /var/lib/postgresql/16/main/recovery.signal'"
 ```
 
 ### Step 5: Configure Recovery Settings
@@ -67,7 +69,7 @@ ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u
 Create `/var/lib/postgresql/16/main/postgresql.auto.conf` with recovery parameters:
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres cat > /var/lib/postgresql/16/main/postgresql.auto.conf << EOF
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres cat > /var/lib/postgresql/16/main/postgresql.auto.conf << EOF
 restore_command = '\''cp /var/backups/postgresql/wal/%f %p'\''
 recovery_target_time = '\''2025-12-24 12:00:00 UTC'\''
 recovery_target_action = '\''promote'\''
@@ -92,7 +94,7 @@ EOF
 ### Step 6: Start PostgreSQL and Monitor Recovery
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo systemctl start postgresql@16-main && sudo tail -f /var/log/postgresql/postgresql-16-main.log'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo systemctl start postgresql@16-main && sudo tail -f /var/log/postgresql/postgresql-16-main.log'"
 ```
 
 Watch for:
@@ -105,13 +107,13 @@ Watch for:
 ### Step 7: Verify Recovery
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac root@46.62.252.96 "export PGPASSWORD='<REDACTED_PASSWORD>' && psql -h 77.42.44.35 -U adproject -d adproject -c 'SELECT now(), pg_postmaster_start_time(), pg_is_in_recovery();'"
+ssh -i ~/.ssh/hetzner-db-mac root@203.0.113.10 "export PGPASSWORD='<REDACTED_PASSWORD>' && psql -h 203.0.113.12 -U adproject -d adproject -c 'SELECT now(), pg_postmaster_start_time(), pg_is_in_recovery();'"
 ```
 
 ### Step 8: Promote Server (if recovery_target_action was 'pause')
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres psql -c \"SELECT pg_wal_replay_resume();\"'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres psql -c \"SELECT pg_wal_replay_resume();\"'"
 ```
 
 ## Creating Base Backups
@@ -119,7 +121,7 @@ ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u
 ### Manual Base Backup
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres pg_basebackup -D /var/backups/postgresql/base/$(date +%Y%m%d_%H%M%S) -Ft -z -Xs -P'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres pg_basebackup -D /var/backups/postgresql/base/$(date +%Y%m%d_%H%M%S) -Ft -z -Xs -P'"
 ```
 
 ### Automated Daily Base Backup (Recommended)
@@ -156,7 +158,7 @@ Steps:
 - Create test restore point:
 
 ```bash
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres psql -d adproject -c \"SELECT pg_create_restore_point('\''test_recovery_$(date +%Y%m%d)'\'');\"'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres psql -d adproject -c \"SELECT pg_create_restore_point('\''test_recovery_$(date +%Y%m%d)'\'');\"'"
 ```
 
 - Make test changes.
@@ -166,10 +168,10 @@ ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u
 
 ```bash
 # Check archive_command failures
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres psql -c \"SELECT * FROM pg_stat_archiver;\"'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres psql -c \"SELECT * FROM pg_stat_archiver;\"'"
 
 # Check WAL archive lag
-ssh -i ~/.ssh/hetzner-db-mac -A root@46.62.252.96 "ssh root@77.42.44.35 'sudo -u postgres psql -c \"SELECT pg_walfile_name(pg_current_wal_lsn());\"'"
+ssh -i ~/.ssh/hetzner-db-mac -A root@203.0.113.10 "ssh root@203.0.113.12 'sudo -u postgres psql -c \"SELECT pg_walfile_name(pg_current_wal_lsn());\"'"
 ```
 
 ## Troubleshooting

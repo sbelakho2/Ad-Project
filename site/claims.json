@@ -82,7 +82,7 @@
       "id": "verify-live-write-refusal",
       "claim": "We confirm that scope before enabling writes.",
       "anchor": "rust/crates/apex-autopilot/src/plan.rs",
-      "test": "verify_live_endpoints_refuse_before_apply (rust/crates/apex-autopilot/src/tests.rs)"
+      "test": "verify_live_endpoints_hold_the_proposal_without_aborting (rust/crates/apex-autopilot/src/tests.rs)"
     },
     {
       "id": "critical-finding-blackout",
@@ -93,7 +93,7 @@
     {
       "id": "encrypted-credentials",
       "claim": "Stored platform credentials are encrypted with AES-256-GCM.",
-      "anchor": "rust/crates/apex-api/src/vault.rs",
+      "anchor": "rust/crates/apex-vault/src/lib.rs",
       "test": "vault_roundtrip_and_tamper_detection"
     },
     {
@@ -128,9 +128,9 @@
     },
     {
       "id": "monitoring-plan",
-      "claim": "Optional monitoring is a separate $500 monthly plan.",
+      "claim": "Monitoring is included, cancel any time.",
       "anchor": "rust/crates/apex-billing/src/subscription.rs",
-      "test": "the_standard_plan_is_a_flat_monthly_fee"
+      "test": "cancellation_bills_the_current_period_only_and_is_not_deleted (rust/crates/apex-billing/src/subscription.rs)"
     }
   ]
 }

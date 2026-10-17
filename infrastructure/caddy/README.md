@@ -1,7 +1,7 @@
 # Caddy edge
 
-One origin layout for the whole product. Set the host names and the access-log
-path in the environment before starting Caddy:
+The public edge layout, run next to apex-api on the console host. Set the
+host names and the access-log path in the environment before starting Caddy:
 
 - `SITE_DOMAIN` (default `www.apexmediation.ee`): the marketing origin. It
   serves the built Zola site from `/srv/site/public` and proxies only
@@ -9,12 +9,14 @@ path in the environment before starting Caddy:
   `127.0.0.1:8787`. `GET /free-audit` and every other page stay static.
 - `APEX_DOMAIN` (default `api.apexmediation.ee`): the API origin, proxied
   whole to `apex-api` on `127.0.0.1:8787`.
-- `CONTROL_DOMAIN` (default `control.apexmediation.ee`): the operator origin,
-  proxied whole to `apex-control` on `127.0.0.1:8790` and to nothing else.
 - `APEX_ACCESS_LOG` (default `/var/log/caddy/apex-access.json`): the JSON
   access log on the marketing origin for `apex-ingest`. The directory must
   exist and be writable by the Caddy process
   (`install -d -o caddy -g caddy /var/log/caddy` on a Debian host).
+
+The operator origin is not on this edge. The control plane runs on the
+control host, binds loopback there and carries no public host block
+(`infrastructure/README.md`, "Hosting split").
 
 Routing table:
 
@@ -25,10 +27,10 @@ Routing table:
 | `SITE_DOMAIN` | `/console`, `/console/*` | `apex-api` |
 | `SITE_DOMAIN` | everything else (GET pages, `/fonts/*`, assets) | static `file_server` from `/srv/site/public` |
 | `APEX_DOMAIN` | everything | `apex-api` |
-| `CONTROL_DOMAIN` | everything | `apex-control` (`127.0.0.1:8790`) |
 
-No route reaches ClickHouse: the only upstreams in the config are the two
-loopback services, and the contract test fails on any other dial.
+No route reaches ClickHouse or the control plane: the only upstream in the
+config is `apex-api`, and the contract test fails on any other dial, on any
+`8790` mention and on a returning operator host block.
 
 Validate and run the routing contract (the contract adapts the file with fixed
 test domains and asserts the table above):

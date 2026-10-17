@@ -172,6 +172,8 @@ pub struct WebState {
     pub sessions: Arc<OwnerSessions>,
     /// Idempotency keys and action result pages.
     pub actions: Arc<Mutex<ActionMemory>>,
+    /// The mtime-keyed snapshot parse cache behind every page load.
+    pub snapshots: Arc<crate::data::SnapshotCache>,
     /// The clock boundary.
     pub clock: Arc<dyn Clock>,
     /// The bounded metrics registry of this origin.
@@ -190,6 +192,7 @@ impl WebState {
             unconfigured_reason,
             sessions: Arc::new(OwnerSessions::bounded()),
             actions: Arc::new(Mutex::new(ActionMemory::default())),
+            snapshots: Arc::new(crate::data::SnapshotCache::new()),
             clock: Arc::new(SystemClock),
             metrics: Arc::new(Registry::new()),
         }

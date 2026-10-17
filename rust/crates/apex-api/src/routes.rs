@@ -6,13 +6,27 @@
 //! | route | success | refusals |
 //! |---|---|---|
 //! | `GET /healthz` | `200 {"status":"ok"}` | — |
-//! | `GET /metrics` | `200` Prometheus text (`text/plain`) | — |
+//! | `GET /metrics` | `200` Prometheus text (`text/plain`, scraped on the loopback bind; the public edge refuses the path) | — |
 //! | `GET /v1/audit/{platform}` | `200` `AuditReport` | `400 unknown_platform / bad_request`, `404 not_found` |
 //! | `POST /v1/audit/{platform}` | `200` live read-only `AuditReport` | `400 bad_request / unknown_platform / invalid_publisher`, `401 unauthorized`, `502 platform_unavailable`, `503 live_audit_not_configured` |
 //! | `GET /v1/ledger/{publisher}` | `200 {"publisher","mode":"read_only","records"}` | `400 invalid_publisher / bad_request`, `401 unauthorized`, `404 not_found`, `422 {"error":"ledger_unverified","line":n}`, `503 ledger_auth_not_configured` |
-//! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `404`, `422` |
+//! | `POST /v1/cycle/{publisher}?platform=` | `200` read-only summary | `400 platform_required / unknown_platform / invalid_publisher / invalid_cycle_request / invalid_policy / bad_request`, `401 unauthorized`, `404`, `422`, `503 live_audit_not_configured` |
 //! | `POST /v1/adyen/webhook` | `200 {"received":true,"items":n,"new":m}` | `400 invalid_signature` or `malformed_event`, `503 adyen_webhook_not_configured` or `collection_store_not_configured` |
 //! | `POST /v1/leads` | `202 {"received":true}` | `400 invalid_lead`, `503 lead_capture_not_configured` |
+//! | `POST /v1/operator/jobs` | `200` frozen job JSON (the created job, or the existing job on a duplicate `job_id`) | `400 bad_request`, `401 unauthorized`, `503 operator_jobs_not_configured` |
+//! | `GET /v1/operator/jobs/{job_id}` | `200` frozen job JSON | `400 bad_request`, `401 unauthorized`, `404 not_found`, `503 operator_jobs_not_configured` |
+//!
+//! The operator-jobs receiver moves the control plane's durable job writes off
+//! the shared disk: `POST /v1/operator/jobs` accepts the frozen job JSON (the
+//! schema in `apex_autopilot::operator_jobs`) and persists the exact request
+//! bytes into `APEX_OPERATOR_JOBS_DIR` (default `.apex/control/jobs`, the
+//! directory the runner's daily pass consumes) with the control plane's
+//! atomic temp-file-plus-rename discipline. Writes are idempotent by
+//! `job_id`: a duplicate POST answers `200` with the existing file and
+//! rewrites nothing. Both routes are gated by a bearer token from
+//! `APEX_OPERATOR_JOBS_TOKEN` with the live-audit semantics: no configured
+//! token is `503 operator_jobs_not_configured`, a missing or wrong bearer is
+//! `401 unauthorized`.
 //!
 //! Unknown paths fall through to `404 {"error":"not_found"}`; a known path
 //! with the wrong method is axum's `405` (asserted by tests) on the API
@@ -21,9 +35,22 @@
 //! Console routes (server-rendered HTML, no JavaScript; every mutation is a
 //! POST that answers `303 See Other`):
 //!
+//! Console pages are session-scoped: every console GET except the change-log
+//! access panel itself (`GET /console/ledger`), the bare `/console` redirect,
+//! the one-time sign-in link (`GET /console/signin`) and the public
+//! free-audit and setup-watch sign-up flows requires a live session and
+//! answers `303` to
+//! `/console/ledger` without one; the session's bound publisher scopes the
+//! page (there is no deployment-wide console publisher). A deployment with no
+//! configured console credentials at all (no ledger tokens and no self-serve
+//! workspace) can never mint a session, so its workspace pages keep the `503`
+//! not-configured panel instead of redirecting to an access panel that could
+//! not authorize anyone. The `303` outranks per-page query validation: an
+//! anonymous request never learns whether its query was well formed.
+//!
 //! | route | success | states |
 //! |---|---|---|
-//! | `GET /` | `200` overview | first-run state when no source exists |
+//! | `GET /` | `200` overview, for the session's publisher | first-run state when no source exists |
 //! | `GET /console` | `303` to the change log | — |
 //! | `GET /console/audit` | `200` form or report | `400` bad query / unknown platform, `404` no snapshot, `500` read failure |
 //! | `GET /console/audit/findings/{id}` | `200` finding detail | `404` unknown id, `500` read failure |
@@ -32,7 +59,8 @@
 //! | `POST /console/ledger` | `303` to the change log + session cookie | `400` invalid publisher, `401` invalid access, `503` ledger_auth_not_configured |
 //! | `GET /console/ledger/records/{seq}` | `200` record detail | `303` to the change log without a session, `404` unknown sequence |
 //! | `POST /console/ledger/session/end` | `303` to the change log | `400` missing or wrong CSRF token |
-//! | `GET /console/connections` | `200` platform list | `503` workspace publisher not configured, `500` store read failure |
+//! | `GET /console/signin?token=` | `303` to `/` with a session cookie | `200` refusal page for a used, expired or unknown link, `400` for a missing or malformed token, `503` when the sign-in store is not configured |
+//! | `GET /console/connections` | `200` platform list | `303` without a session, `503` not configured (no console credentials), `500` store read failure |
 //! | `GET /console/connections/{platform}` | `200` detail | `404` unknown platform |
 //! | `POST /console/connections/{platform}/submit` | `303` back to the detail | `303` to the change log without a session, `400` field errors or wrong CSRF token, `404` unknown platform, `503` vault not configured |
 //! | `POST /console/connections/{platform}/rotate` | `303` | same refusals as submit |
@@ -51,10 +79,14 @@
 //! | `GET /console/settings/policy` | `200` recorded policy | — |
 //! | `GET /console/settings/monitoring` | `200` health and plan | `500` connection store read failure |
 //! | `GET /console/analytics?view=&format=csv` | `200` tab, or CSV | `400` unknown view or platform filter, `503` store not configured (CSV exports answer `503 text/plain` with the reason) |
-//! | `POST /free-audit` | `303` to `/audit-requested/?ref=` | `400` field errors, `500`/`503` storage failure |
+//! | `POST /free-audit` | `303` to `/audit-requested/?ref=` (workspace and one-time sign-in link ensured; mail is best effort) | `400` field errors, `500`/`503` storage failure |
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
 //! | `GET /audit-requested/` | `200` confirmation | — |
+//! | `POST /watch` | `303` to `/watch/requested?ref=` (repeat submissions inside 24 h deduplicate; the outcomes line is best effort) | `400` field errors, `500`/`503` store unavailable |
+//! | `GET /watch` | `303` to `/watch/` | — |
+//! | `GET /watch/` | `200` sign-up page | — |
+//! | `GET /watch/requested` | `200` confirmation | — |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
 //! a malformed path segment or duplicated query key on `/v1/*` is
@@ -85,8 +117,10 @@ use crate::html::audit::{is_finding_id, AuditFormProblem, AuditReportView, Findi
 use crate::html::leads_html::RequestPageState;
 use crate::html::ledger::LedgerAccessProblem;
 use crate::html::overview::{LatestAudit, LedgerState, OverviewData};
+use crate::html::watch_html::{self, WatchFormValues, WatchPageState};
 use crate::html::{audit, errors, leads_html, ledger, overview, ConsoleCtx};
 use crate::leads::{self, Lead};
+use crate::live::constant_time_eq;
 use crate::session;
 use crate::sources::{is_valid_publisher, parse_platform, PLATFORM_NAMES};
 use crate::state::AppState;
@@ -119,6 +153,7 @@ pub fn router(state: AppState) -> Router {
             "/console/ledger/session/end",
             post(console_ledger_session_end),
         )
+        .route("/console/signin", get(console_signin))
         .route("/console/connections", get(console_connections))
         .route(
             "/console/connections/{platform}",
@@ -165,6 +200,15 @@ pub fn router(state: AppState) -> Router {
             "/console/settings/monitoring",
             get(console_settings_monitoring),
         )
+        .route(
+            "/console/settings/monitoring/cancel",
+            post(console_settings_monitoring_cancel),
+        )
+        .route("/console/settings/billing", get(console_settings_billing))
+        .route(
+            "/console/settings/billing/managed/cancel",
+            post(console_settings_billing_managed_cancel),
+        )
         .route("/console/analytics", get(console_analytics))
         .route(
             "/free-audit",
@@ -172,6 +216,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/free-audit/", get(free_audit_page))
         .route("/audit-requested/", get(audit_requested))
+        .route("/watch", get(watch_redirect).post(watch_submit))
+        .route("/watch/", get(watch_page))
+        .route("/watch/requested", get(watch_requested))
         .method_not_allowed_fallback(console_method_not_allowed)
         .route("/healthz", get(healthz))
         .route("/favicon.ico", get(crate::favicon::ico))
@@ -183,6 +230,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/cycle/{publisher}", post(run_cycle))
         .route("/v1/adyen/webhook", post(adyen_webhook))
         .route("/v1/leads", post(lead_capture))
+        .route("/v1/operator/jobs", post(operator_jobs_submit))
+        .route("/v1/operator/jobs/{job_id}", get(operator_jobs_show))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(shape_oversized_responses))
@@ -418,6 +467,164 @@ fn default_audit_window(now_unix_ms: i64) -> (String, String) {
     (from, to)
 }
 
+// ---------------------------------------------------------------------------
+// Operator jobs: the split-host receiver
+// ---------------------------------------------------------------------------
+
+/// Bearer token gating the operator-jobs routes; unset means the receiver is
+/// closed (`503`).
+pub const OPERATOR_JOBS_TOKEN_ENV: &str = "APEX_OPERATOR_JOBS_TOKEN";
+/// The jobs directory shared with the runner's daily pass.
+pub const OPERATOR_JOBS_DIR_ENV: &str = "APEX_OPERATOR_JOBS_DIR";
+/// The shared default jobs directory (the runner's and the control plane's
+/// default).
+pub const DEFAULT_OPERATOR_JOBS_DIR: &str = ".apex/control/jobs";
+
+/// One bounded serial number for unique temp names: the receiver is stateless
+/// (two concurrent POSTs of one `job_id` share no lock), so each write uses
+/// its own temp file.
+static OPERATOR_JOB_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The configured jobs directory: `APEX_OPERATOR_JOBS_DIR` when set and
+/// non-blank, the shared default otherwise.
+fn operator_jobs_dir() -> std::path::PathBuf {
+    std::env::var(OPERATOR_JOBS_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_OPERATOR_JOBS_DIR))
+}
+
+/// Authorize one operator-jobs request with the live-audit bearer semantics
+/// (`crate::live::LiveAuditor::authorize`): the configured token must arrive
+/// as `Authorization: Bearer <token>` and is compared in constant time; a
+/// configured-but-empty token refuses every request.
+fn authorize_operator_jobs(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
+    if expected.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
+/// The fail-closed `503` when `APEX_OPERATOR_JOBS_TOKEN` is unset; the
+/// taxonomy lives in `error.rs`, which this additive route does not extend.
+fn operator_jobs_not_configured() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "operator_jobs_not_configured" })),
+    )
+        .into_response()
+}
+
+/// The frozen job id shape (`opj_` plus twelve lowercase hex digits) that the
+/// runner and the control plane both enforce before trusting a job file. It
+/// is also the path-safety check: only this shape reaches the filesystem.
+fn is_frozen_job_id(job_id: &str) -> bool {
+    let Some(hex) = job_id.strip_prefix("opj_") else {
+        return false;
+    };
+    hex.len() == 12
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// A `200 application/json` answer carrying the frozen job bytes verbatim, so
+/// the receiver never reshapes the producer's recording.
+fn job_json_response(body: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response()
+}
+
+/// `POST /v1/operator/jobs`: validate the frozen job JSON, then persist the
+/// exact request bytes into the shared jobs folder atomically. A duplicate
+/// `job_id` returns the existing job unchanged (`200`, no rewrite).
+async fn operator_jobs_submit(headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+    let token = match std::env::var(OPERATOR_JOBS_TOKEN_ENV) {
+        Ok(token) => token,
+        Err(_) => return Ok(operator_jobs_not_configured()),
+    };
+    authorize_operator_jobs(&headers, &token)?;
+    let job: apex_autopilot::OperatorJob =
+        serde_json::from_slice(&body).map_err(|_| ApiError::BadRequest("bad_request"))?;
+    let history_matches_state = job
+        .state_history
+        .last()
+        .is_some_and(|change| change.state == job.state);
+    if !is_frozen_job_id(&job.job_id)
+        || job.kind.is_empty()
+        || job.kind.len() > 64
+        || !job.kind.is_ascii()
+        || !history_matches_state
+        || apex_autopilot::operator_jobs::JobState::parse(&job.state).is_none()
+    {
+        return Err(ApiError::BadRequest("bad_request"));
+    }
+    let dir = operator_jobs_dir();
+    let path = dir.join(format!("{}.json", job.job_id));
+    if path.exists() {
+        let existing =
+            std::fs::read(&path).map_err(|error| ApiError::Internal(error.to_string()))?;
+        return Ok(job_json_response(existing));
+    }
+    std::fs::create_dir_all(&dir).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let sequence = OPERATOR_JOB_TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = dir.join(format!(
+        ".{}.json.{}.{sequence}.tmp",
+        job.job_id,
+        std::process::id()
+    ));
+    std::fs::write(&temp, &body).map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(ApiError::Internal(error.to_string()));
+    }
+    Ok(job_json_response(body.to_vec()))
+}
+
+/// `GET /v1/operator/jobs/{job_id}`: the current job JSON from the shared
+/// folder, or `404` when the well-formed id has no file.
+async fn operator_jobs_show(
+    headers: HeaderMap,
+    job_id: Result<Path<String>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let token = match std::env::var(OPERATOR_JOBS_TOKEN_ENV) {
+        Ok(token) => token,
+        Err(_) => return Ok(operator_jobs_not_configured()),
+    };
+    authorize_operator_jobs(&headers, &token)?;
+    let Ok(Path(job_id)) = job_id else {
+        return Err(ApiError::BadRequest("bad_request"));
+    };
+    if !is_frozen_job_id(&job_id) {
+        return Err(ApiError::BadRequest("bad_request"));
+    }
+    let path = operator_jobs_dir().join(format!("{job_id}.json"));
+    match std::fs::read(&path) {
+        Ok(existing) => Ok(job_json_response(existing)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ApiError::NotFound),
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
+}
+
 async fn ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -478,10 +685,24 @@ struct CycleParams {
 
 async fn run_cycle(
     State(state): State<AppState>,
+    headers: HeaderMap,
     publisher: Result<Path<String>, PathRejection>,
     params: Result<Query<CycleParams>, QueryRejection>,
     body: Bytes,
 ) -> Result<Json<CycleSummary>, ApiError> {
+    // The cycle carries the same bearer-token gate as `POST
+    // /v1/audit/{platform}`: no configured token source is
+    // `503 live_audit_not_configured`, a missing or wrong bearer is `401`.
+    // The gate runs before any path/query validation, so an anonymous caller
+    // cannot probe publisher or platform handling.
+    let Some(auditor) = &state.live_auditor else {
+        return Err(ApiError::LiveAuditNotConfigured);
+    };
+    auditor.authorize(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )?;
     let Ok(Path(publisher)) = publisher else {
         return Err(ApiError::BadRequest("bad_request"));
     };
@@ -576,6 +797,14 @@ async fn adyen_webhook(
                     success = %item.success,
                     "adyen collection event recorded"
                 );
+                // The frozen sales outcome for an accepted payment event:
+                // success=true only, the psp reference as the ref. Best
+                // effort; the recorded event stands regardless.
+                if item.success.eq_ignore_ascii_case("true") {
+                    if let Some(publisher) = event.publisher_id() {
+                        append_outcome(&state, publisher, "paid", &item.psp_reference);
+                    }
+                }
             }
             Ok(false) => {
                 tracing::info!(
@@ -611,10 +840,13 @@ fn console_reference(state: &AppState, route: &str) -> String {
     )
 }
 
-async fn console_overview(State(state): State<AppState>) -> Html<String> {
+async fn console_overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_session(&state, &headers) {
+        return *response;
+    }
     let ctx = ConsoleCtx::from_env();
     let data = collect_overview(&state).await;
-    Html(overview::render(&ctx, &data))
+    page(StatusCode::OK, overview::render(&ctx, &data))
 }
 
 /// `GET /console`: the bare address the deployment proxy routes to this
@@ -675,8 +907,8 @@ async fn collect_overview(state: &AppState) -> OverviewData {
         let mut unavailable = 0usize;
         let mut first_reason: Option<String> = None;
         for publisher in &publishers {
-            match state.ledger_source.records(publisher).await {
-                Ok(list) => records += list.len() as u64,
+            match state.ledger_source.record_count(publisher).await {
+                Ok(count) => records += count,
                 Err(error) => {
                     unavailable += 1;
                     if first_reason.is_none() {
@@ -719,8 +951,12 @@ struct AuditConsoleParams {
 
 async fn console_audit(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<AuditConsoleParams>, QueryRejection>,
 ) -> Response {
+    if let Err(response) = require_session(&state, &headers) {
+        return *response;
+    }
     let ctx = ConsoleCtx::from_env();
     let Ok(Query(params)) = params else {
         return page(
@@ -777,8 +1013,12 @@ async fn console_audit(
 
 async fn console_finding(
     State(state): State<AppState>,
+    headers: HeaderMap,
     id: Result<Path<String>, PathRejection>,
 ) -> Response {
+    if let Err(response) = require_session(&state, &headers) {
+        return *response;
+    }
     let ctx = ConsoleCtx::from_env();
     let Ok(Path(id)) = id else {
         return page(StatusCode::NOT_FOUND, errors::finding_not_found(&ctx));
@@ -833,8 +1073,12 @@ async fn console_finding(
 
 async fn console_audit_csv(
     State(state): State<AppState>,
+    headers: HeaderMap,
     params: Result<Query<AuditConsoleParams>, QueryRejection>,
 ) -> Response {
+    if let Err(response) = require_session(&state, &headers) {
+        return *response;
+    }
     let ctx = ConsoleCtx::from_env();
     let Ok(Query(params)) = params else {
         return page(
@@ -1138,6 +1382,65 @@ fn leads_csrf_field() -> &'static str {
     "csrf_token"
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct SigninParams {
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// `GET /console/signin?token=<opaque>`: the self-serve one-time link.
+///
+/// A valid, unused, unexpired token mints the same session the ledger-token
+/// exchange mints (the same [`session::LedgerSessions`] store and the same
+/// `Set-Cookie` shape) and answers `303` to the console overview. The token
+/// is consumed under the store lock before the session exists, so a replay
+/// mints nothing while sessions already minted live their own idle window.
+/// The response never contains the token.
+///
+/// Status precedence, pinned by tests: a missing or malformed token is the
+/// `400` refusal page (the request names no link; the same shape rule as the
+/// other console query refusals), a well-formed but unknown, used or expired
+/// token is the same refusal page with `200` (the page is the state, exactly
+/// like the change-log access panel answering `200` with an expired-session
+/// notice), and a deployment without a leads root answers the `503`
+/// not-configured panel: the sign-in path fails closed.
+async fn console_signin(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<SigninParams>, QueryRejection>,
+) -> Response {
+    let ctx = ctx_for_request(&headers);
+    let Some(signin) = &state.signin else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let token = match params {
+        Ok(Query(params)) => params.token,
+        Err(_) => None,
+    };
+    let Some(token) = token.filter(|token| crate::signin::is_signin_token(token)) else {
+        return page(StatusCode::BAD_REQUEST, errors::signin_refused(&ctx));
+    };
+    match signin.consume(&token, now_unix_ms(&state)) {
+        Ok(Some(publisher)) => {
+            let opened = state.ledger_sessions.open(&publisher, now_unix_ms(&state));
+            let cookie = session::session_cookie(&opened.id, session::request_is_secure(&headers));
+            redirect_with_cookie("/", Some(cookie))
+        }
+        Ok(None) => page(StatusCode::OK, errors::signin_refused(&ctx)),
+        Err(error) => {
+            // Fail closed: an unreadable sign-in store mints nothing.
+            tracing::warn!(%error, "sign-in store unavailable; the link was refused");
+            page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                errors::not_configured(&ctx),
+            )
+        }
+    }
+}
+
 // --- phase 2: connections, proposals, experiments, billing, settings -------
 
 /// The console context of a request: deployment facts plus the resolved
@@ -1163,46 +1466,79 @@ fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
     None
 }
 
-/// The workspace publisher, or the HTML not-configured page (boxed: a
-/// `Response` is large and this is the cold path).
-fn workspace_ctx(state: &AppState, ctx: &ConsoleCtx) -> Result<String, Box<Response>> {
-    match &state.workspace_publisher {
-        Some(publisher) => Ok(publisher.clone()),
-        None => Err(Box::new(page(
-            StatusCode::SERVICE_UNAVAILABLE,
-            errors::not_configured(ctx),
-        ))),
-    }
-}
-
-/// The session plus CSRF check shared by every phase-2 mutation. A request
-/// without a live session is redirected to the change-log access panel (the
-/// stable recovery point); a wrong token is the HTML `400`.
-fn mutation_session(
+/// The console workspace gate: every console page that renders or mutates one
+/// publisher's workspace resolves that publisher from the live session, never
+/// from a deployment-wide default. Precedence (documented and pinned by
+/// tests):
+///
+/// 1. A deployment with no console credentials at all — the boot-time ledger
+///    tokens are empty *and* the live workspace file records no publisher —
+///    can never mint a session, so the handler keeps its documented `503`
+///    not-configured panel instead of redirecting to an access panel that
+///    could not authorize anyone. A workspace created by a free-audit
+///    submission counts as a credential from the moment it is written.
+/// 2. No live session: `303` to `/console/ledger`, the stable access panel
+///    every console page recovers through.
+/// 3. A live session: its bound publisher scopes the page.
+fn workspace_session(
     state: &AppState,
     ctx: &ConsoleCtx,
     headers: &HeaderMap,
-    fields: &std::collections::BTreeMap<String, String>,
-) -> Result<crate::session::SessionView, Box<Response>> {
+) -> Result<(String, session::SessionView), Box<Response>> {
+    let no_credentials = state.ledger_tokens.is_empty()
+        && state
+            .workspaces
+            .as_ref()
+            .is_none_or(|workspaces| workspaces.is_empty());
+    if no_credentials {
+        return Err(Box::new(page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(ctx),
+        )));
+    }
     let (_, view) = live_session(state, headers);
     let Some(view) = view else {
         return Err(Box::new(Redirect::to("/console/ledger").into_response()));
     };
+    Ok((view.publisher.clone(), view))
+}
+
+/// The console access gate for pages that render deployment/platform facts
+/// (overview, audit, findings and the CSV export): a live session is
+/// required; without one the stable access panel is the recovery point.
+fn require_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<session::SessionView, Box<Response>> {
+    let (_, view) = live_session(state, headers);
+    match view {
+        Some(view) => Ok(view),
+        None => Err(Box::new(Redirect::to("/console/ledger").into_response())),
+    }
+}
+
+/// The per-session CSRF check shared by every console mutation: a missing or
+/// wrong token is the HTML `400`, never a state change.
+fn csrf_verified(
+    ctx: &ConsoleCtx,
+    session: &session::SessionView,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Result<(), Box<Response>> {
     let csrf = fields.get(leads_csrf_field()).cloned().unwrap_or_default();
-    if !crate::live::constant_time_eq(csrf.as_bytes(), view.csrf.as_bytes()) {
+    if !crate::live::constant_time_eq(csrf.as_bytes(), session.csrf.as_bytes()) {
         return Err(Box::new(page(
             StatusCode::BAD_REQUEST,
             errors::bad_request(ctx, None),
         )));
     }
-    Ok(view)
+    Ok(())
 }
 
 /// `GET /console/connections`.
 async fn console_connections(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let meta = match connection_meta(&state, &publisher).await {
@@ -1272,8 +1608,8 @@ async fn console_connection_detail(
     platform_path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(platform_name)) = platform_path else {
@@ -1288,16 +1624,16 @@ async fn console_connection_detail(
     let Some(platform) = parse_platform(capability.wire) else {
         return page(StatusCode::NOT_FOUND, errors::not_found(&ctx));
     };
-    connection_detail_response(&state, &ctx, &headers, &publisher, platform, capability).await
+    connection_detail_response(&state, &ctx, &publisher, platform, capability, &session).await
 }
 
 async fn connection_detail_response(
     state: &AppState,
     ctx: &ConsoleCtx,
-    headers: &HeaderMap,
     publisher: &str,
     platform: PlatformId,
     capability: &crate::connections::PlatformCapability,
+    session: &session::SessionView,
 ) -> Response {
     let writable = state.connection_store.is_some();
     let meta = match connection_meta(state, publisher).await {
@@ -1311,7 +1647,6 @@ async fn connection_detail_response(
         },
         None => None,
     };
-    let (_, session) = live_session(state, headers);
     let running_work = running_experiments(state, publisher, Some(platform)).await;
     let last_report = state
         .audit_source
@@ -1330,7 +1665,7 @@ async fn connection_detail_response(
                 state: meta.platform(capability.wire),
                 blob_meta: blob_meta.as_ref(),
                 writable,
-                csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                csrf: Some(session.csrf.as_str()),
                 errors: Vec::new(),
                 preserved: Vec::new(),
                 running_work,
@@ -1385,6 +1720,9 @@ fn connection_fields(platform: PlatformId) -> &'static [(&'static str, bool)] {
             ("refresh_token", true),
         ],
         PlatformId::Admob => &[("account_id", true), ("api_key", true)],
+        // The billing domain is not a connectable platform: it carries no
+        // credential fields (the wire name never routes here).
+        PlatformId::Billing => &[],
     }
 }
 
@@ -1471,8 +1809,8 @@ async fn connection_mutation(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(platform_name)) = platform_path else {
@@ -1497,14 +1835,13 @@ async fn connection_mutation(
         Ok(fields) => fields,
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    if let Err(response) = mutation_session(&state, &ctx, &headers, &fields) {
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
     let credentials = match parse_connection_submission(platform, &fields) {
         Ok(credentials) => credentials,
         Err((errors, preserved)) => {
             let meta = store.load_meta(&publisher).await.unwrap_or_default();
-            let (_, session) = live_session(&state, &headers);
             return page(
                 StatusCode::BAD_REQUEST,
                 crate::html::connections::render_detail(
@@ -1516,7 +1853,7 @@ async fn connection_mutation(
                         state: meta.platform(capability.wire),
                         blob_meta: None,
                         writable: true,
-                        csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                        csrf: Some(session.csrf.as_str()),
                         errors,
                         preserved,
                         running_work: None,
@@ -1629,6 +1966,14 @@ async fn apply_validation(
             state_row.state = Some(crate::connections::CredentialState::Validated);
             state_row.validated_at_unix_ms = Some(now_unix_ms(state));
             state_row.reporting = Some(reporting_hint);
+            // The frozen sales outcome for a validated connection; best
+            // effort, write-once per (kind, ref).
+            append_outcome(
+                state,
+                publisher,
+                "connected",
+                &format!("{publisher}:{}", platform.as_str()),
+            );
             state
                 .analytics
                 .emit_connection_validated(
@@ -1692,8 +2037,8 @@ async fn console_connection_disconnect(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(platform_name)) = platform_path else {
@@ -1712,7 +2057,7 @@ async fn console_connection_disconnect(
         Ok(fields) => fields,
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    if let Err(response) = mutation_session(&state, &ctx, &headers, &fields) {
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
     match store.disconnect_platform(&publisher, platform).await {
@@ -1747,8 +2092,8 @@ async fn console_proposal(
     id_path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Some(store) = state.proposal_store.clone() else {
@@ -1766,7 +2111,6 @@ async fn console_proposal(
     match store.get(&id).await {
         Ok(Some(proposal)) => {
             let approval = store.approval(&id).await.ok().flatten();
-            let (_, session) = live_session(&state, &headers);
             page(
                 StatusCode::OK,
                 crate::html::proposals::render_detail(
@@ -1777,7 +2121,7 @@ async fn console_proposal(
                         proposal: &proposal,
                         approval: approval.as_ref(),
                         expired: proposal.is_expired(now_unix_ms(&state)),
-                        csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                        csrf: Some(session.csrf.as_str()),
                         refusal: None,
                     },
                 ),
@@ -1811,7 +2155,7 @@ fn proposal_store_failure(state: &AppState, ctx: &ConsoleCtx, error: ApiError) -
 /// `GET /console/proposals` renders the proposal index.
 async fn console_proposals(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    if let Err(response) = workspace_ctx(&state, &ctx) {
+    if let Err(response) = workspace_session(&state, &ctx, &headers) {
         return *response;
     }
     let Some(store) = state.proposal_store.clone() else {
@@ -1852,8 +2196,8 @@ async fn console_proposal_decision(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Some(store) = state.proposal_store.clone() else {
@@ -1872,7 +2216,7 @@ async fn console_proposal_decision(
         Ok(fields) => fields,
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    if let Err(response) = mutation_session(&state, &ctx, &headers, &fields) {
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
     let decision = match fields.get("decision").map(String::as_str) {
@@ -1901,7 +2245,6 @@ async fn console_proposal_decision(
         return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
     }
     if proposal.is_expired(now) {
-        let (_, session) = live_session(&state, &headers);
         return page(
             StatusCode::OK,
             crate::html::proposals::render_detail(
@@ -1912,7 +2255,7 @@ async fn console_proposal_decision(
                     proposal: &proposal,
                     approval: None,
                     expired: true,
-                    csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                    csrf: Some(session.csrf.as_str()),
                     refusal: None,
                 },
             ),
@@ -1984,7 +2327,6 @@ async fn console_proposal_decision(
             // The losing request reports the winner's recorded decision, so
             // the page and the durable file always agree.
             let winner = store.approval(&id).await.ok().flatten();
-            let (_, session) = live_session(&state, &headers);
             page(
                 StatusCode::CONFLICT,
                 crate::html::proposals::render_detail(
@@ -1995,7 +2337,7 @@ async fn console_proposal_decision(
                         proposal: &proposal,
                         approval: winner.as_ref(),
                         expired: false,
-                        csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                        csrf: Some(session.csrf.as_str()),
                         refusal: Some(
                             "This proposal was already decided; the recorded decision stands.",
                         ),
@@ -2032,8 +2374,8 @@ async fn console_experiments(
     params: Result<Query<ExperimentsParams>, QueryRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let filter = match &params {
@@ -2109,8 +2451,8 @@ async fn console_experiment_detail(
     params: Result<Query<ExperimentsParams>, QueryRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(id)) = id_path else {
@@ -2168,8 +2510,8 @@ async fn console_experiment_incident(
     id_path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(id)) = id_path else {
@@ -2203,7 +2545,7 @@ async fn billing_view(
         Some(path) => crate::billing_view::read_collection_log(path)?,
         None => Vec::new(),
     };
-    let monitoring = crate::billing_view::monitoring_from_env(&|key| crate::config::env_value(key));
+    let monitoring = crate::billing_view::monitoring_state_view(connection_root(state), publisher)?;
     let currency = ConsoleCtx::from_env().currency;
     Ok(crate::billing_view::build(
         &records,
@@ -2217,8 +2559,8 @@ async fn billing_view(
 /// `GET /console/billing`.
 async fn console_billing(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     match billing_view(&state, &publisher).await {
@@ -2243,8 +2585,8 @@ async fn console_invoice_detail(
     period_path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Path(period)) = period_path else {
@@ -2290,16 +2632,15 @@ async fn console_invoice_detail(
 /// `GET /console/settings`.
 async fn console_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    let workspace = state
-        .workspace_publisher
-        .clone()
-        .unwrap_or_else(|| ctx.publisher_label.clone());
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let account = crate::settings::account_view(
         &|key| crate::config::env_value(key),
-        &workspace,
+        &publisher,
         &ctx.currency,
     );
-    let (_, session) = live_session(&state, &headers);
     page(
         StatusCode::OK,
         crate::html::settings::render_account(
@@ -2308,7 +2649,7 @@ async fn console_settings(State(state): State<AppState>, headers: HeaderMap) -> 
                 account: &account,
                 as_of_unix_ms: now_unix_ms(&state),
                 theme: ctx.theme,
-                csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                csrf: Some(session.csrf.as_str()),
                 theme_error: None,
             },
         ),
@@ -2335,11 +2676,15 @@ async fn console_settings_theme(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let fields = match leads::parse_form(&body) {
         Ok(fields) => fields,
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    if let Err(response) = mutation_session(&state, &ctx, &headers, &fields) {
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
         return *response;
     }
     let requested = fields
@@ -2347,16 +2692,11 @@ async fn console_settings_theme(
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
     if !matches!(requested.as_str(), "auto" | "light" | "dark") {
-        let workspace = state
-            .workspace_publisher
-            .clone()
-            .unwrap_or_else(|| ctx.publisher_label.clone());
         let account = crate::settings::account_view(
             &|key| crate::config::env_value(key),
-            &workspace,
+            &publisher,
             &ctx.currency,
         );
-        let (_, session) = live_session(&state, &headers);
         return page(
             StatusCode::BAD_REQUEST,
             crate::html::settings::render_account(
@@ -2365,7 +2705,7 @@ async fn console_settings_theme(
                     account: &account,
                     as_of_unix_ms: now_unix_ms(&state),
                     theme: ctx.theme,
-                    csrf: session.as_ref().map(|session| session.csrf.as_str()),
+                    csrf: Some(session.csrf.as_str()),
                     theme_error: Some("Choose System, Light or Dark."),
                 },
             ),
@@ -2378,20 +2718,16 @@ async fn console_settings_theme(
 /// `GET /console/settings/access`.
 async fn console_settings_access(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    let (_, session) = live_session(&state, &headers);
-    let publisher = state
-        .workspace_publisher
-        .clone()
-        .unwrap_or_else(|| ctx.publisher_label.clone());
-    let sessions = match &session {
-        Some(view) => state
-            .ledger_sessions
-            .summaries(now_unix_ms(&state))
-            .into_iter()
-            .filter(|summary| summary.publisher == view.publisher)
-            .collect(),
-        None => Vec::new(),
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
+    let sessions = state
+        .ledger_sessions
+        .summaries(now_unix_ms(&state))
+        .into_iter()
+        .filter(|summary| summary.publisher == session.publisher)
+        .collect();
     let mut response = page(
         StatusCode::OK,
         crate::html::settings::render_access(
@@ -2399,8 +2735,8 @@ async fn console_settings_access(State(state): State<AppState>, headers: HeaderM
             &crate::html::settings::AccessPageData {
                 publisher: &publisher,
                 sessions,
-                current_handle: session.as_ref().map(|view| view.handle.as_str()),
-                csrf: session.as_ref().map(|view| view.csrf.as_str()),
+                current_handle: Some(session.handle.as_str()),
+                csrf: Some(session.csrf.as_str()),
                 as_of_unix_ms: now_unix_ms(&state),
             },
         ),
@@ -2423,14 +2759,17 @@ async fn console_settings_access_revoke(
     body: Bytes,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
+    let (_, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let fields = match leads::parse_form(&body) {
         Ok(fields) => fields,
         Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
     };
-    let session = match mutation_session(&state, &ctx, &headers, &fields) {
-        Ok(session) => session,
-        Err(response) => return *response,
-    };
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
+        return *response;
+    }
     let handle = fields.get("handle").cloned().unwrap_or_default();
     if !session::is_session_handle(&handle) {
         return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
@@ -2452,10 +2791,10 @@ struct PolicyFile {
 /// `GET /console/settings/policy`.
 async fn console_settings_policy(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = state
-        .workspace_publisher
-        .clone()
-        .unwrap_or_else(|| ctx.publisher_label.clone());
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
     let policy = crate::config::env_value(crate::settings::POLICY_FILE_ENV)
         .and_then(|path| read_policy_file(&path));
     let approval_required_now = policy
@@ -2499,17 +2838,35 @@ fn read_policy_file(path: &str) -> Option<apex_autopilot::model::AutopilotPolicy
     }
 }
 
+/// The connections root the console writes: the vault root holds the
+/// per-publisher plan state files (`<root>/<publisher>.<slug>.json`) beside
+/// the customer billing profile and connection blobs.
+fn connection_root(state: &AppState) -> Option<&std::path::Path> {
+    state.connection_store.as_ref().map(|store| store.root())
+}
+
+/// The current billing period `YYYY-MM` at the read's as-of time.
+fn current_period(as_of_unix_ms: i64) -> String {
+    apex_analytics::UtcMillis::from_unix_millis(as_of_unix_ms).to_day_string()[..7].to_string()
+}
+
 /// `GET /console/settings/monitoring`.
 async fn console_settings_monitoring(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = state
-        .workspace_publisher
-        .clone()
-        .unwrap_or_else(|| ctx.publisher_label.clone());
-    let plan = crate::billing_view::monitoring_from_env(&|key| crate::config::env_value(key));
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let plan = match crate::billing_view::monitoring_state_view(connection_root(&state), &publisher)
+    {
+        Ok(plan) => plan,
+        Err(error) => {
+            return ledger_failure_page(&state, &ctx, error, "/console/settings/monitoring")
+        }
+    };
     let meta = match connection_meta(&state, &publisher).await {
         Ok(meta) => meta,
         Err(error) => return connection_store_failure(&state, &ctx, error),
@@ -2534,9 +2891,140 @@ async fn console_settings_monitoring(
                 rows,
                 alert_log_configured: state.alerts_path.is_some(),
                 as_of_unix_ms: now_unix_ms(&state),
+                csrf: Some(session.csrf.as_str()),
             },
         ),
     )
+}
+
+/// `POST /console/settings/monitoring/cancel`. Records the cancellation on
+/// the plan state file (POST + CSRF): the cancelled plan bills its current
+/// period only and the next period is zero, and the record is kept — never
+/// deleted. A publisher with no recorded plan has nothing to cancel, so the
+/// route refuses with the house `400` instead of inventing one; cancelling
+/// an already-cancelled plan is idempotent (the recorded stop period is
+/// never re-dated).
+async fn console_settings_monitoring_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ctx = ctx_for_request(&headers);
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let fields = match leads::parse_form(&body) {
+        Ok(fields) => fields,
+        Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
+    };
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
+        return *response;
+    }
+    let Some(root) = connection_root(&state) else {
+        // Without the connections root there is no plan state to record the
+        // cancellation in; the action is a refusal, never a silent no-op.
+        return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
+    };
+    let path =
+        apex_billing::PlanState::path_for(root, &publisher, apex_billing::PlanId::Monitoring);
+    let mut plan = match apex_billing::PlanState::load(&path) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
+        Err(error) => {
+            return ledger_failure_page(
+                &state,
+                &ctx,
+                ApiError::Internal(format!("plan state: {error}")),
+                "/console/settings/monitoring",
+            )
+        }
+    };
+    plan.cancel(&current_period(now_unix_ms(&state)));
+    if let Err(error) = plan.save(&path) {
+        return ledger_failure_page(
+            &state,
+            &ctx,
+            ApiError::Internal(format!("plan state: {error}")),
+            "/console/settings/monitoring",
+        );
+    }
+    Redirect::to("/console/settings/monitoring").into_response()
+}
+
+/// `GET /console/settings/billing`: the managed ad-ops plan line with its
+/// written scope and cancel action.
+async fn console_settings_billing(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let ctx = ctx_for_request(&headers);
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let managed = match crate::billing_view::managed_state_view(connection_root(&state), &publisher)
+    {
+        Ok(managed) => managed,
+        Err(error) => return ledger_failure_page(&state, &ctx, error, "/console/settings/billing"),
+    };
+    page(
+        StatusCode::OK,
+        crate::html::settings::render_billing_settings(
+            &ctx,
+            &crate::html::settings::BillingSettingsPageData {
+                publisher: &publisher,
+                managed: &managed,
+                as_of_unix_ms: now_unix_ms(&state),
+                csrf: Some(session.csrf.as_str()),
+            },
+        ),
+    )
+}
+
+/// `POST /console/settings/billing/managed/cancel`. Records the managed
+/// cancellation on the plan state file: the current period bills, the next
+/// is zero, and the record is kept.
+async fn console_settings_billing_managed_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ctx = ctx_for_request(&headers);
+    let (publisher, session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let fields = match leads::parse_form(&body) {
+        Ok(fields) => fields,
+        Err(_) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
+    };
+    if let Err(response) = csrf_verified(&ctx, &session, &fields) {
+        return *response;
+    }
+    let Some(root) = connection_root(&state) else {
+        return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
+    };
+    let path = apex_billing::PlanState::path_for(root, &publisher, apex_billing::PlanId::Managed);
+    let mut plan = match apex_billing::PlanState::load(&path) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None)),
+        Err(error) => {
+            return ledger_failure_page(
+                &state,
+                &ctx,
+                ApiError::Internal(format!("plan state: {error}")),
+                "/console/settings/billing",
+            )
+        }
+    };
+    plan.cancel(&current_period(now_unix_ms(&state)));
+    if let Err(error) = plan.save(&path) {
+        return ledger_failure_page(
+            &state,
+            &ctx,
+            ApiError::Internal(format!("plan state: {error}")),
+            "/console/settings/billing",
+        );
+    }
+    Redirect::to("/console/settings/billing").into_response()
 }
 
 // --- analytics --------------------------------------------------------------
@@ -2582,8 +3070,8 @@ async fn console_analytics(
     params: Result<Query<AnalyticsParams>, QueryRejection>,
 ) -> Response {
     let ctx = ctx_for_request(&headers);
-    let publisher = match workspace_ctx(&state, &ctx) {
-        Ok(publisher) => publisher,
+    let (publisher, _session) = match workspace_session(&state, &ctx, &headers) {
+        Ok(value) => value,
         Err(response) => return *response,
     };
     let Ok(Query(params)) = params else {
@@ -2890,6 +3378,11 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
                     "free-audit",
                 )
                 .await;
+            // The workspace exists before the confirmation, and the one-time
+            // sign-in link goes out (both best effort: a saved lead is
+            // success even when either fails).
+            ensure_workspace(&state, &lead.publisher);
+            issue_signin_link(&state, &lead.publisher, lead.email.trim()).await;
             Redirect::to(&format!("/audit-requested/?ref={request_id}")).into_response()
         }
         Err(error) => {
@@ -2907,6 +3400,45 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
                 ),
             )
         }
+    }
+}
+
+/// The workspace seam of an accepted audit request: create or extend the
+/// submission publisher's entry in the deployment's ledger-token file
+/// (`APEX_LEDGER_TOKENS_FILE`). The studio-to-slug mapping itself lives in
+/// the stored lead row; this adds the publisher's credential entry only. A
+/// deployment without the token file, or a failing write, leaves the lead
+/// saved and is logged — the confirmation is never withheld over it.
+fn ensure_workspace(state: &AppState, publisher: &str) {
+    let Some(workspaces) = &state.workspaces else {
+        tracing::warn!(
+            publisher,
+            "workspace not recorded: APEX_LEDGER_TOKENS_FILE is not configured"
+        );
+        return;
+    };
+    if let Err(error) = workspaces.ensure(publisher) {
+        tracing::warn!(%error, publisher, "workspace could not be recorded");
+    }
+}
+
+/// Issue the one-time sign-in link for an accepted audit request. Delivery is
+/// best effort: the service records a warning when no email sink is
+/// configured (or the send fails), and the confirmation — the audit success
+/// contract — is unaffected.
+async fn issue_signin_link(state: &AppState, publisher: &str, email: &str) {
+    let Some(signin) = &state.signin else {
+        tracing::warn!(
+            publisher,
+            "sign-in link not issued: the leads root is not configured"
+        );
+        return;
+    };
+    if let Err(error) = signin
+        .issue_link(publisher, email, now_unix_ms(state))
+        .await
+    {
+        tracing::warn!(%error, publisher, "sign-in link could not be created");
     }
 }
 
@@ -2931,6 +3463,136 @@ fn is_request_id(value: &str) -> bool {
     value
         .strip_prefix("req_")
         .is_some_and(|hex| hex.len() == 10 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+// --- setup watch ------------------------------------------------------------
+
+/// `GET /watch` is only the recipient of the form POST; the page lives at
+/// the canonical trailing-slash address.
+async fn watch_redirect() -> Redirect {
+    Redirect::to("/watch/")
+}
+
+async fn watch_page() -> Html<String> {
+    let ctx = ConsoleCtx::from_env();
+    Html(watch_html::render_request_page(
+        &ctx,
+        &WatchPageState::Fresh,
+    ))
+}
+
+/// `POST /watch`: validate the form fields, deduplicate repeat submissions
+/// inside the store's 24-hour window, store the subscriber through
+/// `apex-watch` and redirect to the confirmation. Validation failures
+/// re-render the request page with the exact field copy and the safe values
+/// preserved; storage failures re-render it with the submission-failure copy
+/// and the retry action.
+async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Ok(fields) = leads::parse_form(&body) else {
+        return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
+    };
+    let values = WatchFormValues {
+        domain: fields.get("domain").cloned().unwrap_or_default(),
+        email: fields.get("email").cloned().unwrap_or_default(),
+        accounts: fields.get("accounts").cloned().unwrap_or_default(),
+        core: fields
+            .get("tier")
+            .is_some_and(|value| value.split(',').any(|part| part.trim() == "core")),
+    };
+    if let Err(errors) = apex_watch::validate_watch_signup(
+        &values.domain,
+        &values.email,
+        &values.accounts,
+        values.core,
+    ) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_request_page(&ctx, &WatchPageState::Invalid { values, errors }),
+        );
+    }
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            watch_html::render_request_page(
+                &ctx,
+                &WatchPageState::SubmissionFailed(Box::new(values)),
+            ),
+        );
+    };
+    match store.subscribe(
+        now_unix_ms(&state),
+        &values.domain,
+        &values.email,
+        &values.accounts,
+        values.core,
+    ) {
+        Ok(outcome) => {
+            append_outcome(
+                &state,
+                &outcome.subscriber.publisher,
+                "watch_signup",
+                &outcome.subscriber.id,
+            );
+            Redirect::to(&format!("/watch/requested?ref={}", outcome.subscriber.id)).into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "watch sign-up could not be stored");
+            let status = if matches!(error, apex_watch::WatchError::Validation(_)) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            page(
+                status,
+                watch_html::render_request_page(
+                    &ctx,
+                    &WatchPageState::SubmissionFailed(Box::new(values)),
+                ),
+            )
+        }
+    }
+}
+
+async fn watch_requested(params: Result<Query<RequestedParams>, QueryRejection>) -> Html<String> {
+    let ctx = ConsoleCtx::from_env();
+    let reference = match params {
+        Ok(Query(params)) => params.reference,
+        Err(_) => None,
+    };
+    let reference = reference.filter(|value| is_subscriber_id(value));
+    let checkout = crate::config::env_value(watch_html::WATCH_CHECKOUT_ENV);
+    let checkout = checkout
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Html(watch_html::render_confirmation(
+        &ctx,
+        reference.as_deref(),
+        checkout,
+    ))
+}
+
+/// `sub_` plus 10 hex characters, the subscriber-id shape.
+fn is_subscriber_id(value: &str) -> bool {
+    value
+        .strip_prefix("sub_")
+        .is_some_and(|hex| hex.len() == 10 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Best-effort frozen outcomes append: the primary action's success never
+/// depends on the outcomes file, so every failure is only logged.
+fn append_outcome(state: &AppState, publisher: &str, kind: &str, reference: &str) {
+    let Some(appender) = &state.outcomes else {
+        return;
+    };
+    match appender.append(now_unix_ms(state), publisher, kind, reference) {
+        Ok(true) => tracing::info!(publisher, kind, "sales outcome appended"),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, publisher, kind, "sales outcome could not be appended")
+        }
+    }
 }
 
 fn page(status: StatusCode, body: String) -> Response {
@@ -3044,6 +3706,39 @@ mod tests {
         response.status()
     }
 
+    /// One GET through the real router with a session cookie, returning only
+    /// the status.
+    async fn get_status_with_cookie(app: &Router, uri: &str, cookie: &str) -> StatusCode {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .header(axum::http::header::COOKIE, cookie)
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        response.status()
+    }
+
+    /// A configured state plus a live console session bound to `publisher`.
+    fn state_with_session(publisher: &str) -> (AppState, String) {
+        let state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        )
+        .with_ledger_token(publisher, b"test-token".to_vec());
+        let opened = state
+            .ledger_sessions
+            .open(publisher, state.clock.now_unix_s() * 1000);
+        (
+            state,
+            format!("{}={}", crate::session::SESSION_COOKIE, opened.id),
+        )
+    }
+
     #[tokio::test]
     async fn font_assets_are_served_from_the_router() {
         use axum::http::header;
@@ -3118,15 +3813,14 @@ mod tests {
 
     #[tokio::test]
     async fn raw_route_ids_never_reach_the_metrics_and_the_text_stays_well_formed() {
-        let app = router(AppState::new(
-            Arc::new(StaticAuditSource::default()),
-            Arc::new(StaticLedgerSource::default()),
-        ));
+        let (state, cookie) = state_with_session("pub1");
+        let app = router(state);
         // A hostile finding id carrying a quote and a backslash,
         // percent-encoded in the URL: `zz"qq\rr`. The route matches (so the
         // request is recorded), the handler answers 404, and the labels must
         // hold the template only.
-        let status = get_status(&app, "/console/audit/findings/zz%22qq%5Crr").await;
+        let status =
+            get_status_with_cookie(&app, "/console/audit/findings/zz%22qq%5Crr", &cookie).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let text = metrics_text(&app).await;
         assert!(
@@ -3153,16 +3847,21 @@ mod tests {
         let state = AppState::new(
             Arc::new(crate::sources::JsonFileAuditSource::new(&dir)),
             Arc::new(StaticLedgerSource::default()),
-        );
+        )
+        .with_ledger_token("pub1", b"test-token".to_vec());
+        let opened = state
+            .ledger_sessions
+            .open("pub1", state.clock.now_unix_s() * 1000);
+        let cookie = format!("{}={}", crate::session::SESSION_COOKIE, opened.id);
         let app = router(state);
         assert_eq!(get_status(&app, "/healthz").await, StatusCode::OK);
         assert_eq!(get_status(&app, "/free-audit").await, StatusCode::SEE_OTHER);
         assert_eq!(
-            get_status(&app, "/console/audit/findings/not-a-finding").await,
+            get_status_with_cookie(&app, "/console/audit/findings/not-a-finding", &cookie).await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            get_status(&app, "/console/audit?platform=admob").await,
+            get_status_with_cookie(&app, "/console/audit?platform=admob", &cookie).await,
             StatusCode::INTERNAL_SERVER_ERROR
         );
         let text = metrics_text(&app).await;
@@ -3279,5 +3978,173 @@ mod tests {
         assert!(!is_request_id("req_0123456789a"));
         assert!(!is_request_id("req_zzzzzzzzzz"));
         assert!(!is_request_id(""));
+    }
+
+    #[test]
+    fn subscriber_id_shape_is_exact() {
+        assert!(is_subscriber_id("sub_0123456789"));
+        assert!(is_subscriber_id("sub_abcdefabcd"));
+        assert!(!is_subscriber_id("sub_012345678"));
+        assert!(!is_subscriber_id("sub_0123456789a"));
+        assert!(!is_subscriber_id("sub_zzzzzzzzzz"));
+        assert!(!is_subscriber_id("req_0123456789"));
+        assert!(!is_subscriber_id(""));
+    }
+
+    /// A validation success through `apply_validation` (the console
+    /// connection seam) appends the frozen `connected` outcome exactly once;
+    /// a second validation of the same `(publisher, platform)` appends
+    /// nothing, and without an outcomes appender the call site is a no-op.
+    #[tokio::test]
+    async fn a_validated_connection_appends_the_connected_outcome_write_once() {
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        use apex_connectors::transport::{
+            HttpRequest, HttpResponse, RecordingSleeper, RetryTransport, Transport, TransportError,
+        };
+
+        #[derive(Debug)]
+        struct ScriptedTransport {
+            script: Mutex<VecDeque<Result<HttpResponse, TransportError>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Transport for ScriptedTransport {
+            async fn request(&self, _request: HttpRequest) -> Result<HttpResponse, TransportError> {
+                self.script
+                    .lock()
+                    .expect("script lock")
+                    .pop_front()
+                    .unwrap_or(Err(TransportError::Network("script exhausted".into())))
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct StaticAccounts {
+            account: Option<crate::live::LiveAccount>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::live::LiveAccountStore for StaticAccounts {
+            async fn account(
+                &self,
+                _publisher: &str,
+            ) -> Result<crate::live::LiveAccount, ApiError> {
+                self.account.clone().ok_or(ApiError::NotFound)
+            }
+        }
+
+        fn ok(status: u16, body: &str) -> Result<HttpResponse, TransportError> {
+            Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
+            })
+        }
+
+        let mut platforms = std::collections::BTreeMap::new();
+        platforms.insert(
+            "applovin_max".to_string(),
+            crate::live::LiveCredentials {
+                api_key: "key".to_string(),
+                account_id: "acct".to_string(),
+                base_url: "https://api.example.test".to_string(),
+                report_key: None,
+                reporting_base_url: None,
+                refresh_token: None,
+            },
+        );
+        let account = crate::live::LiveAccount {
+            developer_site: "studio.example.com".to_string(),
+            expected_networks: Vec::new(),
+            ad_unit_ids: Vec::new(),
+            bidder_accounts: Vec::new(),
+            platforms,
+        };
+        let transport = Arc::new(ScriptedTransport {
+            script: Mutex::new(
+                vec![
+                    ok(
+                        200,
+                        r#"[{"id":"u1","name":"Banner","platform":"ios","package_name":"com.x","ad_format":"BANNER"}]"#,
+                    ),
+                    ok(200, "google.com, pub-1, DIRECT\n"),
+                ]
+                .into(),
+            ),
+        });
+        let retry: Arc<dyn Transport> = Arc::new(RetryTransport::new(
+            transport,
+            0,
+            Arc::new(RecordingSleeper::default()),
+        ));
+        let auditor = Arc::new(crate::live::LiveAuditor::new(
+            Arc::new(StaticAccounts {
+                account: Some(account),
+            }),
+            retry,
+            Arc::new(crate::clock::FixedClock::new(1_700_000_000)),
+        ));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let outcomes_path = dir.path().join("outcomes.jsonl");
+        let state = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        )
+        .with_connection_validator(auditor)
+        .with_outcomes(Arc::new(crate::outcomes::OutcomesAppender::new(
+            &outcomes_path,
+        )));
+
+        let previous = crate::connections::PlatformState::default();
+        let mut row = crate::connections::PlatformState::default();
+        apply_validation(
+            &state,
+            "pub1",
+            PlatformId::AppLovinMax,
+            true,
+            &previous,
+            &mut row,
+        )
+        .await;
+        assert_eq!(
+            row.credential_state(),
+            crate::connections::CredentialState::Validated,
+            "the scripted audit must validate"
+        );
+        let raw = std::fs::read_to_string(&outcomes_path).expect("outcomes");
+        let line: serde_json::Value = serde_json::from_str(raw.trim()).expect("frozen line");
+        assert_eq!(line["publisher"], "pub1");
+        assert_eq!(line["kind"], "connected");
+        assert_eq!(line["ref"], "pub1:applovin_max");
+
+        // The second validation of the same connection appends nothing.
+        let mut row = crate::connections::PlatformState::default();
+        apply_validation(
+            &state,
+            "pub1",
+            PlatformId::AppLovinMax,
+            true,
+            &previous,
+            &mut row,
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&outcomes_path)
+                .expect("outcomes")
+                .lines()
+                .count(),
+            1,
+            "write-once per (kind, ref)"
+        );
+
+        // Without an appender the call site stays a silent no-op.
+        let plain = AppState::new(
+            Arc::new(StaticAuditSource::default()),
+            Arc::new(StaticLedgerSource::default()),
+        );
+        append_outcome(&plain, "pub1", "connected", "pub1:applovin_max");
     }
 }

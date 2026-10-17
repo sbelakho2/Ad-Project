@@ -4,10 +4,13 @@
 //! that only logs marks nothing paid and protects against nothing. The store
 //! persists every accepted notification item, deduplicates on
 //! `eventCode` + `pspReference` (Adyen signs no timestamp, so replay
-//! protection lives here), and answers whether the event was new.
+//! protection lives here), and answers whether the event was new. The stored
+//! payment method id a first payment reports travels on the event too, so the
+//! card on file can be charged from the recorded history
+//! ([`stored_payment_method_id_for_publisher`]).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +30,11 @@ pub struct CollectionEvent {
     pub success: String,
     pub amount_value: i64,
     pub amount_currency: String,
+    /// The stored payment method the payment created or refreshed, when the
+    /// webhook reported one. Empty for events that carry none (older lines
+    /// deserialize with the default).
+    #[serde(default)]
+    pub stored_payment_method_id: String,
 }
 
 impl CollectionEvent {
@@ -40,6 +48,7 @@ impl CollectionEvent {
             success: item.success.clone(),
             amount_value: item.amount_value,
             amount_currency: item.amount_currency.clone(),
+            stored_payment_method_id: item.stored_payment_method_id.clone(),
         }
     }
 
@@ -48,6 +57,59 @@ impl CollectionEvent {
     pub fn replay_key(&self) -> String {
         format!("{}:{}", self.event_code, self.psp_reference)
     }
+
+    /// The publisher segment of the deterministic merchant reference
+    /// `apex-fee:<publisher>:<experiment>:<period>`, when it has one.
+    pub fn publisher_id(&self) -> Option<&str> {
+        let mut segments = self.merchant_reference.split(':');
+        if segments.next() != Some("apex-fee") {
+            return None;
+        }
+        segments.next().filter(|publisher| !publisher.is_empty())
+    }
+}
+
+/// The newest stored payment method id the collection log records for
+/// `publisher`, when any accepted event carried one. A missing log is "none
+/// yet"; a malformed line is a typed refusal, never a silently skipped
+/// record.
+pub fn stored_payment_method_id_for_publisher(
+    path: &Path,
+    publisher: &str,
+) -> Result<Option<String>, BillingError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(BillingError::Malformed(format!(
+                "collection log at {} could not be read: {error}",
+                path.display()
+            )))
+        }
+    };
+    let mut newest: Option<(i64, String)> = None;
+    for (index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: CollectionEvent = serde_json::from_str(line).map_err(|error| {
+            BillingError::Malformed(format!(
+                "collection log at {} line {} is corrupt: {error}",
+                path.display(),
+                index + 1
+            ))
+        })?;
+        if event.stored_payment_method_id.is_empty() || event.publisher_id() != Some(publisher) {
+            continue;
+        }
+        if newest
+            .as_ref()
+            .is_none_or(|(at, _)| event.at_unix_ms >= *at)
+        {
+            newest = Some((event.at_unix_ms, event.stored_payment_method_id.clone()));
+        }
+    }
+    Ok(newest.map(|(_, id)| id))
 }
 
 /// Where accepted collection events are recorded.
@@ -149,6 +211,7 @@ mod tests {
             success: "true".into(),
             amount_value: 1_500,
             amount_currency: "USD".into(),
+            stored_payment_method_id: String::new(),
         }
     }
 

@@ -753,4 +753,128 @@ mod tests {
             Decision::Rollback { .. }
         ));
     }
+
+    #[test]
+    fn threshold_validation_bounds_the_fill_targets() {
+        let loose_rewarded = GuardrailThresholds {
+            fill_rewarded: 0.021,
+            ..GuardrailThresholds::default()
+        };
+        let error = loose_rewarded.validate().expect_err("loose rewarded fill");
+        assert!(error.contains("fill_rewarded"), "{error}");
+        let loose_banner = GuardrailThresholds {
+            fill_banner: 0.051,
+            ..GuardrailThresholds::default()
+        };
+        let error = loose_banner.validate().expect_err("loose banner fill");
+        assert!(error.contains("fill_banner"), "{error}");
+        // The defaults and a fully tightened registration stay valid.
+        assert!(GuardrailThresholds::default().validate().is_ok());
+        let tightened = GuardrailThresholds {
+            harm_point: 0.0,
+            fill_rewarded: 0.0,
+            fill_banner: 0.0,
+            split_chi_square: f64::EPSILON,
+        };
+        assert!(tightened.validate().is_ok());
+    }
+
+    #[test]
+    fn from_record_rebuilds_non_string_before_values_verbatim() {
+        let record = LiftRecord::PreRegistration {
+            experiment_id: "exp-1".into(),
+            scope: "u1".into(),
+            before_value: serde_json::json!(42),
+            after_value: serde_json::json!({"change": "raise t1 floor by 10%"}),
+            split: 0.25,
+            metric: "revenue_per_user".into(),
+            burn_in_days: 3,
+            window_days: 14,
+            looks: 2,
+            extension_allowed: true,
+            guardrail_thresholds: serde_json::json!({
+                "harmPoint": -0.05,
+                "fillRewarded": 0.02,
+                "fillBanner": 0.05,
+                "splitChiSquare": 10.8276,
+            }),
+            code_version_hash: "abc123".into(),
+            rate_bp: 2000,
+        };
+        let prereg = PreRegistration::from_record(&record).expect("record rebuilds");
+        // A non-string prior value is rendered through its JSON form.
+        assert_eq!(prereg.before_value, "42");
+        assert_eq!(prereg.change_description, "raise t1 floor by 10%");
+        assert!(prereg.interim_look, "two looks mean the interim look is on");
+    }
+
+    #[test]
+    fn fewer_than_two_days_is_pending_not_a_verdict() {
+        let one = window(1, 0.02, false);
+        match decide(&prereg(), &input(&one, &[], false)) {
+            Decision::Pending { reason } => {
+                assert!(reason.contains("fewer than two analysis days"), "{reason}");
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unrunnable_bootstrap_is_pending_at_every_look() {
+        // Fewer than 100 iterations cannot run: the interim and the final
+        // look must wait instead of keeping on an unverified bound.
+        let interim = window(7, 0.02, false);
+        let mut interim_input = input(&interim, &[], false);
+        interim_input.bootstrap_iterations = 99;
+        match decide(&prereg(), &interim_input) {
+            Decision::Pending { reason } => {
+                assert!(
+                    reason.contains("bootstrap cross-check could not run"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+        let final_look = window(14, 0.02, true);
+        let mut final_input = input(&final_look, &[], true);
+        final_input.bootstrap_iterations = 99;
+        match decide(&prereg(), &final_input) {
+            Decision::Pending { reason } => {
+                assert!(
+                    reason.contains("bootstrap cross-check could not run"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bootstrap_disagreement_offers_the_pre_registered_extension() {
+        // Alternating +5%/-1% days: the analytic lower bound is just above
+        // zero, while whole-window blocks make the bootstrap replay the point
+        // estimate about 1.2 points higher. The cross-check disagrees and the
+        // one pre-registered extra week is offered at the final look.
+        let mut days = window(14, 0.0, true);
+        days.days.clear();
+        for i in 0..14 {
+            let ratio: f64 = if i % 2 == 0 { 0.05 } else { -0.01 };
+            days.days.push(AnalysisDay {
+                day: format!("d{i}"),
+                test_value: ratio.exp(),
+                control_value: 1.0,
+                log_ratio: ratio,
+                fill_delta: None,
+                calendar_index: i,
+            });
+        }
+        let mut final_input = input(&days, &[], true);
+        final_input.bootstrap_block_len = days.days.len();
+        match decide(&prereg(), &final_input) {
+            Decision::Extend { reason } => {
+                assert!(reason.contains("bootstrap"), "{reason}");
+            }
+            other => panic!("expected extend, got {other:?}"),
+        }
+    }
 }

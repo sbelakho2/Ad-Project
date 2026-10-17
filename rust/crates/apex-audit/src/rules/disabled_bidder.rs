@@ -44,6 +44,24 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
     }
 
     let mut findings = Vec::new();
+    // Integration counts per ASCII-case-folded network, built once: the old
+    // shape rescanned both integration lists for every candidate network,
+    // which is quadratic in networks times integration rows. ASCII folding is
+    // exactly `eq_ignore_ascii_case` (the predicate the counts encode).
+    let mut waterfall_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in &snapshot.waterfall {
+        *waterfall_counts
+            .entry(entry.network.to_ascii_lowercase())
+            .or_insert(0) += 1;
+    }
+    let mut mapping_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for group in &snapshot.mediation_groups {
+        for mapping in &group.mappings {
+            *mapping_counts
+                .entry(mapping.network.to_ascii_lowercase())
+                .or_insert(0) += 1;
+        }
+    }
     for (key, group) in groups {
         if group.qualifying_accounts == 0 {
             continue;
@@ -54,17 +72,9 @@ pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
             .next()
             .cloned()
             .unwrap_or_else(|| key.clone());
-        let waterfall_entries = snapshot
-            .waterfall
-            .iter()
-            .filter(|entry| entry.network.eq_ignore_ascii_case(&display))
-            .count();
-        let mediation_mappings = snapshot
-            .mediation_groups
-            .iter()
-            .flat_map(|group| group.mappings.iter())
-            .filter(|mapping| mapping.network.eq_ignore_ascii_case(&display))
-            .count();
+        let folded = display.to_ascii_lowercase();
+        let waterfall_entries = waterfall_counts.get(&folded).copied().unwrap_or(0);
+        let mediation_mappings = mapping_counts.get(&folded).copied().unwrap_or(0);
         let integrations = waterfall_entries + mediation_mappings;
         let integrated = integrations > 0;
         let severity = if integrated {
@@ -195,6 +205,64 @@ mod tests {
         // Byte-order smallest spelling wins: the uppercase form sorts first.
         assert_eq!(finding.subject, "network:MINTEGRAL");
         assert_eq!(finding.evidence["qualifying_accounts"], 2);
+    }
+
+    #[test]
+    fn integration_counts_match_the_linear_reference_at_ten_thousand_rows() {
+        // 10k waterfall rows and 10k mediation mappings over 250 networks,
+        // with one disabled apex-managed account whose spellings exercise the
+        // case-insensitive fold. The evidence counts must equal the pre-index
+        // predicate's per-group scan.
+        let mut snapshot = empty_snapshot();
+        snapshot.bidder_accounts = vec![
+            bidder("NetworkA", true, false),
+            bidder("networka", true, false),
+        ];
+        snapshot.waterfall = (0..10_000)
+            .map(|i| {
+                waterfall_entry(
+                    &format!("e{i}"),
+                    "uA",
+                    if i % 2 == 0 { "NETWORKA" } else { "other" },
+                )
+            })
+            .collect();
+        snapshot.mediation_groups = (0..10_000)
+            .map(|i| {
+                mediation_group(
+                    &format!("g{i}"),
+                    &[if i % 3 == 0 { "networka" } else { "other" }],
+                    "uA",
+                )
+            })
+            .collect();
+        let naive_waterfall = snapshot
+            .waterfall
+            .iter()
+            .filter(|entry| entry.network.eq_ignore_ascii_case("NetworkA"))
+            .count();
+        let naive_mappings = snapshot
+            .mediation_groups
+            .iter()
+            .flat_map(|group| group.mappings.iter())
+            .filter(|mapping| mapping.network.eq_ignore_ascii_case("NetworkA"))
+            .count();
+        assert_eq!(naive_waterfall, 5_000);
+        assert_eq!(naive_mappings, 3_334);
+        let finding = only(&snapshot);
+        assert_eq!(
+            finding.evidence["waterfall_entries"],
+            serde_json::json!(naive_waterfall)
+        );
+        assert_eq!(
+            finding.evidence["mediation_mappings"],
+            serde_json::json!(naive_mappings)
+        );
+        assert_eq!(
+            finding.evidence["integrations"],
+            serde_json::json!(naive_waterfall + naive_mappings)
+        );
+        assert_eq!(finding.severity, Severity::Critical);
     }
 
     #[test]

@@ -265,6 +265,24 @@ pub fn not_configured(ctx: &ConsoleCtx) -> String {
     )
 }
 
+/// The sign-in link refusal page: rendered for a link that cannot sign anyone
+/// in (missing, malformed, unknown, used or expired). The handler answers
+/// `400` when the request names no link and `200` when a well-formed link is
+/// dead; the page never carries the token. The copy is the documented
+/// refusal, sentence case, with no em dashes; the only recovery action is a
+/// fresh audit request.
+pub fn signin_refused(ctx: &ConsoleCtx) -> String {
+    render(
+        ctx,
+        ErrorKind::BadRequest,
+        "Sign-in refused.",
+        "This sign-in link is no longer valid. Request a new audit to receive a fresh link.",
+        None,
+        None,
+        &[("Request a new audit", "/free-audit/")],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +376,20 @@ mod tests {
         let html = not_configured(&ctx());
         assert_common(&html, "This view is not available in this deployment.");
         assert!(html.contains("Contact the account team for access."));
+    }
+
+    #[test]
+    fn signin_refusal_carries_the_documented_copy_and_no_em_dash() {
+        let html = signin_refused(&ctx());
+        assert_common(&html, "Sign-in refused.");
+        let copy =
+            "This sign-in link is no longer valid. Request a new audit to receive a fresh link.";
+        assert!(html.contains(copy), "{html}");
+        assert!(!copy.contains('\u{2014}'), "the copy has no em dash");
+        assert!(html.contains("href=\"/free-audit/\""), "{html}");
+        // The refusal page never renders a link or a token-shaped echo: it
+        // only offers a fresh request.
+        assert!(!html.contains("token="), "{html}");
     }
 
     #[test]

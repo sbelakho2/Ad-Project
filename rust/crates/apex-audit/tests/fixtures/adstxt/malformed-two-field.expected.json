@@ -1,0 +1,16 @@
+{
+  "file": "malformed-two-field.txt",
+  "note": "Too-few-field lines (one or two fields), an empty ad system domain, a non-variable NAME line and an invalid variable name; every line is malformed.",
+  "errors": [
+    {"line": 1, "kind": "TooFewFields"},
+    {"line": 2, "kind": "TooFewFields"},
+    {"line": 3, "kind": "BadDomain"},
+    {"line": 4, "kind": "TooFewFields"},
+    {"line": 5, "kind": "TooFewFields"},
+    {"line": 6, "kind": "TooFewFields"},
+    {"line": 7, "kind": "TooFewFields"}
+  ],
+  "records": 0,
+  "variables": 0,
+  "domains": []
+}

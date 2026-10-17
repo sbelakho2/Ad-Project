@@ -214,4 +214,20 @@ mod tests {
             SwitchbackDecision::NotBillable { .. }
         ));
     }
+
+    #[test]
+    fn a_plan_with_too_few_blocks_per_arm_is_never_billable() {
+        let plan = SwitchbackPlan {
+            blocks: vec![
+                true, false, true, false, true, false, true, false, true, false,
+            ],
+            blocks_per_arm: 5,
+        };
+        match decide(&plan, &[], 6) {
+            SwitchbackDecision::NotBillable { reason } => {
+                assert!(reason.contains("fewer than six blocks per arm"), "{reason}");
+            }
+            other => panic!("expected not billable, got {other:?}"),
+        }
+    }
 }

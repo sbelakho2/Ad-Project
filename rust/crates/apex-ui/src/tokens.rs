@@ -775,6 +775,33 @@ mod contrast {
     }
 
     #[test]
+    fn the_css_scanning_helpers_read_declarations_exactly() {
+        // A declaration block without a colon is skipped, not misparsed.
+        assert_eq!(
+            hex_after("x;color:#123456", "color"),
+            Some("#123456".to_string())
+        );
+        assert_eq!(hex_after("color:#123456", "background"), None);
+        // The size/weight helpers read only their own properties.
+        assert_eq!(font_size_px("x;font-size:18.66px"), Some(18.66));
+        assert_eq!(font_size_px("font-weight:700"), None);
+        assert_eq!(font_weight("x;font-weight:700"), Some(700.0));
+        assert_eq!(font_weight("font-size:18.66px"), None);
+        assert_eq!(font_weight("font-weight:heavy"), None);
+    }
+
+    #[test]
+    fn large_text_accepts_24px_or_1866px_bold_only() {
+        assert!(large_text("font-size:24px"));
+        assert!(large_text("font-size:30px;font-weight:400"));
+        assert!(large_text("font-size:18.66px;font-weight:700"));
+        assert!(!large_text("font-size:18.66px;font-weight:400"));
+        assert!(!large_text("font-size:18.66px"));
+        assert!(!large_text("font-size:12px;font-weight:900"));
+        assert!(!large_text("color:#000000"));
+    }
+
+    #[test]
     fn contrast_formula_matches_reference_values() {
         let black_white = contrast("#000000", "#ffffff");
         assert!(

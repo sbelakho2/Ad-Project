@@ -189,6 +189,13 @@ pub struct CycleOutcome {
     /// Proposals held for explicit approval (approval mode).
     #[serde(default)]
     pub awaiting_approval: u32,
+    /// Proposals held because the platform adapter has not verified the
+    /// operation as writable (`verify-live`): one typed reason per held
+    /// proposal, `awaiting live verification for <platform>: <operation>`,
+    /// in proposal order. A held proposal writes nothing and the pass
+    /// continues past it.
+    #[serde(default)]
+    pub awaiting_verification: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -247,9 +254,6 @@ pub enum PlanError {
     #[error("no baseline for comparison: {reason}")]
     NoBaseline { reason: String },
 
-    #[error("endpoint for operation '{operation}' is not writable (verify-live)")]
-    EndpointNotWritable { operation: String },
-
     #[error("apply failed: {source}")]
     ApplyFailed { source: PlatformError },
 
@@ -258,6 +262,18 @@ pub enum PlanError {
 
     #[error("ledger error: {0}")]
     Ledger(#[from] apex_proof::LedgerError),
+
+    /// A signed lift payload in the ledger is not valid JSON. The scans refuse
+    /// the pass instead of skipping the record: a hostile payload must never
+    /// silently shrink the set of experiments that settle.
+    #[error("ledger record {seq} has an unparseable lift payload: {detail}")]
+    MalformedLiftRecord { seq: u64, detail: String },
+
+    /// A billing/VAT refusal, typed by the billing crate: a missing seller
+    /// profile, an unusable invoice register, or a refused VAT treatment
+    /// carries its own variant and field names instead of a string.
+    #[error("billing: {0}")]
+    Billing(#[from] apex_billing::BillingError),
 
     #[error("validation: {0}")]
     Validation(String),

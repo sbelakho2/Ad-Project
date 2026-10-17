@@ -304,6 +304,32 @@ mod tests {
     }
 
     #[test]
+    fn cuped_adjusts_matched_users_and_passes_unmatched_ones_through() {
+        let pretest: BTreeMap<String, f64> = [("a", 1.0), ("b", 2.0)]
+            .into_iter()
+            .map(|(user, value)| (user.to_string(), value))
+            .collect();
+        let posttest: BTreeMap<String, f64> = [("a", 2.0), ("b", 4.0), ("c", 99.0)]
+            .into_iter()
+            .map(|(user, value)| (user.to_string(), value))
+            .collect();
+        let adjusted = cuped_adjust(&pretest, &posttest);
+        // theta = 2 over this pair set: a -> 2 - 2*(1 - 1.5) = 3.
+        assert!((adjusted["a"] - 3.0).abs() < 1e-12, "{}", adjusted["a"]);
+        assert!((adjusted["b"] - 3.0).abs() < 1e-12, "{}", adjusted["b"]);
+        // The user with no pre value has no theta term and passes through.
+        assert_eq!(adjusted["c"], 99.0);
+    }
+
+    #[test]
+    fn overflowing_arm_statistics_fail_closed() {
+        // The Welch standard error overflows to NaN: no estimate is emitted.
+        assert!(estimate_user_lift(&[1e308, 0.0], &[1.0, 1.0]).is_none());
+        // A finite pair whose ratio overflows the log-ratio also refuses.
+        assert!(estimate_user_lift(&[1e-300, 1e-300], &[1e300, 1e300]).is_none());
+    }
+
+    #[test]
     fn the_precise_path_runs_end_to_end() {
         let estimate = lift_from_postbacks(&impressions(), None).expect("estimate");
         assert!(estimate.lower_90 > 0.0);

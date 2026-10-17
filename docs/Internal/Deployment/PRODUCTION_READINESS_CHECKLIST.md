@@ -713,7 +713,7 @@ References
 - [ ] Repeat scenario in live mode with €0 invoice once Adyen live.
 
 ## 7. Email (Self-Hosted Postfix)
-- [x] Configure Postfix MTA on Test Server (157.90.126.205).
+- [x] Configure Postfix MTA on Test Server (203.0.113.11).
 - [x] Configure OpenDKIM with apexmail selector.
 - [x] Update DNS: MX, SPF, DKIM, DMARC records.
 - [x] Set PTR record in Hetzner Cloud Console.
@@ -737,7 +737,7 @@ References
 
 ## 9. Sales Automation
 
-> **⚠️ Architecture Note (January 2026):** All **Autonomous Sales V2** (outbound prospecting, campaign execution) runs on the **Test Server** (157.90.126.205:4001).
+> **⚠️ Architecture Note (January 2026):** All **Autonomous Sales V2** (outbound prospecting, campaign execution) runs on the **Test Server** (203.0.113.11:4001).
 > The **App Server control-plane is strictly a proxy client**.
 > V1 cron jobs (trial reminders, dunning, usage sync) still run on the **App Server backend** (PM2).
 

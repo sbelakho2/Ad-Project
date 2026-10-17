@@ -13,6 +13,9 @@
 
 mod common;
 
+use std::sync::Arc;
+
+use apex_analytics::store::EventStore;
 use apex_api::html::audit::finding_id;
 use apex_api::router;
 use apex_core::PlatformId;
@@ -57,7 +60,8 @@ async fn overview_page_renders_cards_steps_and_health_links() {
     let temp = TempDir::new("console-root");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(&app, get_with_cookie("/", &cookie)).await;
     assert_eq!(response.status, 200);
     assert!(response.content_type().starts_with(HTML));
     for needle in [
@@ -81,16 +85,19 @@ async fn overview_page_renders_cards_steps_and_health_links() {
 #[tokio::test]
 async fn overview_first_run_explains_the_arrangement() {
     let temp = TempDir::new("console-first-run");
-    // No snapshot and no configured publisher ledger: the first-run state.
+    // No snapshot and no configured publisher ledger: the first-run state,
+    // rendered for the session's publisher.
     let state = apex_api::AppState::new(
         std::sync::Arc::new(apex_api::JsonFileAuditSource::new(temp.path())),
         std::sync::Arc::new(apex_api::FileLedgerSource::new(
             temp.path(),
             std::collections::HashMap::new(),
         )),
-    );
+    )
+    .with_ledger_token(PUBLISHER, LEDGER_TOKEN.as_bytes().to_vec());
     let app = router(state);
-    let response = send(&app, get("/")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(&app, get_with_cookie("/", &cookie)).await;
     assert_eq!(response.status, 200);
     assert!(response.body.contains("No audit snapshot is available."));
     assert!(
@@ -112,7 +119,8 @@ async fn audit_form_is_a_plain_get_form_with_all_platforms() {
     let temp = TempDir::new("console-audit-form");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/console/audit")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(&app, get_with_cookie("/console/audit", &cookie)).await;
     assert_eq!(response.status, 200);
     assert!(response.content_type().starts_with(HTML));
     assert!(response
@@ -146,7 +154,12 @@ async fn audit_page_ranks_findings_with_stable_detail_links() {
     let temp = TempDir::new("console-audit-golden");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/console/audit?platform=admob")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(
+        &app,
+        get_with_cookie("/console/audit?platform=admob", &cookie),
+    )
+    .await;
     assert_eq!(response.status, 200);
     assert!(response.content_type().starts_with(HTML));
     assert!(response.body.contains("<h1>AdMob audit</h1>"));
@@ -168,9 +181,13 @@ async fn audit_page_ranks_findings_with_stable_detail_links() {
     assert_no_raw_script(&response.body, "audit report");
 
     // The finding id is stable across renders and the link resolves.
-    let again = send(&app, get("/console/audit?platform=admob")).await;
+    let again = send(
+        &app,
+        get_with_cookie("/console/audit?platform=admob", &cookie),
+    )
+    .await;
     assert!(again.body.contains(&link));
-    let detail = send(&app, get(&link)).await;
+    let detail = send(&app, get_with_cookie(&link, &cookie)).await;
     assert_eq!(detail.status, 200, "{}", detail.body);
     assert!(detail.body.contains("Estimated monthly recovery:"));
     assert!(detail.body.contains("The source evidence"));
@@ -187,12 +204,17 @@ async fn audit_finding_detail_escapes_hostile_subjects() {
     let temp = TempDir::new("console-audit-finding-xss");
     write_snapshot(temp.path(), "admob", &minimal_snapshot(&[HOSTILE]));
     let app = router(file_state(temp.path(), pub1_keys()));
+    let cookie = open_ledger_session(&app).await;
     let id = finding_id(
         "stale_floor",
         "admob",
         &format!("ad_unit:{HOSTILE}:country:EE"),
     );
-    let response = send(&app, get(&format!("/console/audit/findings/{id}"))).await;
+    let response = send(
+        &app,
+        get_with_cookie(&format!("/console/audit/findings/{id}"), &cookie),
+    )
+    .await;
     assert_eq!(response.status, 200);
     assert!(response
         .body
@@ -205,8 +227,13 @@ async fn audit_unknown_finding_id_is_a_404() {
     let temp = TempDir::new("console-audit-finding-404");
     write_standard_fixture(temp.path());
     let app = router(file_state(temp.path(), pub1_keys()));
+    let cookie = open_ledger_session(&app).await;
     for id in ["f_000000000000", "not-an-id", "f_0123456789ab"] {
-        let response = send(&app, get(&format!("/console/audit/findings/{id}"))).await;
+        let response = send(
+            &app,
+            get_with_cookie(&format!("/console/audit/findings/{id}"), &cookie),
+        )
+        .await;
         assert_eq!(response.status, 404, "{id}");
         assert!(
             response.body.contains("No finding matches this address."),
@@ -220,9 +247,13 @@ async fn audit_unknown_finding_id_is_a_404() {
 async fn audit_unknown_platform_renders_escaped_banner() {
     let temp = TempDir::new("console-audit-400");
     let app = router(file_state(temp.path(), pub1_keys()));
+    let cookie = open_ledger_session(&app).await;
     let response = send(
         &app,
-        get(&format!("/console/audit?platform={HOSTILE_ENCODED}")),
+        get_with_cookie(
+            &format!("/console/audit?platform={HOSTILE_ENCODED}"),
+            &cookie,
+        ),
     )
     .await;
     assert_eq!(response.status, 400);
@@ -244,7 +275,12 @@ async fn audit_unknown_platform_renders_escaped_banner() {
 async fn audit_missing_snapshot_renders_the_frozen_404_with_the_selected_platform() {
     let temp = TempDir::new("console-audit-404");
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/console/audit?platform=levelplay")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(
+        &app,
+        get_with_cookie("/console/audit?platform=levelplay", &cookie),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert!(response.body.contains("No audit snapshot is available."));
     assert!(response
@@ -265,7 +301,12 @@ async fn csv_export_is_an_attachment_with_rfc4180_quoting_and_utc_dates() {
         &minimal_snapshot(&[HOSTILE, "a,b\"c"]),
     );
     let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, get("/console/audit/export.csv?platform=admob")).await;
+    let cookie = open_ledger_session(&app).await;
+    let response = send(
+        &app,
+        get_with_cookie("/console/audit/export.csv?platform=admob", &cookie),
+    )
+    .await;
     assert_eq!(response.status, 200, "{}", response.body);
     assert!(response.content_type().starts_with("text/csv"));
     let disposition = response
@@ -296,15 +337,254 @@ async fn csv_export_is_an_attachment_with_rfc4180_quoting_and_utc_dates() {
         "/console/audit/export.csv",
         "/console/audit/export.csv?platform=tiktok",
     ] {
-        let response = send(&app, get(uri)).await;
+        let response = send(&app, get_with_cookie(uri, &cookie)).await;
         assert_eq!(response.status, 400, "{uri}");
         assert!(response.content_type().starts_with(HTML), "{uri}");
         assert!(response.body.contains("Check the request."), "{uri}");
         assert!(response.body.contains("Back to the overview"), "{uri}");
     }
-    let response = send(&app, get("/console/audit/export.csv?platform=levelplay")).await;
+    let response = send(
+        &app,
+        get_with_cookie("/console/audit/export.csv?platform=levelplay", &cookie),
+    )
+    .await;
     assert_eq!(response.status, 404);
     assert!(response.body.contains("No audit snapshot is available."));
+}
+
+// --- session gate ------------------------------------------------------------
+
+/// Every console GET route that must require a live session, with a
+/// well-formed placeholder for each path parameter.
+const SESSION_REQUIRED_GET_ROUTES: &[&str] = &[
+    "/",
+    "/console/audit",
+    "/console/audit?platform=admob",
+    "/console/audit/export.csv?platform=admob",
+    "/console/audit/findings/f_0123456789ab",
+    "/console/ledger/records/0",
+    "/console/connections",
+    "/console/connections/admob",
+    "/console/proposals",
+    "/console/proposals/p_missing",
+    "/console/experiments",
+    "/console/experiments/exp_missing",
+    "/console/experiments/exp_missing/incident",
+    "/console/billing",
+    "/console/billing/invoices/2026-10",
+    "/console/settings",
+    "/console/settings/access",
+    "/console/settings/policy",
+    "/console/settings/monitoring",
+    "/console/analytics",
+];
+
+/// The billing record that gives [`PUBLISHER2`] its own fee-bearing month.
+fn billing_record() -> LedgerRecord {
+    use sha2::{Digest, Sha256};
+    let payload = r#"{"type":"monthlyBilling","changeId":"ch_9999","month":"2026-10","scopeRevenue":51500000000,"lambda":0.03,"factor":1.03,"incremental":1500000000,"logShare":1.0,"rateBp":2000,"feeMicros":300000000,"billedDays":31,"monthDays":31}"#;
+    let digest = hex::encode(Sha256::digest(payload.as_bytes()));
+    LedgerRecord::lift_record(1_792_000_000_000, &digest, payload)
+}
+
+#[tokio::test]
+async fn every_console_get_without_a_session_redirects_to_the_access_panel() {
+    let temp = TempDir::new("console-gate");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    for uri in SESSION_REQUIRED_GET_ROUTES {
+        let response = send(&app, get(uri)).await;
+        assert_eq!(response.status, 303, "{uri}: {}", response.body);
+        assert_eq!(
+            response
+                .headers
+                .get("location")
+                .and_then(|value| value.to_str().ok()),
+            Some("/console/ledger"),
+            "{uri}"
+        );
+    }
+
+    // The documented exceptions stay reachable: the access panel itself is
+    // the entry point (200), the bare console address redirects there, and
+    // the free-audit flow is public marketing.
+    let panel = send(&app, get("/console/ledger")).await;
+    assert_eq!(panel.status, 200);
+    assert!(panel.body.contains("<h1>Open your signed change log</h1>"));
+    let bare = send(&app, get("/console")).await;
+    assert_eq!(bare.status, 303);
+    assert_eq!(
+        bare.headers
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/console/ledger")
+    );
+    assert_eq!(send(&app, get("/free-audit/")).await.status, 200);
+    assert_eq!(send(&app, get("/audit-requested/")).await.status, 200);
+}
+
+#[tokio::test]
+async fn every_console_get_renders_for_the_live_session_publisher() {
+    let temp = TempDir::new("console-gate-session");
+    write_standard_fixture(temp.path());
+    let proposals = temp.path().join("proposals");
+    std::fs::create_dir_all(&proposals).expect("proposals dir");
+    let store = Arc::new(apex_analytics::MemoryStore::new());
+    store.ensure_schema().await.expect("schema");
+    let analytics = apex_api::AnalyticsAccess::enabled(
+        Arc::new(apex_analytics::MemoryReader::new((*store).clone())),
+        apex_analytics::AnalyticsClient::new(
+            {
+                let concrete: Arc<apex_analytics::MemoryStore> = Arc::clone(&store);
+                let store: Arc<dyn apex_analytics::store::EventStore> = concrete;
+                store
+            },
+            "test",
+            "apex-api-test",
+        ),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_proposal_store(Arc::new(apex_api::proposals::FileProposalStore::new(
+            &proposals,
+        )))
+        .with_analytics(analytics);
+    let app = router(state);
+    let cookie = open_ledger_session(&app).await;
+
+    let cases: &[(&str, u16)] = &[
+        ("/", 200),
+        ("/console/audit", 200),
+        ("/console/audit?platform=admob", 200),
+        ("/console/audit/findings/f_0123456789ab", 404),
+        ("/console/ledger/records/0", 200),
+        ("/console/connections", 200),
+        ("/console/connections/admob", 200),
+        ("/console/proposals", 200),
+        ("/console/proposals/p_missing", 404),
+        ("/console/experiments", 200),
+        ("/console/experiments/exp_missing", 404),
+        ("/console/experiments/exp_missing/incident", 404),
+        ("/console/billing", 200),
+        ("/console/billing/invoices/2026-10", 404),
+        ("/console/settings", 200),
+        ("/console/settings/access", 200),
+        ("/console/settings/policy", 200),
+        ("/console/settings/monitoring", 200),
+        ("/console/analytics", 200),
+    ];
+    for (uri, expected) in cases {
+        let response = send(&app, get_with_cookie(uri, &cookie)).await;
+        assert_eq!(
+            response.status.as_u16(),
+            *expected,
+            "{uri}: {} {}",
+            response.status,
+            response.body
+        );
+        assert!(response.content_type().starts_with(HTML), "{uri}");
+        assert_no_raw_script(&response.body, uri);
+    }
+    // The CSV export renders its machine shape for the session too.
+    let csv = send(
+        &app,
+        get_with_cookie("/console/audit/export.csv?platform=admob", &cookie),
+    )
+    .await;
+    assert_eq!(csv.status, 200, "{}", csv.body);
+    assert!(
+        csv.content_type().starts_with("text/csv"),
+        "{}",
+        csv.content_type()
+    );
+}
+
+#[tokio::test]
+async fn a_deployment_without_console_credentials_keeps_the_503_panels() {
+    // No ledger tokens and no stores: no session can ever be opened, so the
+    // workspace pages keep the not-configured panel instead of redirecting to
+    // an access panel that could not authorize anyone.
+    let temp = TempDir::new("console-no-auth");
+    let state = apex_api::AppState::new(
+        std::sync::Arc::new(apex_api::JsonFileAuditSource::new(temp.path())),
+        std::sync::Arc::new(apex_api::FileLedgerSource::new(
+            temp.path(),
+            std::collections::HashMap::new(),
+        )),
+    );
+    let app = router(state);
+    for uri in [
+        "/console/connections",
+        "/console/connections/admob",
+        "/console/proposals",
+        "/console/experiments",
+        "/console/billing",
+        "/console/settings",
+        "/console/settings/access",
+        "/console/settings/policy",
+        "/console/settings/monitoring",
+        "/console/analytics",
+    ] {
+        let response = send(&app, get(uri)).await;
+        assert_eq!(response.status, 503, "{uri}: {}", response.body);
+        assert!(
+            response
+                .body
+                .contains("This view is not available in this deployment."),
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn two_sessions_see_their_own_publishers_data() {
+    let temp = TempDir::new("console-two-sessions");
+    write_standard_fixture(temp.path());
+    write_ledger(
+        temp.path(),
+        PUBLISHER2,
+        &seed_keypair(9),
+        vec![billing_record()],
+    );
+    let state = file_state(temp.path(), two_publisher_keys())
+        .with_ledger_token(PUBLISHER2, LEDGER_TOKEN2.as_bytes().to_vec());
+    let app = router(state);
+    let cookie1 = open_ledger_session(&app).await;
+    let exchange = send(
+        &app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER2}&token={LEDGER_TOKEN2}"),
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, 303, "second publisher exchange");
+    let cookie2 = set_cookie(&exchange)
+        .expect("second session cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    let page1 = send(&app, get_with_cookie("/console/ledger", &cookie1)).await;
+    assert_eq!(page1.status, 200);
+    assert!(page1.body.contains("Publisher pub1"), "{}", page1.body);
+    assert!(page1.body.contains("2 records / Verified"));
+    assert!(!page1.body.contains("Publisher pub2"));
+
+    let page2 = send(&app, get_with_cookie("/console/ledger", &cookie2)).await;
+    assert_eq!(page2.status, 200);
+    assert!(page2.body.contains("Publisher pub2"), "{}", page2.body);
+    assert!(page2.body.contains("1 record / Verified"));
+    assert!(!page2.body.contains("Publisher pub1"));
+
+    // Billing reads the session's publisher too: pub2's recorded month
+    // renders its signed fee, pub1's register never shows it.
+    let billing2 = send(&app, get_with_cookie("/console/billing", &cookie2)).await;
+    assert_eq!(billing2.status, 200, "{}", billing2.body);
+    assert!(billing2.body.contains("$300.00"), "{}", billing2.body);
+    let billing1 = send(&app, get_with_cookie("/console/billing", &cookie1)).await;
+    assert_eq!(billing1.status, 200, "{}", billing1.body);
+    assert!(!billing1.body.contains("$300.00"), "{}", billing1.body);
 }
 
 // --- change-log access and session ------------------------------------------
@@ -917,9 +1197,9 @@ async fn console_pages_are_html_and_contain_no_script_elements() {
     let app = router(file_state(temp.path(), pub1_keys()));
     let cookie = open_ledger_session(&app).await;
     let pages: Vec<(&str, Option<&str>)> = vec![
-        ("/", None),
-        ("/console/audit", None),
-        ("/console/audit?platform=admob", None),
+        ("/", Some(cookie.as_str())),
+        ("/console/audit", Some(cookie.as_str())),
+        ("/console/audit?platform=admob", Some(cookie.as_str())),
         ("/console/ledger", None),
         ("/console/ledger", Some(cookie.as_str())),
         ("/console/ledger/records/0", Some(cookie.as_str())),
@@ -949,11 +1229,12 @@ async fn console_duplicate_query_keys_are_html_bad_request() {
     // refusals must stay HTML with the pinned error page.
     let temp = TempDir::new("console-dup-query");
     let app = router(file_state(temp.path(), pub1_keys()));
+    let cookie = open_ledger_session(&app).await;
     for uri in [
         "/console/audit?platform=admob&platform=admob",
         "/console/audit/export.csv?platform=admob&platform=admob",
     ] {
-        let response = send(&app, get(uri)).await;
+        let response = send(&app, get_with_cookie(uri, &cookie)).await;
         assert_eq!(response.status, 400, "{uri}");
         assert!(
             response.content_type().starts_with(HTML),
@@ -998,4 +1279,194 @@ async fn oversized_request_body_is_html_413() {
         "{}",
         response.body
     );
+}
+
+// --- setup watch ------------------------------------------------------------
+
+#[tokio::test]
+async fn watch_get_redirects_and_the_page_renders_the_sign_up_form() {
+    let temp = TempDir::new("watch-page");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let redirect = send(&app, get("/watch")).await;
+    assert_eq!(redirect.status, 303);
+    assert_eq!(
+        redirect
+            .headers
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/watch/")
+    );
+    let response = send(&app, get("/watch/")).await;
+    assert_eq!(response.status, 200);
+    assert!(response.content_type().starts_with(HTML));
+    assert!(response
+        .body
+        .contains("<header class=\"marketing-header\">"));
+    assert!(response
+        .body
+        .contains("<h1>Watch your app-ads.txt every day.</h1>"));
+    for needle in [
+        ">Domain</label>",
+        ">Email</label>",
+        ">Network account ids (optional)</label>",
+        ">Tier</label>",
+        ">Start the setup watch</button>",
+        "No platform keys are needed for the watch.",
+        "Read the privacy notice",
+    ] {
+        assert!(response.body.contains(needle), "missing {needle}");
+    }
+    assert!(response
+        .body
+        .contains("<form method=\"post\" action=\"/watch\">"));
+    assert_single_h1(&response.body, "watch page");
+    assert_no_raw_script(&response.body, "watch page");
+}
+
+#[tokio::test]
+async fn watch_validation_renders_the_exact_copy_and_preserves_safe_values() {
+    let temp = TempDir::new("watch-invalid");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let empty = send(&app, post_form("/watch", "")).await;
+    assert_eq!(empty.status, 400);
+    for message in [
+        "Enter the domain where your app-ads.txt lives.",
+        "Enter an email address we can reply to.",
+        "Check the highlighted fields before sending.",
+    ] {
+        assert!(empty.body.contains(message), "missing {message}");
+    }
+    assert!(!empty.body.contains("Your request was not confirmed."));
+
+    let hostile =
+        "domain=%22%20onmouseover%3D%22alert(1)&email=you%40studio.example&accounts=garbage+line";
+    let response = send(&app, post_form("/watch", hostile)).await;
+    assert_eq!(response.status, 400);
+    assert!(response
+        .body
+        .contains("Enter the domain where your app-ads.txt lives."));
+    assert!(response
+        .body
+        .contains("List one network = account id per line."));
+    assert!(response
+        .body
+        .contains("value=\"&quot; onmouseover=&quot;alert(1)\""));
+    assert!(!response.body.contains("onmouseover=\"alert(1)\""));
+    assert_no_raw_script(&response.body, "watch invalid");
+}
+
+#[tokio::test]
+async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
+    let temp = TempDir::new("watch-ok");
+    let watch_root = temp.path().join("watch");
+    let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
+    let state = file_state(temp.path(), pub1_keys())
+        .with_watch(Arc::new(apex_watch::SubscriberStore::open(&watch_root)))
+        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
+    let app = router(state);
+    let body = "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1&tier=core";
+    let first = send(&app, post_form("/watch", body)).await;
+    assert_eq!(first.status, 303, "{}", first.body);
+    let location = first
+        .headers
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("location")
+        .to_string();
+    let reference = location
+        .strip_prefix("/watch/requested?ref=")
+        .expect("the confirmation reference");
+    assert!(reference.starts_with("sub_"), "{reference}");
+    assert_eq!(reference.len(), 14, "{reference}");
+    assert!(
+        reference[4..].bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{reference}"
+    );
+    assert!(
+        !location.to_ascii_lowercase().contains("northstar"),
+        "the id carries no personal data: {location}"
+    );
+
+    // The stored subscriber row carries the normalized values.
+    let stored = std::fs::read_to_string(watch_root.join("subscribers.jsonl")).expect("rows");
+    assert_eq!(stored.lines().count(), 1);
+    let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("row");
+    assert_eq!(row["domain"], "northstar.example");
+    assert_eq!(row["email"], "Founder@northstar.example");
+    assert_eq!(row["tier"], "core");
+    assert_eq!(row["status"], "active");
+    assert_eq!(row["accountIds"]["admob.com"], "pub-1");
+    assert_eq!(row["id"], reference);
+
+    // The frozen outcome line rode along, exactly once.
+    let outcomes = std::fs::read_to_string(&outcomes_path).expect("outcomes");
+    let line: serde_json::Value = serde_json::from_str(outcomes.trim()).expect("line");
+    assert_eq!(line["publisher"], "northstar-example");
+    assert_eq!(line["kind"], "watch_signup");
+    assert_eq!(line["ref"], reference);
+
+    // A repeat submission inside the window returns the same id and appends
+    // neither a subscriber row nor a second outcome line.
+    let repeat = send(&app, post_form("/watch", body)).await;
+    assert_eq!(repeat.status, 303);
+    assert_eq!(
+        repeat
+            .headers
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some(location.as_str())
+    );
+    assert_eq!(
+        std::fs::read_to_string(watch_root.join("subscribers.jsonl"))
+            .expect("rows")
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outcomes_path)
+            .expect("outcomes")
+            .lines()
+            .count(),
+        1
+    );
+
+    // The confirmation renders; the checkout line depends on the deployment
+    // variable, which this test only observes.
+    let confirmation = send(&app, get(&location)).await;
+    assert_eq!(confirmation.status, 200);
+    assert!(confirmation
+        .body
+        .contains("<h1>Your watch is requested.</h1>"));
+    assert!(confirmation
+        .body
+        .contains(&format!("Confirmation ID: <code>{reference}</code>")));
+    let checkout = std::env::var("APEX_WATCH_CHECKOUT_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if checkout.is_some() {
+        assert!(confirmation.body.contains("Complete the checkout"));
+    } else {
+        assert!(confirmation
+            .body
+            .contains("We will email a payment link before the watch starts."));
+    }
+    assert_single_h1(&confirmation.body, "watch confirmation");
+    assert_no_raw_script(&confirmation.body, "watch confirmation");
+}
+
+#[tokio::test]
+async fn watch_signup_without_a_store_is_503_with_the_retry_form() {
+    let temp = TempDir::new("watch-no-store");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(
+        &app,
+        post_form("/watch", "domain=northstar.example&email=a%40x.example"),
+    )
+    .await;
+    assert_eq!(response.status, 503);
+    assert!(response.body.contains("Your request was not confirmed."));
+    assert!(response.body.contains(">Try again</button>"));
+    assert!(response.body.contains("value=\"northstar.example\""));
+    assert_no_raw_script(&response.body, "watch no store");
 }

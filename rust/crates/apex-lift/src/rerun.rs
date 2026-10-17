@@ -216,4 +216,22 @@ mod tests {
         let rows = parse_csv(CSV).expect("rows");
         assert!(rerun(&rows, 10, 0.5).is_err());
     }
+
+    #[test]
+    fn a_zero_user_test_row_is_skipped_and_extra_days_truncate() {
+        // Ten clean days but the fifth test row reports zero users: that day
+        // is skipped, leaving nine ratios for a seven-day window.
+        let mut csv = String::from("day,arm,revenue,users\n");
+        for day in 1..=10 {
+            let users = if day == 5 { "0" } else { "1000" };
+            csv.push_str(&format!("2026-10-{day:02},control,100.00,1000\n"));
+            csv.push_str(&format!("2026-10-{day:02},test,106.00,{users}\n"));
+        }
+        let rows = parse_csv(&csv).expect("rows");
+        let report = rerun(&rows, 7, 0.5).expect("report");
+        // Nine usable days truncate to the whole-week window of seven.
+        assert_eq!(report.days, 7);
+        assert_eq!(report.daily_log_ratios.len(), 7);
+        assert!((report.lift - 0.06).abs() < 1e-9, "{}", report.lift);
+    }
 }

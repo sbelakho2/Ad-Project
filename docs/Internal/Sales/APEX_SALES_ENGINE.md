@@ -55,9 +55,10 @@ on day one and sharpens as outcomes arrive.
 - Timing and stopping: pooled Beta posteriors per local hour; per-step
   hazards decide whether a follow-up is still worth sending.
 - Domain health: Bayesian rate tests on complaints and bounces plus a
-  Bernoulli cumulative-sum test (Page, 1954). The daily cap warms up from
-  20 to 150 sends and backs off on warnings; a breach quarantines the
-  domain until you run `reset-health`.
+  Bernoulli cumulative-sum test (Page, 1954). Each sending domain warms up
+  from 20 to 150 sends with its own cap and its own breakers; a breach
+  pauses or quarantines only that domain, and the full-volume section below
+  covers running several domains at once.
 - Measurement: a randomized 10% of publishers is never emailed; the
   report shows the paid-rate difference against that holdout with a
   Newcombe interval. Calibration is reported as Brier score, log loss and
@@ -104,8 +105,12 @@ starts in `shadow` mode: it plans and writes every message it would send to
 3. Read a day of previews in the outbox. When they are right, set
    `APEX_SALES_MODE=approval` and approve touches with `apex-sales approve`,
    or set `autonomous` to let the gate decide.
-4. Pipe every reply and bounce into `apex-sales ingest message.eml`, and
-   record later stages: `apex-sales record studio.example connected`.
+4. Pipe every reply and bounce into `apex-sales ingest message.eml` (or
+   `ingest --stdin` from a pipe, or `ingest --maildir <dir>` for a whole
+   directory), and record later stages: `apex-sales record studio.example
+   connected`. The hourly `run` imports the outcomes file that `apex-api`
+   appends whenever it exists, so connections, invoices and watch signups
+   need no second timer.
 5. Read `apex-sales report` weekly. It shows domain health, feature
    weights with intervals, message posteriors, funnel rates, calibration
    and the holdout effect.
@@ -116,6 +121,113 @@ Sending needs `APEX_SALES_FROM`, `APEX_SALES_FROM_NAME`,
 unprivileged client such as `msmtp` relaying through the authenticated
 outbound host, with `SPF`, `DKIM` and `DMARC` aligned for the sending
 domain. Discovery needs `curl` on the host.
+
+## Full volume
+
+At full volume several sending domains carry the day's plan, the second
+offer rides the same bandit, and the outcomes and replies flow in without an
+operator. The knobs and the data flow:
+
+### Several sending domains
+
+Every sending domain has its own sender identity, its own daily cap and its
+own health. Configure them with `APEX_SALES_SENDERS_FILE`, a CSV with a
+header:
+
+```csv
+email,name,company,postal_address,unsubscribe_url
+aaron@apexmediation.ee,Aaron at Apex,Apex OÜ,"Kadaka tee 1, Tallinn, Estonia",https://apexmediation.ee/u/
+dana@apexmediation.com,Dana at Apex,Apex OÜ,"Kadaka tee 1, Tallinn, Estonia",
+```
+
+or inline with `APEX_SALES_SENDERS`: entries separated by `;`, fields by
+`|`, in the same column order (`email|name|company|postal_address|unsubscribe_url`).
+Domains must be unique, and a row with an invalid email refuses the whole
+file. Without either variable the single `APEX_SALES_FROM` identity is used
+and behaviour is exactly what it was.
+
+- Each domain warms up on its own from 20 to `APEX_SALES_DAILY_MAX`
+  (default 150) sends. The engine's daily cap is the sum of the per-domain
+  caps, so two warming domains may send 40 on their first day, not 20.
+- The day's plan keeps its expected-value ranking and is spread round-robin
+  over the domains that may send, in the configured order. The best planned
+  touch goes to the first domain with capacity left, the next to the next
+  domain, and so on. A paused or quarantined domain is skipped, so its share
+  moves to the healthy domains. With one domain the rule reduces to the old
+  one: best ranked touches up to the cap.
+- Complaints and bounces pause or quarantine only the domain that sent the
+  message. The defaults are the complaint ceiling of 0.1% and the hard
+  bounce ceiling of 3% per domain, and attribution runs through the touch
+  that carried the message (the contact's latest touch, or the publisher's).
+  Each row of the `/domains` table is one domain's own history, and one
+  domain's breach never halts the others.
+- `reset-health <domain>` resets one domain after an investigation;
+  `reset-health` without a domain resets every domain.
+
+### The second offer: Setup Watch
+
+The message bandit carries a fourth first-touch variant, `t0-watch`: the
+Setup Watch offer, the daily measurement pass with guardrail monitoring and
+alerts as a flat monthly plan. Set `APEX_SALES_WATCH_CHECKOUT_URL` to the
+HTTPS checkout base; the engine appends the publisher key to it, the same
+way the contact's token is appended to `APEX_SALES_UNSUBSCRIBE_URL`.
+Without the variable the variant is not enumerated at all and the bandit
+never serves it (`apex-sales report` marks the arm unavailable). The
+variant learns like every other arm: replies and outcomes move its
+posterior exactly as the other templates'.
+
+The price copy lives in one constant, `WATCH_PRICE_TEXT` in
+`rust/crates/apex-sales/src/compose.rs`, and it must match billing's Setup
+Watch plan, the $99 one-platform and $199 three-platform monthly lines that
+`apex_billing::subscription::watch_plan` owns. The engine never invents a
+price: no template text carries a dollar amount, only the placeholder that
+the constant fills.
+
+### Outcomes import
+
+`apex-api` appends one JSON line per post-sale event to the outcomes file
+(`APEX_SALES_OUTCOMES_FILE`, default `.apex/sales/outcomes.jsonl`):
+
+```json
+{"atUnixMs":1792400000000,"publisher":"studio.example","kind":"connected","ref":"evt_123"}
+```
+
+`kind` is `connected`, `paid` or `watch_signup`; `ref` is the appender's
+own id. `apex-sales import-outcomes [file]` records every line through the
+same outcome semantics as `record`: the line's timestamp, the publisher as
+the target, the `ref` as the note. Lines are deduplicated by (publisher,
+kind, ref) against the store, so replaying the append-only file is
+idempotent. Malformed lines are skipped with a count instead of aborting the
+file. `--dry-run` prints the counts and writes nothing. The hourly `run`
+imports the file first when it exists, so connections, invoices and watch
+signups reach the learner without a second timer. A `watch_signup` moves the
+publisher to the connected rung of the funnel ladder; the event log keeps
+the distinct kind.
+
+### Reply intake
+
+Replies and bounces reach the engine through `ingest`, in three shapes:
+
+- one message from a pipe: `... | /usr/local/bin/apex-sales ingest --stdin`
+- one saved file: `apex-sales ingest message.eml`
+- a directory the mail server writes into: `apex-sales ingest --maildir /var/lib/apex/replies`
+
+For the mail-server pipeline, deliver the reply mailbox as a directory of
+`.eml` files and scan it on a schedule. Fetchmail, getmail or the MTA's own
+aliasing can write a Maildir, and `ingest --maildir` reads every `*.eml`
+file newest first with the single-file semantics per message. A durable seen
+set (`ingest-seen.jsonl` in the state directory) keys each file by name,
+size and modification time, so a file is processed exactly once even across
+restarts. Unreadable files are skipped with a counted reason and stay
+unseen, so a transient failure is retried on the next run. A message from an
+unknown sender is classified and counted, not recorded: record it by hand
+with `apex-sales record`.
+
+An example pipeline beside the hourly unit:
+
+```text
+*/10 * * * * /usr/bin/getmail --rcfile /etc/apex/getmailrc && /usr/local/bin/apex-sales ingest --maildir /var/lib/apex/replies >> /var/log/apex/sales-ingest.log 2>&1
+```
 
 ## Workspace UI
 
@@ -207,5 +319,9 @@ atomically every 15 seconds and once more on shutdown.
   address and calls `apex-sales suppress`. Until one exists, leave
   `APEX_SALES_UNSUBSCRIBE_URL` unset; the message then carries a mailto
   unsubscribe, and opt-out replies are suppressed on `ingest`.
-- Replies reach the engine only through `ingest`. Wire the reply mailbox to
-  it, or run it by hand.
+- Replies reach the engine only through `ingest` (one message or a whole
+  Maildir). Wire the reply mailbox to it as the full-volume section shows,
+  or run it by hand.
+- The outcomes file is one-way: the engine imports it and never writes to
+  it. The appender owns the schema, and the engine only reads the three
+  kinds it documents; an unknown kind is skipped and counted.

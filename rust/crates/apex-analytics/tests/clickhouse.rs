@@ -945,6 +945,7 @@ async fn real_clickhouse_round_trip() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -1398,6 +1399,7 @@ async fn real_clickhouse_legacy_staged_tables_migrate() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -1549,6 +1551,7 @@ async fn real_clickhouse_page_requests_daily_parity() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -1642,6 +1645,7 @@ async fn real_clickhouse_ingest_cursor_is_incremental() {
         http_url: http_url.clone(),
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     })
     .expect("store");
     async fn ingest_counts(store: &ClickHouseStore, database: &str) -> (u64, u64) {
@@ -1853,6 +1857,7 @@ async fn real_clickhouse_sql_fast_path_agrees_with_the_portable_path() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -1980,6 +1985,7 @@ async fn real_clickhouse_operator_wide_revenue_shape() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -2148,6 +2154,7 @@ async fn real_clickhouse_queue_anchor_parity() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,
@@ -2257,6 +2264,7 @@ async fn real_clickhouse_duplicate_rows_pending_merge() {
         http_url,
         database: database.clone(),
         request_timeout_ms: 60_000,
+        ..ClickHouseConfig::default()
     };
     let store = match ClickHouseStore::new(config) {
         Ok(store) => store,

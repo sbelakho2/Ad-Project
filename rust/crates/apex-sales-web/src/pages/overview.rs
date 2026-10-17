@@ -23,11 +23,15 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
     let snap = &data.snap;
     let learned = &data.learned;
     let health = &learned.health;
+    let domains = health.domains();
 
     let publishers = snap.publishers.len();
     let mut suppressed_contacts = 0usize;
+    // One index for the whole count: a per-contact scan of the suppression
+    // list would make the overview quadratic in contacts × suppressions.
+    let suppressions = data.suppression_index();
     for contact in snap.contacts.values() {
-        if learned.suppressions.check(contact).is_some() {
+        if suppressions.check(contact).is_some() {
             suppressed_contacts += 1;
         }
     }
@@ -41,7 +45,31 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
         .filter(|key| data.config.holdout.is_held_out(key))
         .count();
 
-    let type_state = state_label(health.state);
+    // One domain reads exactly as before; several domains summarize.
+    let sending_value: String = if domains.len() <= 1 {
+        state_label(health.summary_state()).to_string()
+    } else {
+        let can_send = domains
+            .iter()
+            .filter(|domain| health.get(domain).is_some_and(|h| h.state.may_send()))
+            .count();
+        format!("{can_send}/{} can send", domains.len())
+    };
+    let sending_note = if domains.len() <= 1 {
+        let h = domains.first().and_then(|domain| health.get(domain));
+        format!(
+            "cap {}; {}; CUSUM {:.2} of {:.1}",
+            h.map_or(0, |h| h.cap),
+            complaints_sentence(data),
+            h.map_or(0.0, |h| h.cusum),
+            data.config.health.cusum_h
+        )
+    } else {
+        format!(
+            "total cap {}; each domain keeps its own cap, breakers and warm-up",
+            health.total_cap()
+        )
+    };
 
     let cards = kpi_row(&[
         kpi_card(
@@ -58,10 +86,11 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
         ),
         kpi_card(
             "Sent today",
-            &learned.sent_today.to_string(),
+            &health.sent_today().to_string(),
             &format!(
                 "of today's cap {} (warm-up ceiling {})",
-                health.cap, data.config.health.max_cap
+                health.total_cap(),
+                data.config.health.max_cap
             ),
             Some("/sends"),
         ),
@@ -78,15 +107,13 @@ pub fn render(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
             Some("/models"),
         ),
         kpi_card(
-            "Sending domain",
-            type_state,
-            &format!(
-                "cap {}; {}; CUSUM {:.2} of {:.1}",
-                health.cap,
-                complaints_sentence(data),
-                health.cusum,
-                data.config.health.cusum_h
-            ),
+            if domains.len() <= 1 {
+                "Sending domain"
+            } else {
+                "Sending domains"
+            },
+            &sending_value,
+            &sending_note,
             Some("/domains"),
         ),
     ]);
@@ -141,10 +168,17 @@ fn state_label(state: apex_sales::health::SenderState) -> &'static str {
 }
 
 fn complaints_sentence(data: &RequestData) -> String {
+    let p = data
+        .learned
+        .health
+        .domains()
+        .first()
+        .and_then(|domain| data.learned.health.get(domain))
+        .map_or(0.0, |h| h.p_complaints_over(&data.config.health));
     format!(
         "P(complaint rate > {}) = {:.2}",
         percent(data.config.health.complaint_ceiling),
-        data.learned.health.p_complaints_over(&data.config.health)
+        p
     )
 }
 
@@ -164,20 +198,47 @@ fn notices(data: &RequestData) -> String {
         ));
         out.push('\n');
     }
-    match data.learned.health.state {
-        apex_sales::health::SenderState::Quarantined => out.push_str(&notice(
-            StatusKind::Failure,
-            "The sending domain is quarantined",
-            "Complaints breached the Bayesian rate test or the CUSUM jump test. No outreach is planned until an operator investigates and resets the domain.",
-            Some(("Open the domain", "/domains")),
-        )),
-        apex_sales::health::SenderState::Paused => out.push_str(&notice(
-            StatusKind::Attention,
-            "The sending domain is paused",
-            "Hard bounces breached the rate test. The domain rests, then resumes throttled if the window clears.",
-            Some(("Open the domain", "/domains")),
-        )),
-        _ => {}
+    let health = &data.learned.health;
+    let multi = health.domains().len() > 1;
+    let mut first = true;
+    for domain in health.domains() {
+        let Some(h) = health.get(domain) else {
+            continue;
+        };
+        let title = |base: &str| {
+            if multi {
+                format!("{base} ({domain})")
+            } else {
+                base.to_string()
+            }
+        };
+        match h.state {
+            apex_sales::health::SenderState::Quarantined => {
+                if !first {
+                    out.push('\n');
+                }
+                first = false;
+                out.push_str(&notice(
+                    StatusKind::Failure,
+                    &title("The sending domain is quarantined"),
+                    "Complaints breached the Bayesian rate test or the CUSUM jump test. No outreach is planned until an operator investigates and resets the domain.",
+                    Some(("Open the domain", "/domains")),
+                ));
+            }
+            apex_sales::health::SenderState::Paused => {
+                if !first {
+                    out.push('\n');
+                }
+                first = false;
+                out.push_str(&notice(
+                    StatusKind::Attention,
+                    &title("The sending domain is paused"),
+                    "Hard bounces breached the rate test. The domain rests, then resumes throttled if the window clears.",
+                    Some(("Open the domain", "/domains")),
+                ));
+            }
+            _ => {}
+        }
     }
     out
 }
@@ -274,17 +335,26 @@ fn next_steps(meta: &PageMeta, data: &RequestData, transport: &Transport) -> Str
                 "/plan".to_string(),
             ));
         }
-        if !data.learned.health.state.may_send() {
-            steps.push((
-                "Investigate the sending domain".to_string(),
+        if !data.learned.health.may_send() {
+            let domains = data.learned.health.domains();
+            let why = if domains.len() <= 1 {
                 format!(
                     "The domain is {}; outreach stops until the health page's reset after an investigation.",
-                    data.learned.health.state.as_str()
-                ),
+                    data.learned.health.summary_state().as_str()
+                )
+            } else {
+                format!(
+                    "No sending domain may send ({}); outreach stops until the health page's reset after an investigation.",
+                    domains.join(", ")
+                )
+            };
+            steps.push((
+                "Investigate the sending domain".to_string(),
+                why,
                 "/domains".to_string(),
             ));
         }
-        if live > 0 && data.learned.sent_today == 0 {
+        if live > 0 && data.learned.health.sent_today() == 0 {
             steps.push((
                 "Run the sender".to_string(),
                 format!(
@@ -397,6 +467,7 @@ mod tests {
                     at: now - 2 * DAY,
                     email: "a@b.io".into(),
                     publisher: "b.io".into(),
+                    from: None,
                     step: 0,
                     arm: "t0-finding".into(),
                     message_id: "m".into(),

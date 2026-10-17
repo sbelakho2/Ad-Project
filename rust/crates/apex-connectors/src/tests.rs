@@ -10,8 +10,11 @@ use apex_core::{
 };
 use async_trait::async_trait;
 
-use crate::admob::{normalize_account_id, AdmobClient, ADMOB_ENDPOINTS};
-use crate::levelplay::{LevelPlayClient, LEVELPLAY_ENDPOINTS};
+use crate::admob::{
+    normalize_account_id, AdmobClient, MediationAbExperimentState, MediationAbVariantLeader,
+    ADMOB_ENDPOINTS, ADMOB_REVENUE_PER_VARIANT,
+};
+use crate::levelplay::{AbTestActiveUsersRow, LevelPlayClient, LEVELPLAY_ENDPOINTS};
 use crate::max::{MaxClient, MaxReportClient, MAX_ENDPOINTS};
 use crate::transport::{
     HttpBody, HttpMethod, HttpRequest, HttpResponse, PlatformCaller, RecordingSleeper,
@@ -556,12 +559,16 @@ async fn max_report_http_errors_surface() {
 }
 
 fn lp_client(mock: Arc<MockTransport>) -> LevelPlayClient {
+    lp_client_with_key(mock, "acct")
+}
+
+fn lp_client_with_key(mock: Arc<MockTransport>, app_key: &str) -> LevelPlayClient {
     let retry = Arc::new(RetryTransport::new(
         mock,
         0,
         Arc::new(RecordingSleeper::default()),
     ));
-    LevelPlayClient::new("tok", "refresh", "acct", "https://lp.test", retry).expect("client")
+    LevelPlayClient::new("tok", "refresh", app_key, "https://lp.test", retry).expect("client")
 }
 
 #[tokio::test]
@@ -593,7 +600,23 @@ async fn lp_list_waterfall_and_fallback() {
         .header("Authorization")
         .unwrap()
         .starts_with("Bearer "));
-    assert!(mock.calls()[1].url.contains("/mediation/instances/v4"));
+    // Byte-exact instances v4 URL: the app key is a path segment, not a query
+    // parameter.
+    assert_eq!(mock.calls()[1].method, HttpMethod::Get);
+    assert_eq!(
+        mock.calls()[1].url,
+        "https://lp.test/levelPlay/network/instances/v4/acct/"
+    );
+    assert!(
+        !mock.calls()[1].url.contains("?appKey="),
+        "the app key must never be a query parameter: {}",
+        mock.calls()[1].url
+    );
+    assert!(
+        !mock.calls()[1].url.contains("partners/publisher/mediation"),
+        "the old partner-gate mediation path must be gone: {}",
+        mock.calls()[1].url
+    );
 
     let drift = Arc::new(MockTransport::scripted(vec![
         Ok(MockTransport::ok(200, Some(r#""bearer""#))),
@@ -604,6 +627,210 @@ async fn lp_list_waterfall_and_fallback() {
     ]));
     let err = lp_client(drift).list_waterfall("u").await.unwrap_err();
     assert!(matches!(err, PlatformError::Schema { .. }));
+}
+
+#[tokio::test]
+async fn lp_instances_and_groups_recordings_are_byte_exact() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(r#"{"instances":[]}"#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(
+                r#"{"groups":[{"groupId":"g1","name":"Main","floorPrice":1.5,"countriesRate":0.8}]}"#,
+            ),
+        )),
+    ]));
+    let client = lp_client(mock.clone());
+    assert!(client.list_waterfall("u1").await.unwrap().is_empty());
+    let groups = client.list_groups().await.expect("groups");
+    assert_eq!(groups["groups"][0]["groupId"], "g1");
+    assert_eq!(groups["groups"][0]["floorPrice"], 1.5);
+    assert_eq!(groups["groups"][0]["countriesRate"], 0.8);
+    let calls = mock.calls();
+    // Recorded pair 1: instances v4, app key in the path, GET.
+    assert_eq!(calls[1].method, HttpMethod::Get);
+    assert_eq!(
+        calls[1].url,
+        "https://lp.test/levelPlay/network/instances/v4/acct/"
+    );
+    // Recorded pair 2: groups v4, app key in the path, GET.
+    assert_eq!(calls[2].method, HttpMethod::Get);
+    assert_eq!(calls[2].url, "https://lp.test/levelPlay/groups/v4/acct");
+    assert_eq!(calls[2].header("Authorization"), Some("Bearer bearer"));
+    for call in &calls {
+        assert!(
+            !call.url.contains("partners/publisher/mediation"),
+            "no call may emit the old partner-gate form: {}",
+            call.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn lp_hostile_app_key_is_percent_encoded_in_every_path() {
+    let hostile = "app key/../x?y#z%";
+    let encoded = "app%20key%2F..%2Fx%3Fy%23z%25";
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(r#"{"instances":[]}"#))),
+        Ok(MockTransport::ok(200, Some(r#"{"groups":[]}"#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"code":200,"count":0,"results":[]}"#),
+        )),
+    ]));
+    let client = lp_client_with_key(mock.clone(), hostile);
+    client.list_waterfall("u1").await.unwrap();
+    client.list_groups().await.unwrap();
+    client
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .unwrap();
+    let calls = mock.calls();
+    assert_eq!(
+        calls[1].url,
+        format!("https://lp.test/levelPlay/network/instances/v4/{encoded}/")
+    );
+    assert_eq!(
+        calls[2].url,
+        format!("https://lp.test/levelPlay/groups/v4/{encoded}")
+    );
+    assert_eq!(
+        calls[3].url,
+        format!(
+            "https://lp.test/levelPlay/reporting/v1?appKey={encoded}&breakdowns=abTest&metrics=activeUsers&startDate=2026-10-01&endDate=2026-10-14"
+        )
+    );
+    for call in calls.iter().skip(1) {
+        assert!(
+            !call.url.contains(hostile),
+            "the raw hostile key must never leak into the URL: {}",
+            call.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn lp_reporting_ab_test_active_users_recording_parses_rows() {
+    let body = r#"{"code":200,"count":2,"results":[
+        {"abTest":"Control","activeUsers":"120"},
+        {"abTest":"Variant A","activeUsers":95}
+    ]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(body))),
+    ]));
+    let rows = lp_client(mock.clone())
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect("rows");
+    assert_eq!(
+        rows,
+        vec![
+            AbTestActiveUsersRow {
+                ab_test: "Control".into(),
+                active_users: 120
+            },
+            AbTestActiveUsersRow {
+                ab_test: "Variant A".into(),
+                active_users: 95
+            },
+        ]
+    );
+    let call = &mock.calls()[1];
+    assert_eq!(call.method, HttpMethod::Get);
+    assert_eq!(
+        call.url,
+        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=abTest&metrics=activeUsers&startDate=2026-10-01&endDate=2026-10-14"
+    );
+    assert!(call.header("Authorization").unwrap().starts_with("Bearer "));
+}
+
+#[tokio::test]
+async fn lp_reporting_error_mapping_is_typed() {
+    // In-body code != 200 maps to Http with that status.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"code":403,"count":0,"results":[]}"#),
+        )),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, PlatformError::Http { status: 403, .. }),
+        "{err}"
+    );
+
+    // A response without the results array is a schema refusal.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(r#"{"code":200}"#))),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+
+    // A malformed row (non-numeric activeUsers) is a schema refusal, not zero.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(
+                r#"{"code":200,"count":1,"results":[{"abTest":"A","activeUsers":"not a number"}]}"#,
+            ),
+        )),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+
+    // A row missing the abTest arm is a schema refusal.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"code":200,"count":1,"results":[{"activeUsers":1}]}"#),
+        )),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, PlatformError::Schema { .. }), "{err}");
+
+    // An HTTP failure status is classified by the retry layer: a terminal 404
+    // is Http, a 429 is RateLimited.
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::status(404)),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, PlatformError::Http { status: 404, .. }),
+        "{err}"
+    );
+
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::status(429)),
+    ]));
+    let err = lp_client(mock)
+        .ab_test_active_users("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("must fail");
+    assert!(matches!(err, PlatformError::RateLimited { .. }), "{err}");
 }
 
 #[tokio::test]
@@ -619,7 +846,10 @@ async fn lp_price_update_pins_body_and_key() {
     assert_eq!(entry.price_ecpm, 2_345_000);
     let call = &mock.calls()[1];
     assert_eq!(call.method, HttpMethod::Put);
-    assert!(call.url.contains("/mediation/instances/v4"));
+    assert_eq!(
+        call.url,
+        "https://lp.test/levelPlay/network/instances/v4/acct/"
+    );
     assert_eq!(
         call.body.as_ref().and_then(HttpBody::as_json).unwrap()["instanceId"],
         "e1"
@@ -657,12 +887,21 @@ async fn lp_create_and_remove_contract() {
         .await
         .unwrap();
     assert_eq!(id, "new-1");
+    assert_eq!(mock.calls()[1].method, HttpMethod::Post);
+    assert_eq!(
+        mock.calls()[1].url,
+        "https://lp.test/levelPlay/network/instances/v4/acct/"
+    );
     assert_eq!(
         mock.calls()[1].header("Idempotency-Key"),
         Some("levelplay-create:u1:mintegral:MTG_1:0.75")
     );
     client.remove_entry("u1", "e9").await.unwrap();
     assert_eq!(mock.calls()[2].method, HttpMethod::Delete);
+    assert_eq!(
+        mock.calls()[2].url,
+        "https://lp.test/levelPlay/network/instances/v4/acct/?instanceId=e9"
+    );
     assert_eq!(
         mock.calls()[2].header("Idempotency-Key"),
         Some("levelplay-remove:u1:e9")
@@ -747,6 +986,25 @@ async fn admob_pagination_follows_tokens_and_bounds_runaway() {
         .unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].mappings[1].ecpm, 1_000_000, "eCPM alias parses");
+    // Recorded pair: mediation groups now live on v1beta; the v1 base must
+    // never be emitted.
+    let calls = mock.calls();
+    assert_eq!(calls[0].method, HttpMethod::Get);
+    assert_eq!(
+        calls[0].url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups"
+    );
+    assert_eq!(
+        calls[1].url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups?pageToken=t1"
+    );
+    for call in &calls {
+        assert!(
+            !call.url.contains("/v1/accounts"),
+            "the v1 mediation-group base must be gone: {}",
+            call.url
+        );
+    }
 
     let runaway_page = r#"{"mediationGroups":[],"nextPageToken":"again"}"#;
     let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
@@ -777,7 +1035,7 @@ async fn admob_update_mapping_is_read_modify_write_full_list() {
     assert_eq!(patch.method, HttpMethod::Patch);
     assert_eq!(
         patch.url,
-        "https://admob.test/v1/accounts/pub-1234567890123456/mediationGroups/g1"
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1"
     );
     let mappings = patch.body.as_ref().and_then(HttpBody::as_json).unwrap()["adUnitMappings"]
         .as_array()
@@ -840,6 +1098,151 @@ async fn admob_401_fails_fast() {
     assert_eq!(mock.calls().len(), 1);
 }
 
+const ADMOB_EXPERIMENT_CREATED: &str = r#"{
+    "name": "accounts/pub-1234567890123456/mediationAbExperiments/ab-1",
+    "mediationGroupId": "g1",
+    "displayName": "Floor test",
+    "state": "RUNNING",
+    "variantLeader": "VARIANT_LEADER_UNSPECIFIED"
+}"#;
+
+#[tokio::test]
+async fn admob_create_mediation_ab_experiment_recording_is_typed_and_verdict_only() {
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(ADMOB_EXPERIMENT_CREATED),
+    ))]));
+    let experiment = admob_client(mock.clone())
+        .create_mediation_ab_experiment("g1", "Floor test")
+        .await
+        .expect("create");
+    assert_eq!(
+        experiment.name,
+        "accounts/pub-1234567890123456/mediationAbExperiments/ab-1"
+    );
+    assert_eq!(experiment.mediation_group_id, "g1");
+    assert_eq!(experiment.display_name, "Floor test");
+    assert_eq!(experiment.state, MediationAbExperimentState::Running);
+    assert_eq!(
+        experiment.variant_leader,
+        Some(MediationAbVariantLeader::Unspecified)
+    );
+    assert_eq!(
+        experiment.revenue_per_variant, ADMOB_REVENUE_PER_VARIANT,
+        "the typed surface must not claim per-variant revenue"
+    );
+    assert!(
+        !experiment.revenue_per_variant,
+        "AdMob documents only a variantLeader verdict"
+    );
+    let call = &mock.calls()[0];
+    assert_eq!(call.method, HttpMethod::Post);
+    assert_eq!(
+        call.url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationAbExperiments"
+    );
+    let body = call
+        .body
+        .as_ref()
+        .and_then(HttpBody::as_json)
+        .expect("body");
+    assert_eq!(body["mediationGroupId"], "g1");
+    assert_eq!(body["displayName"], "Floor test");
+}
+
+#[tokio::test]
+async fn admob_stop_mediation_ab_experiment_recording_pins_path_and_parses_verdict() {
+    let response = r#"{
+        "name": "accounts/pub-1234567890123456/mediationAbExperiments/ab-1",
+        "mediationGroupId": "g1",
+        "displayName": "Floor test",
+        "state": "STOPPED",
+        "variantLeader": "VARIANT"
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(response),
+    ))]));
+    let experiment = admob_client(mock.clone())
+        .stop_mediation_ab_experiment("ab-1")
+        .await
+        .expect("stop");
+    assert_eq!(experiment.state, MediationAbExperimentState::Stopped);
+    assert_eq!(
+        experiment.variant_leader,
+        Some(MediationAbVariantLeader::Variant),
+        "the stop response is the only place the verdict appears"
+    );
+    assert!(!experiment.revenue_per_variant);
+    let call = &mock.calls()[0];
+    assert_eq!(call.method, HttpMethod::Post);
+    assert_eq!(
+        call.url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationAbExperiments/ab-1:stop"
+    );
+    assert!(
+        call.body.is_none(),
+        "the :stop custom method carries no body"
+    );
+}
+
+#[tokio::test]
+async fn admob_experiment_error_mapping_is_typed() {
+    // A transport-level failure status is classified before the body is read.
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::status(
+        400,
+    ))]));
+    let err = admob_client(mock)
+        .create_mediation_ab_experiment("g1", "Floor test")
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, PlatformError::Http { status: 400, .. }),
+        "{err}"
+    );
+
+    // Missing required fields and unknown enum values are schema refusals.
+    for body in [
+        r#"{"mediationGroupId":"g1","displayName":"d","state":"RUNNING"}"#,
+        r#"{"name":"n","displayName":"d","state":"RUNNING"}"#,
+        r#"{"name":"n","mediationGroupId":"g1","state":"RUNNING"}"#,
+        r#"{"name":"n","mediationGroupId":"g1","displayName":"d"}"#,
+        r#"{"name":"n","mediationGroupId":"g1","displayName":"d","state":"PAUSED"}"#,
+        r#"{"name":"n","mediationGroupId":"g1","displayName":"d","state":"RUNNING","variantLeader":"WINNER"}"#,
+        r#"{"name":"n","mediationGroupId":"g1","displayName":"d","state":"RUNNING","variantLeader":7}"#,
+    ] {
+        let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+            200,
+            Some(body),
+        ))]));
+        let err = admob_client(mock)
+            .stop_mediation_ab_experiment("ab-1")
+            .await
+            .expect_err("must fail");
+        assert!(
+            matches!(err, PlatformError::Schema { .. }),
+            "body {body} must refuse: {err}"
+        );
+    }
+
+    // Blank identifiers are refused before any request goes out.
+    let mock = Arc::new(MockTransport::scripted(vec![]));
+    let client = admob_client(mock.clone());
+    assert!(matches!(
+        client.create_mediation_ab_experiment(" ", "d").await,
+        Err(PlatformError::Validation(_))
+    ));
+    assert!(matches!(
+        client.create_mediation_ab_experiment("g1", " ").await,
+        Err(PlatformError::Validation(_))
+    ));
+    assert!(matches!(
+        client.stop_mediation_ab_experiment(" ").await,
+        Err(PlatformError::Validation(_))
+    ));
+    assert!(mock.calls().is_empty(), "no request may go out");
+}
+
 // ---------------- endpoint metadata ----------------
 
 #[test]
@@ -857,7 +1260,7 @@ fn endpoint_metas_are_pinned() {
         .all(|m| m.verification == SourceVerification::VerifyLive));
     assert!(!MAX_ENDPOINTS.iter().any(|m| m.writable()));
 
-    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 5);
+    assert_eq!(LEVELPLAY_ENDPOINTS.len(), 7);
     assert!(
         LEVELPLAY_ENDPOINTS
             .iter()
@@ -869,8 +1272,63 @@ fn endpoint_metas_are_pinned() {
         .find(|m| m.name == "updateEntryPrice")
         .unwrap()
         .writable());
+    // The corrected/added surface is present in the capability table: groups
+    // and the abTest/activeUsers report are GETs, so readiness shows them as
+    // implemented rows.
+    for (name, method) in [
+        ("listGroups", apex_core::endpoint::HttpMethod::Get),
+        (
+            "reportAbTestActiveUsers",
+            apex_core::endpoint::HttpMethod::Get,
+        ),
+    ] {
+        let meta = LEVELPLAY_ENDPOINTS
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("missing endpoint meta '{name}'"));
+        assert_eq!(meta.method, method, "{name}");
+    }
 
-    assert_eq!(ADMOB_ENDPOINTS.len(), 3);
+    assert_eq!(ADMOB_ENDPOINTS.len(), 5);
+    assert!(ADMOB_ENDPOINTS
+        .iter()
+        .filter(|m| m.method == apex_core::endpoint::HttpMethod::Get)
+        .all(|m| m.verification == SourceVerification::Documented));
+    assert!(ADMOB_ENDPOINTS
+        .iter()
+        .filter(|m| m.method != apex_core::endpoint::HttpMethod::Get)
+        .all(|m| m.verification == SourceVerification::VerifyLive));
+    assert!(
+        !ADMOB_ENDPOINTS.iter().any(|m| m.writable()),
+        "AdMob writes (including the A/B experiments) stay verify-live"
+    );
+    for name in ["createMediationAbExperiment", "stopMediationAbExperiment"] {
+        let meta = ADMOB_ENDPOINTS
+            .iter()
+            .find(|m| m.name == name)
+            .unwrap_or_else(|| panic!("missing endpoint meta '{name}'"));
+        assert_eq!(meta.method, apex_core::endpoint::HttpMethod::Post, "{name}");
+    }
+}
+
+// ---------------- old-endpoint guards ----------------
+
+#[test]
+fn no_code_path_emits_the_old_endpoints() {
+    // The LevelPlay instances/groups endpoints moved off the partner-gate
+    // query form and the AdMob mediation endpoints moved off the v1 base; the
+    // source itself is the guard (a fixture-only check could miss a code path
+    // that is not exercised by the current tests).
+    let levelplay = include_str!("levelplay.rs");
+    assert!(
+        !levelplay.contains("partners/publisher/mediation"),
+        "the partner-gate mediation form must not come back"
+    );
+    let admob = include_str!("admob.rs");
+    assert!(
+        !admob.contains("/v1/"),
+        "the AdMob v1 mediation-group base must not come back"
+    );
 }
 
 // ---------------- body shape and diagnostics ----------------
@@ -1063,7 +1521,11 @@ async fn lp_groups_and_token_shapes_are_read() {
     ]));
     let groups = lp_client(mock.clone()).list_groups().await.expect("groups");
     assert_eq!(groups["groups"][0]["groupId"], "g1");
-    assert!(mock.calls()[1].url.contains("/mediation/groups/v4"));
+    assert_eq!(mock.calls()[1].method, HttpMethod::Get);
+    assert_eq!(
+        mock.calls()[1].url,
+        "https://lp.test/levelPlay/groups/v4/acct"
+    );
     assert_eq!(
         mock.calls()[1].header("Authorization"),
         Some("Bearer tok-2")

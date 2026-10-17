@@ -76,6 +76,8 @@ pub fn fixture_state() -> Result<ControlState, StateError> {
         operators_path: None,
         journal_path: work.join("journal.jsonl"),
         jobs_dir: work.join("jobs"),
+        jobs_remote: None,
+        sync_marker: None,
         environment: "PRODUCTION".to_string(),
         ledger_root: work.join("ledgers"),
         invoice_register: work.join("invoices.jsonl"),
@@ -833,6 +835,9 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
             &pages::system::SystemData {
                 overdue_jobs: Ok(demo.queues().overdue_jobs),
                 component_rows: demo.system_components(),
+                ledger_copy_line: ControlData::fixtures()
+                    .ledger_copy(crate::fixtures::DEMO_NOW_MS)
+                    .system_line(crate::fixtures::DEMO_NOW_MS),
             },
         ),
     );
@@ -1006,7 +1011,7 @@ pub fn render_all(out_dir: &Path) -> Result<Vec<String>, String> {
     }
     // Clean the per-run working directory (journal, registers, jobs), but
     // never anything outside the system temp directory.
-    if let Some(parent) = state.jobs.dir().parent() {
+    if let Some(parent) = state.jobs.dir().and_then(std::path::Path::parent) {
         if parent.starts_with(std::env::temp_dir()) {
             let _ = std::fs::remove_dir_all(parent);
         }

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use apex_metrics::Registry;
 use apex_notify::contacts::{ContactBook, ContactError};
 use apex_notify::notifier::{Notifier, NotifyReport};
-use apex_notify::sink::{FileSink, NotificationSink, SinkError, WebhookSink};
+use apex_notify::sink::{select_sink, NotificationSink, SinkError};
 use apex_notify::state::{DeliveryLog, StateError};
 use apex_notify::template::{
     self, ApprovalRequested, AuditReady, FeePreview, GuardrailStop, IncidentBlock, PaymentFailed,
@@ -96,18 +96,16 @@ impl NotifyPlan {
         if !console_base.starts_with("https://") || console_base.len() <= "https://".len() {
             return Err(NotifyPlanError::ConsoleUrl);
         }
-        let sink: Arc<dyn NotificationSink> = if let Some(webhook) = WebhookSink::from_env(&lookup)?
-        {
-            Arc::new(webhook)
-        } else if let Some(path) =
-            lookup("APEX_NOTIFY_FILE").filter(|value| !value.trim().is_empty())
-        {
-            Arc::new(FileSink::new(path.trim()))
-        } else {
-            return Err(NotifyPlanError::Sink(SinkError::Config(format!(
-                "no notification sink configured; set APEX_NOTIFY_WEBHOOK or APEX_NOTIFY_FILE when {CONTACTS_ENV} is set"
-            ))));
-        };
+        // One sink, selected by the sink owner's shared rule: an explicit
+        // `APEX_NOTIFY_SINK` kind (email/webhook/file), otherwise the legacy
+        // order (webhook, then file). The runner never falls back to a
+        // different provider, and contacts without a sink are a typed
+        // configuration refusal.
+        let sink: Arc<dyn NotificationSink> = select_sink(&lookup)?.ok_or_else(|| {
+            NotifyPlanError::Sink(SinkError::Config(format!(
+                "no notification sink configured; set APEX_NOTIFY_SINK (email, webhook or file) or APEX_NOTIFY_WEBHOOK or APEX_NOTIFY_FILE when {CONTACTS_ENV} is set"
+            )))
+        })?;
         let log = match lookup("APEX_NOTIFY_STATE").filter(|value| !value.trim().is_empty()) {
             Some(path) => DeliveryLog::open(Some(std::path::Path::new(path.trim())))?,
             None => {
@@ -459,6 +457,7 @@ mod tests {
 
     use super::*;
     use apex_notify::contacts::Contact;
+    use apex_notify::sink::FileSink;
 
     fn plan(label: &str, book_json: &str) -> Arc<NotifyPlan> {
         let dir =
@@ -515,6 +514,88 @@ mod tests {
         )
         .expect_err("bad contact");
         assert!(matches!(error, NotifyPlanError::Contacts(_)));
+    }
+
+    #[test]
+    fn sink_selection_follows_the_shared_select_sink_rule() {
+        let registry = Arc::new(Registry::new());
+        let configured = |name: &str, sink: Option<&'static str>| match name {
+            CONTACTS_ENV => Some(r#"{"northstar": ["ops@example.com"]}"#.to_string()),
+            CONSOLE_URL_ENV => Some("https://console.apexmediation.ee".to_string()),
+            "APEX_NOTIFY_SINK" => sink.map(str::to_string),
+            _ => None,
+        };
+
+        // No sink variable at all: the typed configuration refusal, never a
+        // silent fallback.
+        let error = NotifyPlan::from_lookup(|name| configured(name, None), registry.clone())
+            .expect_err("no sink");
+        assert!(
+            matches!(error, NotifyPlanError::Sink(SinkError::Config(_))),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("no notification sink configured"),
+            "{error}"
+        );
+
+        // The legacy order is preserved: a webhook URL wins over a file
+        // path, so deployments that relied on the inline selection keep it.
+        let (plan, _) = NotifyPlan::from_lookup(
+            |name| match name {
+                "APEX_NOTIFY_WEBHOOK" => Some("https://hooks.example.test/apex".to_string()),
+                "APEX_NOTIFY_FILE" => Some("/tmp/apex-notify-both.jsonl".to_string()),
+                other => configured(other, None),
+            },
+            registry.clone(),
+        )
+        .expect("legacy order");
+        assert!(plan.is_some());
+
+        // The explicit email kind is now selectable through the shared rule.
+        let (plan, logs) = NotifyPlan::from_lookup(
+            |name| match name {
+                "APEX_NOTIFY_FROM" => Some("Apex <hello@apex-transactional.example>".to_string()),
+                other => configured(other, Some("email")),
+            },
+            registry.clone(),
+        )
+        .expect("email sink");
+        assert!(plan.is_some());
+        assert!(logs[0].contains("process-local"));
+
+        // A kind whose required variable is missing refuses typed instead of
+        // falling back to another provider.
+        let error = NotifyPlan::from_lookup(
+            |name| match name {
+                "APEX_NOTIFY_FILE" => Some("/tmp/apex-notify-legacy.jsonl".to_string()),
+                other => configured(other, Some("webhook")),
+            },
+            registry.clone(),
+        )
+        .expect_err("webhook kind without a url");
+        assert!(
+            error
+                .to_string()
+                .contains("APEX_NOTIFY_WEBHOOK is required"),
+            "{error}"
+        );
+
+        // An unknown kind is refused outright.
+        let error = NotifyPlan::from_lookup(
+            |name| match name {
+                "APEX_NOTIFY_FILE" => Some("/tmp/apex-notify-legacy.jsonl".to_string()),
+                other => configured(other, Some("pigeon")),
+            },
+            registry,
+        )
+        .expect_err("unknown kind");
+        assert!(
+            error.to_string().contains("'email', 'webhook' or 'file'"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

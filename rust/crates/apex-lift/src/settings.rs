@@ -200,4 +200,41 @@ mod tests {
         apply_override(&mut change, "u1", &watcher);
         assert_eq!(change.overridden_day.as_deref(), Some("2026-10-02"));
     }
+
+    #[test]
+    fn unchanged_snapshots_and_unmatched_expectations_fall_through() {
+        let mut watcher = SettingsWatcher::new();
+        let _ = watcher.observe(&snapshot("2026-10-01", "h0"), None);
+        // The same hash on a later day is Unchanged, not an edit.
+        assert_eq!(
+            watcher.observe(&snapshot("2026-10-02", "h0"), None),
+            SettingsEvent::Unchanged {
+                day: "2026-10-02".into()
+            }
+        );
+        // An expected Apex write whose hash does not match falls through and
+        // is reported as the publisher edit it must be.
+        let application = ApexApplication {
+            change_id: "c1".into(),
+            day: "2026-10-03".into(),
+            scope: "u1".into(),
+            values_hash_after: "h1".into(),
+        };
+        assert!(matches!(
+            watcher.observe(&snapshot("2026-10-03", "h9"), Some(&application)),
+            SettingsEvent::PublisherEdit { .. }
+        ));
+        // Applying an override for an unwatched scope leaves the change as is.
+        let mut change = crate::billing::KeptChange {
+            change_id: "c2".into(),
+            lambda: 0.02,
+            rate_bp: 2000,
+            kept_day: "2026-10-01".into(),
+            overridden_day: None,
+            pre_registration_hash: "pre".into(),
+            result_hash: "res".into(),
+        };
+        apply_override(&mut change, "u-other", &watcher);
+        assert_eq!(change.overridden_day, None);
+    }
 }

@@ -252,8 +252,8 @@ psql $DATABASE_URL -c "SELECT * FROM customer_health_scores ORDER BY updated_at 
 Use the Hetzner test server for pre-production validation.
 
 ```bash
-# Deploy backend to the Hetzner test server
-DEPLOY_SERVER=157.90.126.205 ./scripts/deploy-all.sh backend
+# Deploy backend to the Hetzner test server (replace 203.0.113.11 with your test server address)
+DEPLOY_SERVER=203.0.113.11 ./scripts/deploy-all.sh backend
 
 # Verify from the test server
 ./scripts/ops/hetzner_ssh.sh test -- "set -euo pipefail; pm2 status backend; curl -sf http://127.0.0.1:8080/health"

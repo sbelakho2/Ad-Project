@@ -1,0 +1,8 @@
+{
+  "file": "reseller.txt",
+  "note": "RESELLER relationship lines (including lowercase) are valid records; the same domain may have both a RESELLER and a DIRECT record.",
+  "errors": [],
+  "records": 4,
+  "variables": 0,
+  "domains": ["applovin.com", "google.com", "unity3d.com"]
+}

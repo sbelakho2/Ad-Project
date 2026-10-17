@@ -1,5 +1,8 @@
 # Deployment inventory for the current product. No secrets and no addresses
-# live here; every value comes from the service environment file.
+# live here; every value comes from the service environment file. Two hosts:
+# the console host runs apex-api, the ingest and runner jobs and the sync
+# push; the control host runs apex-control, ClickHouse, the sales services
+# and the sync pull (see README.md, "Hosting split").
 
 [api]
 service = "apex-api"
@@ -43,6 +46,20 @@ state = ".apex/sales"
 env_file = "/etc/apex/sales-web.env"
 unit = "infrastructure/systemd/apex-sales-web.service"
 
+[watch]
+# The paid daily app-ads.txt watch: the daily check/diff/alert job and the
+# monthly billing pass. The crate holds no platform keys and no runner; the
+# only shared state is public (subscriber rows, fetched app-ads.txt text).
+service = "apex-watch"
+schedule = "daily 05:00 UTC"
+bill_schedule = "monthly, first of month 06:00 UTC"
+state = ".apex/watch"
+env_file = "/etc/apex/watch.env"
+unit = "infrastructure/systemd/apex-watch.service"
+timer = "infrastructure/systemd/apex-watch.timer"
+bill_unit = "infrastructure/systemd/apex-watch-bill.service"
+bill_timer = "infrastructure/systemd/apex-watch-bill.timer"
+
 [site]
 build = "zola build"
 root = "/srv/site/public"
@@ -62,3 +79,24 @@ listen_tcp = "127.0.0.1:9000"
 data = ".apex/clickhouse"
 dev_config = "infrastructure/clickhouse/config.xml"
 compose = "infrastructure/clickhouse/docker-compose.yml"
+
+[sync-push]
+# Console host to object storage; one-way upload of the ledger directory,
+# the invoice register and the leads (+signin) files, then the manifest.
+host = "console"
+service = "apex-sync-push"
+schedule = "every 15 minutes"
+env_file = "/etc/apex/sync.env"
+unit = "infrastructure/systemd/apex-sync-push.service"
+timer = "infrastructure/systemd/apex-sync-push.timer"
+
+[sync-pull]
+# Control host from object storage; verifies every manifest hash, installs
+# the ledger, the invoice register and the sales imports, and writes the
+# sync marker last.
+host = "control"
+service = "apex-sync-pull"
+schedule = "every 15 minutes, offset 5"
+env_file = "/etc/apex/sync.env"
+unit = "infrastructure/systemd/apex-sync-pull.service"
+timer = "infrastructure/systemd/apex-sync-pull.timer"

@@ -324,6 +324,39 @@ fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, Pay
     Ok(rows)
 }
 
+/// The publisher a billing reference belongs to: payment links carry
+/// `apex-fee:<publisher>:<experiment>:<period>` and invoice references carry
+/// `INV-<YYYY-MM>-<publisher>`. The fleet-level payment pass uses this to
+/// scope each group's customer messages to the owning publisher; an
+/// unrecognized or charset-invalid reference yields `None` (processed with an
+/// empty publisher scope, never silently attributed to someone).
+pub fn publisher_of_reference(reference: &str) -> Option<String> {
+    let candidate = reference
+        .strip_prefix("apex-fee:")
+        .and_then(|rest| rest.split(':').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            // `YYYY-MM-<publisher>`: fixed-shape month, then the publisher.
+            let rest = reference.strip_prefix("INV-")?;
+            let bytes = rest.as_bytes();
+            if rest.len() < 10
+                || !bytes[..4].iter().all(u8::is_ascii_digit)
+                || bytes[4] != b'-'
+                || !bytes[5..7].iter().all(u8::is_ascii_digit)
+                || bytes[7] != b'-'
+            {
+                return None;
+            }
+            Some(rest[8..].to_string())
+        })?;
+    let valid = candidate.len() <= 64
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    valid.then_some(candidate)
+}
+
 /// The bounded class of a provider event code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaymentClass {
@@ -383,6 +416,17 @@ pub async fn process_payment_events(
     use apex_metrics::vocab::{PaymentEventClass, PaymentResult};
 
     let mut report = PaymentsReport::default();
+    // The due amount per reference, indexed once: the old shape rescanned the
+    // whole payment history for every received event. The first row per
+    // reference wins, exactly like the previous linear `find`.
+    let due_by_reference: Option<std::collections::HashMap<&str, i64>> = notifier.map(|_| {
+        let mut due = std::collections::HashMap::with_capacity(ledger.len());
+        for row in ledger {
+            due.entry(row.reference.as_str())
+                .or_insert(row.amount_micros);
+        }
+        due
+    });
     // Successful receipts per collected reference, in file order, so the
     // remaining balance is correct for partial payments.
     let mut received_by_reference: std::collections::BTreeMap<String, i64> =
@@ -428,10 +472,9 @@ pub async fn process_payment_events(
                             reference: event.merchant_reference.clone(),
                         })?;
                 if let Some(notifier) = notifier {
-                    let due = ledger
-                        .iter()
-                        .find(|row| row.reference == event.merchant_reference)
-                        .map(|row| row.amount_micros);
+                    let due = due_by_reference
+                        .as_ref()
+                        .and_then(|due| due.get(event.merchant_reference.as_str()).copied());
                     match due {
                         Some(due) => {
                             // A ledger row below the received total (or at
@@ -580,6 +623,7 @@ mod tests {
             success: success.to_string(),
             amount_value: amount,
             amount_currency: "USD".to_string(),
+            stored_payment_method_id: String::new(),
         }
     }
 
@@ -587,6 +631,35 @@ mod tests {
         CollectionEvent {
             amount_currency: "EUR".to_string(),
             ..event(code, success, psp, amount)
+        }
+    }
+
+    #[test]
+    fn reference_publishers_are_parsed_strictly() {
+        assert_eq!(
+            publisher_of_reference("apex-fee:northstar:ch_0246:2026-10").as_deref(),
+            Some("northstar")
+        );
+        assert_eq!(
+            publisher_of_reference("INV-2026-09-northstar").as_deref(),
+            Some("northstar")
+        );
+        assert_eq!(
+            publisher_of_reference("INV-2026-09-pub_1-a").as_deref(),
+            Some("pub_1-a")
+        );
+        for bad in [
+            "",
+            "PSP123",
+            "apex-fee:",
+            "apex-fee::ch:2026-10",
+            "apex-fee:../evil:ch:2026-10",
+            "INV-2026-09-",
+            "INV-26-09-northstar",
+            "INV-2026/09-northstar",
+            "invoice-2026-09-northstar",
+        ] {
+            assert_eq!(publisher_of_reference(bad), None, "{bad:?}");
         }
     }
 

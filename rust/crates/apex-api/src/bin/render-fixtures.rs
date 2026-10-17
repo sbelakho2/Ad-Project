@@ -23,7 +23,7 @@ use apex_analytics::queries::{
     DataQuality, FeeDetail, FeeRow, FeeState, LiftRow, Money, QueryScope, RevenueBreakdownRow,
     RevenueDailyRow, StaleSource,
 };
-use apex_api::billing_view::{BillingView, MonitoringView};
+use apex_api::billing_view::{BillingView, ManagedView, MonitoringView};
 use apex_api::connections::{ConnectionMeta, CredentialState, PlatformState};
 use apex_api::experiments::ExperimentView;
 use apex_api::html::analytics::{
@@ -39,6 +39,7 @@ use apex_api::html::ledger::{self, LedgerAccessProblem};
 use apex_api::html::overview::{LatestAudit, LedgerState, OverviewData};
 use apex_api::html::proposals as proposals_html;
 use apex_api::html::settings as settings_html;
+use apex_api::html::watch_html::{self, WatchPageState};
 use apex_api::html::{overview, ConsoleCtx};
 use apex_api::leads::{
     FieldError, FreeAuditInvalid, FreeAuditRequest, EMAIL_ERROR, PLATFORM_ERROR,
@@ -64,7 +65,7 @@ const NOW_MS: i64 = 1_792_055_400_000;
 const CSRF: &str = "0123456789abcdef0123456789abcdef";
 
 /// Every fixture page this binary renders.
-pub const PAGES: [&str; 60] = [
+pub const PAGES: [&str; 62] = [
     "overview.html",
     "overview-empty.html",
     "audit-form.html",
@@ -93,6 +94,7 @@ pub const PAGES: [&str; 60] = [
     "free-audit-errors.html",
     "free-audit-failure.html",
     "audit-requested.html",
+    "watch.html",
     "connections-list.html",
     "connection-detail-max.html",
     "connection-detail-levelplay.html",
@@ -119,6 +121,7 @@ pub const PAGES: [&str; 60] = [
     "settings-access.html",
     "settings-policy.html",
     "settings-monitoring.html",
+    "settings-billing.html",
     "analytics-revenue.html",
     "analytics-lift.html",
     "analytics-fees.html",
@@ -169,6 +172,10 @@ async fn run(
         std::io::Error::other(format!("{PUBLISHER} ledger read failed: {error}"))
     })?;
 
+    // This renderer is the offline branch of the console: it builds the
+    // ConsoleCtx directly from the fixture data (label, currency, read-only)
+    // and calls the render functions — no AppState, no router and no session.
+    // The router's session gate never applies to static fixture rendering.
     let ctx = ConsoleCtx::new("Northstar Studio", "USD", true);
     let mut pages: Vec<(String, String)> = Vec::new();
 
@@ -401,6 +408,13 @@ async fn run(
     pages.push((
         "audit-requested.html".into(),
         leads_html::render_confirmation(&ctx, Some("req_0123456789")),
+    ));
+
+    // The setup-watch sign-up (the confirmation shares the marketing layout
+    // and is exercised by the integration tests).
+    pages.push((
+        "watch.html".into(),
+        watch_html::render_request_page(&ctx, &WatchPageState::Fresh),
     ));
 
     // --- phase 2: connections -----------------------------------------------
@@ -882,19 +896,39 @@ async fn run(
         &[(PlatformId::AppLovinMax, 1_792_055_340_000)],
         &connection_meta,
     );
+    // The recorded monitoring plan: tier Mid, price, effective date and the
+    // cancel action, exactly as the runner would have recorded it.
+    let monitoring_plan = MonitoringView::from_state(
+        &apex_billing::MonitoringPlan::default().activate(350_000 * 1_000_000, "2026-05-01"),
+    );
     pages.push((
         "settings-monitoring.html".into(),
         settings_html::render_monitoring(
             &ctx,
             &settings_html::MonitoringPageData {
                 publisher: PUBLISHER,
-                plan: &MonitoringView {
-                    fee_micros: None,
-                    since: None,
-                },
+                plan: &monitoring_plan,
                 rows: monitoring_rows,
                 alert_log_configured: true,
                 as_of_unix_ms: NOW_MS,
+                csrf: Some("fixture-csrf"),
+            },
+        ),
+    ));
+    // The billing settings page: the managed ad-ops line with its written
+    // scope and cancel action.
+    let managed_plan = ManagedView::from_state(
+        &apex_billing::ManagedPlan::default().activate(900_000 * 1_000_000, "2026-06-01"),
+    );
+    pages.push((
+        "settings-billing.html".into(),
+        settings_html::render_billing_settings(
+            &ctx,
+            &settings_html::BillingSettingsPageData {
+                publisher: PUBLISHER,
+                managed: &managed_plan,
+                as_of_unix_ms: NOW_MS,
+                csrf: Some("fixture-csrf"),
             },
         ),
     ));
@@ -1328,6 +1362,7 @@ fn billing_fixture() -> Result<BillingView, Box<dyn std::error::Error>> {
             success: "true".to_string(),
             amount_value: 22_500,
             amount_currency: "USD".to_string(),
+            stored_payment_method_id: String::new(),
         },
         apex_billing::CollectionEvent {
             at_unix_ms: NOW_MS - 10 * 86_400_000,
@@ -1337,6 +1372,7 @@ fn billing_fixture() -> Result<BillingView, Box<dyn std::error::Error>> {
             success: "true".to_string(),
             amount_value: 4_000,
             amount_currency: "USD".to_string(),
+            stored_payment_method_id: String::new(),
         },
         // A receipt in another currency: excluded from the USD balance and
         // rendered as the explicit exclusion note, never summed in.
@@ -1348,16 +1384,14 @@ fn billing_fixture() -> Result<BillingView, Box<dyn std::error::Error>> {
             success: "true".to_string(),
             amount_value: 300,
             amount_currency: "EUR".to_string(),
+            stored_payment_method_id: String::new(),
         },
     ];
     Ok(apex_api::billing_view::build(
         &records,
         payments,
         NOW_MS,
-        MonitoringView {
-            fee_micros: None,
-            since: None,
-        },
+        MonitoringView::not_recorded(),
         "USD",
     ))
 }

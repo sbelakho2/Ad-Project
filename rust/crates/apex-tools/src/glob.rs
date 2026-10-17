@@ -6,6 +6,8 @@ use regex::Regex;
 
 /// Expand braces, then compile with the exact JS replacement ordering.
 pub fn glob_to_regex(glob: &str) -> Result<Regex, String> {
+    #[cfg(test)]
+    crate::util::note_regex_compile();
     let mut alts: Vec<String> = Vec::new();
     let mut with_placeholders = String::new();
     {
@@ -71,6 +73,15 @@ pub fn matches(glob: &str, path: &str) -> bool {
     glob_to_regex(glob)
         .map(|re| re.is_match(path))
         .unwrap_or(false)
+}
+
+/// Compile a glob once for repeated matching. An invalid glob compiles to
+/// `None` and never matches, exactly like the one-shot [`matches`] helper;
+/// callers that match one pattern against many paths (the classifier, the
+/// orphan gate) must compile first instead of paying a regex compilation per
+/// path.
+pub fn compile(glob: &str) -> Option<Regex> {
+    glob_to_regex(glob).ok()
 }
 
 #[cfg(test)]

@@ -1,0 +1,6 @@
+# only comments above
+#admob.com, pub-commented-out, DIRECT
+# applovin.com, pub-ignored, DIRECT
+metaads.com, pub-7, DIRECT # inline comment
+   # indented comment
+CONTACT=ops@studio.example # reach us

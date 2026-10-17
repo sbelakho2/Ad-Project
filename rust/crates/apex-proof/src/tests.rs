@@ -2,12 +2,13 @@
 //! rollback rules, file mode and file/in-memory equivalence.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use apex_core::platform::ExperimentMetric;
 use apex_core::{
     ExperimentResult, ExperimentSpec, ExperimentState, ExperimentVariantResult, PlatformId,
 };
-use ed25519_dalek::Signer;
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 
 use crate::errors::LedgerError;
 use crate::record::{ChangeKind, LedgerRecord};
@@ -501,6 +502,27 @@ fn append_refuses_a_broken_chain_and_leaves_the_file_untouched() {
 }
 
 #[test]
+fn append_refuses_a_malformed_external_tail() {
+    let dir = TempDir::new("malformed-append-tail");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(66);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    append_sample(&mut ledger);
+
+    let mut bytes = std::fs::read(&path).expect("read");
+    bytes.extend_from_slice(b"not json\n");
+    std::fs::write(&path, &bytes).expect("write malformed tail");
+    let err = ledger
+        .append(change(2))
+        .expect_err("append must refuse a malformed external tail");
+    assert!(
+        matches!(err, LedgerError::Malformed { line: 3, .. }),
+        "{err}"
+    );
+    assert_eq!(ledger.len(), 2, "in-memory state is unchanged");
+}
+
+#[test]
 fn append_refuses_a_truncated_file() {
     let dir = TempDir::new("truncated-append");
     let path = dir.file("ledger.jsonl");
@@ -509,7 +531,9 @@ fn append_refuses_a_truncated_file() {
     append_sample(&mut ledger);
 
     let bytes = std::fs::read(&path).expect("read");
-    std::fs::write(&path, &bytes[..bytes.len() - 1]).expect("write truncated");
+    let cut = bytes.len() - 5;
+    assert_ne!(bytes[cut - 1], b'\n', "the cut is inside the second line");
+    std::fs::write(&path, &bytes[..cut]).expect("write truncated");
     let err = ledger
         .append(change(2))
         .expect_err("append must fail closed");
@@ -954,9 +978,11 @@ fn forged_billing_records_are_refused_at_append() {
 // ---------------- verifier-round 2 regressions ----------------
 
 #[test]
-fn append_refuses_on_same_length_prefix_tamper() {
+fn append_refuses_on_same_length_prefix_tamper_with_restored_mtime() {
     // The length-equality fast path once let this through: rewrite the payload
-    // in place with identical byte count, then append on the open handle.
+    // in place with identical byte count and restore the mtime, so only the
+    // identity's ctime (or the content digest) can catch it. Then append on the
+    // open handle.
     let dir = TempDir::new("samelen-append");
     let path = dir.file("ledger.jsonl");
     let keys = keypair(60);
@@ -964,14 +990,32 @@ fn append_refuses_on_same_length_prefix_tamper() {
     append_sample(&mut ledger);
     append_sample(&mut ledger);
 
+    let modified = std::fs::metadata(&path)
+        .expect("stat")
+        .modified()
+        .expect("mtime");
     let mut lines = read_lines(&path);
     lines[0] = lines[0].replacen("admob-ecpm:g1:u1:0", "admob-ecpm:g1:u1:9", 1);
     let before = lines[0].len();
     write_lines(&path, &lines);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open for mtime")
+        .set_modified(modified)
+        .expect("restore mtime");
     let after = read_lines(&path)[0].len();
     assert_eq!(
         before, after,
         "tamper must be same-length for this regression"
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("stat")
+            .modified()
+            .expect("mtime"),
+        modified,
+        "the mtime is restored; only ctime and the content digest remain"
     );
 
     let err = ledger
@@ -999,7 +1043,177 @@ fn append_refuses_when_the_file_was_swapped_for_a_shorter_valid_chain() {
     };
     std::fs::write(&path, only_first).expect("swap file");
     let err = ledger.append(change(9)).expect_err("shorter swap refused");
-    assert!(matches!(err, LedgerError::StateDiverged { .. }), "{err}");
+    assert!(
+        matches!(err, LedgerError::StateDiverged { line: 2 }),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn append_reverifies_only_the_tail_when_the_prefix_is_unchanged() {
+    let dir = TempDir::new("tail-fast-path");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(62);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    for index in 0..40 {
+        ledger.append(change(index)).expect("append");
+    }
+    crate::ledger::reset_verified_lines();
+    crate::ledger::reset_append_prefix_metrics();
+    ledger.append(change(40)).expect("append");
+    ledger.append(change(41)).expect("append");
+    assert_eq!(
+        crate::ledger::verified_lines(),
+        2,
+        "only the two appended lines are parsed and checked"
+    );
+    assert_eq!(
+        crate::ledger::append_prefix_reads(),
+        0,
+        "the unchanged prefix is never re-read on consecutive self-appends"
+    );
+    assert_eq!(
+        crate::ledger::append_prefix_hashed(),
+        0,
+        "the unchanged prefix is never re-hashed on consecutive self-appends"
+    );
+
+    // Control: a fresh open re-verifies every line of the same file.
+    crate::ledger::reset_verified_lines();
+    let reopened = Ledger::open(&path, keys).expect("reopen");
+    assert_eq!(reopened.len(), 42);
+    assert_eq!(
+        crate::ledger::verified_lines(),
+        42,
+        "a fresh open verifies the whole file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_first_append_after_open_reads_no_prefix() {
+    let dir = TempDir::new("open-first-append");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(64);
+    let mut ledger = Ledger::open(&path, keys).expect("open");
+    // The identity captured by open is stable across the verifying read, so
+    // even the first append needs no prefix read or line verification.
+    crate::ledger::reset_verified_lines();
+    crate::ledger::reset_append_prefix_metrics();
+    ledger.append(change(0)).expect("append");
+    assert_eq!(crate::ledger::append_prefix_reads(), 0);
+    assert_eq!(crate::ledger::append_prefix_hashed(), 0);
+    assert_eq!(crate::ledger::verified_lines(), 0);
+}
+
+#[test]
+fn an_external_append_is_tail_verified_and_picked_up() {
+    let dir = TempDir::new("tail-external");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(63);
+    let mut first = Ledger::open(&path, keys.clone()).expect("first handle");
+    let mut second = Ledger::open(&path, keys.clone()).expect("second handle");
+    first.append(change(0)).expect("record 0");
+    first.append(change(1)).expect("record 1");
+    // The second handle's identity is the empty file, so its append detects
+    // the external writes. Its verified offset is 0: refresh re-reads the file,
+    // the content digest still matches the empty verified prefix, and the two
+    // external lines are verified in order (signature, canonical encoding,
+    // chain, seq) before its own record with seq 2 is linked to that tail.
+    crate::ledger::reset_verified_lines();
+    crate::ledger::reset_append_prefix_metrics();
+    second.append(change(2)).expect("record 2");
+    assert_eq!(second.len(), 3);
+    assert_eq!(second.get(2).expect("third").seq(), 2);
+    assert_eq!(
+        second.get(2).expect("third").prev_hash(),
+        second.get(1).expect("second").hash()
+    );
+    assert_eq!(
+        crate::ledger::append_prefix_reads(),
+        1,
+        "an identity mismatch takes the documented full-read fallback"
+    );
+    assert_eq!(
+        crate::ledger::verified_lines(),
+        2,
+        "the fallback verifies only the two lines past the verified prefix"
+    );
+
+    // The first handle now detects the second handle's write. Its running
+    // prefix digest still matches, so only the tail it had not seen is
+    // re-verified before it appends seq 3: its own lazily-unverified seq 1
+    // line plus the externally written seq 2 line.
+    crate::ledger::reset_verified_lines();
+    crate::ledger::reset_append_prefix_metrics();
+    first.append(change(3)).expect("record 3");
+    assert_eq!(
+        crate::ledger::append_prefix_reads(),
+        1,
+        "the identity mismatch is detected by the first handle"
+    );
+    assert_eq!(
+        crate::ledger::verified_lines(),
+        2,
+        "the content-digest fallback verifies only the two unseen tail lines"
+    );
+    assert_eq!(first.len(), 4);
+
+    let records = Ledger::read_verified(&path, &keys.verifying_key()).expect("verify");
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[3].prev_hash(), records[2].hash());
+}
+
+#[test]
+fn two_handles_interleave_by_detecting_each_others_identity_change() {
+    // The ledger is single-writer by contract, but the identity gate makes an
+    // out-of-contract interleaving safe rather than corrupting: each writer's
+    // next append detects the other's ctime/len change, re-verifies the valid
+    // chain (tail-only when the digest still matches) and appends the next
+    // sequence linked to the externally written tip. A shorter valid chain
+    // would instead be refused with StateDiverged.
+    let dir = TempDir::new("two-handle-interleave");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(65);
+    let mut a = Ledger::open(&path, keys.clone()).expect("handle a");
+    let mut b = Ledger::open(&path, keys.clone()).expect("handle b");
+
+    a.append(change(0)).expect("a seq 0");
+    a.append(change(1)).expect("a seq 1");
+
+    // B's identity is still the empty file: it detects A's two appends.
+    crate::ledger::reset_append_prefix_metrics();
+    b.append(change(2)).expect("b seq 2");
+    assert_eq!(
+        crate::ledger::append_prefix_reads(),
+        1,
+        "handle B detected handle A through the file identity"
+    );
+    assert_eq!(b.len(), 3);
+
+    // A's identity is the two-line file it left: it detects B's append.
+    crate::ledger::reset_append_prefix_metrics();
+    a.append(change(3)).expect("a seq 3");
+    assert_eq!(
+        crate::ledger::append_prefix_reads(),
+        1,
+        "handle A detected handle B through the file identity"
+    );
+    assert_eq!(a.len(), 4);
+
+    let records = Ledger::read_verified(&path, &keys.verifying_key()).expect("verify");
+    assert_eq!(records.len(), 4);
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(
+            record.seq(),
+            u64::try_from(index).expect("index"),
+            "seq order"
+        );
+    }
+    for pair in records.windows(2) {
+        assert_eq!(pair[1].prev_hash(), pair[0].hash(), "link chain");
+    }
 }
 
 #[test]
@@ -1121,4 +1335,302 @@ fn the_file_ledger_opens_from_owned_and_borrowed_paths() {
     assert_eq!(b.len(), 0);
     let c = Ledger::open(&owned, keypair(4)).expect("reopen");
     assert_eq!(c.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Parallel signature verification: sequential equivalence and thread seam
+// ---------------------------------------------------------------------------
+
+/// A valid chain of `count` sealed and signed lines.
+fn chained_lines(count: usize, keys: &crate::Keypair) -> Vec<String> {
+    let mut lines = Vec::with_capacity(count);
+    let mut prev_hash = [0u8; 32];
+    for index in 0..count {
+        let seq = u64::try_from(index).expect("test index fits u64");
+        let record = seal_record(change(seq), seq, prev_hash);
+        prev_hash = record.hash();
+        lines.push(signed_line(&record, keys));
+    }
+    lines
+}
+
+fn chain_bytes(lines: &[String]) -> Vec<u8> {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text.into_bytes()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReferenceLine {
+    record: LedgerRecord,
+    signature: String,
+    pubkey: String,
+}
+
+/// The pre-parallel verification algorithm, kept as the test oracle: parse,
+/// public key, signature, canonical bytes and chain rules, strictly in line
+/// order, exactly as the sequential implementation did.
+fn sequential_reference(
+    bytes: &[u8],
+    expected_pubkey: &VerifyingKey,
+) -> Result<Vec<LedgerRecord>, LedgerError> {
+    let mut records = Vec::new();
+    let mut validator = crate::chain::ChainValidator::new();
+    if !bytes.is_empty() {
+        if bytes.last() != Some(&b'\n') {
+            let complete_lines = bytes.iter().filter(|byte| **byte == b'\n').count();
+            return Err(LedgerError::Truncated {
+                line: complete_lines + 1,
+            });
+        }
+        for (index, chunk) in bytes[..bytes.len() - 1]
+            .split(|byte| *byte == b'\n')
+            .enumerate()
+        {
+            let line = index + 1;
+            let stored: ReferenceLine =
+                serde_json::from_slice(chunk).map_err(|error| LedgerError::Malformed {
+                    line,
+                    detail: error.to_string(),
+                })?;
+            let pubkey: [u8; 32] = hex::decode(&stored.pubkey)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(LedgerError::WrongPubkey { line })?;
+            if pubkey != expected_pubkey.to_bytes() {
+                return Err(LedgerError::WrongPubkey { line });
+            }
+            let signature_bytes: [u8; 64] = hex::decode(&stored.signature)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(LedgerError::BadSignature { line })?;
+            let signature = Signature::from_bytes(&signature_bytes);
+            expected_pubkey
+                .verify_strict(&stored.record.hash(), &signature)
+                .map_err(|_| LedgerError::BadSignature { line })?;
+            let canonical =
+                crate::ledger::canonical_line(&stored.record, &signature, expected_pubkey)?;
+            if canonical[..canonical.len() - 1] != *chunk {
+                return Err(LedgerError::Malformed {
+                    line,
+                    detail: "line bytes are not the canonical serialization of the signed record"
+                        .into(),
+                });
+            }
+            validator.check(&stored.record, line)?;
+            records.push(stored.record);
+        }
+    }
+    Ok(records)
+}
+
+fn assert_same_ledger_error(actual: &LedgerError, expected: &LedgerError) {
+    assert_eq!(
+        std::mem::discriminant(actual),
+        std::mem::discriminant(expected),
+        "error variant differs: {actual:?} vs {expected:?}"
+    );
+    assert_eq!(
+        actual.to_string(),
+        expected.to_string(),
+        "error message differs"
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Expected {
+    Valid,
+    BadSignature(usize),
+    HashMismatch(usize),
+    Malformed(usize),
+}
+
+fn assert_expected(
+    result: &Result<Vec<LedgerRecord>, LedgerError>,
+    expected: Expected,
+    case: &str,
+) {
+    match (result, expected) {
+        (Ok(_), Expected::Valid) => {}
+        (Err(error), Expected::BadSignature(line)) => {
+            assert!(
+                matches!(error, LedgerError::BadSignature { line: actual } if *actual == line),
+                "{case}: expected BadSignature at line {line}, got {error:?}"
+            );
+        }
+        (Err(error), Expected::HashMismatch(line)) => {
+            assert!(
+                matches!(error, LedgerError::HashMismatch { line: actual } if *actual == line),
+                "{case}: expected HashMismatch at line {line}, got {error:?}"
+            );
+        }
+        (Err(error), Expected::Malformed(line)) => {
+            assert!(
+                matches!(error, LedgerError::Malformed { line: actual, .. } if *actual == line),
+                "{case}: expected Malformed at line {line}, got {error:?}"
+            );
+        }
+        (other, expected) => {
+            panic!("{case}: expected {expected:?}, got {other:?}");
+        }
+    }
+}
+
+/// Equivalence matrix: every tampered ledger must produce the exact same
+/// typed error (variant and message) through the sequential reference, the
+/// forced-single-worker path and the parallel path.
+#[test]
+fn parallel_verification_matches_the_sequential_reference() {
+    let keys = keypair(70);
+    let expected_key = keys.verifying_key();
+    let pristine = chained_lines(12, &keys);
+    let last_seq = pristine.len() - 1;
+    let middle_seq = pristine.len() / 2;
+
+    let mut cases: Vec<(String, Vec<String>, Expected)> = Vec::new();
+    cases.push(("pristine".into(), pristine.clone(), Expected::Valid));
+
+    for seq in [1, 2, middle_seq, last_seq] {
+        let mut lines = pristine.clone();
+        lines[seq] = flip_hex_field(&lines[seq], "signature");
+        cases.push((
+            format!("bad signature at seq {seq}"),
+            lines,
+            Expected::BadSignature(seq + 1),
+        ));
+    }
+
+    // Two bad signatures: the smallest sequence must be reported, regardless
+    // of which worker finishes first.
+    let mut two_bad = pristine.clone();
+    two_bad[9] = flip_hex_field(&two_bad[9], "signature");
+    two_bad[5] = flip_hex_field(&two_bad[5], "signature");
+    cases.push((
+        "bad signatures at seq 5 and seq 9".into(),
+        two_bad,
+        Expected::BadSignature(6),
+    ));
+
+    // The same two failures listed in the opposite tampering order.
+    let mut two_bad_reversed = pristine.clone();
+    two_bad_reversed[5] = flip_hex_field(&two_bad_reversed[5], "signature");
+    two_bad_reversed[9] = flip_hex_field(&two_bad_reversed[9], "signature");
+    cases.push((
+        "bad signatures at seq 5 and seq 9 (reverse order)".into(),
+        two_bad_reversed,
+        Expected::BadSignature(6),
+    ));
+
+    // Structural tamper at line 3 unchanged even when a later signature is bad.
+    let mut structural = pristine.clone();
+    structural[2] = structural[2].replacen("admob-ecpm:g1:u1:2", "admob-ecpm:g1:u1:9", 1);
+    structural[8] = flip_hex_field(&structural[8], "signature");
+    cases.push((
+        "payload tamper at seq 2 plus bad signature at seq 8".into(),
+        structural,
+        Expected::HashMismatch(3),
+    ));
+
+    // An earlier bad signature wins over a later structural tamper.
+    let mut earlier_signature = pristine.clone();
+    earlier_signature[1] = flip_hex_field(&earlier_signature[1], "signature");
+    earlier_signature[7] =
+        earlier_signature[7].replacen("admob-ecpm:g1:u1:7", "admob-ecpm:g1:u1:9", 1);
+    cases.push((
+        "bad signature at seq 1 before payload tamper at seq 7".into(),
+        earlier_signature,
+        Expected::BadSignature(2),
+    ));
+
+    // Canonical-encoding tamper (injected annotation) is still Malformed.
+    let mut injected = pristine.clone();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&injected[3]).expect("parse persisted line");
+    value["record"]["annotation"] = serde_json::json!("injected");
+    injected[3] = serde_json::to_string(&value).expect("serialize injected line");
+    cases.push((
+        "injected field at seq 3".into(),
+        injected,
+        Expected::Malformed(4),
+    ));
+
+    for (case, lines, expected) in cases {
+        let bytes = chain_bytes(&lines);
+        let reference = sequential_reference(&bytes, &expected_key);
+        let single =
+            crate::ledger::read_verified_bytes_with_threads(&bytes, &expected_key, 1, None);
+        let parallel =
+            crate::ledger::read_verified_bytes_with_threads(&bytes, &expected_key, 4, None);
+
+        assert_expected(&reference, expected, &format!("{case}: reference"));
+        assert_expected(&single, expected, &format!("{case}: one worker"));
+        assert_expected(&parallel, expected, &format!("{case}: four workers"));
+
+        match (reference, parallel) {
+            (Ok(reference), Ok(parallel)) => assert_eq!(reference, parallel, "{case}"),
+            (Err(reference), Err(parallel)) => {
+                assert_same_ledger_error(&parallel, &reference);
+            }
+            (reference, parallel) => {
+                panic!("{case}: reference {reference:?}, parallel {parallel:?}");
+            }
+        }
+    }
+}
+
+/// The concurrency seam: a large ledger uses more than one verification
+/// worker, the pool stays bounded by the requested count, and forcing a single
+/// thread runs exactly one worker (so the >1 assertion above is load-bearing).
+#[test]
+fn large_ledgers_verify_signatures_on_multiple_workers() {
+    let keys = keypair(71);
+    let expected_key = keys.verifying_key();
+    let lines = chained_lines(64, &keys);
+    let bytes = chain_bytes(&lines);
+
+    let parallel_probe = AtomicU64::new(0);
+    let records = crate::ledger::read_verified_bytes_with_threads(
+        &bytes,
+        &expected_key,
+        4,
+        Some(&parallel_probe),
+    )
+    .expect("parallel verify");
+    assert_eq!(records.len(), 64);
+    let workers = parallel_probe.load(Ordering::Relaxed);
+    assert!(
+        workers > 1,
+        "a 64-record ledger must use more than one signature-verification worker, used {workers}"
+    );
+    assert!(
+        workers <= 4,
+        "the worker pool must stay bounded by the requested threads, used {workers}"
+    );
+
+    let single_probe = AtomicU64::new(0);
+    crate::ledger::read_verified_bytes_with_threads(&bytes, &expected_key, 1, Some(&single_probe))
+        .expect("single-worker verify");
+    assert_eq!(
+        single_probe.load(Ordering::Relaxed),
+        1,
+        "forcing one thread must run exactly one verification worker"
+    );
+}
+
+#[test]
+fn verify_thread_override_is_parsed_and_bounded() {
+    assert_eq!(crate::ledger::parse_verify_threads("1"), Some(1));
+    assert_eq!(crate::ledger::parse_verify_threads(" 4 "), Some(4));
+    assert_eq!(
+        crate::ledger::parse_verify_threads("0"),
+        Some(1),
+        "zero workers is clamped to one"
+    );
+    assert_eq!(
+        crate::ledger::parse_verify_threads("1000"),
+        Some(crate::ledger::MAX_VERIFY_THREADS),
+        "the override cannot exceed the sane cap"
+    );
+    assert_eq!(crate::ledger::parse_verify_threads("nope"), None);
+    assert_eq!(crate::ledger::parse_verify_threads(""), None);
 }

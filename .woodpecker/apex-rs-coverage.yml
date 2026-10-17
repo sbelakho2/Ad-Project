@@ -1,7 +1,12 @@
-# apex-rs coverage: every Rust crate in the workspace, one matrix entry per
-# crate. Coverage comes from cargo-llvm-cov and is consumed by apex-tools'
-# lcov gate, which enforces the ratchet floor from tools/coverage/floors.txt.
-# Clippy and fmt run per entry.
+# apex-rs coverage: one matrix entry per Rust crate for the build domain
+# (tests, clippy, fmt). Coverage is produced by ONE workspace-instrumented
+# llvm-cov run (all crates' tests in one profile), because the frozen floors
+# in tools/coverage/floors.txt were calibrated that way: per-crate
+# `cargo llvm-cov -p <crate>` runs miss hits from other crates' tests and can
+# gate below a floor the workspace run clears. The workspace run and all 18
+# gates execute once, in the apex-core matrix entry; the other entries build
+# their crate. Each gate reads the merged profile and `lcov-gate --crate`
+# filters it to that crate's records.
 # Stable cargo-llvm-cov emits no branch records, so the gate holds lines and
 # functions; branch parity stays a nightly-toolchain upgrade.
 #
@@ -27,6 +32,8 @@ matrix:
       PKG: apex-billing
     - CRATE: apex-api
       PKG: apex-api
+    - CRATE: apex-vault
+      PKG: apex-vault
     - CRATE: apex-tools
       PKG: apex-tools
     - CRATE: apex-lift
@@ -45,15 +52,23 @@ matrix:
       PKG: apex-sales
     - CRATE: apex-sales-web
       PKG: apex-sales-web
+    - CRATE: apex-watch
+      PKG: apex-watch
 
 steps:
   apex-rs-crate:
     image: rust:1.88-bookworm
     commands:
       - rustup component add llvm-tools-preview clippy rustfmt
-      - cargo install cargo-llvm-cov --locked
+      - cargo install cargo-llvm-cov --version 0.9.1 --locked
       - cd "$CI_WORKSPACE"/rust
-      - cargo llvm-cov -p "$PKG" --lcov --output-path "$CRATE.lcov" && cargo test -p "$PKG" && cargo clippy -p "$PKG" --all-targets -- -D warnings && cargo fmt -p "$PKG" --check
-      - cd "$CI_WORKSPACE" && cargo build --release --manifest-path rust/Cargo.toml -p apex-tools
-      - FLOOR=$(grep -E "^${CRATE} " "$CI_WORKSPACE"/tools/coverage/floors.txt | awk '{print $2}')
-      - cd "$CI_WORKSPACE" && rust/target/release/apex-tools lcov-gate "rust/$CRATE.lcov" "$FLOOR" --crate "$CRATE"
+      - cargo test -p "$PKG" && cargo clippy -p "$PKG" --all-targets -- -D warnings && cargo fmt -p "$PKG" --check
+      - if [ "$CRATE" = apex-core ]; then
+      -   mkdir -p target/coverage
+      -   cargo llvm-cov --workspace --lcov --output-path target/coverage/workspace.lcov
+      -   cargo build --release -p apex-tools
+      -   while read -r DOMAIN FLOOR; do
+      -     case "$DOMAIN" in ''|'#'*) continue ;; esac
+      -     target/release/apex-tools lcov-gate target/coverage/workspace.lcov "$FLOOR" --crate "$DOMAIN"
+      -   done < "$CI_WORKSPACE"/tools/coverage/floors.txt
+      - fi

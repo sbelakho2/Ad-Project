@@ -896,6 +896,10 @@ async fn system(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         crate::data::ControlData::Fixtures(demo) => demo.system_components(),
         crate::data::ControlData::Live(_) => Vec::new(),
     };
+    let ledger_copy_line = state
+        .data
+        .ledger_copy(state.now_ms())
+        .system_line(state.now_ms());
     html_response(
         StatusCode::OK,
         pages::system::render(
@@ -903,6 +907,7 @@ async fn system(State(state): State<ControlState>, headers: HeaderMap) -> Respon
             &pages::system::SystemData {
                 overdue_jobs,
                 component_rows,
+                ledger_copy_line,
             },
         ),
     )
@@ -1523,7 +1528,7 @@ async fn action_result(
         return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
     let (state_outcome, job_state) = match entry.job_id.as_deref() {
-        Some(job_id) => match state.jobs.read(job_id) {
+        Some(job_id) => match state.jobs.read(job_id).await {
             Ok(crate::jobs::JobRead::Parsed(job)) => {
                 let display = job.display_state().to_string();
                 let mapped = match job.state.as_str() {

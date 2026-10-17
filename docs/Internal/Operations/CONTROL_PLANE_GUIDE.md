@@ -11,9 +11,9 @@ The ApexMediation Control Plane (`admin.apexmediation.ee`) is the central nerve 
 
 | Component | Server | Port | Role |
 |-----------|--------|------|------|
-| Control Plane | App (46.62.252.96) | 4000 | Refactored modular controllers |
-| **Sales API** | **Test (157.90.126.205)** | 4001 | **ALL orchestration, spintax, Thompson sampler, scoring** |
-| Edge Worker | Test (157.90.126.205) | 3500 | ML inference (ONNX 9-Dim, classification) |
+| Control Plane | App (203.0.113.10) | 4000 | Refactored modular controllers |
+| **Sales API** | **Test (203.0.113.11)** | 4001 | **ALL orchestration, spintax, Thompson sampler, scoring** |
+| Edge Worker | Test (203.0.113.11) | 3500 | ML inference (ONNX 9-Dim, classification) |
 | DB Access | Test→DB | 5432 | Direct P2P connectivity via ApexTunnel |
 
 ### ApexTunnel (P2P Mesh Networking)

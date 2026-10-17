@@ -1,0 +1,15 @@
+[package]
+name = "apex-vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aes-gcm = { version = "0.10", features = ["std"] }
+hex = "0.4"
+serde.workspace = true
+thiserror.workspace = true

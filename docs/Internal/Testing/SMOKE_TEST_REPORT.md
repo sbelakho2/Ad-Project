@@ -2,8 +2,8 @@
 
 **Date:** 2025-12-12  
 **Environment:** Production (Hetzner)  
-**App Server:** 46.62.252.96  
-**DB Server:** 77.42.44.35
+**App Server:** 203.0.113.10  
+**DB Server:** 203.0.113.12
 
 > **Note:** This report was originally run on DigitalOcean (164.90.232.151) during the migration.  
 > The platform has since migrated to Hetzner (December 2025). All tests remain valid.
@@ -110,11 +110,11 @@ All core platform features are **WORKING** across all pricing tiers. The RTB bid
 
 | Tier | Email | Password |
 |------|-------|----------|
-| Free | test@apexmediation.ee | admin123 |
-| Starter | starter@apexmediation.ee | admin123 |
-| Growth | growth@apexmediation.ee | admin123 |
-| Scale | scale@apexmediation.ee | admin123 |
-| Enterprise | enterprise@apexmediation.ee | admin123 |
+| Free | test@apexmediation.ee | <operator-password-from-the-vault> |
+| Starter | starter@apexmediation.ee | <operator-password-from-the-vault> |
+| Growth | growth@apexmediation.ee | <operator-password-from-the-vault> |
+| Scale | scale@apexmediation.ee | <operator-password-from-the-vault> |
+| Enterprise | enterprise@apexmediation.ee | <operator-password-from-the-vault> |
 
 ## SDK Keys (Test Environment)
 

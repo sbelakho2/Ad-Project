@@ -16,7 +16,7 @@ use apex_ui::format::{date_short, or_not_available, utc_datetime};
 use apex_ui::status::StatusKind;
 
 use crate::connections::{CredentialState, PlatformState};
-use crate::vault::VaultEntryMeta;
+use apex_vault::VaultEntryMeta;
 
 use super::{console_document, html_escape, ConsoleCtx};
 
@@ -293,6 +293,9 @@ fn field_help_list(platform: PlatformId) -> String {
         PlatformId::AppLovinMax => MAX_FIELDS_HELP,
         PlatformId::LevelPlay => LEVELPLAY_FIELDS_HELP,
         PlatformId::Admob => ADMOB_FIELDS_HELP,
+        // The billing domain is not a connectable platform; the console
+        // refuses the wire name before this page can render.
+        PlatformId::Billing => "",
     };
     format!("<p>{}</p>", html_escape(help))
 }
@@ -456,6 +459,9 @@ fn platform_fields(data: &ConnectionDetailData<'_>) -> Vec<(String, String, Stri
                 "A token is accepted today; an OAuth consent flow is a later addition.",
             ),
         ],
+        // The billing domain is not a connectable platform; the console
+        // refuses the wire name before this form can render.
+        PlatformId::Billing => vec![],
     }
 }
 

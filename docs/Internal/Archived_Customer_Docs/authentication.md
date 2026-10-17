@@ -21,7 +21,7 @@ We support two authentication methods:
 ```json
 {
   "email": "developer@example.com",
-  "password": "SecureP@ssw0rd!",
+  "password": "<example-password>",
   "firstName": "John",
   "lastName": "Doe",
   "company": "Example Games Inc"
@@ -58,7 +58,7 @@ We support two authentication methods:
 ```json
 {
   "email": "developer@example.com",
-  "password": "SecureP@ssw0rd!"
+  "password": "<example-password>"
 }
 ```
 

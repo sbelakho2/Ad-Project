@@ -315,7 +315,7 @@ Path: `monitoring/grafana/migration-studio.json`
 - Guardrail pauses (orange)
 - Kill switches (red)
 
-**Access (Hetzner Production)**: `http://46.62.252.96:3001/d/apex-rtb-analytics`
+**Access (Hetzner Production)**: `http://203.0.113.10:3001/d/apex-rtb-analytics`
 
 ### Alert Routing
 

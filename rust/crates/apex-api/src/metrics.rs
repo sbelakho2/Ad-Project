@@ -24,14 +24,18 @@
 //! unwinding cannot leak it.
 //!
 //! `GET /metrics` serves the hand-rolled text plus the registry render as one
-//! Prometheus document. When `APEX_METRICS_TEXTFILE` is set,
-//! [`spawn_textfile_exporter`] exports the registry render atomically (temp
-//! file plus rename, [`apex_metrics::textfile`]) every 15 seconds through a
-//! background task, and [`export_textfile`] writes the final file once more
-//! on graceful shutdown. The periodic tick is deliberate: a per-request write
-//! would couple request latency to disk I/O and expose a partial file to a
-//! scrape, while the atomic writer plus a 15-second maximum staleness keeps
-//! the node_exporter textfile collector honest at a bounded cost.
+//! Prometheus document on the API's own bind, for the operator scrape on the
+//! loopback/control boundary. The public edge
+//! (`infrastructure/caddy/Caddyfile`) refuses the `/metrics` path, so process
+//! internals never reach the public API host. When `APEX_METRICS_TEXTFILE` is
+//! set, [`spawn_textfile_exporter`] exports the registry render atomically
+//! (temp file plus rename, [`apex_metrics::textfile`]) every 15 seconds
+//! through a background task, and [`export_textfile`] writes the final file
+//! once more on graceful shutdown. The periodic tick is deliberate: a
+//! per-request write would couple request latency to disk I/O and expose a
+//! partial file to a scrape, while the atomic writer plus a 15-second maximum
+//! staleness keeps the node_exporter textfile collector honest at a bounded
+//! cost.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

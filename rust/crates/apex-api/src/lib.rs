@@ -19,8 +19,13 @@
 //! deployment context: `APEX_CONSOLE_PUBLISHER_NAME` (default
 //! `Publisher workspace`), `APEX_CONSOLE_CURRENCY` (default `USD`) and the
 //! deployment's read-only mode. Console mutations are POSTs with a `303`
-//! result; the change-log session lives in an `HttpOnly`, host-only,
-//! `SameSite=Lax` cookie holding only an opaque id ([`session`]).
+//! result; the session lives in an `HttpOnly`, host-only, `SameSite=Lax`
+//! cookie holding only an opaque id ([`session`]). Every console page except
+//! the change-log access panel itself, the public free-audit flow and the
+//! one-time sign-in link ([`signin`]) requires a live session and scopes its
+//! data to the session's publisher: a request without one is answered `303`
+//! to `/console/ledger` (or, in a deployment with no console credentials at
+//! all, the not-configured panel), never a deployment-wide publisher's data.
 //!
 //! ## Read-only deployment mode
 //!
@@ -69,17 +74,23 @@ pub mod html;
 pub mod leads;
 pub mod live;
 pub mod metrics;
+pub mod outcomes;
 pub mod proposals;
 pub mod routes;
 pub mod session;
 pub mod settings;
+pub mod signin;
 pub mod sources;
 pub mod state;
-pub mod vault;
+
+/// The credential vault lives in the `apex-vault` crate; the `vault` module
+/// path is kept so every consumer of `apex_api::vault::*` (for example the
+/// fixture renderer and the console pages) keeps compiling unchanged.
+pub use apex_vault as vault;
 
 pub use analytics::AnalyticsAccess;
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use config::{env_value, parse_keys};
+pub use config::{decode_hex_env_key, env_value, parse_keys, HexKeyError};
 pub use cycle::{
     CyclePolicy, CycleRequest, CycleRunner, CycleSummary, LedgerOnlyRunner, READ_ONLY_MODE,
     READ_ONLY_NOTE,
@@ -90,8 +101,13 @@ pub use leads::{validate_lead, FileLeadStore, Lead, LeadStore};
 pub use live::{
     LiveAccount, LiveAccountStore, LiveAuditor, LiveCredentials, VaultedFileAccountStore,
 };
+pub use outcomes::{OutcomesAppender, OutcomesError};
 pub use routes::{router, MAX_BODY_BYTES};
 pub use session::{LedgerSessions, SESSION_COOKIE, SESSION_IDLE_MS};
+pub use signin::{
+    email_sink_from_env, is_signin_token, SigninRow, SigninService, SigninStore, WarningLog,
+    WorkspaceTokens,
+};
 pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,

@@ -169,6 +169,18 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     /// Return the publisher's records after full chain verification.
     async fn records(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError>;
 
+    /// The number of verified records for `publisher`, with the same
+    /// verification and error semantics as [`Self::records`]. Sources that
+    /// can answer from verified state without materializing the records
+    /// (the file source's cache) override this, so aggregate readers (the
+    /// overview totals) do not copy every record just to count them. The
+    /// default materializes and counts.
+    async fn record_count(&self, publisher: &str) -> Result<u64, ApiError> {
+        self.records(publisher)
+            .await
+            .map(|records| records.len() as u64)
+    }
+
     /// The publishers this source can serve, sorted. The overview totals read
     /// every one of them; a source that cannot enumerate returns nothing.
     fn publishers(&self) -> Vec<String> {
@@ -286,40 +298,93 @@ impl AuditSource for StaticAuditSource {
     }
 }
 
-/// One verified ledger held in memory: the records and the file identity
-/// (size plus modification time) they were verified at.
-#[derive(Debug, Clone)]
-struct CachedLedger {
+/// A ledger file's cache identity.
+///
+/// The size and modification time are the original key. On Unix the ctime and
+/// inode are included too: an unprivileged writer cannot set the ctime, so a
+/// rewrite that restores the mtime (`touch -t`) still invalidates the entry.
+/// The fallback keeps the original pair where those fields do not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
     size: u64,
     modified: SystemTime,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileStamp {
+    /// The stamp of `metadata`, or `None` when the filesystem exposes no
+    /// modification time (the cache is then bypassed, exactly as before).
+    fn read(metadata: &std::fs::Metadata) -> Option<Self> {
+        let modified = metadata.modified().ok()?;
+        let size = metadata.len();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Some(Self {
+                size,
+                modified,
+                ctime: metadata.ctime(),
+                ctime_nsec: metadata.ctime_nsec(),
+                ino: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Some(Self { size, modified })
+        }
+    }
+}
+
+/// One verified ledger held in memory: the records and the file identity they
+/// were verified at.
+#[derive(Debug, Clone)]
+struct CachedLedger {
+    stamp: FileStamp,
     records: Vec<LedgerRecord>,
 }
 
 /// The in-process verified-record cache of [`FileLedgerSource`]. A read is
-/// served from the cache only while the file's size and modification time are
-/// unchanged; a changed file (or one whose mtime cannot be read) goes back
-/// through [`apex_proof::Ledger::read_verified`].
+/// served from the cache only while the file's size, modification time and
+/// (on Unix) ctime and inode are unchanged; a changed file (or one whose
+/// mtime cannot be read) goes back through
+/// [`apex_proof::Ledger::read_verified`].
 #[derive(Debug, Default)]
 struct LedgerCache {
     entries: Mutex<HashMap<PathBuf, CachedLedger>>,
     verifications: AtomicU64,
+    materializations: AtomicU64,
 }
 
 impl LedgerCache {
-    fn get(&self, path: &Path, size: u64, modified: SystemTime) -> Option<Vec<LedgerRecord>> {
+    fn get(&self, path: &Path, stamp: FileStamp) -> Option<Vec<LedgerRecord>> {
         let entries = self.entries.lock().ok()?;
         entries.get(path).and_then(|cached| {
-            (cached.size == size && cached.modified == modified).then(|| cached.records.clone())
+            (cached.stamp == stamp).then(|| {
+                self.materializations.fetch_add(1, Ordering::Relaxed);
+                cached.records.clone()
+            })
         })
     }
 
-    fn put(&self, path: &Path, size: u64, modified: SystemTime, records: &[LedgerRecord]) {
+    /// The cached verified record count, without materializing the records.
+    fn count(&self, path: &Path, stamp: FileStamp) -> Option<u64> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .get(path)
+            .and_then(|cached| (cached.stamp == stamp).then_some(cached.records.len() as u64))
+    }
+
+    fn put(&self, path: &Path, stamp: FileStamp, records: &[LedgerRecord]) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(
                 path.to_path_buf(),
                 CachedLedger {
-                    size,
-                    modified,
+                    stamp,
                     records: records.to_vec(),
                 },
             );
@@ -332,9 +397,9 @@ impl LedgerCache {
 /// The key map is the allow-list of onboarded publishers: an unknown (but
 /// well-formed) publisher is a `404`, never an attempt at some other file.
 /// Records are parsed from the one read that verification accepted, and that
-/// verification is reused only while the file's size and modification time
-/// are unchanged: any change (including within the mtime granularity of the
-/// filesystem, when accompanied by a size change) re-verifies before serving.
+/// verification is reused only while the file's size, modification time and
+/// (on Unix) ctime and inode are unchanged: any change re-verifies before
+/// serving, including a same-length rewrite whose mtime was restored.
 #[derive(Debug, Clone)]
 pub struct FileLedgerSource {
     keys: Arc<HashMap<String, VerifyingKey>>,
@@ -385,9 +450,9 @@ impl FileLedgerSource {
         };
         let size = metadata.len();
         ensure_within_cap(size, MAX_LEDGER_BYTES)?;
-        let modified = metadata.modified().ok();
-        if let Some(modified) = modified {
-            if let Some(records) = self.cache.get(&path, size, modified) {
+        let stamp = FileStamp::read(&metadata);
+        if let Some(stamp) = stamp {
+            if let Some(records) = self.cache.get(&path, stamp) {
                 return Ok(records);
             }
         }
@@ -399,10 +464,43 @@ impl FileLedgerSource {
                 Some(line) => ApiError::LedgerUnverified { line },
                 None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
             })?;
-        if let Some(modified) = modified {
-            self.cache.put(&path, size, modified, &records);
+        if let Some(stamp) = stamp {
+            self.cache.put(&path, stamp, &records);
         }
         Ok(records)
+    }
+
+    /// The verified record count without materializing cached records.
+    ///
+    /// A cache hit answers from the entry's length alone; a miss runs the
+    /// same verified read as [`Self::load`] (warming the cache) and counts
+    /// what that read returned, so the count is always a count of records
+    /// that passed verification.
+    fn load_count_cached(&self, publisher: &str) -> Result<Option<u64>, ApiError> {
+        if !is_valid_publisher(publisher) {
+            return Err(ApiError::BadRequest("invalid_publisher"));
+        }
+        let _expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
+        let path = contained_in(&self.canonical_root, self.path_for(publisher))?;
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
+            Err(error) => {
+                return Err(ApiError::Internal(format!(
+                    "stat ledger {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        let size = metadata.len();
+        ensure_within_cap(size, MAX_LEDGER_BYTES)?;
+        let stamp = FileStamp::read(&metadata);
+        if let Some(stamp) = stamp {
+            if let Some(count) = self.cache.count(&path, stamp) {
+                return Ok(Some(count));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -414,6 +512,21 @@ impl LedgerSource for FileLedgerSource {
         tokio::task::spawn_blocking(move || source.load(&publisher))
             .await
             .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
+    }
+
+    async fn record_count(&self, publisher: &str) -> Result<u64, ApiError> {
+        // The cache-hit path is a stat plus a cache lookup; only a miss pays
+        // for the blocking verified read (which also warms the cache).
+        if let Some(count) = self.load_count_cached(publisher)? {
+            return Ok(count);
+        }
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || {
+            source.load(&publisher).map(|records| records.len() as u64)
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
     }
 
     fn publishers(&self) -> Vec<String> {
@@ -807,5 +920,205 @@ mod tests {
             "a changed file re-verifies"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A same-length rewrite whose mtime is restored (`touch -t`) must still
+    /// be detected and re-verified: the Unix ctime is part of the cache key,
+    /// and an unprivileged writer cannot restore it. A pair-keyed cache
+    /// serves the stale records here; this test fails on it.
+    #[tokio::test]
+    async fn restored_mtime_same_length_rewrite_is_detected() {
+        let dir = std::env::temp_dir().join(format!("apex-ledger-ctime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let seed = [9u8; 32];
+        let path = dir.join("pub1.jsonl");
+        {
+            let mut ledger =
+                apex_proof::Ledger::open(&path, apex_proof::Keypair::from_bytes(&seed))
+                    .expect("open ledger");
+            ledger
+                .append(lift_draft(r#"{"type":"dataPull","day":"2026-10-01"}"#))
+                .expect("append");
+        }
+        // A second, equally long valid ledger signed by the same key.
+        let replacement = dir.join("replacement.jsonl");
+        {
+            let mut ledger =
+                apex_proof::Ledger::open(&replacement, apex_proof::Keypair::from_bytes(&seed))
+                    .expect("open replacement");
+            ledger
+                .append(lift_draft(r#"{"type":"dataPull","day":"2026-10-02"}"#))
+                .expect("append");
+        }
+        let replacement_bytes = std::fs::read_to_string(&replacement).expect("replacement bytes");
+        let mut keys = HashMap::new();
+        keys.insert(
+            "pub1".to_string(),
+            apex_proof::Keypair::from_bytes(&seed).verifying_key(),
+        );
+        let source = FileLedgerSource::new(&dir, keys);
+
+        let original = source.records("pub1").await.expect("first read");
+        assert_eq!(source.cache.verifications.load(Ordering::Relaxed), 1);
+        let original_json = serde_json::to_string(&original[0]).expect("record json");
+        assert!(original_json.contains("2026-10-01"), "{original_json}");
+
+        let metadata = std::fs::metadata(&path).expect("stat");
+        let modified = metadata.modified().expect("mtime");
+        assert_eq!(
+            metadata.len(),
+            replacement_bytes.len() as u64,
+            "the rewrites keep the length"
+        );
+        std::fs::write(&path, &replacement_bytes).expect("rewrite");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(modified)
+            .expect("restore mtime");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("stat")
+                .modified()
+                .expect("mtime"),
+            modified,
+            "the mtime is restored to the pair-keyed value"
+        );
+
+        let rewritten = source.records("pub1").await.expect("second read");
+        assert_eq!(
+            source.cache.verifications.load(Ordering::Relaxed),
+            2,
+            "the restored-mtime rewrite re-verifies"
+        );
+        let rewritten_json = serde_json::to_string(&rewritten[0]).expect("record json");
+        assert!(
+            rewritten_json.contains("2026-10-02"),
+            "the new bytes are served: {rewritten_json}"
+        );
+        assert_ne!(rewritten, original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The overview totals read every publisher every request. The count path
+    /// must answer from the verified cache without re-verifying and without
+    /// materializing (cloning) records, until a file actually changes. The
+    /// pre-fix overview loop (`records()` per publisher, summed lengths)
+    /// materialized every record on every request; this test guards that the
+    /// count path never regresses to that shape (implementing `record_count`
+    /// as `records().len()` makes the materialization assertion fail).
+    #[tokio::test]
+    async fn record_count_avoids_verification_and_materialization_until_a_file_changes() {
+        let dir = std::env::temp_dir().join(format!("apex-ledger-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+
+        let mut keys = HashMap::new();
+        let mut ledger_paths = Vec::new();
+        for (publisher, records) in [("pub1", 3usize), ("pub2", 2)] {
+            let seed = [publisher.len() as u8 + 10; 32];
+            let path = dir.join(format!("{publisher}.jsonl"));
+            {
+                let mut ledger =
+                    apex_proof::Ledger::open(&path, apex_proof::Keypair::from_bytes(&seed))
+                        .expect("open ledger");
+                for i in 0..records {
+                    ledger
+                        .append(lift_draft(&format!(
+                            r#"{{"type":"dataPull","day":"2026-10-{:02}"}}"#,
+                            i + 1
+                        )))
+                        .expect("append");
+                }
+            }
+            keys.insert(
+                publisher.to_string(),
+                apex_proof::Keypair::from_bytes(&seed).verifying_key(),
+            );
+            ledger_paths.push((publisher, seed, path));
+        }
+        let source = FileLedgerSource::new(&dir, keys);
+        let publishers = source.publishers();
+        assert_eq!(publishers, vec!["pub1".to_string(), "pub2".to_string()]);
+
+        // Three overview sweeps: one verification per publisher in total and
+        // zero record materializations on the count path.
+        for sweep in 0..3 {
+            let mut total = 0;
+            for publisher in &publishers {
+                total += source.record_count(publisher).await.expect("count");
+            }
+            assert_eq!(total, 5, "sweep {sweep}");
+        }
+        assert_eq!(
+            source.cache.verifications.load(Ordering::Relaxed),
+            publishers.len() as u64,
+            "one verification per publisher, no re-verification across sweeps"
+        );
+        assert_eq!(
+            source.cache.materializations.load(Ordering::Relaxed),
+            0,
+            "counting never clones records"
+        );
+
+        // The rendered path still materializes, and both paths agree.
+        let records = source.records("pub1").await.expect("records");
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            source.cache.materializations.load(Ordering::Relaxed),
+            1,
+            "reading records is what materializes them"
+        );
+        assert_eq!(
+            source.record_count("pub1").await.expect("count"),
+            records.len() as u64
+        );
+
+        // A changed file re-verifies once and the new count is served.
+        let (publisher, seed, path) = &ledger_paths[0];
+        {
+            let mut ledger = apex_proof::Ledger::open(path, apex_proof::Keypair::from_bytes(seed))
+                .expect("reopen ledger");
+            ledger
+                .append(lift_draft(r#"{"type":"dataPull","day":"2026-11-01"}"#))
+                .expect("append");
+        }
+        assert_eq!(
+            source.record_count(publisher).await.expect("count"),
+            4,
+            "the appended record is counted"
+        );
+        assert_eq!(
+            source.cache.verifications.load(Ordering::Relaxed),
+            publishers.len() as u64 + 1,
+            "exactly one re-verification after the change"
+        );
+        assert_eq!(
+            source.records(publisher).await.expect("records").len(),
+            4,
+            "the read path agrees with the count path"
+        );
+
+        // Refusals agree across both paths.
+        for bad in ["pub3", "a/b"] {
+            let count_error = source.record_count(bad).await.expect_err("refused");
+            let read_error = source.records(bad).await.expect_err("refused");
+            assert_eq!(count_error.to_string(), read_error.to_string(), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn static_source_record_count_agrees_with_records() {
+        let mut source = StaticLedgerSource::new(HashMap::new());
+        assert!(source.record_count("pub").await.is_err());
+        source.insert("pub", vec![]);
+        assert_eq!(source.record_count("pub").await.expect("count"), 0);
+        assert!(matches!(
+            source.record_count("a/b").await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
     }
 }

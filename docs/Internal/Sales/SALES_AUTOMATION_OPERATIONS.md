@@ -8,7 +8,7 @@
 > **📢 See Also:** [Autonomous Sales V2](AUTONOMOUS_SALES_V2.md) - Zero-cost outbound prospecting system with Thompson Sampling, Spintax, and Naive Bayes classification
 
 > **⚠️ Architecture Note (January 2026):** For V1 cron jobs (trial reminders, dunning, usage sync), these still run on the **App Server backend** (PM2).
-> For V2 autonomous sales (outbound prospecting, campaign execution), **ALL work runs on the Test Server** (157.90.126.205:4001).
+> For V2 autonomous sales (outbound prospecting, campaign execution), **ALL work runs on the Test Server** (203.0.113.11:4001).
 > The App Server control-plane is strictly a proxy client for V2.
 
 ---
@@ -263,9 +263,11 @@ await dunningManagementService.reactivateSubscription(
 - Direct delivery to recipient MX
 - Full control over deliverability
 
+> **Note:** Example addresses below use RFC 5737 documentation addresses; replace them with your server addresses before applying them.
+
 **Configuration:**
-- MX: mail.apexmediation.ee (157.90.126.205)
-- SPF: `v=spf1 ip4:157.90.126.205 ip4:46.62.252.96 -all`
+- MX: mail.apexmediation.ee (203.0.113.11)
+- SPF: `v=spf1 ip4:203.0.113.11 ip4:203.0.113.10 -all`
 - DKIM: apexmail._domainkey selector
 - DMARC: `p=reject`
 

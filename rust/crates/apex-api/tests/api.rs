@@ -7,7 +7,7 @@ mod common;
 
 use std::sync::Arc;
 
-use apex_api::{router, MAX_BODY_BYTES};
+use apex_api::{router, AppState, MAX_BODY_BYTES};
 
 use axum::body::Body;
 use axum::http::header;
@@ -17,6 +17,12 @@ use common::*;
 use serde_json::json;
 
 const JSON: &str = "application/json";
+
+/// The state the cycle tests drive: the file fixture plus the configured
+/// bearer token (`APEX_LIVE_AUDIT_TOKEN` in the real binary).
+fn token_state(dir: &TempDir) -> AppState {
+    file_state(dir.path(), pub1_keys()).with_live_auditor(token_auditor(API_TOKEN))
+}
 
 #[tokio::test]
 async fn healthz_returns_ok_json() {
@@ -269,11 +275,58 @@ async fn publisher_length_boundary_is_64_bytes() {
 }
 
 #[tokio::test]
+async fn cycle_without_authorization_is_401() {
+    // The cycle changes publisher state upstream, so it carries the same
+    // bearer gate as `POST /v1/audit/{platform}`: the gate runs before any
+    // path or query handling, so an anonymous caller learns nothing else.
+    let temp = TempDir::new("cycle-401");
+    write_standard_fixture(temp.path());
+    let app = router(token_state(&temp));
+    let response = send(&app, post(&format!("/v1/cycle/{PUBLISHER}?platform=admob"))).await;
+    assert_eq!(response.status, 401, "{}", response.body);
+    assert_eq!(response.json()["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn cycle_with_a_wrong_authorization_is_401() {
+    let temp = TempDir::new("cycle-401-wrong");
+    write_standard_fixture(temp.path());
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+            "not-the-token",
+            b"",
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 401, "{}", response.body);
+    assert_eq!(response.json()["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn cycle_without_a_configured_token_source_is_503() {
+    // No `APEX_LIVE_AUDIT_TOKEN` (no live auditor at all): the route cannot
+    // verify any bearer, so it fails closed instead of opening the cycle.
+    let temp = TempDir::new("cycle-503");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, post(&format!("/v1/cycle/{PUBLISHER}?platform=admob"))).await;
+    assert_eq!(response.status, 503, "{}", response.body);
+    assert_eq!(response.json()["error"], "live_audit_not_configured");
+}
+
+#[tokio::test]
 async fn cycle_requires_a_platform_parameter() {
     let temp = TempDir::new("cycle-platform");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, post(&format!("/v1/cycle/{PUBLISHER}"))).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        post_with_bearer(&format!("/v1/cycle/{PUBLISHER}"), API_TOKEN, b""),
+    )
+    .await;
     assert_eq!(response.status, 400);
     assert_eq!(response.json()["error"], "platform_required");
 }
@@ -282,8 +335,16 @@ async fn cycle_requires_a_platform_parameter() {
 async fn cycle_summarises_audit_and_ledger_without_mutating() {
     let temp = TempDir::new("cycle-summary");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, post(&format!("/v1/cycle/{PUBLISHER}?platform=admob"))).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+            API_TOKEN,
+            b"",
+        ),
+    )
+    .await;
     assert_eq!(response.status, 200);
     let expected = report_for(&minimal_snapshot(&["u1"]));
     let critical = expected
@@ -316,10 +377,14 @@ async fn cycle_summarises_audit_and_ledger_without_mutating() {
 async fn cycle_unknown_platform_is_400() {
     let temp = TempDir::new("cycle-unknown");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     let response = send(
         &app,
-        post(&format!("/v1/cycle/{PUBLISHER}?platform=tiktok")),
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=tiktok"),
+            API_TOKEN,
+            b"",
+        ),
     )
     .await;
     assert_eq!(response.status, 400);
@@ -329,8 +394,12 @@ async fn cycle_unknown_platform_is_400() {
 #[tokio::test]
 async fn cycle_rejects_invalid_publishers() {
     let temp = TempDir::new("cycle-badpub");
-    let app = router(file_state(temp.path(), pub1_keys()));
-    let response = send(&app, post("/v1/cycle/%2E%2E?platform=admob")).await;
+    let app = router(token_state(&temp));
+    let response = send(
+        &app,
+        post_with_bearer("/v1/cycle/%2E%2E?platform=admob", API_TOKEN, b""),
+    )
+    .await;
     assert_eq!(response.status, 400);
     assert_eq!(response.json()["error"], "invalid_publisher");
 }
@@ -339,7 +408,7 @@ async fn cycle_rejects_invalid_publishers() {
 async fn cycle_rejects_policy_outside_the_business_band() {
     let temp = TempDir::new("cycle-policy");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     for body in [
         r#"{"policy":{"minLiftRateBp":1000}}"#,
         r#"{"policy":{"minLiftRateBp":2500}}"#,
@@ -347,8 +416,9 @@ async fn cycle_rejects_policy_outside_the_business_band() {
     ] {
         let response = send(
             &app,
-            post_json(
+            post_json_with_bearer(
                 &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+                API_TOKEN,
                 body.as_bytes(),
             ),
         )
@@ -362,15 +432,16 @@ async fn cycle_rejects_policy_outside_the_business_band() {
 async fn cycle_accepts_the_band_edges() {
     let temp = TempDir::new("cycle-band");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     for body in [
         r#"{"policy":{"minLiftRateBp":1500}}"#,
         r#"{"policy":{"minLiftRateBp":2000,"maxFeeMicros":0}}"#,
     ] {
         let response = send(
             &app,
-            post_json(
+            post_json_with_bearer(
                 &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+                API_TOKEN,
                 body.as_bytes(),
             ),
         )
@@ -384,7 +455,7 @@ async fn cycle_accepts_the_band_edges() {
 async fn cycle_rejects_malformed_and_unknown_field_bodies() {
     let temp = TempDir::new("cycle-body");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     for body in [
         b"{".as_slice(),
         b"{\"policies\":{}}",
@@ -399,7 +470,11 @@ async fn cycle_rejects_malformed_and_unknown_field_bodies() {
     ] {
         let response = send(
             &app,
-            post_json(&format!("/v1/cycle/{PUBLISHER}?platform=admob"), body),
+            post_json_with_bearer(
+                &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+                API_TOKEN,
+                body,
+            ),
         )
         .await;
         assert_eq!(
@@ -412,12 +487,24 @@ async fn cycle_rejects_malformed_and_unknown_field_bodies() {
     }
     // An empty body is the default request, not an error; `{}` and an explicit
     // null policy are the same request spelled out.
-    let response = send(&app, post(&format!("/v1/cycle/{PUBLISHER}?platform=admob"))).await;
+    let response = send(
+        &app,
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+            API_TOKEN,
+            b"",
+        ),
+    )
+    .await;
     assert_eq!(response.status, 200);
     for body in [b"{}".as_slice(), b"{\"policy\":null}"] {
         let response = send(
             &app,
-            post_json(&format!("/v1/cycle/{PUBLISHER}?platform=admob"), body),
+            post_json_with_bearer(
+                &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+                API_TOKEN,
+                body,
+            ),
         )
         .await;
         assert_eq!(
@@ -509,6 +596,53 @@ async fn webhook_key_can_come_from_the_adyen_client() {
 }
 
 #[tokio::test]
+async fn webhook_hex_encoded_key_verifies_end_to_end() {
+    // Adyen publishes the HMAC key as hex text, while the signature is over
+    // the raw key bytes. The deployment decodes the value before wiring it
+    // (main.rs); this test drives that exact pipeline: the pinned signature
+    // verifies only when the hex text became the binary key it encodes.
+    let temp = TempDir::new("webhook-hex-key");
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let decoded = apex_api::decode_hex_env_key("APEX_ADYEN_HMAC_KEY", WEBHOOK_HMAC_KEY_HEX)
+        .expect("the pinned key is hex");
+    assert_eq!(decoded, WEBHOOK_HMAC_KEY);
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen_hmac_key(decoded)
+        .with_collection(store);
+    let app = router(state);
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(
+        response.json(),
+        json!({"received": true, "items": 1, "new": 1})
+    );
+
+    // The same value left as text (the pre-fix wiring) fails verification:
+    // this is the regression the hex decode closes.
+    let temp = TempDir::new("webhook-hex-key-text");
+    let store = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY_HEX.as_bytes().to_vec())
+        .with_collection(store);
+    let app = router(state);
+    let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert_eq!(response.json()["error"], "invalid_signature");
+
+    // Bad hex is a typed refusal naming the variable, not a failing-open key.
+    let error = apex_api::decode_hex_env_key("APEX_ADYEN_HMAC_KEY", "zz-not-hex")
+        .expect_err("bad hex refuses");
+    assert_eq!(error.variable(), "APEX_ADYEN_HMAC_KEY");
+    assert!(error.to_string().contains("APEX_ADYEN_HMAC_KEY"), "{error}");
+}
+
+#[tokio::test]
 async fn webhook_missing_signature_is_400() {
     let temp = TempDir::new("webhook-no-sig");
     let state = file_state(temp.path(), pub1_keys()).with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec());
@@ -597,7 +731,7 @@ async fn every_api_success_carries_application_json() {
         apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
             .expect("store"),
     );
-    let state = file_state(temp.path(), pub1_keys())
+    let state = token_state(&temp)
         .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
         .with_collection(store);
     let app = router(state);
@@ -605,7 +739,11 @@ async fn every_api_success_carries_application_json() {
         get("/healthz"),
         get("/v1/audit/admob"),
         get_with_bearer(&format!("/v1/ledger/{PUBLISHER}"), LEDGER_TOKEN),
-        post(&format!("/v1/cycle/{PUBLISHER}?platform=admob")),
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=admob"),
+            API_TOKEN,
+            b"",
+        ),
         post_json("/v1/adyen/webhook", &webhook_body()),
     ];
     for request in requests {
@@ -620,6 +758,26 @@ async fn every_api_success_carries_application_json() {
     }
 }
 
+#[tokio::test]
+async fn metrics_stays_available_on_the_direct_bind() {
+    // The edge refuses `/metrics` publicly (infrastructure/caddy); the API
+    // itself keeps serving it on its own bind for the operator scrape.
+    let temp = TempDir::new("metrics-direct");
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let response = send(&app, get("/metrics")).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert!(
+        response.content_type().starts_with("text/plain"),
+        "{}",
+        response.content_type()
+    );
+    assert!(
+        response.body.contains("apex_api_uptime_seconds"),
+        "{}",
+        response.body
+    );
+}
+
 // --- hardening regressions pinned from the adversarial verification report ---
 
 #[tokio::test]
@@ -628,12 +786,14 @@ async fn cycle_duplicate_query_keys_are_json_bad_request() {
     // refusals must stay `application/json` with the pinned code.
     let temp = TempDir::new("cycle-dup-query");
     write_standard_fixture(temp.path());
-    let app = router(file_state(temp.path(), pub1_keys()));
+    let app = router(token_state(&temp));
     let response = send(
         &app,
-        post(&format!(
-            "/v1/cycle/{PUBLISHER}?platform=admob&platform=admob"
-        )),
+        post_with_bearer(
+            &format!("/v1/cycle/{PUBLISHER}?platform=admob&platform=admob"),
+            API_TOKEN,
+            b"",
+        ),
     )
     .await;
     assert_eq!(response.status, 400);
@@ -826,4 +986,111 @@ fn ledger_read_path_is_pinned_to_a_single_read() {
         !SOURCES.contains("PersistedLine"),
         "the post-verification re-parse must stay deleted"
     );
+}
+
+/// The frozen `paid` outcome rides an accepted Adyen payment event: exactly
+/// one line per `(kind, ref)`, nothing for a replay, nothing for a refused
+/// payment, and nothing when no appender is configured.
+#[tokio::test]
+async fn accepted_payment_events_append_the_paid_outcome_once() {
+    let temp = TempDir::new("outcomes-paid");
+    let collection = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
+    let state = file_state(temp.path(), pub1_keys())
+        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_collection(collection)
+        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
+    let app = router(state);
+
+    let first = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!(first.json()["new"], 1);
+    let outcomes = std::fs::read_to_string(&outcomes_path).expect("outcomes");
+    let line: serde_json::Value = serde_json::from_str(outcomes.trim()).expect("line");
+    assert_eq!(line["publisher"], "pub1");
+    assert_eq!(line["kind"], "paid");
+    assert_eq!(line["ref"], "9916934567890123");
+    assert!(line["atUnixMs"].as_i64().expect("at") > 0);
+
+    // The replay is accepted but neither the event nor the outcome repeats.
+    let replay = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
+    assert_eq!(replay.status, 200);
+    assert_eq!(replay.json()["new"], 0);
+    assert_eq!(
+        std::fs::read_to_string(&outcomes_path)
+            .expect("outcomes")
+            .lines()
+            .count(),
+        1
+    );
+
+    // A refused payment (success=false, validly signed) records the event
+    // but appends no outcome.
+    let refused = signed_webhook_body("false", "9916934567890999");
+    let response = send(&app, post_json("/v1/adyen/webhook", &refused)).await;
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(response.json()["new"], 1);
+    assert_eq!(
+        std::fs::read_to_string(&outcomes_path)
+            .expect("outcomes")
+            .lines()
+            .count(),
+        1
+    );
+
+    // Without an appender the same accepted event still succeeds (the
+    // outcomes file is best effort).
+    let temp2 = TempDir::new("outcomes-absent");
+    let collection2 = Arc::new(
+        apex_billing::FileCollectionStore::open(&temp2.path().join("collection.jsonl"))
+            .expect("store"),
+    );
+    let state2 = file_state(temp2.path(), pub1_keys())
+        .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
+        .with_collection(collection2);
+    let response = send(
+        &router(state2),
+        post_json("/v1/adyen/webhook", &webhook_body()),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["new"], 1);
+}
+
+/// A validly signed webhook envelope for one AUTHORISATION item.
+fn signed_webhook_body(success: &str, psp_reference: &str) -> Vec<u8> {
+    let mut item = apex_billing::NotificationItem {
+        psp_reference: psp_reference.to_string(),
+        original_reference: String::new(),
+        merchant_account_code: "ApexMerchant".to_string(),
+        merchant_reference: "apex-fee:pub1:exp:2026-10".to_string(),
+        amount_value: 1_000,
+        amount_currency: "USD".to_string(),
+        event_code: "AUTHORISATION".to_string(),
+        success: success.to_string(),
+        hmac_signature: String::new(),
+        payment_method: String::new(),
+        stored_payment_method_id: String::new(),
+    };
+    item.hmac_signature = apex_billing::sign_notification_item(WEBHOOK_HMAC_KEY, &item);
+    serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "pspReference": item.psp_reference,
+                "originalReference": "",
+                "merchantAccountCode": "ApexMerchant",
+                "merchantReference": "apex-fee:pub1:exp:2026-10",
+                "amount": {"value": 1000, "currency": "USD"},
+                "eventCode": "AUTHORISATION",
+                "success": success,
+                "additionalData": {"hmacSignature": item.hmac_signature}
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
 }

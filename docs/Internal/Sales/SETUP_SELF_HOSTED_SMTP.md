@@ -4,9 +4,11 @@ This guide explains how to set up the zero-cost, self-hosted SMTP server for han
 
 **Goal:** Receive emails on `replies.apexmediation.ee` and forward them to the Control Plane API without using third-party services like SendGrid or Cloudflare.
 
-> **⚠️ Architecture Note (January 2026):** The inbound-smtp service runs on the **Test Server** (157.90.126.205:2525), not the App Server.
+> **⚠️ Architecture Note (January 2026):** The inbound-smtp service runs on the **Test Server** (203.0.113.11:2525), not the App Server.
 > It forwards to the local sales-api (localhost:4001) which handles all sales automation.
 > The App Server control-plane is strictly a proxy client.
+
+> **Note:** Example addresses in this guide use RFC 5737 documentation addresses; replace them with your server addresses before applying the configuration.
 
 ## Architecture
 
@@ -30,9 +32,9 @@ sequenceDiagram
 **Server Locations:**
 | Component | Server | Port |
 |-----------|--------|------|
-| inbound-smtp | Test Server (157.90.126.205) | 2525 (via iptables from 25) |
-| sales-api | Test Server (157.90.126.205) | 4001 |
-| Control Plane (proxy) | App Server (46.62.252.96) | 4000 |
+| inbound-smtp | Test Server (203.0.113.11) | 2525 (via iptables from 25) |
+| sales-api | Test Server (203.0.113.11) | 4001 |
+| Control Plane (proxy) | App Server (203.0.113.10) | 4000 |
 
 ## Prerequisites
 

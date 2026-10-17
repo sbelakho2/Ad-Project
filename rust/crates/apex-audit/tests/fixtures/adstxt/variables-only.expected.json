@@ -1,0 +1,8 @@
+{
+  "file": "variables-only.txt",
+  "note": "Variables only: NAME=VALUE lines are recorded as variables, never as networks and never as errors.",
+  "errors": [],
+  "records": 0,
+  "variables": 6,
+  "domains": []
+}

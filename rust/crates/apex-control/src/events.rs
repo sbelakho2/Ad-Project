@@ -200,6 +200,7 @@ mod tests {
             http_url: "http://127.0.0.1:8123".to_string(),
             database: "apex_test".to_string(),
             request_timeout_ms: 1,
+            ..ClickHouseConfig::default()
         }
     }
 
@@ -278,6 +279,7 @@ mod tests {
                     http_url: "http://127.0.0.1:9".to_string(),
                     database: "unreachable".to_string(),
                     request_timeout_ms: 200,
+                    ..apex_analytics::ClickHouseConfig::default()
                 })
                 .expect("config"),
             ),

@@ -544,11 +544,14 @@ async fn zero_expected_effect_is_refused() {
 }
 
 #[tokio::test]
-async fn verify_live_endpoints_refuse_before_apply() {
+async fn verify_live_endpoints_hold_the_proposal_without_aborting() {
+    // The adapter's verified write set does not include the operation: the
+    // proposal is held as a typed awaiting state and the pass continues —
+    // nothing is written and no other proposal is aborted.
     let ops = crate::ops::RecordingOps::new();
     ops.set_writable("updateEntryPrice", false);
     let mut l = ledger();
-    let err = run_cycle(
+    let outcome = run_cycle(
         &ops,
         &mut l,
         &AutopilotPolicy::conservative(),
@@ -561,12 +564,81 @@ async fn verify_live_endpoints_refuse_before_apply() {
         NOW,
     )
     .await
-    .expect_err("not writable");
-    assert!(
-        matches!(err, PlanError::EndpointNotWritable { ref operation } if operation == "updateEntryPrice")
+    .expect("the pass continues past an unverified endpoint");
+    assert_eq!(outcome.applied, 0);
+    assert_eq!(outcome.skipped, 1);
+    assert_eq!(
+        outcome.awaiting_verification,
+        vec!["awaiting live verification for AppLovinMax: updateEntryPrice".to_string()]
     );
+    assert_eq!(
+        outcome.outcomes,
+        vec![ActionOutcome::Skipped {
+            reason: "awaiting live verification for AppLovinMax: updateEntryPrice".into(),
+        }]
+    );
+    assert!(l.is_empty(), "a held proposal writes nothing");
     let log = ops.call_log();
     assert_eq!(log, vec!["writable:updateEntryPrice".to_string()]);
+}
+
+#[tokio::test]
+async fn a_capability_hold_records_only_the_ineligible_operation() {
+    // One writable + one unverified operation: the writable proposal starts
+    // its experiment, the unverified one is held with its typed reason and
+    // nothing else is recorded against it.
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_platform(PlatformId::Admob);
+    ops.set_change_in_test_arm(true);
+    ops.set_writable("updateMediationGroup", false);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action()), proposal(ecpm_action())],
+        NOW,
+    )
+    .await
+    .expect("the pass continues");
+    assert_eq!(outcome.applied, 1, "the writable proposal applies");
+    assert_eq!(outcome.skipped, 1, "only the unverified op is held");
+    assert_eq!(
+        outcome.awaiting_verification,
+        vec!["awaiting live verification for Admob: updateMediationGroup".to_string()]
+    );
+    assert!(outcome
+        .outcomes
+        .iter()
+        .any(|outcome| matches!(outcome, ActionOutcome::Applied { .. })));
+    assert!(outcome.outcomes.iter().any(|outcome| matches!(
+        outcome,
+        ActionOutcome::Skipped { reason }
+            if reason == "awaiting live verification for Admob: updateMediationGroup"
+    )));
+}
+
+#[tokio::test]
+async fn a_max_floor_adapter_with_the_verified_operation_is_unchanged() {
+    // The MAX path with its operation verified writable: the cycle applies
+    // exactly as before and records no awaiting-verification state.
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![proposal(floor_action())],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(outcome.skipped, 0);
+    assert!(outcome.awaiting_verification.is_empty());
 }
 
 // ---------- cycle: apply paths ----------
@@ -1106,7 +1178,8 @@ async fn empty_proposals_produce_an_empty_cycle() {
             outcomes: vec![],
             applied: 0,
             skipped: 0,
-            awaiting_approval: 0
+            awaiting_approval: 0,
+            awaiting_verification: vec![],
         }
     );
 }
