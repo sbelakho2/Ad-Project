@@ -80,10 +80,14 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), TextfileError> {
         path: tmp.display().to_string(),
         reason: error.to_string(),
     })?;
-    std::fs::rename(&tmp, path).map_err(|error| TextfileError::Rename {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(TextfileError::Rename {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Export `registry` to `path` (atomic).
@@ -189,6 +193,107 @@ mod tests {
         // Re-exporting is idempotent and never leaves the temp behind.
         write_registry(&path, &registry).expect("re-export");
         assert!(!dir.join("apex-runner.prom.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn textfile_errors_display_their_exact_messages() {
+        let cases = [
+            (
+                TextfileError::Directory {
+                    path: "/tmp/metrics".into(),
+                    reason: "not a directory".into(),
+                },
+                "metrics directory /tmp/metrics: not a directory",
+            ),
+            (
+                TextfileError::Write {
+                    path: "/tmp/metrics/apex.prom.tmp".into(),
+                    reason: "permission denied".into(),
+                },
+                "metrics temp file /tmp/metrics/apex.prom.tmp: permission denied",
+            ),
+            (
+                TextfileError::Rename {
+                    path: "/tmp/metrics/apex.prom".into(),
+                    reason: "is a directory".into(),
+                },
+                "metrics rename to /tmp/metrics/apex.prom: is a directory",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn a_temp_write_failure_leaves_no_destination() {
+        let dir = temp_dir("temp-write-failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("apex.prom");
+        let tmp = dir.join("apex.prom.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        let error = write_atomic(&path, "contents").expect_err("temp path is a directory");
+        assert!(matches!(error, TextfileError::Write { .. }), "{error:?}");
+        assert!(error.to_string().starts_with("metrics temp file"));
+        assert!(!path.exists(), "no destination is created");
+        assert!(tmp.is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_failure_is_typed_and_cleans_the_temp_file() {
+        let dir = temp_dir("rename-failure");
+        let path = dir.join("apex.prom");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("child"), "x").unwrap();
+        let error = write_atomic(&path, "contents").expect_err("destination is a directory");
+        assert!(matches!(error, TextfileError::Rename { .. }), "{error:?}");
+        assert!(error.to_string().starts_with("metrics rename to"));
+        assert!(
+            !dir.join("apex.prom.tmp").exists(),
+            "the temporary file is removed after a failed rename"
+        );
+        assert!(path.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(path.join("child")).unwrap(),
+            "x",
+            "the existing destination is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_relative_path_needs_no_parent_directory() {
+        let name = format!("apex-metrics-relative-{}.prom", std::process::id());
+        let path = PathBuf::from(&name);
+        write_atomic(&path, "relative\n").expect("relative write");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "relative\n");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_empty_destination_fails_without_leaving_a_temp_file() {
+        let error = write_atomic(Path::new(""), "contents").expect_err("empty destination");
+        assert!(matches!(error, TextfileError::Rename { .. }), "{error:?}");
+        assert!(error.to_string().starts_with("metrics rename to"));
+        assert!(!Path::new(".tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_destination_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("read-only-target");
+        let path = dir.join("apex.prom");
+        write_atomic(&path, "old\n").expect("first write");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o444);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        write_atomic(&path, "new\n").expect("replace read-only target");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

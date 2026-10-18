@@ -1241,6 +1241,160 @@ async fn admob_update_rejects_unknown_group_unit_and_bad_ecpm() {
 }
 
 #[tokio::test]
+async fn admob_mediation_revenue_reads_the_documented_report_fixture() {
+    // Recorded v1beta mediationReport:generate shape: a POST with the date
+    // range, DATE dimension and ESTIMATED_EARNINGS metric, whose rows carry
+    // money as microsValue strings. The two rows sum exactly into micros.
+    let report = r#"{
+        "header": {"currencyCode": "USD"},
+        "rows": [
+            {
+                "dimensionValues": {"DATE": {"value": "2026-09-18"}},
+                "metricValues": {"ESTIMATED_EARNINGS": {"microsValue": "60000000000"}}
+            },
+            {
+                "dimensionValues": {"DATE": {"value": "2026-10-17"}},
+                "metricValues": {"ESTIMATED_EARNINGS": {"microsValue": "40000000000"}}
+            }
+        ]
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(report),
+    ))]));
+    let revenue = admob_client(mock.clone())
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect("revenue");
+    assert_eq!(revenue, 100_000_000_000, "$100,000.00 in micros");
+    let call = &mock.calls()[0];
+    assert_eq!(call.method, HttpMethod::Post);
+    assert_eq!(
+        call.url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationReport:generate"
+    );
+    let body = call
+        .body
+        .as_ref()
+        .and_then(HttpBody::as_json)
+        .expect("body");
+    assert_eq!(
+        body["startDate"],
+        serde_json::json!({"year": 2026, "month": 9, "day": 18})
+    );
+    assert_eq!(
+        body["endDate"],
+        serde_json::json!({"year": 2026, "month": 10, "day": 17})
+    );
+    assert_eq!(body["dimensions"], serde_json::json!(["DATE"]));
+    assert_eq!(body["metrics"], serde_json::json!(["ESTIMATED_EARNINGS"]));
+    assert_eq!(body["currencyCode"], serde_json::json!("USD"));
+
+    // A malformed date refuses before any request.
+    let mock = Arc::new(MockTransport::scripted(vec![]));
+    let client = admob_client(mock.clone());
+    assert!(matches!(
+        client.mediation_revenue("2026-9-18", "2026-10-17").await,
+        Err(PlatformError::Validation(_))
+    ));
+    assert!(mock.calls().is_empty());
+
+    // A report without rows is a typed refusal, never a silent zero.
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(r#"{"header":{"currencyCode":"USD"}}"#),
+    ))]));
+    let error = admob_client(mock)
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect_err("schema");
+    assert!(matches!(error, PlatformError::Schema { .. }), "{error}");
+
+    // An empty rows array is a real zero.
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(r#"{"rows":[]}"#),
+    ))]));
+    assert_eq!(
+        admob_client(mock)
+            .mediation_revenue("2026-09-18", "2026-10-17")
+            .await
+            .expect("zero"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn admob_mediation_revenue_caches_one_read_per_window() {
+    // The audit and the billing path can share one client and ask for the
+    // same 30-day window; the second ask must not be a second platform read.
+    let report = r#"{
+        "rows": [
+            {"metricValues": {"ESTIMATED_EARNINGS": {"microsValue": "2500000"}}}
+        ]
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(report),
+    ))]));
+    let client = admob_client(mock.clone());
+    let first = client
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect("first");
+    let second = client
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect("cached");
+    assert_eq!(first, 2_500_000);
+    assert_eq!(second, first);
+    assert_eq!(mock.calls().len(), 1, "one report read serves both asks");
+}
+
+#[tokio::test]
+async fn admob_mediation_revenue_sums_ten_thousand_rows_exactly() {
+    // The parse is one pass over the rows (no per-row rescan) and the total
+    // is exact at 10k rows: every row contributes one micro.
+    const ROWS: usize = 10_000;
+    let rows: Vec<serde_json::Value> = (0..ROWS)
+        .map(|_| {
+            serde_json::json!({
+                "metricValues": {"ESTIMATED_EARNINGS": {"microsValue": "1"}}
+            })
+        })
+        .collect();
+    let body = serde_json::json!({"rows": rows}).to_string();
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(&body),
+    ))]));
+    let total = admob_client(mock.clone())
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect("revenue");
+    assert_eq!(total, ROWS as i64);
+    assert_eq!(mock.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn admob_mediation_revenue_refuses_a_truncated_page() {
+    // A total from a single page is only trustworthy when the API says there
+    // is no second page; a token is a typed refusal, never a silent partial
+    // revenue figure.
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(
+            r#"{"rows":[{"metricValues":{"ESTIMATED_EARNINGS":{"microsValue":"1"}}}],"nextPageToken":"next"}"#,
+        ),
+    ))]));
+    let error = admob_client(mock)
+        .mediation_revenue("2026-09-18", "2026-10-17")
+        .await
+        .expect_err("truncated");
+    assert!(matches!(error, PlatformError::Schema { .. }), "{error}");
+}
+
+#[tokio::test]
 async fn admob_401_fails_fast() {
     let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::status(
         401,
@@ -1444,7 +1598,7 @@ fn endpoint_metas_are_pinned() {
         assert_eq!(meta.method, method, "{name}");
     }
 
-    assert_eq!(ADMOB_ENDPOINTS.len(), 5);
+    assert_eq!(ADMOB_ENDPOINTS.len(), 6);
     assert!(ADMOB_ENDPOINTS
         .iter()
         .filter(|m| m.method == apex_core::endpoint::HttpMethod::Get)

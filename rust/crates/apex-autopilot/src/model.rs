@@ -31,9 +31,23 @@ pub enum Action {
         ad_unit_id: String,
         entry_id: String,
     },
+    /// Raise one LevelPlay waterfall instance price (the variant group's
+    /// instance). `instance_id` is the platform instance resource id and
+    /// `price_micros` the new eCPM floor in micros.
+    SetLevelplayInstancePrice {
+        instance_id: String,
+        price_micros: i64,
+    },
+    /// Set an AdMob mediation-group line floor. `group_id` is the mediation
+    /// group and `floor_micros` the new eCPM floor in micros.
+    SetAdmobMediationFloor { group_id: String, floor_micros: i64 },
 }
 
 impl Action {
+    /// The platform resource the action is scoped to. MAX and LevelPlay entry
+    /// actions name an ad unit; the instance-price and mediation-floor actions
+    /// name their platform resource directly (`instanceId`/`mediationGroupId`),
+    /// so that resource id is the scope the ledger and pre-registration carry.
     pub fn ad_unit_id(&self) -> &str {
         match self {
             Action::SetCountryFloor { ad_unit_id, .. }
@@ -41,6 +55,8 @@ impl Action {
             | Action::SetWaterfallPrice { ad_unit_id, .. }
             | Action::CreateWaterfallEntry { ad_unit_id, .. }
             | Action::RemoveWaterfallEntry { ad_unit_id, .. } => ad_unit_id,
+            Action::SetLevelplayInstancePrice { instance_id, .. } => instance_id,
+            Action::SetAdmobMediationFloor { group_id, .. } => group_id,
         }
     }
 }

@@ -4533,6 +4533,15 @@ mod tests {
             .to_string()
     }
 
+    fn levelplay_report_body() -> String {
+        r#"{"code":200,"results":[{"date":"2026-10-01","revenue":"1.0"}]}"#.to_string()
+    }
+
+    fn admob_report_body() -> String {
+        r#"{"header":{"currencyCode":"USD"},"rows":[{"dimensionValues":{"DATE":{"value":"2026-10-01"}},"metricValues":{"ESTIMATED_EARNINGS":{"microsValue":"1000000"}}}]}"#
+            .to_string()
+    }
+
     fn admob_groups_body() -> String {
         r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"Main","format":"interstitial","adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2}]}]}"#
             .to_string()
@@ -4738,19 +4747,42 @@ mod tests {
         // All three fixtures share one developer site, so the run cache
         // serves one app-ads.txt read to every publisher: only one response
         // is queued.
-        // admob-pub: mediation groups + app-ads.txt.
+        // admob-pub: mediation report + groups + app-ads.txt.
+        transport.push(200, &admob_report_body());
         transport.push(200, &admob_groups_body());
         transport.push(200, "google.com, pub-1, DIRECT\n");
-        // levelplay-pub: auth + one unit's instances (app-ads is replayed).
+        // levelplay-pub: auth + app revenue + one unit's instances (app-ads is replayed).
         transport.push(200, r#""bearer-token""#);
+        transport.push(200, &levelplay_report_body());
         transport.push(200, &levelplay_instances_body());
         // max-pub: reporting + ad units (app-ads is replayed).
         transport.push(200, &reporting_body("max-unit"));
         transport.push(200, &ad_units_body("max-unit"));
 
-        let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport).await;
+        let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport.clone()).await;
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.publishers.len(), 3);
+        // One revenue read per publisher/platform, shared exactly once: the
+        // app-ads cache serves the single developer-site fetch to every
+        // platform and publisher, and each platform's 30-day read is called
+        // once (no per-snapshot re-fetch).
+        let seen = transport.seen.lock().unwrap();
+        let operation_calls = |operation: &str| {
+            seen.iter()
+                .filter(|request| request.operation == operation)
+                .count()
+        };
+        assert_eq!(operation_calls("mediationReport"), 1);
+        assert_eq!(operation_calls("adUnitRevenue"), 1);
+        assert_eq!(operation_calls("maxReport"), 1);
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.url.contains("app-ads.txt"))
+                .count(),
+            1,
+            "one cached app-ads.txt read for the whole fleet"
+        );
+        drop(seen);
 
         let admob_path = snapshot_root.join("admob-pub").join("admob.json");
         let levelplay_path = snapshot_root.join("levelplay-pub").join("levelplay.json");
@@ -4811,11 +4843,12 @@ mod tests {
         transport.push(200, &reporting_body("multi-unit"));
         transport.push(200, &ad_units_body("multi-unit"));
         transport.push(200, "google.com, pub-1, DIRECT\n");
-        // then levelplay: auth + instances. Its app-ads.txt read is replayed
-        // from the run cache, so no second app-ads response is queued: a
-        // broken cache would consume the exhausted script and fail the
-        // snapshot.
+        // then levelplay: auth + app revenue + instances. Its app-ads.txt read
+        // is replayed from the run cache, so no second app-ads response is
+        // queued: a broken cache would consume the exhausted script and fail
+        // the snapshot.
         transport.push(200, r#""bearer-token""#);
+        transport.push(200, &levelplay_report_body());
         transport.push(200, &levelplay_instances_body());
 
         let (report, _outcome) = audit_fleet(&registry, &snapshot_root, transport.clone()).await;

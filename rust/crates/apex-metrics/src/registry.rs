@@ -6,10 +6,62 @@
 //! so no producer can mint a per-customer series. Rendering, snapshots and the
 //! atomic textfile export are in [`crate::render`] and [`crate::textfile`].
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, TryLockError};
 
 use crate::spec::{LabelValue, MetricKind, MetricSpec};
+
+/// The series map is sharded so observations on different label sets update
+/// different locks. Only the series *creation* path takes a shard write lock;
+/// an existing series is found under a read lock and then updated through its
+/// own atomics, so the steady state has no write-lock contention.
+const SERIES_SHARDS: usize = 64;
+
+type SeriesMap = HashMap<u64, Vec<(SeriesKey, Arc<Series>)>>;
+type SeriesShard = RwLock<SeriesMap>;
+
+/// The owned form of a series key, kept only for a series that exists. The
+/// steady-state lookup never builds one: it hashes the borrowed label values
+/// and compares them against the stored key in place.
+#[derive(Debug, Clone)]
+struct SeriesKey(Box<[String]>);
+
+impl SeriesKey {
+    /// Copy the validated values in declaration order. This is the only
+    /// allocation on the series-creation path.
+    fn new(spec: &MetricSpec, labels: &[(&'static str, &str)]) -> Self {
+        Self(
+            spec.labels
+                .iter()
+                .map(|declared| {
+                    value_of(labels, declared.name)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    /// Compare with the incoming (borrowed) label values without allocating.
+    fn matches(&self, spec: &MetricSpec, labels: &[(&'static str, &str)]) -> bool {
+        self.0.len() == spec.labels.len()
+            && self.0.iter().zip(spec.labels).all(|(stored, declared)| {
+                stored.as_str() == value_of(labels, declared.name).unwrap_or_default()
+            })
+    }
+}
+
+/// The value of a declared label in the incoming set, borrowed (no copy).
+fn value_of<'a>(labels: &'a [(&'static str, &str)], name: &str) -> Option<&'a str> {
+    labels
+        .iter()
+        .find(|(label, _)| *label == name)
+        .map(|(_, value)| *value)
+}
 
 /// Why a write was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,21 +155,188 @@ impl From<crate::spec::LabelError> for WriteError {
 }
 
 /// One series' stored value.
-#[derive(Debug, Clone, Default)]
+///
+/// Every field is an atomic so a write to an existing series never holds a
+/// map lock while it mutates. The bucket vector is fixed at declaration time
+/// (the declared bounds plus the implicit `+Inf` bucket) and never resized.
+#[derive(Debug)]
 struct Series {
-    counter: u64,
-    gauge: f64,
-    observations: u64,
-    sum: f64,
+    counter: AtomicU64,
+    /// The gauge as raw `f64` bits (`AtomicU64` has no `f64` form).
+    gauge: AtomicU64,
+    observations: AtomicU64,
+    /// The observation sum as raw `f64` bits.
+    sum: AtomicU64,
     /// Cumulative counts per declared bucket; length = buckets + 1 (the
     /// implicit `+Inf` bucket).
-    buckets: Vec<u64>,
+    buckets: Box<[AtomicU64]>,
 }
 
+impl Series {
+    fn new(kind: MetricKind) -> Self {
+        let bucket_count = match kind {
+            MetricKind::Histogram { buckets } => buckets.len() + 1,
+            MetricKind::Counter | MetricKind::Gauge => 0,
+        };
+        Self {
+            counter: AtomicU64::new(0),
+            gauge: AtomicU64::new(0.0f64.to_bits()),
+            observations: AtomicU64::new(0),
+            sum: AtomicU64::new(0.0f64.to_bits()),
+            buckets: (0..bucket_count)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    fn counter_add(&self, delta: u64) -> u64 {
+        let previous = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_add(delta))
+            })
+            .unwrap_or(0);
+        previous.saturating_add(delta)
+    }
+
+    fn counter_value(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    fn gauge_value(&self) -> f64 {
+        f64::from_bits(self.gauge.load(Ordering::Relaxed))
+    }
+
+    fn gauge_set(&self, value: f64) {
+        self.gauge.store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    fn gauge_add(&self, delta: f64) {
+        let _ = self
+            .gauge
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                Some((f64::from_bits(bits) + delta).to_bits())
+            });
+    }
+
+    fn observe(&self, value: f64, bounds: &[f64]) {
+        for (index, bound) in bounds.iter().enumerate() {
+            if value <= *bound {
+                if let Some(bucket) = self.buckets.get(index) {
+                    bucket.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        if let Some(total) = self.buckets.last() {
+            total.fetch_add(1, Ordering::Relaxed);
+        }
+        self.observations.fetch_add(1, Ordering::Relaxed);
+        let _ = self
+            .sum
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                Some((f64::from_bits(bits) + value).to_bits())
+            });
+    }
+
+    fn observations(&self) -> u64 {
+        self.observations.load(Ordering::Relaxed)
+    }
+
+    fn sum(&self) -> f64 {
+        f64::from_bits(self.sum.load(Ordering::Relaxed))
+    }
+
+    fn bucket(&self, index: usize) -> u64 {
+        self.buckets
+            .get(index)
+            .map(|bucket| bucket.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+}
+
+/// One metric family: the immutable declaration plus the sharded series map.
 #[derive(Debug)]
 struct Family {
     spec: &'static MetricSpec,
-    series: BTreeMap<Vec<String>, Series>,
+    shards: Box<[SeriesShard]>,
+    stats: Arc<LockStats>,
+}
+
+impl Family {
+    fn new(spec: &'static MetricSpec, stats: Arc<LockStats>) -> Self {
+        Self {
+            spec,
+            shards: (0..SERIES_SHARDS)
+                .map(|_| RwLock::new(HashMap::new()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            stats,
+        }
+    }
+
+    fn shard(&self, hash: u64) -> usize {
+        (hash as usize) % self.shards.len()
+    }
+
+    /// The stored series for `labels`, if any, without creating it. The lookup
+    /// borrows the incoming values: no key, `String` or `Vec` is allocated.
+    fn lookup(&self, labels: &[(&'static str, &str)], hash: u64) -> Option<Arc<Series>> {
+        let shard = self.shard(hash);
+        let guard = read_or_wait(self.shards.get(shard)?, &self.stats);
+        guard
+            .get(&hash)?
+            .iter()
+            .find_map(|(key, series)| key.matches(self.spec, labels).then(|| Arc::clone(series)))
+    }
+
+    /// The stored series for `labels`, creating it when absent. The returned
+    /// handle is safe to use after every lock is released. Only the creation
+    /// path allocates the owned key.
+    fn series(&self, labels: &[(&'static str, &str)], hash: u64) -> Arc<Series> {
+        let shard = self.shard(hash);
+        let Some(slot) = self.shards.get(shard) else {
+            // `shard` is always in range; this keeps the method total.
+            return Arc::new(Series::new(self.spec.kind));
+        };
+        {
+            let guard = read_or_wait(slot, &self.stats);
+            if let Some(bucket) = guard.get(&hash) {
+                if let Some((_, series)) = bucket
+                    .iter()
+                    .find(|(key, _)| key.matches(self.spec, labels))
+                {
+                    return Arc::clone(series);
+                }
+            }
+        }
+        let mut guard = write_or_wait(slot, &self.stats);
+        let bucket = guard.entry(hash).or_default();
+        if let Some((_, series)) = bucket
+            .iter()
+            .find(|(key, _)| key.matches(self.spec, labels))
+        {
+            return Arc::clone(series);
+        }
+        let series = Arc::new(Series::new(self.spec.kind));
+        bucket.push((SeriesKey::new(self.spec, labels), Arc::clone(&series)));
+        series
+    }
+
+    /// Every series, in canonical key order.
+    fn series_snapshot(&self) -> Vec<(Vec<String>, Arc<Series>)> {
+        let mut all = Vec::new();
+        for shard in self.shards.iter() {
+            let guard = read_or_wait(shard, &self.stats);
+            all.extend(guard.values().flat_map(|bucket| {
+                bucket
+                    .iter()
+                    .map(|(key, series)| (key.0.to_vec(), Arc::clone(series)))
+            }));
+        }
+        all.sort_by(|left, right| left.0.cmp(&right.0));
+        all
+    }
 }
 
 /// A snapshot of one series.
@@ -162,16 +381,82 @@ pub struct FamilySnapshot {
 /// Everything the registry holds, in canonical order.
 pub type Snapshot = Vec<FamilySnapshot>;
 
-/// The process-wide telemetry registry.
+/// Deterministic lock instrumentation for the contention harness: a read or
+/// write that had to wait for an in-progress writer. In steady state both
+/// stay flat because observations update per-series atomics.
 #[derive(Debug, Default)]
+struct LockStats {
+    read_waits: AtomicU64,
+    write_waits: AtomicU64,
+}
+
+/// The lock waits observed by one registry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LockWaits {
+    /// Reads that could not take the lock immediately and blocked.
+    pub read_waits: u64,
+    /// Writes that could not take the lock immediately and blocked.
+    pub write_waits: u64,
+}
+
+fn read_or_wait<'a, T>(
+    lock: &'a RwLock<T>,
+    stats: &LockStats,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    match lock.try_read() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => {
+            stats.read_waits.fetch_add(1, Ordering::Relaxed);
+            lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    }
+}
+
+fn write_or_wait<'a, T>(
+    lock: &'a RwLock<T>,
+    stats: &LockStats,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    match lock.try_write() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => {
+            stats.write_waits.fetch_add(1, Ordering::Relaxed);
+            lock.write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    }
+}
+
+/// The process-wide telemetry registry.
+#[derive(Debug)]
 pub struct Registry {
-    families: Mutex<BTreeMap<&'static str, Family>>,
+    families: RwLock<HashMap<&'static str, Arc<Family>>>,
+    stats: Arc<LockStats>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            families: RwLock::new(HashMap::new()),
+            stats: Arc::new(LockStats::default()),
+        }
+    }
 }
 
 impl Registry {
     /// An empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lock waits this registry observed so far. Test and operations seam for
+    /// the contention harness; it never changes a value.
+    pub fn lock_waits(&self) -> LockWaits {
+        LockWaits {
+            read_waits: self.stats.read_waits.load(Ordering::Relaxed),
+            write_waits: self.stats.write_waits.load(Ordering::Relaxed),
+        }
     }
 
     /// Increment a counter by one and return the new total.
@@ -190,12 +475,9 @@ impl Registry {
         labels: &[(&'static str, &str)],
         delta: u64,
     ) -> Result<u64, WriteError> {
-        let key = validate(metric, labels, "counter")?;
-        let mut families = self.families();
-        let family = declare(&mut families, metric)?;
-        let series = family.series.entry(key).or_default();
-        series.counter = series.counter.saturating_add(delta);
-        Ok(series.counter)
+        let hash = validate(metric, labels, "counter")?;
+        let family = self.family(metric)?;
+        Ok(family.series(labels, hash).counter_add(delta))
     }
 
     /// Set a gauge to `value`.
@@ -205,11 +487,9 @@ impl Registry {
         labels: &[(&'static str, &str)],
         value: f64,
     ) -> Result<(), WriteError> {
-        let key = validate(metric, labels, "gauge")?;
-        let mut families = self.families();
-        let family = declare(&mut families, metric)?;
-        let series = family.series.entry(key).or_default();
-        series.gauge = value;
+        let hash = validate(metric, labels, "gauge")?;
+        let family = self.family(metric)?;
+        family.series(labels, hash).gauge_set(value);
         Ok(())
     }
 
@@ -220,11 +500,9 @@ impl Registry {
         labels: &[(&'static str, &str)],
         delta: f64,
     ) -> Result<(), WriteError> {
-        let key = validate(metric, labels, "gauge")?;
-        let mut families = self.families();
-        let family = declare(&mut families, metric)?;
-        let series = family.series.entry(key).or_default();
-        series.gauge += delta;
+        let hash = validate(metric, labels, "gauge")?;
+        let family = self.family(metric)?;
+        family.series(labels, hash).gauge_add(delta);
         Ok(())
     }
 
@@ -234,12 +512,10 @@ impl Registry {
         metric: &'static MetricSpec,
         labels: &[(&'static str, &str)],
     ) -> Result<f64, WriteError> {
-        let key = validate(metric, labels, "gauge")?;
-        let families = self.families();
-        Ok(families
-            .get(metric.name)
-            .and_then(|family| family.series.get(&key))
-            .map(|series| series.gauge)
+        let hash = validate(metric, labels, "gauge")?;
+        Ok(self
+            .lookup_series(metric, labels, hash)
+            .map(|series| series.gauge_value())
             .unwrap_or(0.0))
     }
 
@@ -254,21 +530,9 @@ impl Registry {
             metric: metric.name,
             expected: "histogram",
         })?;
-        let key = validate(metric, labels, "histogram")?;
-        let mut families = self.families();
-        let family = declare(&mut families, metric)?;
-        let series = family.series.entry(key).or_default();
-        if series.buckets.is_empty() {
-            series.buckets = vec![0; buckets.len() + 1];
-        }
-        for (index, bound) in buckets.iter().enumerate() {
-            if value <= *bound {
-                series.buckets[index] += 1;
-            }
-        }
-        series.buckets[buckets.len()] += 1;
-        series.observations += 1;
-        series.sum += value;
+        let hash = validate(metric, labels, "histogram")?;
+        let family = self.family(metric)?;
+        family.series(labels, hash).observe(value, buckets);
         Ok(())
     }
 
@@ -279,35 +543,34 @@ impl Registry {
         metric: &'static MetricSpec,
         labels: &[(&'static str, &str)],
     ) -> Result<InFlightGuard<'_>, WriteError> {
-        let key = validate(metric, labels, "gauge")?;
-        {
-            let mut families = self.families();
-            let family = declare(&mut families, metric)?;
-            let series = family.series.entry(key.clone()).or_default();
-            series.gauge += 1.0;
-        }
+        let hash = validate(metric, labels, "gauge")?;
+        let family = self.family(metric)?;
+        let series = family.series(labels, hash);
+        series.gauge_add(1.0);
         Ok(InFlightGuard {
-            registry: self,
-            metric,
-            labels: key,
+            series,
+            _registry: std::marker::PhantomData,
         })
     }
 
     /// A snapshot of every family and series, in canonical order.
     pub fn snapshot(&self) -> Snapshot {
-        self.families()
+        let families = read_or_wait(&self.families, &self.stats);
+        let mut snapshot: Snapshot = families
             .values()
             .map(|family| FamilySnapshot {
                 name: family.spec.name,
                 help: family.spec.help,
                 kind: family.spec.kind,
                 series: family
-                    .series
-                    .iter()
-                    .map(|(key, series)| series_snapshot(family.spec, key, series))
+                    .series_snapshot()
+                    .into_iter()
+                    .map(|(key, series)| series_snapshot(family.spec, &key, &series))
                     .collect(),
             })
-            .collect()
+            .collect();
+        snapshot.sort_by_key(|family| family.name);
+        snapshot
     }
 
     /// The snapshot of one family by name.
@@ -323,31 +586,82 @@ impl Registry {
         metric: &'static MetricSpec,
         labels: &[(&'static str, &str)],
     ) -> Result<u64, WriteError> {
-        let key = validate(metric, labels, "counter")?;
-        let families = self.families();
-        Ok(families
-            .get(metric.name)
-            .and_then(|family| family.series.get(&key))
-            .map(|series| series.counter)
+        let hash = validate(metric, labels, "counter")?;
+        Ok(self
+            .lookup_series(metric, labels, hash)
+            .map(|series| series.counter_value())
             .unwrap_or(0))
     }
 
-    /// Lock the family map, recovering a poisoned lock instead of panicking:
-    /// a panicked peer must not take the whole process's telemetry down.
-    fn families(&self) -> std::sync::MutexGuard<'_, BTreeMap<&'static str, Family>> {
-        self.families
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lookup_series(
+        &self,
+        metric: &MetricSpec,
+        labels: &[(&'static str, &str)],
+        hash: u64,
+    ) -> Option<Arc<Series>> {
+        let families = read_or_wait(&self.families, &self.stats);
+        families
+            .get(metric.name)
+            .and_then(|family| family.lookup(labels, hash))
+    }
+
+    /// Get or declare the family for `metric`; a conflicting re-declaration
+    /// under the same name is refused so two crates cannot silently merge
+    /// series.
+    fn family(&self, metric: &'static MetricSpec) -> Result<Arc<Family>, WriteError> {
+        {
+            let families = read_or_wait(&self.families, &self.stats);
+            if let Some(family) = families.get(metric.name) {
+                if family.spec != metric {
+                    return Err(WriteError::ConflictingDeclaration {
+                        metric: metric.name,
+                    });
+                }
+                return Ok(Arc::clone(family));
+            }
+        }
+        let mut families = write_or_wait(&self.families, &self.stats);
+        resolve_family(families.entry(metric.name), metric, &self.stats)
     }
 }
 
-/// Validate a label set against a metric declaration and return the canonical
-/// series key (values in declaration order).
+/// Resolve a family-map entry under the write lock: insert a vacant entry,
+/// return an occupied entry whose declaration matches, and refuse one that
+/// does not.
+fn resolve_family(
+    entry: Entry<'_, &'static str, Arc<Family>>,
+    metric: &'static MetricSpec,
+    stats: &Arc<LockStats>,
+) -> Result<Arc<Family>, WriteError> {
+    match entry {
+        Entry::Occupied(existing) => {
+            if existing.get().spec != metric {
+                return Err(WriteError::ConflictingDeclaration {
+                    metric: metric.name,
+                });
+            }
+            Ok(Arc::clone(existing.get()))
+        }
+        Entry::Vacant(slot) => {
+            let family = Arc::new(Family::new(metric, Arc::clone(stats)));
+            slot.insert(Arc::clone(&family));
+            Ok(family)
+        }
+    }
+}
+
+/// Validate a label set against a metric declaration and return the hash of
+/// the canonical series key (values in declaration order).
+///
+/// The steady-state path allocates nothing: the duplicate and missing checks
+/// scan the borrowed slices, and the hash walks the declared vocabulary in
+/// order. Only error variants (which own their message text) allocate, and
+/// only a new series copies its values.
 fn validate(
     metric: &'static MetricSpec,
     labels: &[(&'static str, &str)],
     expected: &'static str,
-) -> Result<Vec<String>, WriteError> {
+) -> Result<u64, WriteError> {
     match (metric.kind, expected) {
         (MetricKind::Counter, "counter") => {}
         (MetricKind::Gauge, "gauge") => {}
@@ -359,8 +673,9 @@ fn validate(
             })
         }
     }
-    let mut values: BTreeMap<&str, &str> = BTreeMap::new();
-    for (name, value) in labels {
+    // The checks are in the same order as the owning implementation, so every
+    // typed error is unchanged; only the per-label vector is gone.
+    for (index, (name, value)) in labels.iter().enumerate() {
         let declared = metric.labels.iter().find(|label| label.name == *name);
         let Some(declared) = declared else {
             return Err(WriteError::UnknownLabel {
@@ -377,49 +692,37 @@ fn validate(
                 accepts: declared.vocab.kind_name(),
             });
         }
-        if values.insert(name, value).is_some() {
+        if labels[..index]
+            .iter()
+            .any(|(existing, _)| *existing == *name)
+        {
             return Err(WriteError::DuplicateLabel {
                 metric: metric.name,
                 label: (*name).to_string(),
             });
         }
     }
-    let mut key = Vec::with_capacity(metric.labels.len());
     for declared in metric.labels {
-        match values.get(declared.name) {
-            Some(value) => key.push((*value).to_string()),
-            None => {
-                return Err(WriteError::MissingLabel {
-                    metric: metric.name,
-                    label: declared.name,
-                })
-            }
+        if value_of(labels, declared.name).is_none() {
+            return Err(WriteError::MissingLabel {
+                metric: metric.name,
+                label: declared.name,
+            });
         }
     }
-    Ok(key)
+    Ok(label_hash(metric, labels))
 }
 
-/// Get or declare the family for `metric`; a conflicting re-declaration under
-/// the same name is refused so two crates cannot silently merge series.
-fn declare<'a>(
-    families: &'a mut BTreeMap<&'static str, Family>,
-    metric: &'static MetricSpec,
-) -> Result<&'a mut Family, WriteError> {
-    use std::collections::btree_map::Entry;
-    match families.entry(metric.name) {
-        Entry::Occupied(existing) => {
-            if existing.get().spec != metric {
-                return Err(WriteError::ConflictingDeclaration {
-                    metric: metric.name,
-                });
-            }
-            Ok(existing.into_mut())
-        }
-        Entry::Vacant(slot) => Ok(slot.insert(Family {
-            spec: metric,
-            series: BTreeMap::new(),
-        })),
+/// The series-key hash over the values in declaration order. Borrowed values
+/// are hashed in place, so an existing-series probe allocates nothing.
+fn label_hash(metric: &MetricSpec, labels: &[(&'static str, &str)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for declared in metric.labels {
+        value_of(labels, declared.name)
+            .unwrap_or_default()
+            .hash(&mut hasher);
     }
+    hasher.finish()
 }
 
 fn series_snapshot(spec: &MetricSpec, key: &[String], series: &Series) -> SeriesSnapshot {
@@ -432,14 +735,14 @@ fn series_snapshot(spec: &MetricSpec, key: &[String], series: &Series) -> Series
     match spec.kind {
         MetricKind::Counter => SeriesSnapshot {
             labels,
-            counter: Some(series.counter),
+            counter: Some(series.counter_value()),
             gauge: None,
             histogram: None,
         },
         MetricKind::Gauge => SeriesSnapshot {
             labels,
             counter: None,
-            gauge: Some(series.gauge),
+            gauge: Some(series.gauge_value()),
             histogram: None,
         },
         MetricKind::Histogram { buckets } => SeriesSnapshot {
@@ -448,30 +751,27 @@ fn series_snapshot(spec: &MetricSpec, key: &[String], series: &Series) -> Series
             gauge: None,
             histogram: Some(HistogramSnapshot {
                 buckets: buckets.to_vec(),
-                cumulative_counts: series.buckets.clone(),
-                count: series.observations,
-                sum: series.sum,
+                cumulative_counts: (0..series.buckets.len())
+                    .map(|index| series.bucket(index))
+                    .collect(),
+                count: series.observations(),
+                sum: series.sum(),
             }),
         },
     }
 }
 
-/// One in-flight operation; decrements its gauge on drop.
+/// One in-flight operation; decrements its gauge on drop. The guard owns the
+/// series handle, so the decrement needs no map lookup or global lock.
 #[derive(Debug)]
 pub struct InFlightGuard<'a> {
-    registry: &'a Registry,
-    metric: &'static MetricSpec,
-    labels: Vec<String>,
+    series: Arc<Series>,
+    _registry: std::marker::PhantomData<&'a Registry>,
 }
 
 impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
-        let mut families = self.registry.families();
-        if let Ok(family) = declare(&mut families, self.metric) {
-            if let Some(series) = family.series.get_mut(&self.labels) {
-                series.gauge -= 1.0;
-            }
-        }
+        self.series.gauge_add(-1.0);
     }
 }
 
@@ -481,7 +781,10 @@ mod tests {
 
     use super::*;
     use crate::catalog;
+    use crate::spec::{LabelError, LabelSpec, Vocab};
     use crate::vocab::{JobType, Outcome, Platform};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     fn job_labels<'a>(
         job: &'a str,
@@ -765,5 +1068,263 @@ mod tests {
         assert_eq!(snapshot[1].series[0].labels[0].1, "daily");
         assert_eq!(snapshot[1].series[0].counter, Some(1));
         assert!(registry.family_snapshot("apex_missing").is_none());
+    }
+
+    #[test]
+    fn every_write_error_variant_displays_its_exact_message() {
+        let cases = [
+            (
+                WriteError::Label(LabelError::Empty {
+                    label: "service".into(),
+                }),
+                "label 'service' value is empty",
+            ),
+            (
+                WriteError::UnknownLabel {
+                    metric: "apex_probe_total",
+                    label: "publisher_id".into(),
+                },
+                "apex_probe_total has no declared label 'publisher_id'",
+            ),
+            (
+                WriteError::MissingLabel {
+                    metric: "apex_probe_total",
+                    label: "outcome",
+                },
+                "apex_probe_total requires label 'outcome'",
+            ),
+            (
+                WriteError::DuplicateLabel {
+                    metric: "apex_probe_total",
+                    label: "Platform".into(),
+                },
+                "apex_probe_total label 'Platform' was supplied twice",
+            ),
+            (
+                WriteError::UndeclaredValue {
+                    metric: "apex_probe_total",
+                    label: "platform",
+                    value: "northstar".into(),
+                    accepts: "declared value set",
+                },
+                "apex_probe_total label 'platform' value 'northstar' is outside the declared value set",
+            ),
+            (
+                WriteError::KindMismatch {
+                    metric: "apex_probe_total",
+                    expected: "gauge",
+                },
+                "apex_probe_total is not a gauge",
+            ),
+            (
+                WriteError::ConflictingDeclaration {
+                    metric: "apex_probe_total",
+                },
+                "two declarations named 'apex_probe_total' disagree",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn poisoned_series_shard_recovers_without_losing_the_mutation() {
+        let stats = Arc::new(LockStats::default());
+        let family = Family::new(&catalog::JOB_RUNS_TOTAL, Arc::clone(&stats));
+        let labels = [
+            ("job_type", "daily"),
+            ("platform", "applovin_max"),
+            ("outcome", "completed"),
+        ];
+        let hash = label_hash(&catalog::JOB_RUNS_TOTAL, &labels);
+        let shard = family.shard(hash);
+        std::thread::scope(|scope| {
+            let slot = &family.shards[shard];
+            let handle = scope.spawn(move || {
+                let _guard = slot.write().unwrap();
+                panic!("poison the series shard");
+            });
+            assert!(handle.join().is_err());
+        });
+        assert!(family.shards[shard].is_poisoned());
+        let series = family.series(&labels, hash);
+        assert_eq!(series.counter_add(2), 2);
+        assert_eq!(family.lookup(&labels, hash).unwrap().counter_value(), 2);
+        assert_eq!(family.series_snapshot().len(), 1);
+        assert_eq!(stats.read_waits.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.write_waits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn poisoned_family_map_recovers_for_reads_and_writes() {
+        let registry = Registry::new();
+        std::thread::scope(|scope| {
+            let families = &registry.families;
+            let handle = scope.spawn(move || {
+                let _guard = families.write().unwrap();
+                panic!("poison the family map");
+            });
+            assert!(handle.join().is_err());
+        });
+        assert!(registry.families.is_poisoned());
+        let labels = job_labels("daily", "applovin_max", "completed");
+        assert_eq!(
+            registry
+                .increment(&catalog::JOB_RUNS_TOTAL, &labels)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            registry
+                .counter_value(&catalog::JOB_RUNS_TOTAL, &labels)
+                .unwrap(),
+            1
+        );
+        assert_eq!(registry.snapshot().len(), 1);
+        assert!(registry
+            .family_snapshot(catalog::JOB_RUNS_TOTAL.name)
+            .is_some());
+        assert_eq!(registry.lock_waits(), LockWaits::default());
+    }
+
+    #[test]
+    fn blocked_reads_and_writes_record_the_wait_and_complete() {
+        let stats = LockStats::default();
+        let lock = RwLock::new(0u64);
+        let (held_tx, held_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let guard = lock.read().unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(250));
+                drop(guard);
+            });
+            held_rx.recv().unwrap();
+            {
+                let mut guard = write_or_wait(&lock, &stats);
+                *guard = 7;
+            }
+            reader.join().unwrap();
+        });
+        assert_eq!(*lock.read().unwrap(), 7);
+        assert_eq!(stats.write_waits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.read_waits.load(Ordering::Relaxed), 0);
+
+        let stats = LockStats::default();
+        let lock = RwLock::new(7u64);
+        let (held_tx, held_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let mut guard = lock.write().unwrap();
+                *guard = 9;
+                held_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(250));
+                drop(guard);
+            });
+            held_rx.recv().unwrap();
+            assert_eq!(*read_or_wait(&lock, &stats), 9);
+            writer.join().unwrap();
+        });
+        assert_eq!(stats.read_waits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.write_waits.load(Ordering::Relaxed), 0);
+    }
+
+    static CONFLICT_LABELS: &[LabelSpec] = &[LabelSpec {
+        name: "outcome",
+        vocab: Vocab::Values(&["completed"]),
+    }];
+    static CONFLICT_EXTRA_LABELS: &[LabelSpec] = &[
+        LabelSpec {
+            name: "outcome",
+            vocab: Vocab::Values(&["completed"]),
+        },
+        LabelSpec {
+            name: "platform",
+            vocab: Vocab::Values(&["admob"]),
+        },
+    ];
+    static CONFLICT_COUNTER: MetricSpec = MetricSpec {
+        name: "apex_conflict_probe_total",
+        help: "Conflict probe.",
+        kind: MetricKind::Counter,
+        labels: CONFLICT_LABELS,
+    };
+    static CONFLICT_COUNTER_EXTRA: MetricSpec = MetricSpec {
+        name: "apex_conflict_probe_total",
+        help: "Conflict probe.",
+        kind: MetricKind::Counter,
+        labels: CONFLICT_EXTRA_LABELS,
+    };
+
+    #[test]
+    fn conflicting_declaration_is_refused_on_the_read_hit_path() {
+        let registry = Registry::new();
+        registry
+            .increment(&CONFLICT_COUNTER, &[("outcome", "completed")])
+            .unwrap();
+        let error = registry
+            .increment(
+                &CONFLICT_COUNTER_EXTRA,
+                &[("outcome", "completed"), ("platform", "admob")],
+            )
+            .expect_err("conflicting declaration");
+        assert_eq!(
+            error,
+            WriteError::ConflictingDeclaration {
+                metric: "apex_conflict_probe_total"
+            }
+        );
+        assert_eq!(
+            registry
+                .counter_value(&CONFLICT_COUNTER, &[("outcome", "completed")])
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicting_declaration_is_refused_on_the_entry_occupied_path() {
+        let stats = Arc::new(LockStats::default());
+        let mut families: HashMap<&'static str, Arc<Family>> = HashMap::new();
+        families.insert(
+            CONFLICT_COUNTER.name,
+            Arc::new(Family::new(&CONFLICT_COUNTER, Arc::clone(&stats))),
+        );
+        let error = resolve_family(
+            families.entry(CONFLICT_COUNTER_EXTRA.name),
+            &CONFLICT_COUNTER_EXTRA,
+            &stats,
+        )
+        .expect_err("occupied entry with a different declaration");
+        assert_eq!(
+            error,
+            WriteError::ConflictingDeclaration {
+                metric: "apex_conflict_probe_total"
+            }
+        );
+        let resolved = resolve_family(
+            families.entry(CONFLICT_COUNTER.name),
+            &CONFLICT_COUNTER,
+            &stats,
+        )
+        .expect("occupied entry with the same declaration");
+        assert!(Arc::ptr_eq(
+            &resolved,
+            families.get(CONFLICT_COUNTER.name).unwrap()
+        ));
+        let inserted = resolve_family(
+            families.entry(CONFLICT_COUNTER_EXTRA.name),
+            &CONFLICT_COUNTER_EXTRA,
+            &stats,
+        )
+        .expect_err("the conflicting entry remains the declared one");
+        assert_eq!(
+            inserted,
+            WriteError::ConflictingDeclaration {
+                metric: "apex_conflict_probe_total"
+            }
+        );
+        assert_eq!(families.len(), 1);
     }
 }

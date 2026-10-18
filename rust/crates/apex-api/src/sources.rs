@@ -172,6 +172,30 @@ pub trait AuditSource: Send + Sync + std::fmt::Debug {
         Ok((snapshot, report))
     }
 
+    /// The snapshot behind a shared handle. The file source hands out its
+    /// cached `Arc`, so a render does not clone the whole snapshot; the
+    /// default boxes whatever [`Self::snapshot`] returns.
+    async fn snapshot_arc(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<Arc<Snapshot>, ApiError> {
+        self.snapshot(publisher, platform).await.map(Arc::new)
+    }
+
+    /// The snapshot and report behind shared handles. The file source returns
+    /// the cached `Arc`s (one report per unchanged snapshot), so the overview,
+    /// audit, finding and CSV pages borrow them instead of cloning a whole
+    /// snapshot and report per request.
+    async fn snapshot_report_arc(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Arc<Snapshot>, Arc<AuditReport>), ApiError> {
+        let (snapshot, report) = self.snapshot_report(publisher, platform).await?;
+        Ok((Arc::new(snapshot), Arc::new(report)))
+    }
+
     /// Persist a freshly built snapshot for `publisher`. The file source
     /// writes it beside the reads (atomically); a static source refuses.
     async fn write(
@@ -186,11 +210,44 @@ pub trait AuditSource: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// One page of a publisher's verified records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerPage {
+    /// Every verified record in the publisher's ledger (the page's
+    /// denominator, not the number of records returned here).
+    pub total: u64,
+    /// Only the records in the requested range, in chain order.
+    pub records: Vec<LedgerRecord>,
+}
+
 /// A verified ledger provider (one append-only chain per publisher).
 #[async_trait]
 pub trait LedgerSource: Send + Sync + std::fmt::Debug {
     /// Return the publisher's records after full chain verification.
     async fn records(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError>;
+
+    /// Return one page of the publisher's verified records.
+    ///
+    /// The default materializes the whole chain and slices the requested
+    /// range; sources that keep verified records behind a shared handle (the
+    /// file source's cache) override this so a page request never clones the
+    /// full vector. `offset` past the end is an empty page, not an error; the
+    /// caller uses `total` to decide whether the requested page exists.
+    async fn records_page(
+        &self,
+        publisher: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LedgerPage, ApiError> {
+        let records = self.records(publisher).await?;
+        let total = records.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        Ok(LedgerPage {
+            total: total as u64,
+            records: records[start..end].to_vec(),
+        })
+    }
 
     /// The number of verified records for `publisher`, with the same
     /// verification and error semantics as [`Self::records`]. Sources that
@@ -219,8 +276,8 @@ pub trait LedgerSource: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 struct CachedSnapshot {
     stamp: FileStamp,
-    snapshot: Snapshot,
-    report: std::sync::OnceLock<AuditReport>,
+    snapshot: Arc<Snapshot>,
+    report: std::sync::OnceLock<Arc<AuditReport>>,
 }
 
 /// Observable counters of [`JsonFileAuditSource`]'s parse cache.
@@ -251,18 +308,34 @@ struct SnapshotCache {
     report_builds: AtomicU64,
 }
 
+/// One `read` result: the snapshot, its report when already built, the
+/// resolved path and the stamp the pair may be cached under.
+type CachedRead = (
+    Arc<Snapshot>,
+    Option<Arc<AuditReport>>,
+    PathBuf,
+    Option<FileStamp>,
+);
+
 impl SnapshotCache {
-    fn get(&self, path: &Path, stamp: FileStamp) -> Option<(Snapshot, Option<AuditReport>)> {
+    fn get(
+        &self,
+        path: &Path,
+        stamp: FileStamp,
+    ) -> Option<(Arc<Snapshot>, Option<Arc<AuditReport>>)> {
         let entries = self.entries.lock().ok()?;
         entries.get(path).and_then(|cached| {
             (cached.stamp == stamp).then(|| {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                (cached.snapshot.clone(), cached.report.get().cloned())
+                (
+                    Arc::clone(&cached.snapshot),
+                    cached.report.get().map(Arc::clone),
+                )
             })
         })
     }
 
-    fn put(&self, path: &Path, stamp: FileStamp, snapshot: &Snapshot) {
+    fn put(&self, path: &Path, stamp: FileStamp, snapshot: &Arc<Snapshot>) {
         if let Ok(mut entries) = self.entries.lock() {
             // A concurrent request may have completed this entry (including
             // its report) while this one was reading; never replace it.
@@ -276,7 +349,7 @@ impl SnapshotCache {
                 path.to_path_buf(),
                 CachedSnapshot {
                     stamp,
-                    snapshot: snapshot.clone(),
+                    snapshot: Arc::clone(snapshot),
                     report: std::sync::OnceLock::new(),
                 },
             );
@@ -285,11 +358,11 @@ impl SnapshotCache {
 
     /// Attach `report` to the entry at `stamp`, unless another request already
     /// did or the file changed underneath this one.
-    fn put_report(&self, path: &Path, stamp: FileStamp, report: &AuditReport) {
+    fn put_report(&self, path: &Path, stamp: FileStamp, report: &Arc<AuditReport>) {
         if let Ok(entries) = self.entries.lock() {
             if let Some(cached) = entries.get(path) {
                 if cached.stamp == stamp {
-                    let _ = cached.report.set(report.clone());
+                    let _ = cached.report.set(Arc::clone(report));
                 }
             }
         }
@@ -348,12 +421,9 @@ impl JsonFileAuditSource {
     /// The snapshot plus (when already computed for this file identity) its
     /// cached report, the resolved path and the stamp under which it may be
     /// cached. A cache miss reads and parses once and stores the snapshot with
-    /// no report yet.
-    fn read(
-        &self,
-        publisher: &str,
-        platform: PlatformId,
-    ) -> Result<(Snapshot, Option<AuditReport>, PathBuf, Option<FileStamp>), ApiError> {
+    /// no report yet. Cached values are handed out as `Arc`s so a render never
+    /// materializes a copy of the whole snapshot.
+    fn read(&self, publisher: &str, platform: PlatformId) -> Result<CachedRead, ApiError> {
         if !is_valid_publisher(publisher) {
             return Err(ApiError::BadRequest("invalid_publisher"));
         }
@@ -397,6 +467,7 @@ impl JsonFileAuditSource {
                 platform
             )));
         }
+        let snapshot = Arc::new(snapshot);
         if let Some(stamp) = stamp {
             self.cache.put(&path, stamp, &snapshot);
         }
@@ -404,6 +475,11 @@ impl JsonFileAuditSource {
     }
 
     fn load(&self, publisher: &str, platform: PlatformId) -> Result<Snapshot, ApiError> {
+        self.read(publisher, platform)
+            .map(|(snapshot, _, _, _)| (*snapshot).clone())
+    }
+
+    fn load_arc(&self, publisher: &str, platform: PlatformId) -> Result<Arc<Snapshot>, ApiError> {
         self.read(publisher, platform)
             .map(|(snapshot, _, _, _)| snapshot)
     }
@@ -413,11 +489,20 @@ impl JsonFileAuditSource {
         publisher: &str,
         platform: PlatformId,
     ) -> Result<(Snapshot, AuditReport), ApiError> {
+        self.load_report_arc(publisher, platform)
+            .map(|(snapshot, report)| ((*snapshot).clone(), (*report).clone()))
+    }
+
+    fn load_report_arc(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Arc<Snapshot>, Arc<AuditReport>), ApiError> {
         let (snapshot, report, path, stamp) = self.read(publisher, platform)?;
         if let Some(report) = report {
             return Ok((snapshot, report));
         }
-        let report = apex_audit::run(&snapshot);
+        let report = Arc::new(apex_audit::run(&snapshot));
         self.cache.report_builds.fetch_add(1, Ordering::Relaxed);
         if let Some(stamp) = stamp {
             self.cache.put_report(&path, stamp, &report);
@@ -461,6 +546,18 @@ impl AuditSource for JsonFileAuditSource {
             .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
     }
 
+    async fn snapshot_arc(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<Arc<Snapshot>, ApiError> {
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load_arc(&publisher, platform))
+            .await
+            .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
+    }
+
     async fn snapshot_report(
         &self,
         publisher: &str,
@@ -469,6 +566,18 @@ impl AuditSource for JsonFileAuditSource {
         let publisher = publisher.to_string();
         let source = self.clone();
         tokio::task::spawn_blocking(move || source.load_report(&publisher, platform))
+            .await
+            .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
+    }
+
+    async fn snapshot_report_arc(
+        &self,
+        publisher: &str,
+        platform: PlatformId,
+    ) -> Result<(Arc<Snapshot>, Arc<AuditReport>), ApiError> {
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load_report_arc(&publisher, platform))
             .await
             .map_err(|error| ApiError::Internal(format!("snapshot read task failed: {error}")))?
     }
@@ -519,7 +628,7 @@ impl AuditSource for StaticAuditSource {
 /// rewrite that restores the mtime (`touch -t`) still invalidates the entry.
 /// The fallback keeps the original pair where those fields do not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
+pub(crate) struct FileStamp {
     size: u64,
     modified: SystemTime,
     #[cfg(unix)]
@@ -533,7 +642,7 @@ struct FileStamp {
 impl FileStamp {
     /// The stamp of `metadata`, or `None` when the filesystem exposes no
     /// modification time (the cache is then bypassed, exactly as before).
-    fn read(metadata: &std::fs::Metadata) -> Option<Self> {
+    pub(crate) fn read(metadata: &std::fs::Metadata) -> Option<Self> {
         let modified = metadata.modified().ok()?;
         let size = metadata.len();
         #[cfg(unix)]
@@ -555,11 +664,12 @@ impl FileStamp {
 }
 
 /// One verified ledger held in memory: the records and the file identity they
-/// were verified at.
+/// were verified at. The records are shared behind an `Arc` so a paginated
+/// reader can borrow the cached chain and clone only the requested page.
 #[derive(Debug, Clone)]
 struct CachedLedger {
     stamp: FileStamp,
-    records: Vec<LedgerRecord>,
+    records: Arc<[LedgerRecord]>,
 }
 
 /// The in-process verified-record cache of [`FileLedgerSource`]. A read is
@@ -572,6 +682,7 @@ struct LedgerCache {
     entries: Mutex<HashMap<PathBuf, CachedLedger>>,
     verifications: AtomicU64,
     materializations: AtomicU64,
+    page_slices: AtomicU64,
 }
 
 /// Observable counters of [`FileLedgerSource`]'s verified-record cache.
@@ -581,17 +692,31 @@ pub struct LedgerCacheStats {
     pub verifications: u64,
     /// Cached record clones handed to a reader.
     pub materializations: u64,
+    /// Pages served by slicing the shared cached records without cloning the
+    /// whole chain (the paginated console list).
+    pub page_slices: u64,
 }
 
 impl LedgerCache {
-    fn get(&self, path: &Path, stamp: FileStamp) -> Option<Vec<LedgerRecord>> {
+    /// The whole cached chain, cloned into a fresh vector. This is the
+    /// non-paginated reader (the JSON API and record detail); the paginated
+    /// console list uses [`Self::get_shared`] instead.
+    fn get_cloned(&self, path: &Path, stamp: FileStamp) -> Option<Vec<LedgerRecord>> {
         let entries = self.entries.lock().ok()?;
         entries.get(path).and_then(|cached| {
             (cached.stamp == stamp).then(|| {
                 self.materializations.fetch_add(1, Ordering::Relaxed);
-                cached.records.clone()
+                cached.records.to_vec()
             })
         })
+    }
+
+    /// The cached chain behind its shared handle, with no record clone.
+    fn get_shared(&self, path: &Path, stamp: FileStamp) -> Option<Arc<[LedgerRecord]>> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .get(path)
+            .and_then(|cached| (cached.stamp == stamp).then(|| Arc::clone(&cached.records)))
     }
 
     /// The cached verified record count, without materializing the records.
@@ -603,14 +728,12 @@ impl LedgerCache {
     }
 
     fn put(&self, path: &Path, stamp: FileStamp, records: &[LedgerRecord]) {
+        self.put_shared(path, stamp, Arc::from(records.to_vec()));
+    }
+
+    fn put_shared(&self, path: &Path, stamp: FileStamp, records: Arc<[LedgerRecord]>) {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(
-                path.to_path_buf(),
-                CachedLedger {
-                    stamp,
-                    records: records.to_vec(),
-                },
-            );
+            entries.insert(path.to_path_buf(), CachedLedger { stamp, records });
         }
     }
 }
@@ -661,54 +784,14 @@ impl FileLedgerSource {
         LedgerCacheStats {
             verifications: self.cache.verifications.load(Ordering::Relaxed),
             materializations: self.cache.materializations.load(Ordering::Relaxed),
+            page_slices: self.cache.page_slices.load(Ordering::Relaxed),
         }
     }
 
-    fn load(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError> {
-        if !is_valid_publisher(publisher) {
-            return Err(ApiError::BadRequest("invalid_publisher"));
-        }
-        let expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
-        let path = contained_in(&self.canonical_root, self.path_for(publisher))?;
-        let metadata = match std::fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Err(ApiError::NotFound),
-            Err(error) => {
-                return Err(ApiError::Internal(format!(
-                    "stat ledger {}: {error}",
-                    path.display()
-                )));
-            }
-        };
-        let size = metadata.len();
-        ensure_within_cap(size, MAX_LEDGER_BYTES)?;
-        let stamp = FileStamp::read(&metadata);
-        if let Some(stamp) = stamp {
-            if let Some(records) = self.cache.get(&path, stamp) {
-                return Ok(records);
-            }
-        }
-        self.cache.verifications.fetch_add(1, Ordering::Relaxed);
-        let records =
-            Ledger::read_verified(&path, expected_key).map_err(|error| match ledger_error_line(
-                &error,
-            ) {
-                Some(line) => ApiError::LedgerUnverified { line },
-                None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
-            })?;
-        if let Some(stamp) = stamp {
-            self.cache.put(&path, stamp, &records);
-        }
-        Ok(records)
-    }
-
-    /// The verified record count without materializing cached records.
-    ///
-    /// A cache hit answers from the entry's length alone; a miss runs the
-    /// same verified read as [`Self::load`] (warming the cache) and counts
-    /// what that read returned, so the count is always a count of records
-    /// that passed verification.
-    fn load_count_cached(&self, publisher: &str) -> Result<Option<u64>, ApiError> {
+    /// Validate the publisher and resolve its ledger path, metadata and file
+    /// stamp. A missing file is [`ApiError::NotFound`]; a file above the read
+    /// cap is refused before any bytes are read.
+    fn resolve(&self, publisher: &str) -> Result<(PathBuf, Option<FileStamp>), ApiError> {
         if !is_valid_publisher(publisher) {
             return Err(ApiError::BadRequest("invalid_publisher"));
         }
@@ -724,9 +807,85 @@ impl FileLedgerSource {
                 )));
             }
         };
-        let size = metadata.len();
-        ensure_within_cap(size, MAX_LEDGER_BYTES)?;
-        let stamp = FileStamp::read(&metadata);
+        ensure_within_cap(metadata.len(), MAX_LEDGER_BYTES)?;
+        Ok((path, FileStamp::read(&metadata)))
+    }
+
+    fn load(&self, publisher: &str) -> Result<Vec<LedgerRecord>, ApiError> {
+        let (path, stamp) = self.resolve(publisher)?;
+        if let Some(stamp) = stamp {
+            if let Some(records) = self.cache.get_cloned(&path, stamp) {
+                return Ok(records);
+            }
+        }
+        let expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
+        self.cache.verifications.fetch_add(1, Ordering::Relaxed);
+        let records =
+            Ledger::read_verified(&path, expected_key).map_err(|error| match ledger_error_line(
+                &error,
+            ) {
+                Some(line) => ApiError::LedgerUnverified { line },
+                None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
+            })?;
+        if let Some(stamp) = stamp {
+            self.cache.put(&path, stamp, &records);
+        }
+        Ok(records)
+    }
+
+    /// The whole verified chain behind its shared cache handle. A cache hit
+    /// clones the `Arc`, not the records; a miss verifies once and caches the
+    /// shared handle.
+    fn load_shared(&self, publisher: &str) -> Result<Arc<[LedgerRecord]>, ApiError> {
+        let (path, stamp) = self.resolve(publisher)?;
+        if let Some(stamp) = stamp {
+            if let Some(records) = self.cache.get_shared(&path, stamp) {
+                return Ok(records);
+            }
+        }
+        let expected_key = self.keys.get(publisher).ok_or(ApiError::NotFound)?;
+        self.cache.verifications.fetch_add(1, Ordering::Relaxed);
+        let records =
+            Ledger::read_verified(&path, expected_key).map_err(|error| match ledger_error_line(
+                &error,
+            ) {
+                Some(line) => ApiError::LedgerUnverified { line },
+                None => ApiError::Internal(format!("verify ledger {}: {error}", path.display())),
+            })?;
+        let records: Arc<[LedgerRecord]> = Arc::from(records.into_boxed_slice());
+        if let Some(stamp) = stamp {
+            self.cache.put_shared(&path, stamp, Arc::clone(&records));
+        }
+        Ok(records)
+    }
+
+    /// One page of the shared verified chain. Only the requested range is
+    /// cloned; the full vector never is.
+    fn load_page(
+        &self,
+        publisher: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LedgerPage, ApiError> {
+        let records = self.load_shared(publisher)?;
+        self.cache.page_slices.fetch_add(1, Ordering::Relaxed);
+        let total = records.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        Ok(LedgerPage {
+            total: total as u64,
+            records: records[start..end].to_vec(),
+        })
+    }
+
+    /// The verified record count without materializing cached records.
+    ///
+    /// A cache hit answers from the entry's length alone; a miss runs the
+    /// same verified read as [`Self::load`] (warming the cache) and counts
+    /// what that read returned, so the count is always a count of records
+    /// that passed verification.
+    fn load_count_cached(&self, publisher: &str) -> Result<Option<u64>, ApiError> {
+        let (path, stamp) = self.resolve(publisher)?;
         if let Some(stamp) = stamp {
             if let Some(count) = self.cache.count(&path, stamp) {
                 return Ok(Some(count));
@@ -742,6 +901,19 @@ impl LedgerSource for FileLedgerSource {
         let publisher = publisher.to_string();
         let source = self.clone();
         tokio::task::spawn_blocking(move || source.load(&publisher))
+            .await
+            .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
+    }
+
+    async fn records_page(
+        &self,
+        publisher: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LedgerPage, ApiError> {
+        let publisher = publisher.to_string();
+        let source = self.clone();
+        tokio::task::spawn_blocking(move || source.load_page(&publisher, offset, limit))
             .await
             .map_err(|error| ApiError::Internal(format!("ledger read task failed: {error}")))?
     }
@@ -1034,6 +1206,54 @@ mod tests {
         let unchanged = source.cache_stats();
         assert_eq!(unchanged.reads, 2);
         assert_eq!(unchanged.parses, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shared-handle reads are byte-for-byte equivalent to the by-value
+    /// reads and hand out the same cached value, so the console pages that
+    /// borrow (`snapshot_arc`/`snapshot_report_arc`) render exactly what the
+    /// cloning path used to render without paying a whole-snapshot copy.
+    #[tokio::test]
+    async fn arc_reads_share_the_cached_snapshot_and_report() {
+        let dir = std::env::temp_dir().join(format!("apex-arc-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = JsonFileAuditSource::new(&dir);
+        source
+            .write(
+                "pub1",
+                PlatformId::Admob,
+                &empty_snapshot(PlatformId::Admob, 7),
+            )
+            .await
+            .expect("write");
+
+        let (snapshot_arc, report_arc) = source
+            .snapshot_report_arc("pub1", PlatformId::Admob)
+            .await
+            .expect("arc report");
+        let (snapshot_value, report_value) = source
+            .snapshot_report("pub1", PlatformId::Admob)
+            .await
+            .expect("value report");
+        assert_eq!((*snapshot_arc).clone(), snapshot_value);
+        assert_eq!((*report_arc).clone(), report_value);
+
+        // The second shared read is the same allocation, not a copy.
+        let (snapshot_again, report_again) = source
+            .snapshot_report_arc("pub1", PlatformId::Admob)
+            .await
+            .expect("cached arc report");
+        assert!(Arc::ptr_eq(&snapshot_arc, &snapshot_again));
+        assert!(Arc::ptr_eq(&report_arc, &report_again));
+        let plain = source
+            .snapshot_arc("pub1", PlatformId::Admob)
+            .await
+            .expect("cached arc snapshot");
+        assert!(Arc::ptr_eq(&snapshot_arc, &plain));
+        let stats = source.cache_stats();
+        assert_eq!(stats.parses, 1, "one parse for the whole sequence");
+        assert_eq!(stats.report_builds, 1, "one report build");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1479,6 +1699,81 @@ mod tests {
             "the new bytes are served: {rewritten_json}"
         );
         assert_ne!(rewritten, original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A paginated read borrows the cached chain and clones only the page.
+    /// The [materializations](LedgerCacheStats::materializations) counter
+    /// stays at zero while [page_slices](LedgerCacheStats::page_slices)
+    /// advances, which is the seam proving the console list never clones the
+    /// full vector.
+    #[tokio::test]
+    async fn paginated_reads_slice_the_shared_cache_without_materializing_it() {
+        let dir = std::env::temp_dir().join(format!("apex-ledger-page-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("pub1.jsonl");
+        let seed = [11u8; 32];
+        {
+            let mut ledger =
+                apex_proof::Ledger::open(&path, apex_proof::Keypair::from_bytes(&seed))
+                    .expect("open ledger");
+            for index in 0..250 {
+                ledger
+                    .append(lift_draft(&format!(r#"{{"type":"dataPull","n":{index}}}"#)))
+                    .expect("append");
+            }
+        }
+        let mut keys = HashMap::new();
+        keys.insert(
+            "pub1".to_string(),
+            apex_proof::Keypair::from_bytes(&seed).verifying_key(),
+        );
+        let source = FileLedgerSource::new(&dir, keys);
+
+        let first = source.records_page("pub1", 0, 100).await.expect("page 1");
+        assert_eq!(first.total, 250);
+        assert_eq!(first.records.len(), 100);
+        assert_eq!(first.records[0].seq(), 0);
+        assert_eq!(first.records[99].seq(), 99);
+        let stats = source.cache_stats();
+        assert_eq!(stats.verifications, 1, "one verified read warms the page");
+        assert_eq!(
+            stats.materializations, 0,
+            "a page never clones the whole chain"
+        );
+        assert_eq!(stats.page_slices, 1);
+
+        let remainder = source.records_page("pub1", 200, 100).await.expect("page 3");
+        assert_eq!(remainder.total, 250);
+        assert_eq!(
+            remainder.records.len(),
+            50,
+            "the final page is the remainder"
+        );
+        assert_eq!(remainder.records[0].seq(), 200);
+        assert_eq!(remainder.records[49].seq(), 249);
+        let stats = source.cache_stats();
+        assert_eq!(stats.verifications, 1, "the cached chain is reused");
+        assert_eq!(stats.materializations, 0);
+        assert_eq!(stats.page_slices, 2);
+
+        let beyond = source
+            .records_page("pub1", 1_000, 100)
+            .await
+            .expect("past the end");
+        assert_eq!(beyond.total, 250);
+        assert!(beyond.records.is_empty(), "past the end is an empty page");
+
+        // The non-paginated reader still returns the whole chain and is what
+        // the materializations counter measures.
+        assert_eq!(source.records("pub1").await.expect("all").len(), 250);
+        assert_eq!(source.cache_stats().materializations, 1);
+
+        assert!(matches!(
+            source.records_page("a/b", 0, 100).await,
+            Err(ApiError::BadRequest("invalid_publisher"))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

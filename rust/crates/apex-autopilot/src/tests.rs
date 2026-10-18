@@ -320,6 +320,40 @@ fn platform_and_operation_attribution_is_pinned() {
     assert_eq!(operation_of(&ecpm_action()), "updateMediationGroup");
 }
 
+#[test]
+fn the_frozen_instance_and_mediation_actions_keep_their_platform_and_fee_rules() {
+    let instance = Action::SetLevelplayInstancePrice {
+        instance_id: "i1".into(),
+        price_micros: 2_400_000,
+    };
+    assert_eq!(platform_of(&instance), PlatformId::LevelPlay);
+    assert_eq!(operation_of(&instance), "updateEntryPrice");
+    assert_eq!(
+        idempotency_key(&instance).expect("key"),
+        "levelplay-price:i1:i1:2.4",
+        "the instance id is the existing price key's scope"
+    );
+
+    let floor = Action::SetAdmobMediationFloor {
+        group_id: "g1".into(),
+        floor_micros: 1_200_000,
+    };
+    assert_eq!(platform_of(&floor), PlatformId::Admob);
+    assert_eq!(operation_of(&floor), "updateMediationGroup");
+    assert_eq!(
+        idempotency_key(&floor).expect("key"),
+        "admob-ecpm:g1:g1:1.2"
+    );
+    // The existing fee eligibility rule is platform-based: an AdMob kept
+    // change (including the new mediation-floor action) stays fee-ineligible.
+    let ineligible =
+        apex_lift::billing::fee_eligibility(platform_of(&floor)).expect_err("AdMob has no fee");
+    assert_eq!(
+        ineligible.reason,
+        apex_lift::billing::ADMOB_NO_MEASUREMENT_REASON
+    );
+}
+
 // ---------- cycle: gates ----------
 
 #[tokio::test]
@@ -644,6 +678,61 @@ async fn a_max_floor_adapter_with_the_verified_operation_is_unchanged() {
 // ---------- cycle: apply paths ----------
 
 #[tokio::test]
+async fn the_frozen_actions_record_the_existing_live_change_kinds() {
+    // LevelPlay's instance price and AdMob's mediation floor ride the existing
+    // ledger change kinds the live adapters already understand; the ledger
+    // platform comes from the action's platform attribution.
+    let ops = crate::ops::RecordingOps::new();
+    ops.set_change_in_test_arm(true);
+    let mut l = ledger();
+    let outcome = run_cycle(
+        &ops,
+        &mut l,
+        &AutopilotPolicy::conservative(),
+        &[],
+        vec![
+            proposal(Action::SetLevelplayInstancePrice {
+                instance_id: "i1".into(),
+                price_micros: 2_400_000,
+            }),
+            proposal(Action::SetAdmobMediationFloor {
+                group_id: "g1".into(),
+                floor_micros: 1_200_000,
+            }),
+        ],
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert_eq!(outcome.applied, 2);
+    let mut changes = Vec::new();
+    for record in l.records() {
+        if let LedgerRecord::ChangeApplied {
+            platform, change, ..
+        } = record
+        {
+            changes.push((*platform, change.clone()));
+        }
+    }
+    assert!(changes.contains(&(
+        PlatformId::LevelPlay,
+        ChangeKind::WaterfallEntryPriceSet {
+            ad_unit_id: "i1".into(),
+            entry_id: "i1".into(),
+            price_ecpm: 2_400_000,
+        }
+    )));
+    assert!(changes.contains(&(
+        PlatformId::Admob,
+        ChangeKind::EcpmSet {
+            mediation_group_id: "g1".into(),
+            ad_unit_id: "g1".into(),
+            ecpm: 1_200_000,
+        }
+    )));
+}
+
+#[tokio::test]
 async fn apply_failure_leaves_no_change_record() {
     // An adapter that cannot carry the change in a test arm (LevelPlay/AdMob
     // here) applies first. The pre-registration is already signed, but a
@@ -752,6 +841,97 @@ async fn every_action_shape_validates_its_values() {
         assert!(matches!(err, PlanError::Validation(_)), "{action:?}: {err}");
         assert!(l.is_empty(), "no ledger write for an invalid action");
     }
+}
+
+/// An `InMemoryLedger` that counts `records()` calls, so a test can pin that
+/// the cycle indexes the ledger once instead of rescanning it per proposal.
+struct CountingLedger {
+    inner: InMemoryLedger,
+    records_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl apex_proof::LedgerLog for CountingLedger {
+    fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, apex_proof::LedgerError> {
+        self.inner.append(draft)
+    }
+
+    fn append_rollback(
+        &mut self,
+        at_unix_ms: i64,
+        platform: PlatformId,
+        ad_unit_id: &str,
+        rolled_back_seq: u64,
+        reason: &str,
+    ) -> Result<LedgerRecord, apex_proof::LedgerError> {
+        self.inner
+            .append_rollback(at_unix_ms, platform, ad_unit_id, rolled_back_seq, reason)
+    }
+
+    fn records(&self) -> Vec<&LedgerRecord> {
+        self.records_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.records()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&LedgerRecord> {
+        self.inner.get(index)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+#[tokio::test]
+async fn an_approval_pass_indexes_the_ledger_once_for_ten_thousand_proposals() {
+    // A LevelPlay/AdMob snapshot can yield 10k candidates. The ledger gates
+    // must be indexed once, not rebuilt per proposal: with N proposals this
+    // used to be 2N full ledger scans (the applied check reads twice).
+    const N: usize = 10_000;
+    const PRIOR: usize = 100;
+    let records_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut inner = ledger();
+    for index in 0..PRIOR {
+        seed_change(&mut inner, NOW - DAY, &format!("prior-{index}"));
+    }
+    let mut counting = CountingLedger {
+        inner,
+        records_calls: std::sync::Arc::clone(&records_calls),
+    };
+    let proposals: Vec<Proposal> = (0..N)
+        .map(|index| {
+            proposal(Action::SetCountryFloor {
+                ad_unit_id: format!("u{index}"),
+                country: "ee".into(),
+                floor_ecpm: 2_500_000,
+            })
+        })
+        .collect();
+    let policy = AutopilotPolicy {
+        approval_mode: true,
+        ..AutopilotPolicy::conservative()
+    };
+    let outcome = run_cycle(
+        &crate::ops::RecordingOps::new(),
+        &mut counting,
+        &policy,
+        &[],
+        proposals,
+        NOW,
+    )
+    .await
+    .expect("cycle");
+    assert_eq!(outcome.awaiting_approval as usize, N);
+    assert_eq!(
+        records_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "one index build serves both the gates and the daily-cap count, \
+         independent of proposal count"
+    );
 }
 
 #[tokio::test]

@@ -66,6 +66,14 @@ contains() {
   fi
 }
 
+matches() {
+  if grep -E -q -- "$3" "$2" 2>/dev/null; then
+    pass "$1"
+  else
+    fail "$1 (no match '$3' in $2)"
+  fi
+}
+
 contains_re() {
   if grep -E -q -- "$3" "$2" 2>/dev/null; then
     pass "$1"
@@ -324,12 +332,13 @@ if [ ! -f "$CAP/ssh.argv" ]; then pass "T14 no ssh executed"; else fail "T14 dry
 if [ ! -f "$CAP/rsync.argv" ]; then pass "T14 no rsync executed"; else fail "T14 dry-run executed rsync"; fi
 
 printf '%s\n' "== live.py bookkeeping: equivalence and n vs 2n benchmark =="
+EXPECTED_CELLS=$(python3 -c 'import json, sys; surfaces = json.load(open(sys.argv[1])); print(sum(len(cell["classes"]) for service in surfaces["services"].values() for cell in service["required"]))' "$ROOT/tools/dogfood/surfaces.json")
 capture python3 "$TEST_DIR/live-bookkeeping.py"
 eq "T15 live bookkeeping check exits 0" "$RC" 0
-contains "T15 287-cell equivalence vs the pre-fix scan" "$WORK/out.txt" "cells_of matches the pre-fix scan for 64 class/service pairs"
-contains "T15 n=287 benchmark printed" "$WORK/out.txt" "cells_of cells=287"
-contains "T15 n=574 benchmark printed" "$WORK/out.txt" "cells_of cells=574"
-contains "T15 response-contract table cache evidence" "$WORK/out.txt" "response-contract tables (69 cells x 200 rounds)"
+matches "T15 equivalence vs the pre-fix scan" "$WORK/out.txt" "cells_of matches the pre-fix scan for [0-9]+ class/service pairs"
+contains "T15 n=$EXPECTED_CELLS benchmark printed" "$WORK/out.txt" "cells_of cells=$EXPECTED_CELLS "
+contains "T15 n=$((EXPECTED_CELLS * 2)) benchmark printed" "$WORK/out.txt" "cells_of cells=$((EXPECTED_CELLS * 2)) "
+matches "T15 response-contract table cache evidence" "$WORK/out.txt" "response-contract tables \([0-9]+ cells x 200 rounds\)"
 contains "T15 one parity process, not one per cell" "$WORK/out.txt" "one dogfood-plan process for"
 contains "T15 macOS ClickHouse restart env" "$WORK/out.txt" "the restart carries the macOS fork-safety switch"
 

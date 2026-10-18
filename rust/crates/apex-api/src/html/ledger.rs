@@ -12,13 +12,29 @@ use apex_core::platform::ExperimentMetric;
 use apex_core::ExperimentState;
 use apex_proof::{ChangeKind, LedgerRecord};
 use apex_ui::components::{
-    action, action_button, csrf_hidden, data_table, details, field, input, notice, panel, Cell,
-    EmptyState,
+    action, action_button, csrf_hidden, data_table, details, field, input, notice, pagination,
+    panel, Cell, EmptyState,
 };
 use apex_ui::format::{self, ecpm, money, or_not_available, percent, utc_datetime};
 use apex_ui::status::{self, StatusKind};
 
 use super::{console_document, html_escape, ConsoleCtx};
+
+/// How many verified records one change-log page renders. The paginated list
+/// keeps one render's row work bounded regardless of the ledger's length.
+pub const RECORDS_PER_PAGE: usize = 100;
+
+/// The slice of the change log a render receives: only the current page's
+/// records plus the totals the pagination note needs.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordsPage<'a> {
+    /// The records on this page, in chain order.
+    pub records: &'a [LedgerRecord],
+    /// Every verified record in the publisher's ledger.
+    pub total: u64,
+    /// The 1-based page number, already validated by the route.
+    pub page: u64,
+}
 
 /// Why the access panel is being rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,11 +297,11 @@ fn metric_label(metric: ExperimentMetric) -> &'static str {
     }
 }
 
-/// The verified records list (`GET /console/ledger` with a session).
+/// The verified records list (`GET /console/ledger?page=N` with a session).
 pub fn render_records(
     ctx: &ConsoleCtx,
     publisher: &str,
-    records: &[LedgerRecord],
+    page: RecordsPage<'_>,
     verified_at_unix_ms: i64,
     csrf: &str,
 ) -> String {
@@ -293,15 +309,16 @@ pub fn render_records(
         "<h1>Signed change log</h1><p>{}</p>",
         status::chip("Verified", StatusKind::Verified)
     );
-    let count = records.len();
+    let total = page.total;
     body.push_str(&format!(
         "<p class=\"table-note\">{} {} / Verified {} / Publisher {}</p>",
-        count,
-        if count == 1 { "record" } else { "records" },
+        grouped(total),
+        if total == 1 { "record" } else { "records" },
         utc_datetime(verified_at_unix_ms),
         html_escape(publisher)
     ));
-    let rows: Vec<Vec<Cell>> = records
+    let rows: Vec<Vec<Cell>> = page
+        .records
         .iter()
         .map(|record| {
             vec![
@@ -327,8 +344,35 @@ pub fn render_records(
         Some(empty),
         None,
     ));
+    if total > 0 {
+        body.push_str(&pagination_nav(page));
+    }
     body.push_str(&session_end_form(csrf));
     console_document(ctx, "Change log", "Change log", &body)
+}
+
+/// The design's pagination component over stable GET URLs. The page links
+/// carry only the page number, so the session cookie (the whole access
+/// boundary) remains the only credential in the request.
+fn pagination_nav(page: RecordsPage<'_>) -> String {
+    let offset = (page.page.saturating_sub(1)).saturating_mul(RECORDS_PER_PAGE as u64);
+    let first = offset.saturating_add(1);
+    let last = offset.saturating_add(page.records.len() as u64);
+    let note = format!(
+        "Showing {}-{} of {} records",
+        grouped(first),
+        grouped(last),
+        grouped(page.total)
+    );
+    let previous = (page.page > 1).then(|| format!("/console/ledger?page={}", page.page - 1));
+    let last_page = page.total.div_ceil(RECORDS_PER_PAGE as u64).max(1);
+    let next = (page.page < last_page).then(|| format!("/console/ledger?page={}", page.page + 1));
+    pagination(previous.as_deref(), next.as_deref(), &note)
+}
+
+/// Group a count with commas: `2000` becomes `2,000`.
+fn grouped(value: u64) -> String {
+    format::micros_exact(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
 /// The CSRF-protected session-end form.
@@ -697,7 +741,11 @@ mod tests {
         let html = render_records(
             &ctx(),
             "northstar",
-            &records,
+            RecordsPage {
+                records: &records,
+                total: records.len() as u64,
+                page: 1,
+            },
             1_792_055_400_000,
             "csrf-token-1",
         );
@@ -718,19 +766,99 @@ mod tests {
         assert!(html.contains("observed lift +3.0%"));
         assert!(html.contains("csrf-token-1"));
         assert!(html.contains("action=\"/console/ledger/session/end\""));
+        assert!(html.contains("Showing 1-3 of 3 records"));
+        assert!(!html.contains("rel=\"prev\""));
+        assert!(!html.contains("rel=\"next\""));
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn records_page_paginates_with_stable_links_and_a_remainder() {
+        let records = seal_all(
+            (0..250)
+                .map(|index| change(1_791_967_200_000 + index, "rw_de_01", "DE", 4_000_000))
+                .collect(),
+        );
+        let first = render_records(
+            &ctx(),
+            "northstar",
+            RecordsPage {
+                records: &records[0..RECORDS_PER_PAGE],
+                total: records.len() as u64,
+                page: 1,
+            },
+            1_792_055_400_000,
+            "c",
+        );
+        assert!(first.contains("250 records / Verified"));
+        assert!(first.contains("Showing 1-100 of 250 records"));
+        assert!(first.contains("rel=\"next\" href=\"/console/ledger?page=2\""));
+        assert!(!first.contains("rel=\"prev\""));
+
+        let middle = render_records(
+            &ctx(),
+            "northstar",
+            RecordsPage {
+                records: &records[100..200],
+                total: records.len() as u64,
+                page: 2,
+            },
+            1_792_055_400_000,
+            "c",
+        );
+        assert!(middle.contains("Showing 101-200 of 250 records"));
+        assert!(middle.contains("rel=\"prev\" href=\"/console/ledger?page=1\""));
+        assert!(middle.contains("rel=\"next\" href=\"/console/ledger?page=3\""));
+
+        let last = render_records(
+            &ctx(),
+            "northstar",
+            RecordsPage {
+                records: &records[200..],
+                total: records.len() as u64,
+                page: 3,
+            },
+            1_792_055_400_000,
+            "c",
+        );
+        assert!(last.contains("Showing 201-250 of 250 records"));
+        assert!(last.contains("rel=\"prev\" href=\"/console/ledger?page=2\""));
+        assert!(!last.contains("rel=\"next\""));
+        assert!(last.contains("/console/ledger/records/249"));
     }
 
     #[test]
     fn records_page_singular_and_empty_states() {
         let one = seal_all(vec![change(1_791_967_200_000, "rw_de_01", "DE", 4_000_000)]);
-        let html = render_records(&ctx(), "northstar", &one, 1_792_055_400_000, "c");
+        let html = render_records(
+            &ctx(),
+            "northstar",
+            RecordsPage {
+                records: &one,
+                total: 1,
+                page: 1,
+            },
+            1_792_055_400_000,
+            "c",
+        );
         assert!(html.contains("1 record / Verified"));
-        let empty = render_records(&ctx(), "northstar", &[], 1_792_055_400_000, "c");
+        assert!(html.contains("Showing 1-1 of 1 records"));
+        let empty = render_records(
+            &ctx(),
+            "northstar",
+            RecordsPage {
+                records: &[],
+                total: 0,
+                page: 1,
+            },
+            1_792_055_400_000,
+            "c",
+        );
         assert!(empty.contains(
             "No changes have been recorded. Your verified history is empty for this publisher."
         ));
         assert!(empty.contains("href=\"/console/audit\""));
+        assert!(!empty.contains("class=\"pagination\""));
     }
 
     #[test]

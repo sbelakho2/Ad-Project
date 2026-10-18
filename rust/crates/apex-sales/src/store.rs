@@ -12,12 +12,19 @@
 //! Nothing is ever rewritten. Every model is rebuilt from these files on
 //! each run ([`crate::engine::learn`]), so the engine's state is a pure
 //! function of its history: replayable, auditable and immune to a crash
-//! between writes. Each append is a single `write` followed by `sync_data`.
+//! between writes. A single-record append is one `write` followed by one
+//! `sync_data`. Batch appends (imports and outcome imports) write every record
+//! of the batch and then sync once: the durability point is the end of the
+//! batch, so a crash leaves a valid prefix of whole records. If a crash tore
+//! the last record, the next batch starts on a fresh line and the torn line is
+//! skipped and counted on load, never glued to a later record.
 //! A malformed line is skipped and counted, never fatal.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::json::{self, Value};
 use crate::model::{
@@ -386,6 +393,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone)]
 pub struct StateDir {
     root: PathBuf,
+    syncs: Arc<AtomicU64>,
 }
 
 impl StateDir {
@@ -393,7 +401,10 @@ impl StateDir {
     pub fn open(root: impl Into<PathBuf>) -> std::io::Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            syncs: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     /// The directory.
@@ -401,15 +412,62 @@ impl StateDir {
         &self.root
     }
 
+    /// The number of durability barriers (`sync_data`) this directory has
+    /// performed. Test seam for the fsync counters; a batch of any size costs
+    /// exactly one.
+    #[cfg(test)]
+    pub(crate) fn sync_count(&self) -> u64 {
+        self.syncs.load(Ordering::SeqCst)
+    }
+
     fn append(&self, file: &str, v: &Value) -> std::io::Result<()> {
-        let mut line = v.to_json();
-        line.push('\n');
+        self.append_batch(file, std::slice::from_ref(v))
+    }
+
+    /// Append `values` as JSON lines and sync once at the end.
+    ///
+    /// The durability point is the returned `Ok`: every record of the batch
+    /// is on stable storage then, and a crash before it leaves a prefix of
+    /// whole lines. A pre-existing torn tail (a crash during an earlier
+    /// write) cannot swallow the next record because a newline is inserted
+    /// first.
+    fn append_batch(&self, file: &str, values: &[Value]) -> std::io::Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let mut body = String::new();
+        for value in values {
+            body.push_str(&value.to_json());
+            body.push('\n');
+        }
         let mut f = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(self.root.join(file))?;
-        f.write_all(line.as_bytes())?;
-        f.sync_data()
+        let mut needs_newline = false;
+        if f.metadata()?.len() > 0 {
+            f.seek(SeekFrom::End(-1))?;
+            let mut last = [0u8; 1];
+            f.read_exact(&mut last)?;
+            needs_newline = last[0] != b'\n';
+        }
+        if needs_newline {
+            f.write_all(b"\n")?;
+        }
+        f.write_all(body.as_bytes())?;
+        f.sync_data()?;
+        self.syncs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn append_batch_of(
+        &self,
+        file: &str,
+        values: impl IntoIterator<Item = Value>,
+    ) -> std::io::Result<()> {
+        let values: Vec<Value> = values.into_iter().collect();
+        self.append_batch(file, &values)
     }
 
     /// Append a publisher record.
@@ -430,6 +488,21 @@ impl StateDir {
     /// Append a decision record.
     pub fn put_decision(&self, v: &Value) -> std::io::Result<()> {
         self.append("decisions.jsonl", v)
+    }
+
+    /// Append a batch of publisher records with one durability barrier.
+    pub fn put_publishers(&self, publishers: &[Publisher]) -> std::io::Result<()> {
+        self.append_batch_of("publishers.jsonl", publishers.iter().map(publisher_to_json))
+    }
+
+    /// Append a batch of contact records with one durability barrier.
+    pub fn put_contacts(&self, contacts: &[Contact]) -> std::io::Result<()> {
+        self.append_batch_of("contacts.jsonl", contacts.iter().map(contact_to_json))
+    }
+
+    /// Append a batch of events with one durability barrier.
+    pub fn put_events(&self, events: &[Event]) -> std::io::Result<()> {
+        self.append_batch_of("events.jsonl", events.iter().map(Event::to_json))
     }
 
     /// Record an operator approval of a planned touch id.
@@ -656,6 +729,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let empty = StateDir::open(temp_dir("empty")).unwrap();
         assert_eq!(empty.load().unwrap(), Snapshot::default());
+    }
+
+    fn health_reset(at: i64) -> Event {
+        Event::HealthReset { at, domain: None }
+    }
+
+    #[test]
+    fn a_ten_and_fifty_thousand_event_batch_syncs_once_and_reloads_every_record() {
+        for count in [10_000u64, 50_000] {
+            let dir = temp_dir(&format!("batch-{count}"));
+            let store = StateDir::open(&dir).unwrap();
+            let events: Vec<Event> = (0..count as i64).map(health_reset).collect();
+            let before = store.sync_count();
+            let started = std::time::Instant::now();
+            store.put_events(&events).unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(store.sync_count() - before, 1, "one barrier per batch");
+            let snapshot = store.load().unwrap();
+            assert_eq!(snapshot.events.len() as u64, count);
+            assert_eq!(snapshot.skipped_lines, 0);
+            println!(
+                "batch_events count={count} wall_ms={:.2} fsyncs=1",
+                elapsed.as_secs_f64() * 1_000.0
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn an_interrupted_batch_leaves_a_valid_prefix_and_the_next_batch_appends_cleanly() {
+        let dir = temp_dir("batch-prefix");
+        let store = StateDir::open(&dir).unwrap();
+        let events: Vec<Event> = (0..100).map(health_reset).collect();
+        store.put_events(&events).unwrap();
+        let path = dir.join("events.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let whole: Vec<&str> = text.lines().collect();
+        // Kill after 40 whole records: a valid prefix with no torn line.
+        let prefix: String = whole[..40].iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&path, prefix).unwrap();
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.events.len(), 40);
+        assert_eq!(snapshot.skipped_lines, 0);
+        // The next batch starts a new line and is not glued to a torn tail.
+        store.put_event(&health_reset(500)).unwrap();
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.events.len(), 41);
+        assert_eq!(snapshot.events.last().map(Event::at), Some(500));
+        assert_eq!(snapshot.skipped_lines, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_tail_is_skipped_and_the_next_batch_still_parses() {
+        let dir = temp_dir("batch-torn");
+        let store = StateDir::open(&dir).unwrap();
+        let events: Vec<Event> = (0..100).map(health_reset).collect();
+        store.put_events(&events).unwrap();
+        let path = dir.join("events.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let whole: Vec<&str> = text.lines().collect();
+        let mut prefix: String = whole[..40].iter().map(|line| format!("{line}\n")).collect();
+        // A crash mid-write leaves half of record 41.
+        prefix.push_str(&whole[40][..weird_cut(whole[40])]);
+        std::fs::write(&path, prefix).unwrap();
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.events.len(), 40);
+        assert_eq!(
+            snapshot.skipped_lines, 1,
+            "the torn line is counted, not fatal"
+        );
+        store.put_event(&health_reset(600)).unwrap();
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.events.len(), 41);
+        assert_eq!(
+            snapshot.skipped_lines, 1,
+            "only the old torn line is skipped"
+        );
+        assert!(snapshot.events.iter().any(|event| event.at() == 600));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn weird_cut(line: &str) -> usize {
+        line.len() / 2
     }
 
     #[test]

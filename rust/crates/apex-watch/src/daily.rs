@@ -39,6 +39,7 @@
 //! cancel line.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use apex_audit::{AppAdsTxt, Snapshot};
@@ -144,6 +145,12 @@ pub struct DailyReport {
     pub skipped: Vec<DailySkip>,
     /// Subscriber rows that could not be recorded back.
     pub failures: Vec<String>,
+    /// Distinct domains resolved and fetched (one verdict per domain).
+    pub domain_fetches: usize,
+    /// Subscriber checks served from a same-run domain verdict.
+    pub domain_reuses: usize,
+    /// The largest wave dispatched (at most [`DAILY_CONCURRENCY`]).
+    pub max_wave: usize,
 }
 
 /// The skip reason for `subscriber`, or `None` when it may be checked.
@@ -207,6 +214,10 @@ enum DomainOutcome {
 #[derive(Debug, Default)]
 struct DomainFetches {
     entries: Mutex<HashMap<String, Arc<OnceLock<DomainOutcome>>>>,
+    fetches: AtomicU64,
+    reuses: AtomicU64,
+    #[cfg(test)]
+    key_allocations: AtomicU64,
 }
 
 impl DomainFetches {
@@ -216,9 +227,49 @@ impl DomainFetches {
                 Ok(entries) => entries,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            Arc::clone(entries.entry(domain.to_string()).or_default())
+            // A hit must not allocate a fresh key: the previous
+            // `entry(domain.to_string())` allocated for every subscriber even
+            // when the domain had already been claimed in this run.
+            match entries.get(domain) {
+                Some(cell) => {
+                    self.reuses.fetch_add(1, Ordering::Relaxed);
+                    Arc::clone(cell)
+                }
+                None => {
+                    #[cfg(test)]
+                    self.key_allocations.fetch_add(1, Ordering::Relaxed);
+                    Arc::clone(entries.entry(domain.to_string()).or_default())
+                }
+            }
         };
-        cell.get_or_init(fetch).clone()
+        cell.get_or_init(|| {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            fetch()
+        })
+        .clone()
+    }
+
+    /// Distinct domain verdicts computed in this run.
+    fn fetch_count(&self) -> usize {
+        usize::try_from(self.fetches.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+    }
+
+    /// Subscriber checks served from an existing verdict.
+    fn reuse_count(&self) -> usize {
+        usize::try_from(self.reuses.load(Ordering::Relaxed)).unwrap_or(usize::MAX)
+    }
+
+    #[cfg(test)]
+    fn key_allocations(&self) -> u64 {
+        self.key_allocations.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .map(|entries| entries.len())
+            .unwrap_or(0)
     }
 }
 
@@ -317,6 +368,7 @@ pub async fn run_daily(
     // domain watched by several subscribers is resolved and fetched once.
     let domains = DomainFetches::default();
     for wave in checkable.chunks(DAILY_CONCURRENCY.max(1)) {
+        report.max_wave = report.max_wave.max(wave.len());
         // Only the synchronous check runs on worker threads; the shared
         // sink and the store stay on this thread.
         let outcomes: Vec<Result<CheckFacts, WatchError>> = std::thread::scope(|scope| {
@@ -357,6 +409,11 @@ pub async fn run_daily(
             apply_check(store, subscriber, now_ms, facts, deps, &mut report).await;
         }
     }
+    // The per-run rendezvous map is state of this call only; report its
+    // bounded size and release it before returning.
+    report.domain_fetches = domains.fetch_count();
+    report.domain_reuses = domains.reuse_count();
+    drop(domains);
     Ok(report)
 }
 
@@ -678,6 +735,10 @@ mod tests {
         .expect("run");
         assert_eq!(report.alerted, 0);
         assert_eq!(report.unchanged, 1);
+        // The rendezvous map is per-run state: it is rebuilt and released per
+        // call, so a later run starts from zero entries, not one more.
+        assert_eq!(report.domain_fetches, 1);
+        assert_eq!(report.max_wave, 1);
         assert_eq!(alert_rows(&outbox).len(), 1);
         let folded = store.list().expect("list");
         assert_eq!(folded[0].last_alert_at, Some(1_000), "no re-alert time");
@@ -973,7 +1034,7 @@ mod tests {
                     domain: "example.com".into(),
                     email: "ops@x.example".into(),
                     accounts: "admob.com = pub-1".into(),
-                    app_count: 1,
+                    apps: vec!["example-app".into()],
                 },
             )
             .expect("pending signup");
@@ -1240,6 +1301,9 @@ mod tests {
             1,
             "the shared domain is resolved once"
         );
+        assert_eq!(report.domain_fetches, 1, "one verdict for the domain");
+        assert_eq!(report.domain_reuses, 1, "the second subscriber reuses it");
+        assert_eq!(report.max_wave, 2);
     }
 
     #[tokio::test]
@@ -1288,6 +1352,9 @@ mod tests {
         .expect("run");
         assert_eq!(report.checked, 20);
         assert_eq!(report.alerted, 3);
+        assert_eq!(report.domain_fetches, 20, "one verdict per distinct domain");
+        assert_eq!(report.domain_reuses, 0, "no domain is watched twice here");
+        assert_eq!(report.max_wave, DAILY_CONCURRENCY, "waves are bounded");
         let entry_domains: Vec<&str> = report
             .entries
             .iter()
@@ -1490,5 +1557,30 @@ mod tests {
             alert_subjects(&outbox),
             vec![format!("{} {}", ALERT_SUBJECT_PREFIX, domains[3])]
         );
+    }
+
+    /// The per-run rendezvous allocates one map key per distinct domain and
+    /// none per repeated subscriber; a fresh run starts with an empty map, so
+    /// nothing grows across daily runs.
+    #[test]
+    fn the_domain_rendezvous_allocates_one_key_per_domain_per_run() {
+        let domains = DomainFetches::default();
+        for _ in 0..50 {
+            let outcome = domains.outcome("shared.example", || DomainOutcome::Findings(Vec::new()));
+            assert!(matches!(outcome, DomainOutcome::Findings(_)));
+        }
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains.fetch_count(), 1, "one verdict, not 50");
+        assert_eq!(domains.reuse_count(), 49);
+        assert_eq!(domains.key_allocations(), 1, "no per-subscriber key");
+
+        domains.outcome("other.example", || DomainOutcome::Unreachable("x".into()));
+        assert_eq!(domains.len(), 2);
+        assert_eq!(domains.key_allocations(), 2);
+
+        drop(domains);
+        let next_run = DomainFetches::default();
+        assert_eq!(next_run.len(), 0, "per-run state starts empty");
+        assert_eq!(next_run.key_allocations(), 0);
     }
 }

@@ -49,6 +49,18 @@ class FakeHarness:
         self._cell_index_cache = None
         self._contract_expectations = {}
         self._no_inline_targets = None
+        self.counters = {
+            "surfaces_reads": 0,
+            "baseline_reads": 0,
+            "baseline_writes": 0,
+            "results_writes": 0,
+            "dogfood_plan_spawns": 0,
+            "cell_index_builds": 0,
+            "cells_of_calls": 0,
+            "subprocess_spawns": 0,
+            "server_starts": 0,
+            "server_kills": 0,
+        }
 
 
 def reference_cells_of(required, cls, service=None):
@@ -97,6 +109,7 @@ class SpawnFakeHarness(FakeHarness):
     and runs no real binary."""
 
     probe_surface_parity = live.Harness.probe_surface_parity
+    spawn = live.Harness.spawn
 
     def __init__(self, required):
         super().__init__(required)
@@ -114,7 +127,7 @@ class SpawnFakeHarness(FakeHarness):
 
 def check_single_parity_spawn(required):
     """The parity gate is one `apex-tools dogfood-plan` process per run, not
-    one per cell (the pre-fix per-cell form spawned it 287 times)."""
+    one per cell (the pre-fix per-cell form spawned it once per cell)."""
     fake = SpawnFakeHarness(required)
     cells = [entry[2] for entry in live.Harness.cells_of(fake, "surface-parity")]
     calls = []
@@ -141,6 +154,11 @@ def check_single_parity_spawn(required):
             "surface-parity recorded %d/%d cells as passing"
             % (len(fake.recorded), len(cells))
         )
+    if fake.counters["dogfood_plan_spawns"] != 1:
+        raise SystemExit(
+            "surface-parity counted %d dogfood-plan spawns; expected exactly one"
+            % fake.counters["dogfood_plan_spawns"]
+        )
     return len(cells)
 
 
@@ -158,6 +176,8 @@ def check_clickhouse_restart_env():
         ch_port = 18123
         ch_owned_procs = []
         root = str(ROOT)
+        spawn_popen = live.Harness.spawn_popen
+        counters = {"server_starts": 0, "subprocess_spawns": 0}
 
         def repo_path(self, rel):
             return str(ROOT / rel)
@@ -294,15 +314,71 @@ def time_no_inline_targets(required, rebuild):
     return time.perf_counter() - start
 
 
+def check_runtime_counters():
+    """The per-run choke points are counted, not timed: one catalog read, one
+    baseline read, one results write, one class index, and no stray spawn while
+    the harness is only reading its own catalog."""
+    import contextlib
+    import io
+    import tempfile
+
+    args = live.parse_args([])
+    results = tempfile.NamedTemporaryFile(
+        prefix="apex-live-counters-", suffix=".json", delete=False
+    )
+    results.close()
+    args.results = results.name
+    harness = live.Harness(args)
+    harness.elapsed_seconds = 0.0
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            harness.load_catalog()
+            live.Harness.cells_of(harness, "response-contract")
+            live.Harness.cells_of(harness, "no-inline")
+            live.Harness.check_baseline(harness)
+            harness.write_results(0, [])
+        counters = harness.runtime_counters()
+    finally:
+        import os
+
+        os.unlink(results.name)
+    expected = {
+        "surfaces_reads": 1,
+        "baseline_reads": 1,
+        "results_writes": 1,
+        "cell_index_builds": 1,
+        "dogfood_plan_spawns": 0,
+        "subprocess_spawns": 0,
+    }
+    for name, want in expected.items():
+        got = counters[name]
+        if got != want:
+            raise SystemExit("runtime counter %s = %d, expected %d" % (name, got, want))
+    if counters["cells_of_calls"] < 2:
+        raise SystemExit("cells_of did not count its calls: %r" % counters)
+    return counters
+
+
+def check_http_pool():
+    """The pool self-test is a real loopback server: 12 idempotent requests
+    reuse one connection, a closed socket reconnects, and POSTs never share."""
+    problems = live.http_pool_self_test()
+    if problems:
+        raise SystemExit("http pool self-test failed: %s" % "; ".join(problems))
+    return live.http_stats()
+
+
 def main():
     required = real_required()
     total = len(required)
-    if total < 287:
+    if total < 295:
         raise SystemExit("the required matrix shrank below the frozen floor: found %d" % total)
     pairs_checked = check_cells_of_equivalence(required)
     tables_checked = check_table_caches(required)
     parity_cells = check_single_parity_spawn(required)
     check_clickhouse_restart_env()
+    counters = check_runtime_counters()
+    pool = check_http_pool()
     print(
         "equivalence: cells_of matches the pre-fix scan for %d class/service pairs; "
         "%d per-run tables are built once and byte-identical" % (pairs_checked, tables_checked)
@@ -312,6 +388,21 @@ def main():
         % parity_cells
     )
     print("clickhouse recovery: the restart carries the macOS fork-safety switch")
+    print(
+        "runtime counters: surfaces=%d baseline=%d results=%d cell-index=%d dogfood-plan=%d subprocess=%d"
+        % (
+            counters["surfaces_reads"],
+            counters["baseline_reads"],
+            counters["results_writes"],
+            counters["cell_index_builds"],
+            counters["dogfood_plan_spawns"],
+            counters["subprocess_spawns"],
+        )
+    )
+    print(
+        "http pool: %d request(s) over %d connect(s) (%d reused, %d retries); POSTs stay fresh"
+        % (pool["requests"], pool["connects"], pool["reused"], pool["retries"])
+    )
 
     for n in (total, 2 * total):
         matrix = synth_matrix(n)
@@ -324,16 +415,18 @@ def main():
 
     tables_rebuild = time_contract_tables(required, rebuild=True)
     tables_cached = time_contract_tables(required, rebuild=False)
+    contract_cells = len(live.Harness.cells_of(FakeHarness(required), "response-contract"))
     print(
-        "response-contract tables (69 cells x 200 rounds): cached=%.1f ms rebuild-per-cell=%.1f ms"
-        % (tables_cached * 1000, tables_rebuild * 1000)
+        "response-contract tables (%d cells x 200 rounds): cached=%.1f ms rebuild-per-cell=%.1f ms"
+        % (contract_cells, tables_cached * 1000, tables_rebuild * 1000)
     )
 
     targets_rebuild = time_no_inline_targets(required, rebuild=True)
     targets_cached = time_no_inline_targets(required, rebuild=False)
+    inline_cells = len(live.Harness.cells_of(FakeHarness(required), "no-inline"))
     print(
-        "no-inline targets (53 cells x 200 rounds): cached=%.1f ms rebuild-scan-per-cell=%.1f ms"
-        % (targets_cached * 1000, targets_rebuild * 1000)
+        "no-inline targets (%d cells x 200 rounds): cached=%.1f ms rebuild-scan-per-cell=%.1f ms"
+        % (inline_cells, targets_cached * 1000, targets_rebuild * 1000)
     )
     return 0
 

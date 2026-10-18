@@ -145,6 +145,24 @@ pub fn finding_not_found(ctx: &ConsoleCtx) -> String {
     )
 }
 
+/// 400: the change-log page parameter is not a page in this publisher's
+/// history. The page never echoes the rejected value; the only link is the
+/// stable first page.
+pub fn ledger_page_invalid(ctx: &ConsoleCtx) -> String {
+    render(
+        ctx,
+        ErrorKind::BadRequest,
+        "Check the request.",
+        "A field or upload could not be accepted.",
+        Some(
+            "The page parameter must be a whole number from 1 to the last page of this \
+             publisher's verified history.",
+        ),
+        None,
+        &[("Open the first page", "/console/ledger?page=1")],
+    )
+}
+
 /// 404: the publisher has no ledger in this deployment.
 pub fn ledger_not_found(ctx: &ConsoleCtx) -> String {
     render(
@@ -281,6 +299,27 @@ pub fn signin_refused(ctx: &ConsoleCtx) -> String {
         None,
         &[("Request a new audit", "/free-audit/")],
     )
+}
+
+/// The sign-in landing page: the GET state for a live one-time link. It shows
+/// a button and a form that POSTs the token back; nothing is consumed until
+/// that POST, so a mail scanner that follows the link cannot burn it.
+pub fn signin_confirm(ctx: &ConsoleCtx, token: &str) -> String {
+    let body = format!(
+        "<h1>Sign in to your workspace.</h1>\
+         <p>This link signs in the workspace contact it was sent to. The button uses the link \
+         once; opening the link again does not sign anyone in.</p>\
+         <form method=\"post\" action=\"{}\">\
+         <input type=\"hidden\" name=\"token\" value=\"{}\">\
+         <div class=\"form-actions\">\
+         <button class=\"action action-primary\" type=\"submit\">Sign in</button></div>\
+         </form>\
+         <p class=\"table-note\">If you were not expecting this link, ignore it. \
+         <a href=\"/free-audit/\">Request a new audit</a> to receive a fresh link.</p>",
+        crate::signin::SIGNIN_PATH,
+        html_escape(token)
+    );
+    console_document(ctx, "Sign in", "Overview", &body)
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+> This page is a superseded record of the retired Next.js two-factor design. Current operators sign in to the internal control plane with a password and an authenticator code; see the [operator plane section](../Console/SESSION_AUTH.md#operator-plane).
+
 # Two-Factor Authentication (2FA) System
 
 ## Overview

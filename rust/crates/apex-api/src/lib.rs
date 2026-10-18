@@ -96,7 +96,10 @@ pub use app_ads_proof::{
     StaticAppAdsProof, StdDomainResolver,
 };
 pub use clock::{Clock, FixedClock, SystemClock};
-pub use config::{decode_hex_env_key, env_value, parse_keys, HexKeyError};
+pub use config::{
+    console_url, decode_hex_env_key, env_value, parse_keys, support_url, HexKeyError,
+    PublicUrlError, PublicUrlProblem, CONSOLE_URL_ENV, DEFAULT_SUPPORT_URL, SUPPORT_URL_ENV,
+};
 pub use cycle::{
     CyclePolicy, CycleRequest, CycleRunner, CycleSummary, LedgerOnlyRunner, READ_ONLY_MODE,
     READ_ONLY_NOTE,
@@ -120,4 +123,4 @@ pub use sources::{
     is_valid_publisher, parse_platform, AuditSource, FileLedgerSource, JsonFileAuditSource,
     LedgerSource, StaticAuditSource, StaticLedgerSource, PLATFORM_NAMES,
 };
-pub use state::AppState;
+pub use state::{AppState, WatchBilling};

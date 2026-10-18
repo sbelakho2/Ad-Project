@@ -75,8 +75,10 @@ pub async fn max_snapshot(
 /// Assemble the LevelPlay snapshot: the per-unit waterfalls from the management
 /// API, the app-ads.txt check, and the caller-supplied reporting context.
 ///
-/// LevelPlay exposes the waterfall per ad unit, so the caller enumerates the
-/// units to audit. An empty list audits no units and yields an empty waterfall.
+/// This is the caller-enumerated form: an empty list still reads the app once
+/// (the instances endpoint is app-scoped), while a non-empty list issues one
+/// read per unit id and therefore re-reads the same app rows. The audit/cycle
+/// path uses [`levelplay_app_snapshot`], which always issues exactly one read.
 pub async fn levelplay_snapshot(
     client: &LevelPlayClient,
     fetcher: &AppAdsTxtFetcher,
@@ -86,9 +88,47 @@ pub async fn levelplay_snapshot(
 ) -> Result<Snapshot, PlatformError> {
     let site = require_developer_site(PlatformId::LevelPlay, context)?;
     let mut waterfall: Vec<WaterfallEntry> = Vec::new();
-    for ad_unit_id in ad_unit_ids {
-        waterfall.extend(client.list_waterfall(ad_unit_id).await?);
+    if ad_unit_ids.is_empty() {
+        waterfall.extend(client.list_waterfall("").await?);
+    } else {
+        for ad_unit_id in ad_unit_ids {
+            waterfall.extend(client.list_waterfall(ad_unit_id).await?);
+        }
     }
+    let app_ads_txt = fetcher
+        .fetch(
+            PlatformId::LevelPlay,
+            site,
+            context.expected_networks.clone(),
+        )
+        .await?;
+    Ok(finish(
+        PlatformId::LevelPlay,
+        fetched_at_unix_ms,
+        SnapshotReads {
+            waterfall,
+            ..SnapshotReads::default()
+        },
+        context,
+        app_ads_txt,
+    ))
+}
+
+/// Assemble the LevelPlay snapshot from exactly one app-scoped instances read.
+///
+/// The instances endpoint takes only the app key and returns every instance,
+/// so `ad_unit_ids` cannot select rows: a per-unit loop fetches the whole app
+/// once per configured unit and duplicates every instance in the waterfall
+/// (and every instance-price proposal). The audit/cycle path uses this form;
+/// rows carry an empty unit id because the platform has no per-unit scope.
+pub async fn levelplay_app_snapshot(
+    client: &LevelPlayClient,
+    fetcher: &AppAdsTxtFetcher,
+    context: &PublisherContext,
+    fetched_at_unix_ms: i64,
+) -> Result<Snapshot, PlatformError> {
+    let site = require_developer_site(PlatformId::LevelPlay, context)?;
+    let waterfall: Vec<WaterfallEntry> = client.list_waterfall("").await?;
     let app_ads_txt = fetcher
         .fetch(
             PlatformId::LevelPlay,
@@ -305,6 +345,69 @@ mod tests {
         assert_eq!(snapshot.waterfall.len(), 1);
         assert!(snapshot.ad_units.is_empty());
         assert_eq!(snapshot.waterfall[0].network, "admob");
+    }
+
+    #[tokio::test]
+    async fn levelplay_app_snapshot_reads_the_instances_exactly_once() {
+        // The audit/cycle path uses the app-scoped read: no unit loop, one
+        // instances request and no duplicate rows. Auth + instances + app-ads.
+        let transport = ScriptedTransport::new(vec![
+            ok(r#""bearer-token""#),
+            ok(
+                r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
+            ),
+            ok("admob.com, pub-9, DIRECT\n"),
+        ]);
+        let client = LevelPlayClient::new(
+            "secret",
+            "refresh",
+            "app-key",
+            "https://api.example.test",
+            transport.clone(),
+        )
+        .expect("client");
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let snapshot = levelplay_app_snapshot(&client, &fetcher, &context(), 7)
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.waterfall.len(), 1);
+        assert_eq!(snapshot.waterfall[0].entry_id, "e1");
+        let instances_calls = transport
+            .calls()
+            .iter()
+            .filter(|call| call.url.contains(crate::levelplay::LEVELPLAY_INSTANCES_V4))
+            .count();
+        assert_eq!(instances_calls, 1, "the app read must happen once");
+        assert_eq!(transport.calls().len(), 3, "auth, instances and app-ads");
+    }
+
+    #[tokio::test]
+    async fn levelplay_snapshot_reads_the_app_once_without_a_unit_list() {
+        // An empty unit list still yields the live instances (the endpoint is
+        // app-scoped): one read, tagged with the empty unit id.
+        let transport = ScriptedTransport::new(vec![
+            ok(r#""bearer-token""#),
+            ok(
+                r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
+            ),
+            ok("admob.com, pub-9, DIRECT\n"),
+        ]);
+        let client = LevelPlayClient::new(
+            "secret",
+            "refresh",
+            "app-key",
+            "https://api.example.test",
+            transport.clone(),
+        )
+        .expect("client");
+        let fetcher = AppAdsTxtFetcher::new(transport.clone());
+        let snapshot = levelplay_snapshot(&client, &fetcher, &context(), &[], 7)
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.waterfall.len(), 1);
+        assert_eq!(snapshot.waterfall[0].entry_id, "e1");
+        assert_eq!(snapshot.waterfall[0].price_ecpm, 3_200_000);
+        assert_eq!(snapshot.waterfall[0].ad_unit_id, "");
     }
 
     #[tokio::test]

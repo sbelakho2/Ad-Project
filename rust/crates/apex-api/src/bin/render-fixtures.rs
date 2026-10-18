@@ -347,11 +347,31 @@ async fn run(
     ));
     pages.push((
         "ledger-records.html".into(),
-        ledger::render_records(&ctx, PUBLISHER, &records, NOW_MS, CSRF),
+        ledger::render_records(
+            &ctx,
+            PUBLISHER,
+            ledger::RecordsPage {
+                records: &records,
+                total: records.len() as u64,
+                page: 1,
+            },
+            NOW_MS,
+            CSRF,
+        ),
     ));
     pages.push((
         "ledger-empty.html".into(),
-        ledger::render_records(&ctx, PUBLISHER, &[], NOW_MS, CSRF),
+        ledger::render_records(
+            &ctx,
+            PUBLISHER,
+            ledger::RecordsPage {
+                records: &[],
+                total: 0,
+                page: 1,
+            },
+            NOW_MS,
+            CSRF,
+        ),
     ));
     let first = records.first().ok_or("the ledger fixture has no records")?;
     pages.push((

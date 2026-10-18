@@ -1,8 +1,8 @@
 //! Integration tests for the paid setup-watch sign-up over the real router:
 //! a pending subscriber and a checkout link, no checks before payment, the
 //! one-time email confirmation, webhook activation (idempotent under replay)
-//! and the honest unpaid state. The tier comes from the reported app count;
-//! there is no tier checkbox.
+//! and the honest unpaid state. The tier comes from the distinct apps the
+//! subscriber names; there is no tier checkbox.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -56,6 +56,23 @@ impl NotificationSink for CaptureMailer {
     }
 }
 
+/// A VIES stub: every number is invalid, so the VAT treatment stays domestic
+/// without a network call.
+#[derive(Debug, Default)]
+struct StubVies;
+
+impl apex_billing::ViesClient for StubVies {
+    fn check_vat_number(
+        &self,
+        _country: &str,
+        _number: &str,
+    ) -> Result<apex_billing::ViesCheck, apex_billing::ViesError> {
+        Ok(apex_billing::ViesCheck::Invalid {
+            evidence: "stub: not on the register".to_string(),
+        })
+    }
+}
+
 /// An Adyen checkout transport that records every request and answers a
 /// payment link. The URL is deterministic so the confirmation page can be
 /// asserted exactly.
@@ -97,6 +114,18 @@ fn build_app(
     let collection = Arc::new(
         FileCollectionStore::open(&root.join("collection.jsonl")).expect("collection store"),
     );
+    let seller = apex_billing::BillingProfile {
+        legal_name: "Apex Media OU".to_string(),
+        address_lines: vec!["Sepapaja tn 6".to_string(), "15551 Tallinn".to_string()],
+        country: "EE".to_string(),
+        vat_number: "EE123456789".to_string(),
+        vat_rate_bp: 2_000,
+    };
+    let watch_billing = Arc::new(apex_api::WatchBilling {
+        seller: Arc::new(seller),
+        register_path: root.join("billing").join("invoices.jsonl"),
+        vies: Arc::new(StubVies),
+    });
     let mut state = AppState::new(
         Arc::new(StaticAuditSource::default()),
         Arc::new(StaticLedgerSource::default()),
@@ -105,11 +134,12 @@ fn build_app(
     .with_watch(Arc::clone(&store))
     .with_signin(signin)
     .with_collection(collection)
+    .with_watch_billing(watch_billing)
     .with_app_ads_proof(Arc::new(
         apex_api::app_ads_proof::StaticAppAdsProof::accepting(Vec::<String>::new())
-            .with_app_count("northstar.example", 3)
-            .with_app_count("bigport.example", 12)
-            .with_app_count("bare.example", 1),
+            // The account-id histogram is deliberately not tier evidence.
+            .with_app_count("accounts.example", 40)
+            .with_app_count("bigport.example", 12),
     ));
     let transport = if with_adyen {
         let transport = Arc::new(CheckoutTransport::default());
@@ -296,13 +326,18 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
     let confirmed = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
     assert_eq!(confirmed.status, 200, "{}", confirmed.body);
     assert!(
-        confirmed.body.contains("Your email is confirmed."),
+        confirmed.body.contains("Confirm your billing details."),
         "{}",
         confirmed.body
     );
     assert!(
+        confirmed.body.contains("name=\"profile_token\""),
+        "the confirmed page carries the billing-profile form: {}",
+        confirmed.body
+    );
+    assert!(
         !confirmed.body.contains(&token),
-        "the token is never echoed"
+        "the email token is never echoed"
     );
     assert!(store.list().expect("list")[0].confirmed);
     assert!(store.list().expect("list")[0].email_confirmed_at.is_some());
@@ -314,62 +349,164 @@ async fn signup_creates_a_pending_subscriber_checkout_link_and_confirmation_mail
 }
 
 #[tokio::test]
-async fn the_tier_comes_from_the_app_count_evidence_not_a_checkbox() {
+async fn the_tier_comes_from_the_distinct_named_apps_not_account_ids() {
     let temp = TempDir::new("watch-tier");
     let (app, store, _mailer, transport) = build_app(temp.path(), true);
 
-    // The form has no tier checkbox and no app-count input: the evidence is
-    // the domain's public app-ads.txt, fetched by the proof source.
+    // The form has no tier or app-count input: the subscriber names apps.
     let form = send(&app, get("/watch/")).await;
     assert_eq!(form.status, 200);
+    assert!(form.body.contains("name=\"apps\""), "{}", form.body);
+    assert!(
+        form.body.contains(">Apps (optional)</label>"),
+        "{}",
+        form.body
+    );
     assert!(!form.body.contains("name=\"tier\""), "{}", form.body);
     assert!(!form.body.contains("type=\"checkbox\""), "{}", form.body);
     assert!(!form.body.contains("name=\"app_count\""), "{}", form.body);
 
-    // The proof source records twelve publisher account ids for bigport, so
-    // the pending subscriber is priced at the core tier.
+    // Nine named apps stay the standard tier.
+    let nine = (1..=9)
+        .map(|index| format!("com.example.app{index}"))
+        .collect::<Vec<_>>()
+        .join("%0A");
     let reference = submit_watch(
         &app,
-        "domain=bigport.example&email=ops%40bigport.example&accounts=",
+        &format!("domain=nine.example&email=ops%40nine.example&apps={nine}"),
     )
     .await;
     let rows = store.list().expect("list");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, reference);
-    assert_eq!(
-        rows[0].tier,
-        Tier::Core,
-        "twelve account ids is the core tier"
-    );
+    let row = rows.iter().find(|row| row.id == reference).expect("row");
+    assert_eq!(row.tier, Tier::Normal, "nine apps is the standard tier");
 
+    // Ten distinct apps are the core tier, and the checkout uses its price.
+    let ten = (1..=10)
+        .map(|index| format!("com.example.app{index}"))
+        .collect::<Vec<_>>()
+        .join("%0A");
+    let reference = submit_watch(
+        &app,
+        &format!("domain=bigport.example&email=ops%40bigport.example&apps={ten}"),
+    )
+    .await;
+    let rows = store.list().expect("list");
+    let row = rows.iter().find(|row| row.id == reference).expect("row");
+    assert_eq!(row.tier, Tier::Core, "ten distinct apps is the core tier");
     let transport = transport.expect("checkout transport");
     let body = {
         let calls = transport.calls.lock().unwrap();
-        match calls[0].body.as_ref().expect("json body") {
+        let call = calls
+            .iter()
+            .find(|call| {
+                matches!(
+                    &call.body,
+                    Some(apex_connectors::transport::HttpBody::Json(value))
+                        if value["shopperReference"] == reference
+                )
+            })
+            .expect("the core signup checkout");
+        match call.body.as_ref().expect("json body") {
             apex_connectors::transport::HttpBody::Json(value) => value.clone(),
             other => panic!("unexpected body {other:?}"),
         }
     };
     assert_eq!(body["amount"]["value"], 19_900, "core price in cents");
 
-    // Evidence unavailable is the normal tier, honestly recorded, and the
-    // pending sign-up is never blocked by it.
-    let unknown = submit_watch(
+    // The Kelvin reproduction: 49 ASCII apps plus K (U+212A) and k are 50
+    // distinct under the Unicode identity the tier count uses. The old
+    // ASCII-only parser counted 51 and refused this valid core signup.
+    let mut kelvin: Vec<String> = (1..=49)
+        .map(|index| format!("com.example.app{index}"))
+        .collect();
+    kelvin.push("K".to_string());
+    kelvin.push("k".to_string());
+    let reference = submit_watch(
         &app,
-        "domain=unknown.example&email=ops%40unknown.example&accounts=",
+        &format!(
+            "domain=kelvin.example&email=ops%40kelvin.example&apps={}",
+            kelvin.join("%0A")
+        ),
     )
     .await;
     let rows = store.list().expect("list");
-    let row = rows.iter().find(|row| row.id == unknown).expect("row");
-    assert_eq!(row.tier, Tier::Normal);
+    let row = rows.iter().find(|row| row.id == reference).expect("row");
+    assert_eq!(
+        row.tier,
+        Tier::Core,
+        "50 distinct apps including the Kelvin fold are accepted and stored as core"
+    );
+
+    // Blank apps stay normal.
+    let blank = submit_watch(
+        &app,
+        "domain=blank.example&email=ops%40blank.example&apps=%0A%20%0A",
+    )
+    .await;
+    let rows = store.list().expect("list");
+    assert_eq!(
+        rows.iter().find(|row| row.id == blank).expect("row").tier,
+        Tier::Normal
+    );
+
+    // Duplicates collapse exactly: ten copies of one id are one app.
+    let duplicate = submit_watch(
+        &app,
+        "domain=duplicate.example&email=ops%40duplicate.example&apps=com.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same%0Acom.example.same",
+    )
+    .await;
+    let rows = store.list().expect("list");
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.id == duplicate)
+            .expect("row")
+            .tier,
+        Tier::Normal,
+        "duplicates collapse to one distinct app"
+    );
+
+    // Account ids never influence the tier: many account ids, zero apps.
+    let accounts = submit_watch(
+        &app,
+        "domain=accounts.example&email=ops%40accounts.example&accounts=admob.com+%3D+pub-1%0Agoogle.com+%3D+pub-2",
+    )
+    .await;
+    let rows = store.list().expect("list");
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.id == accounts)
+            .expect("row")
+            .tier,
+        Tier::Normal,
+        "account ids are not apps"
+    );
+
+    // Fifty-one distinct apps are a typed validation refusal.
+    let fifty_one = (1..=51)
+        .map(|index| format!("com.example.app{index}"))
+        .collect::<Vec<_>>()
+        .join("%0A");
+    let refused = send(
+        &app,
+        post_form(
+            "/watch",
+            &format!("domain=too-many.example&email=ops%40too-many.example&apps={fifty_one}"),
+        ),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert!(refused.body.contains("up to 50 lines"), "{}", refused.body);
+    assert_eq!(
+        store.list().expect("list").len(),
+        6,
+        "the refused form stores nothing"
+    );
 }
 
-/// A watch sign-up performs exactly one guarded app-ads fetch when it has a
-/// valid form and a configured store, and none when validation fails or the
-/// store cannot accept the subscriber. The counter is deterministic: it
-/// counts transport requests, not wall-clock time.
+/// The watch tier never fetches app-ads.txt: the account ids there are not
+/// apps, so the form's named apps are the only evidence.
 #[tokio::test]
-async fn a_watch_request_fetches_app_ads_once_after_validation() {
+async fn a_watch_request_never_fetches_app_ads_for_the_tier() {
     const APP_ADS: &str = "OWNERDOMAIN=northstar.example\n\
                            google.com, pub-1, DIRECT\n\
                            google.com, pub-2, RESELLER\n";
@@ -386,60 +523,15 @@ async fn a_watch_request_fetches_app_ads_once_after_validation() {
     .with_app_ads_proof(Arc::new(proof));
     let app = router(state);
 
-    // Invalid form: refused before any network work.
-    let invalid = send(
-        &app,
-        post_form(
-            "/watch",
-            "domain=northstar.example&email=not-an-email&accounts=",
-        ),
-    )
-    .await;
-    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
-    assert_eq!(transport.calls(), 0, "validation refuses before the fetch");
-
-    // One valid submission is one fetch (the tier evidence is read once).
     submit_watch(
         &app,
-        "domain=northstar.example&email=founder%40northstar.example&accounts=",
+        "domain=northstar.example&email=founder%40northstar.example&apps=com.example.one",
     )
     .await;
-    assert_eq!(transport.calls(), 1, "one guarded fetch per request");
-
-    // A repeat submission is a second request: one more fetch, never two
-    // inside one request.
-    submit_watch(
-        &app,
-        "domain=northstar.example&email=founder%40northstar.example&accounts=",
-    )
-    .await;
-    assert_eq!(transport.calls(), 2);
-
-    // No subscriber store: the form cannot be stored, so no fetch happens.
-    let no_store = router(
-        AppState::new(
-            Arc::new(StaticAuditSource::default()),
-            Arc::new(StaticLedgerSource::default()),
-        )
-        .with_clock(Arc::new(FixedClock::new(1_700_000_000)))
-        .with_app_ads_proof(Arc::new(
-            HttpAppAdsProof::new(Arc::clone(&transport) as Arc<dyn Transport>)
-                .with_resolver(Arc::new(PublicResolver)),
-        )),
-    );
-    let unavailable = send(
-        &no_store,
-        post_form(
-            "/watch",
-            "domain=northstar.example&email=founder%40northstar.example&accounts=",
-        ),
-    )
-    .await;
-    assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         transport.calls(),
-        2,
-        "an unstorable sign-up does not fetch the evidence"
+        0,
+        "the tier comes from the named apps, not app-ads.txt account ids"
     );
 }
 
@@ -566,4 +658,463 @@ async fn a_bare_subscriber_reference_also_activates_and_replays_idempotently() {
     assert_eq!(replay.json()["new"], 0);
     assert_eq!(row_count(&store), after_first, "replay appends nothing");
     assert_eq!(store.list().expect("list")[0].status, Status::Active);
+}
+
+/// The value of one hidden input in rendered HTML.
+fn hidden_value(body: &str, name: &str) -> String {
+    let marker = format!("name=\"{name}\" value=\"");
+    let start = body
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no hidden {name} in {body}"))
+        + marker.len();
+    let rest = &body[start..];
+    rest[..rest.find('"').expect("closing quote")].to_string()
+}
+
+/// Percent-encode one form value (`+` is not used, so newlines stay exact).
+fn form_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Submit a watch, read the confirmation mail, and return the confirmed page
+/// (which carries the billing-profile form) plus the profile token.
+async fn confirmed_billing_page(
+    app: &axum::Router,
+    store: &SubscriberStore,
+    mailer: &CaptureMailer,
+    body: &str,
+) -> (String, String) {
+    let reference = submit_watch(app, body).await;
+    let token = token_from_mail(&mailer.last_text());
+    let confirmed = send(app, get(&format!("/watch/confirm?token={token}"))).await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{}", confirmed.body);
+    assert!(
+        confirmed.body.contains("Confirm your billing details."),
+        "{}",
+        confirmed.body
+    );
+    assert!(
+        confirmed.body.contains("name=\"profile_token\""),
+        "the form only appears after the email confirmation: {}",
+        confirmed.body
+    );
+    let profile_token = hidden_value(&confirmed.body, "profile_token");
+    assert!(
+        store
+            .get(&reference)
+            .expect("row")
+            .expect("subscriber")
+            .confirmed
+    );
+    (reference, profile_token)
+}
+
+fn billing_profile_body(
+    profile_token: &str,
+    reference: &str,
+    legal_name: &str,
+    address_lines: &str,
+    country: &str,
+    vat_number: &str,
+) -> String {
+    format!(
+        "profile_token={}&reference={}&legal_name={}&address_lines={}&country={}&vat_number={}",
+        form_encode(profile_token),
+        form_encode(reference),
+        form_encode(legal_name),
+        form_encode(address_lines),
+        form_encode(country),
+        form_encode(vat_number),
+    )
+}
+
+async fn activate_via_webhook(app: &axum::Router, reference: &str) {
+    let response = send(
+        app,
+        post_with_header(
+            "/v1/adyen/webhook",
+            "content-type",
+            "application/json",
+            &watch_webhook(reference, "psp-billing-1"),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+}
+
+#[tokio::test]
+async fn the_billing_profile_is_stored_and_the_first_invoice_is_gapless() {
+    let temp = TempDir::new("watch-billing");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let (reference, profile_token) = confirmed_billing_page(
+        &app,
+        &store,
+        &mailer,
+        "domain=northstar.example&email=founder%40northstar.example&apps=",
+    )
+    .await;
+    activate_via_webhook(&app, &reference).await;
+
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Turbine OU",
+                "Sepapaja tn 6\n15551 Tallinn",
+                "ee",
+                "EE123456789",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    let location = response
+        .headers
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("location")
+        .to_string();
+    assert_eq!(
+        location,
+        format!("/watch/billing-profile/recorded?ref={reference}")
+    );
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    let profile = subscriber.billing_profile.expect("stored profile");
+    assert_eq!(profile.legal_name, "Turbine OU");
+    assert_eq!(
+        profile.address_lines,
+        vec!["Sepapaja tn 6".to_string(), "15551 Tallinn".to_string()]
+    );
+    assert_eq!(profile.country, "EE", "the country is canonical uppercase");
+    assert_eq!(profile.vat_number.as_deref(), Some("EE123456789"));
+    assert_eq!(
+        subscriber.first_invoice_number,
+        Some(1),
+        "the first payment gets the first gapless number"
+    );
+    assert_eq!(
+        subscriber.last_billed_month.as_deref(),
+        Some(apex_watch::current_month(1_700_000_000_000).as_str())
+    );
+
+    let register = apex_billing::InvoiceRegister::open(&temp.path().join("billing/invoices.jsonl"))
+        .expect("register");
+    assert_eq!(register.highest().expect("highest"), 1, "one gapless line");
+
+    let recorded = send(&app, get(&location)).await;
+    assert_eq!(recorded.status, StatusCode::OK);
+    assert!(recorded.body.contains("invoice 1"), "{}", recorded.body);
+    assert!(!recorded.body.contains(&profile_token), "no token echo");
+}
+
+#[tokio::test]
+async fn a_replayed_billing_profile_post_is_refused_without_overwriting() {
+    let temp = TempDir::new("watch-billing-replay");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let (reference, profile_token) = confirmed_billing_page(
+        &app,
+        &store,
+        &mailer,
+        "domain=northstar.example&email=founder%40northstar.example&apps=",
+    )
+    .await;
+    activate_via_webhook(&app, &reference).await;
+
+    let first = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Turbine OU",
+                "Sepapaja tn 6",
+                "EE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::SEE_OTHER, "{}", first.body);
+
+    let replay = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Changed Ltd",
+                "Elsewhere 1",
+                "DE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert!(
+        replay
+            .body
+            .contains("This billing link is no longer valid."),
+        "{}",
+        replay.body
+    );
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(
+        subscriber
+            .billing_profile
+            .as_ref()
+            .map(|profile| profile.legal_name.as_str()),
+        Some("Turbine OU"),
+        "a replay never overwrites the stored profile"
+    );
+    assert_eq!(subscriber.first_invoice_number, Some(1));
+    let register = apex_billing::InvoiceRegister::open(&temp.path().join("billing/invoices.jsonl"))
+        .expect("register");
+    assert_eq!(register.highest().expect("highest"), 1, "no second number");
+}
+
+#[tokio::test]
+async fn hostile_billing_fields_are_typed_refusals_with_nothing_stored() {
+    let temp = TempDir::new("watch-billing-invalid");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let (reference, profile_token) = confirmed_billing_page(
+        &app,
+        &store,
+        &mailer,
+        "domain=northstar.example&email=founder%40northstar.example&apps=",
+    )
+    .await;
+
+    let long_address = "a".repeat(501);
+    let hostile_name = format!("\" onmouseover=\"alert(1){}", "x".repeat(190));
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                &hostile_name,
+                &long_address,
+                "E1",
+                "bad!",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    for message in [
+        "Enter the legal name that should appear on the invoice.",
+        "Enter one address line per line (at least one, at most ten, 500 characters each).",
+        "Enter the two-letter country code.",
+        "Enter a VAT number of 4 to 14 letters and digits, or leave it blank.",
+        "Check the highlighted fields before sending.",
+    ] {
+        assert!(response.body.contains(message), "missing {message}");
+    }
+    assert!(
+        response.body.contains(&long_address),
+        "safe values are preserved"
+    );
+    assert!(response
+        .body
+        .contains("value=\"&quot; onmouseover=&quot;alert(1)"));
+    assert!(!response.body.contains("onmouseover=\"alert(1)\""));
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    assert!(subscriber.billing_profile.is_none(), "nothing is stored");
+    assert!(subscriber.first_invoice_number.is_none());
+    assert!(
+        subscriber.profile_token_used_at.is_none(),
+        "a field refusal does not burn the token, so the form can be corrected"
+    );
+    assert!(!temp.path().join("billing/invoices.jsonl").exists());
+}
+
+#[tokio::test]
+async fn a_subscriber_without_a_profile_is_still_refused_by_the_monthly_bill() {
+    let temp = TempDir::new("watch-billing-missing");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let reference = submit_watch(
+        &app,
+        "domain=northstar.example&email=founder%40northstar.example&apps=",
+    )
+    .await;
+    let token = token_from_mail(&mailer.last_text());
+    let confirmed = send(&app, get(&format!("/watch/confirm?token={token}"))).await;
+    assert_eq!(confirmed.status, StatusCode::OK);
+    activate_via_webhook(&app, &reference).await;
+
+    let seller = apex_billing::BillingProfile {
+        legal_name: "Apex Media OU".to_string(),
+        address_lines: vec!["Sepapaja tn 6".to_string()],
+        country: "EE".to_string(),
+        vat_number: "EE123456789".to_string(),
+        vat_rate_bp: 2_000,
+    };
+    let register_path = temp.path().join("billing/invoices.jsonl");
+    let vies = StubVies;
+    let deps = apex_watch::BillDeps {
+        seller: &seller,
+        register_path: &register_path,
+        vies: &vies,
+        adyen: None,
+        transport: None,
+    };
+    let month = apex_watch::current_month(1_700_000_000_000);
+    let report = apex_watch::run_bill(&store, &month, &deps)
+        .await
+        .expect("bill");
+    assert!(report.issued.is_empty(), "no number is consumed");
+    assert_eq!(report.refused.len(), 1);
+    assert!(
+        report.refused[0].reason.contains("billing profile"),
+        "{}",
+        report.refused[0].reason
+    );
+}
+
+#[tokio::test]
+async fn a_pending_subscriber_stores_the_profile_and_defers_the_invoice() {
+    let temp = TempDir::new("watch-billing-pending");
+    let (app, store, mailer, _transport) = build_app(temp.path(), true);
+    let (reference, profile_token) = confirmed_billing_page(
+        &app,
+        &store,
+        &mailer,
+        "domain=northstar.example&email=founder%40northstar.example&apps=",
+    )
+    .await;
+
+    let response = send(
+        &app,
+        post_form(
+            "/watch/billing-profile",
+            &billing_profile_body(
+                &profile_token,
+                &reference,
+                "Turbine OU",
+                "Sepapaja tn 6",
+                "EE",
+                "",
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
+    let location = response
+        .headers
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("location")
+        .to_string();
+
+    let subscriber = store.get(&reference).expect("row").expect("subscriber");
+    assert!(!subscriber.is_active(), "the watch is still pending");
+    assert!(
+        subscriber.billing_profile.is_some(),
+        "the profile is stored"
+    );
+    assert!(
+        subscriber.first_invoice_number.is_none(),
+        "no invoice before activation"
+    );
+    assert!(!temp.path().join("billing/invoices.jsonl").exists());
+
+    let recorded = send(&app, get(&location)).await;
+    assert_eq!(recorded.status, StatusCode::OK);
+    assert!(
+        recorded.body.contains(
+            "The invoice for the first payment will be issued when your watch activates."
+        ),
+        "{}",
+        recorded.body
+    );
+}
+
+#[tokio::test]
+async fn case_variants_do_not_consume_the_fifty_app_bound() {
+    let temp = TempDir::new("watch-apps-case");
+    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+    // Fifty distinct apps plus one case variant of the first: still fifty
+    // distinct, so the form is accepted and priced as core.
+    let mut lines: Vec<String> = (1..=50)
+        .map(|index| format!("com.example.app{index}"))
+        .collect();
+    lines.push("COM.EXAMPLE.APP1".to_string());
+    let apps = lines.join("%0A");
+    let reference = submit_watch(
+        &app,
+        &format!("domain=case.example&email=ops%40case.example&apps={apps}"),
+    )
+    .await;
+    let row = store.get(&reference).expect("row").expect("subscriber");
+    assert_eq!(
+        row.tier,
+        Tier::Core,
+        "the case variant is the same app, so the fifty-line bound is not exceeded"
+    );
+}
+
+#[tokio::test]
+async fn subscriber_lookups_probe_one_indexed_row_at_every_size() {
+    for subscribers in [500usize, 1_000, 2_000] {
+        let temp = TempDir::new("watch-lookup-index");
+        let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+        let mut last = String::new();
+        for index in 0..subscribers {
+            let outcome = store
+                .subscribe(
+                    1_700_000_000 + index as i64,
+                    &format!("index{index}.example"),
+                    &format!("ops{index}@index.example"),
+                    "",
+                    false,
+                )
+                .expect("subscribe");
+            last = outcome.subscriber.id;
+        }
+
+        let before = store.indexed_row_probes();
+        let requested = send(&app, get(&format!("/watch/requested?ref={last}"))).await;
+        assert_eq!(requested.status, StatusCode::OK);
+        let requested_probes = store.indexed_row_probes() - before;
+
+        let before = store.indexed_row_probes();
+        let recorded = send(
+            &app,
+            get(&format!("/watch/billing-profile/recorded?ref={last}")),
+        )
+        .await;
+        assert_eq!(recorded.status, StatusCode::OK);
+        let recorded_probes = store.indexed_row_probes() - before;
+
+        println!(
+            "subscribers={subscribers} requested_probes={requested_probes} recorded_probes={recorded_probes}"
+        );
+        assert_eq!(
+            requested_probes, 1,
+            "subscribers={subscribers}: the confirmation page uses the id index"
+        );
+        assert_eq!(
+            recorded_probes, 1,
+            "subscribers={subscribers}: the recorded page uses the id index"
+        );
+    }
 }

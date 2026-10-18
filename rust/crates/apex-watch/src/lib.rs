@@ -10,9 +10,9 @@
 //!
 //! - [`SubscriberStore::subscribe_pending`] validates the domain and email
 //!   shapes, records a `pending` subscriber, derives the tier from the
-//!   reported app count ([`tier_from_evidence`]) and returns the one-time
-//!   email confirmation token (only its SHA-256 hash is stored). A pending
-//!   row runs no check and is never billed.
+//!   distinct named apps ([`tier_from_apps`], never ad-system account ids)
+//!   and returns the one-time email confirmation token (only its SHA-256
+//!   hash is stored). A pending row runs no check and is never billed.
 //! - [`SubscriberStore::confirm_email`] consumes that token once, within
 //!   [`CONFIRMATION_TTL_MS`]; a second use, an expired token or an unknown
 //!   token is a typed refusal.
@@ -21,6 +21,11 @@
 //!   is a typed idempotent no-op and an unknown/canceled row is a typed
 //!   refusal. [`SubscriberStore::subscribe`] remains as the legacy direct
 //!   signup used by tools and older tests.
+//! - [`SubscriberStore::create_profile_token`] mints the one-time billing
+//!   profile link token (same shape and TTL as the email token, one
+//!   outstanding); [`SubscriberStore::consume_profile_token`] enforces the
+//!   single use and [`SubscriberStore::set_billing_profile`] validates and
+//!   stores the profile the first and monthly invoices render with.
 //! - [`SubscriberStore::cancel`] matches a presented token against the stored
 //!   hash and records the canceled row (cancelled rows stay, they are never
 //!   deleted).
@@ -61,9 +66,11 @@
 //! [`apex_billing::watch_plan`] line: $99 for the normal tier and $199 for
 //! the core tier, in [`apex_billing::PLAN_CURRENCY`], then charges the
 //! subscriber's stored Adyen card (`ContAuth`, `Subscription`, the
-//! subscriber id as `shopperReference`). A subscriber without a recorded
-//! customer profile is refused with a typed reason and consumes no register
-//! number; a subscriber without a stored card gets the issued plan line plus
+//! subscriber id as `shopperReference`). The customer profile is the one
+//! stored on the row; a subscriber without one is refused with a typed
+//! reason and consumes no register number. [`bill::issue_first_invoice`]
+//! issues the first payment's invoice (gapless, idempotent per period); a
+//! subscriber without a stored card gets the issued plan line plus
 //! a typed charge refusal. An issued-but-unpaid invoice is retried on the
 //! next run with the same deterministic reference (the idempotency key) and
 //! is never re-issued. A subscriber already billed and paid for the month is
@@ -91,7 +98,8 @@ pub mod model;
 pub mod store;
 
 pub use bill::{
-    current_month, month_bounds, run_bill, BillDeps, BillReport, ChargedInvoice, IssuedInvoice,
+    current_month, issue_first_invoice, month_bounds, run_bill, BillDeps, BillReport,
+    ChargedInvoice, IssuedInvoice,
 };
 pub use daily::{
     run_daily, skip_reason, watch_page_url, DailyDeps, DailyEntry, DailyReport, DailySkip,
@@ -101,11 +109,11 @@ pub use fetch::{normalize_domain, CurlFetcher, FetchError, Fetched, Fetcher, Map
 pub use findings::{diff_findings, findings_hash, Change, StoredFinding};
 pub use guard::{guard_hosts, HostResolver, SsrfRefusal, StdResolver, REFUSAL_MESSAGE};
 pub use model::{
-    parse_account_ids, publisher_slug_for_domain, tier_from_evidence, validate_watch_signup,
-    ActivateOutcome, ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome, SubscribeRequest,
-    Subscriber, Tier, WatchFieldError, WatchSignup, ACCOUNTS_ERROR, CONFIRMATION_TOKEN_HEX_LEN,
-    CONFIRMATION_TTL_MS, CORE_TIER_MIN_APP_COUNT, DOMAIN_ERROR, EMAIL_ERROR, FORM_SUMMARY,
-    MAX_ACCOUNT_TEXT_CHARS,
+    app_identity, distinct_app_count, parse_account_ids, publisher_slug_for_domain, tier_from_apps,
+    validate_watch_signup, ActivateOutcome, BillingProfile, ConfirmOutcome, PendingOutcome, Status,
+    SubscribeOutcome, SubscribeRequest, Subscriber, Tier, WatchFieldError, WatchSignup,
+    ACCOUNTS_ERROR, CONFIRMATION_TOKEN_HEX_LEN, CONFIRMATION_TTL_MS, CORE_TIER_MIN_APP_COUNT,
+    DOMAIN_ERROR, EMAIL_ERROR, FORM_SUMMARY, MAX_ACCOUNT_TEXT_CHARS,
 };
 pub use store::{
     is_confirmation_token, now_unix_ms, SubscriberStore, WatchError, DEFAULT_WATCH_ROOT,

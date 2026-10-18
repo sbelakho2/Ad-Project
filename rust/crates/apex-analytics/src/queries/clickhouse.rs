@@ -150,10 +150,9 @@ impl ClickHouseReader {
             .store
             .fetch_rows(&select, &Self::parameters(scope))
             .await?;
-        rows.iter()
+        rows.into_iter()
             .map(|row| {
-                serde_json::from_value(row.clone())
-                    .map_err(|error| StoreError::Json(error.to_string()))
+                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
             })
             .collect()
     }

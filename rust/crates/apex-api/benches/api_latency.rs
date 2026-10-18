@@ -13,10 +13,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use apex_api::{router, AppState, FixedClock, StaticAuditSource, StaticLedgerSource};
+use apex_api::{
+    router, AppState, FixedClock, LedgerSessions, StaticAuditSource, StaticLedgerSource,
+    SESSION_IDLE_MS,
+};
 use apex_core::PlatformId;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::json;
 use tower::ServiceExt;
@@ -70,11 +73,18 @@ fn bench_http(c: &mut Criterion) {
         ("northstar-studio".to_string(), PlatformId::Admob),
         synthetic_snapshot(500),
     );
+    // The console requires a live session now. Open one for the snapshot's
+    // publisher and attach the same cookie a browser would send, so the bench
+    // still measures the report render rather than the session redirect.
+    let sessions = Arc::new(LedgerSessions::new(8, SESSION_IDLE_MS));
+    let session = sessions.open("northstar-studio", 1_700_000_000_000);
+    let session_cookie = format!("{}={}", apex_api::SESSION_COOKIE, session.id);
     let state = AppState::new(
         Arc::new(StaticAuditSource::new(snapshots)),
         Arc::new(StaticLedgerSource::default()),
     )
-    .with_clock(Arc::new(FixedClock::new(1_700_000_000)));
+    .with_clock(Arc::new(FixedClock::new(1_700_000_000)))
+    .with_ledger_sessions(sessions);
     let app = router(state);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -100,9 +110,11 @@ fn bench_http(c: &mut Criterion) {
     group.bench_function("console_audit_render_500_findings", |bencher| {
         bencher.to_async(&runtime).iter(|| {
             let app = app.clone();
+            let session_cookie = session_cookie.clone();
             async move {
                 let request = Request::builder()
                     .uri("/console/audit?platform=admob")
+                    .header(header::COOKIE, session_cookie)
                     .body(Body::empty())
                     .expect("request");
                 let response = app.oneshot(request).await.expect("infallible");

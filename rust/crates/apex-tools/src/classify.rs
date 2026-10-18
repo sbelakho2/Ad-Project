@@ -313,6 +313,46 @@ mod tests {
         assert_eq!(classified.status, "planned");
     }
 
+    /// The policy globs are compiled once by `Classifier::new`, so the
+    /// manifest's per-file cost is matching, never recompilation. Run the
+    /// classifier at 13k and 26k paths and require zero compiles after the
+    /// constructor at both sizes.
+    #[test]
+    fn classification_never_compiles_during_the_file_loop_at_13k_and_26k() {
+        let repo = Repo::discover().expect("repo");
+        let classifier = Classifier::new(Policies::load(&repo).expect("policies"));
+        let _ = classifier.classify("docs/warm.md").expect("warm");
+        let before = crate::util::regex_compile_count();
+        for index in 0..13_000 {
+            let path = match index % 4 {
+                0 => format!("docs/page_{index}.md"),
+                1 => format!("rust/crates/apex-core/src/file_{index}.rs"),
+                2 => format!("tools/coverage/gate_{index}.rs"),
+                _ => format!("site/public/asset_{index}.bin"),
+            };
+            let _ = classifier.classify(&path).expect("classify");
+        }
+        let after_n = crate::util::regex_compile_count();
+        for index in 13_000..26_000 {
+            let path = match index % 4 {
+                0 => format!("docs/page_{index}.md"),
+                1 => format!("rust/crates/apex-core/src/file_{index}.rs"),
+                2 => format!("tools/coverage/gate_{index}.rs"),
+                _ => format!("site/public/asset_{index}.bin"),
+            };
+            let _ = classifier.classify(&path).expect("classify");
+        }
+        let after_2n = crate::util::regex_compile_count();
+        assert_eq!(
+            after_n, before,
+            "13k classifications compiled a policy glob"
+        );
+        assert_eq!(
+            after_2n, after_n,
+            "the second 13k classifications compiled a policy glob"
+        );
+    }
+
     #[test]
     fn classification_equals_the_naive_per_path_glob_scan() {
         let repo = Repo::discover().expect("repo");

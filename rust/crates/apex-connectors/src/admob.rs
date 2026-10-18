@@ -11,7 +11,8 @@
 //! measurable-lift platform. The fee exclusion this implies is the runner's
 //! lift-path job, not the connector's.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use apex_core::endpoint::HttpMethod as CoreMethod;
 use apex_core::{
@@ -23,7 +24,7 @@ use crate::transport::{HttpMethod, PlatformCaller, Transport};
 
 const MAX_PAGES: usize = 50;
 
-pub const ADMOB_ENDPOINTS: [EndpointMeta; 5] = [
+pub const ADMOB_ENDPOINTS: [EndpointMeta; 6] = [
     EndpointMeta::new(
         "listMediationGroups",
         CoreMethod::Get,
@@ -34,6 +35,12 @@ pub const ADMOB_ENDPOINTS: [EndpointMeta; 5] = [
         "getMediationGroup",
         CoreMethod::Get,
         SourceVerification::Documented,
+        true,
+    ),
+    EndpointMeta::new(
+        "mediationReport",
+        CoreMethod::Post,
+        SourceVerification::VerifyLive,
         true,
     ),
     EndpointMeta::new(
@@ -124,6 +131,10 @@ pub fn normalize_account_id(account_id: &str) -> Result<String, PlatformError> {
 pub struct AdmobClient {
     caller: PlatformCaller,
     account_id: String,
+    /// One mediation report total per inclusive date window. The audit and the
+    /// billing path can both ask for the same 30-day window; the cache keeps
+    /// that one platform read, exactly like LevelPlay's `app_revenue`.
+    revenue: Mutex<BTreeMap<(String, String), i64>>,
 }
 
 impl std::fmt::Debug for AdmobClient {
@@ -155,6 +166,7 @@ impl AdmobClient {
                 transport,
                 ("Authorization".into(), format!("Bearer {access_token}")),
             ),
+            revenue: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -352,6 +364,99 @@ impl AdmobClient {
         })
     }
 
+    /// The app's estimated mediation earnings over the inclusive window
+    /// `[start_date, end_date]`, in micros.
+    ///
+    /// This is the documented v1beta `mediationReport:generate` read with the
+    /// `ESTIMATED_EARNINGS` metric only. The report returns money in
+    /// `microsValue` (a string of integer micros); the parser also accepts the
+    /// other documented metric-value spellings so a recorded fixture from
+    /// either surface parses without losing exactness. A missing `rows` array
+    /// or a row without the metric is a typed refusal, never a silent zero;
+    /// an empty `rows` array is a real zero. Totals are checked sums.
+    pub async fn mediation_revenue(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<i64, PlatformError> {
+        let start = report_date(start_date, "start_date")?;
+        let end = report_date(end_date, "end_date")?;
+        let key = (start_date.to_string(), end_date.to_string());
+        if let Some(total) = self
+            .revenue
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).copied())
+        {
+            return Ok(total);
+        }
+        let path = format!("/v1beta/{}/mediationReport:generate", self.account_id);
+        let data = self
+            .caller
+            .call(
+                "mediationReport",
+                HttpMethod::Post,
+                &path,
+                Some(serde_json::json!({
+                    "startDate": { "year": start.0, "month": start.1, "day": start.2 },
+                    "endDate": { "year": end.0, "month": end.1, "day": end.2 },
+                    "dimensions": ["DATE"],
+                    "metrics": ["ESTIMATED_EARNINGS"],
+                    "currencyCode": "USD",
+                    // The DATE dimension is one row per day (at most 31 in the
+                    // audit window); the page is explicit so a short default
+                    // can never truncate the total.
+                    "pageSize": 1000,
+                })),
+                None,
+            )
+            .await?;
+        if data
+            .get("nextPageToken")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|token| !token.is_empty())
+        {
+            return Err(self.schema(
+                "mediationReport",
+                "response carries nextPageToken; refusing a truncated revenue total",
+            ));
+        }
+        let rows = data
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| {
+                data.get("mediationReportRows")
+                    .and_then(serde_json::Value::as_array)
+            })
+            .ok_or_else(|| self.schema("mediationReport", "response has no 'rows' array"))?;
+        let mut total: i64 = 0;
+        for row in rows {
+            let value = row
+                .get("metricValues")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|values| values.get("ESTIMATED_EARNINGS"))
+                .ok_or_else(|| {
+                    self.schema(
+                        "mediationReport",
+                        format!("report row missing ESTIMATED_EARNINGS: {row}"),
+                    )
+                })?;
+            let revenue = report_metric_micros(value).ok_or_else(|| {
+                self.schema(
+                    "mediationReport",
+                    format!("report row has an unparseable ESTIMATED_EARNINGS: {value}"),
+                )
+            })?;
+            total = total
+                .checked_add(revenue)
+                .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+        }
+        if let Ok(mut cache) = self.revenue.lock() {
+            cache.insert(key, total);
+        }
+        Ok(total)
+    }
+
     /// Start a mediation A/B experiment on one mediation group (v1beta
     /// `mediationAbExperiments` create). The returned typed experiment carries
     /// [`ADMOB_REVENUE_PER_VARIANT`] = `false`: AdMob publishes only a
@@ -479,4 +584,96 @@ impl AdmobClient {
             revenue_per_variant: ADMOB_REVENUE_PER_VARIANT,
         })
     }
+}
+
+/// Parse `YYYY-MM-DD` into the `(year, month, day)` triple the AdMob report
+/// request body carries. A malformed date is a typed validation refusal before
+/// any request goes out.
+fn report_date(date: &str, field: &str) -> Result<(i64, i64, i64), PlatformError> {
+    let mut parts = date.split('-');
+    let year_raw = parts.next();
+    let month_raw = parts.next();
+    let day_raw = parts.next();
+    let tail = parts.next();
+    let parsed = match (year_raw, month_raw, day_raw) {
+        (Some(year), Some(month), Some(day))
+            if year.len() == 4 && month.len() == 2 && day.len() == 2 =>
+        {
+            match (
+                year.parse::<i64>(),
+                month.parse::<i64>(),
+                day.parse::<i64>(),
+            ) {
+                (Ok(year), Ok(month), Ok(day))
+                    if (1..=12).contains(&month) && (1..=31).contains(&day) =>
+                {
+                    Some((year, month, day))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match (parsed, tail) {
+        (Some((year, month, day)), None) => Ok((year, month, day)),
+        _ => Err(PlatformError::Validation(format!(
+            "AdMob mediationReport {field} '{date}' is not YYYY-MM-DD"
+        ))),
+    }
+}
+
+/// Parse one AdMob report metric value exactly into micros.
+///
+/// The documented report value is `{"microsValue": "<integer micros>"}`. The
+/// other spellings the same v1beta surface uses are accepted without guessing:
+/// `integerValue` is integer micros, `doubleValue` is a currency amount
+/// rounded to the nearest micro, and a bare string is the currency-string
+/// convention shared with the MAX and LevelPlay reports (parsed exactly into
+/// micros). A bare number is read as whole micros.
+fn report_metric_micros(value: &serde_json::Value) -> Option<i64> {
+    if let Some(raw) = value.as_str() {
+        return crate::parse_decimal_micros(raw).ok();
+    }
+    if let Some(micros) = value.as_i64() {
+        return Some(micros);
+    }
+    if let Some(amount) = value.as_f64() {
+        if amount.is_finite() {
+            return Some((amount * 1_000_000.0).round() as i64);
+        }
+    }
+    let object = value.as_object()?;
+    if let Some(raw) = object
+        .get("microsValue")
+        .and_then(serde_json::Value::as_str)
+    {
+        return raw.parse::<i64>().ok();
+    }
+    if let Some(micros) = object
+        .get("microsValue")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return Some(micros);
+    }
+    if let Some(raw) = object
+        .get("integerValue")
+        .and_then(serde_json::Value::as_str)
+    {
+        return raw.parse::<i64>().ok();
+    }
+    if let Some(micros) = object
+        .get("integerValue")
+        .and_then(serde_json::Value::as_i64)
+    {
+        return Some(micros);
+    }
+    if let Some(amount) = object
+        .get("doubleValue")
+        .and_then(serde_json::Value::as_f64)
+    {
+        if amount.is_finite() {
+            return Some((amount * 1_000_000.0).round() as i64);
+        }
+    }
+    None
 }

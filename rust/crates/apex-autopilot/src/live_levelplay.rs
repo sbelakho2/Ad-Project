@@ -902,6 +902,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_instance_price_action_writes_the_variant_group_instance() {
+        // The frozen Action variant maps to the existing waterfall-entry price
+        // change and the adapter writes it through the instances v4 call.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        transport.push(200, serde_json::json!({}));
+        let adapter = ops(Arc::clone(&transport), true);
+        let change =
+            crate::plan::change_kind_of(&crate::model::Action::SetLevelplayInstancePrice {
+                instance_id: "i1".into(),
+                price_micros: 2_400_000,
+            });
+        assert_eq!(
+            change,
+            ChangeKind::WaterfallEntryPriceSet {
+                ad_unit_id: "i1".into(),
+                entry_id: "i1".into(),
+                price_ecpm: 2_400_000,
+            }
+        );
+        let request = ExperimentRequest {
+            experiment_id: spec().name,
+            spec: spec(),
+            change,
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert_eq!(id, "g-b");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "auth, groups read and exactly one write");
+        assert_eq!(seen[2].method, HttpMethod::Put);
+        assert_eq!(
+            seen[2].url,
+            "https://lp.test/levelPlay/network/instances/v4/acct/"
+        );
+        let body = match seen[2].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(
+            body,
+            serde_json::json!({"instanceId": "i1", "price": 2_400_000})
+        );
+    }
+
+    #[tokio::test]
     async fn created_entries_write_through_the_variant_group() {
         let transport = Arc::new(FakeTransport::default());
         transport.push(200, auth());

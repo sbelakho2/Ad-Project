@@ -442,6 +442,58 @@ pub fn mutation_floor(repo: &Repo, floor_override: f64) -> Result<(), String> {
     Ok(())
 }
 
+/// Every prefix of `value` that ends at a `:` boundary, plus `value` itself.
+/// The yaml-policy stale check asks whether a baseline entry `b` is either an
+/// exact violation or the `scope:` prefix of one (`b: detail`). Indexing the
+/// colon boundaries once per item makes the whole check linear in the
+/// violation text instead of comparing every baseline row with every item and
+/// allocating a `format!("{b}:")` per pair.
+fn colon_prefixes(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .match_indices(':')
+        .map(|(index, _)| &value[..index])
+        .chain(std::iter::once(value))
+}
+
+/// The stale baseline entries of one bucket: rows no scanned item proves
+/// anymore. `present` is the set of exact items and their colon-boundary
+/// prefixes (`colon_prefixes`), so the check never rescans the item list.
+fn stale_baseline_entries(
+    kind: &str,
+    base: &BTreeSet<String>,
+    present: &BTreeSet<&str>,
+) -> Vec<String> {
+    base.iter()
+        .filter(|entry| !present.contains(entry.as_str()))
+        .map(|entry| {
+            format!(
+                "[{kind}] '{entry}' is no longer a violation; remove it from policy-baseline.json"
+            )
+        })
+        .collect()
+}
+
+/// Whether the yaml-policy gate needs this path's bytes at all. The gate walks
+/// the whole tree, including excluded data directories (`.apex/**`) and built
+/// site assets; only shell files, code files (pragma/ignore markers), test
+/// trees (skip markers) and the pipeline yaml carry any checked content. The
+/// old loop read every walked file before deciding, which dominates the
+/// gate on a checkout that also holds a ClickHouse data directory.
+fn yaml_scan_relevant(rel: &str, full: bool, shell: bool, code_ext: &Regex) -> bool {
+    let is_shell = rel.ends_with(".sh") || rel == ".husky/pre-commit";
+    if is_shell && (shell || full) {
+        return true;
+    }
+    if !full {
+        return false;
+    }
+    if code_ext.is_match(rel) {
+        return true;
+    }
+    (rel.ends_with(".yml") || rel.ends_with(".yaml"))
+        && (rel.starts_with(".github/workflows/") || rel.starts_with(".woodpecker/"))
+}
+
 pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
     let baseline = PolicyBaseline::load(repo)?;
     let shell_allow: Vec<&str> = Vec::new();
@@ -468,6 +520,9 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
             || rel.contains(".spec.")
     };
     for rel in repo.walk() {
+        if !yaml_scan_relevant(&rel, full, shell, &code_ext) {
+            continue;
+        }
         let Ok(text) = repo.read(&rel) else { continue };
         let is_shell = rel.ends_with(".sh") || rel == ".husky/pre-commit";
         let mut shell_hits: Vec<String> = Vec::new();
@@ -574,16 +629,8 @@ pub fn yaml_policy(repo: &Repo, full: bool, shell: bool) -> Result<(), String> {
             }
             violations.push(format!("[{kind}] {v}"));
         }
-        for b in &base {
-            let present = items
-                .iter()
-                .any(|v| v == b || v.starts_with(&format!("{b}:")));
-            if !present {
-                stale.push(format!(
-                    "[{kind}] '{b}' is no longer a violation; remove it from policy-baseline.json"
-                ));
-            }
-        }
+        let present: BTreeSet<&str> = items.iter().flat_map(|item| colon_prefixes(item)).collect();
+        stale.extend(stale_baseline_entries(kind, &base, &present));
     }
     if !violations.is_empty() || !stale.is_empty() {
         return Err(format!(
@@ -724,7 +771,7 @@ mod stub_pattern_tests {
     }
     /// Regression: test-case detection used to compile its marker regexes
     /// once per file. The thread-local compile counter proves the memoized
-    /// patterns are reused; this test fails on the pre-fix implementation
+    /// patterns are reused; this test fails on the old implementation
     /// where every call recompiles.
     #[test]
     fn test_case_detection_compiles_each_pattern_once() {
@@ -739,7 +786,7 @@ mod stub_pattern_tests {
             let _ = defines_test_cases(rel, text).expect("detect");
         }
         let before = crate::util::regex_compile_count();
-        for i in 0..300 {
+        for i in 0..13_000 {
             let (rel, text) = samples[i % samples.len()];
             let _ = defines_test_cases(rel, text).expect("detect");
         }
@@ -800,5 +847,135 @@ mod stub_pattern_tests {
         assert!(orphan_gate(&manifest, &suites, naive_percent - 0.01).is_err());
         // At the ceiling: the gate passes.
         assert!(orphan_gate(&manifest, &suites, naive_percent).is_ok());
+    }
+
+    /// The orphan gate compiles each suite glob once per call, so doubling
+    /// the code-file count must not add a single compilation. The thread-local
+    /// counter makes that deterministic (no timing).
+    #[test]
+    fn orphan_compilation_is_independent_of_file_count_at_13k_and_26k() {
+        let suites = vec![
+            vec!["rust/crates/apex-core/**/*.rs".to_string()],
+            vec!["rust/crates/apex-api/**/*.rs".to_string()],
+        ];
+        let manifest_for = |n: usize| Manifest {
+            policy: "p".to_string(),
+            generated_at: "0".to_string(),
+            counts: std::collections::BTreeMap::new(),
+            files: (0..n)
+                .map(|index| crate::classify::ManifestFile {
+                    path: format!("rust/crates/apex-core/src/file_{index:06}.rs"),
+                    domain: Some("apex-core".to_string()),
+                    kind: Some("code".to_string()),
+                    status: "planned".to_string(),
+                    reason: None,
+                    suite: None,
+                })
+                .collect(),
+        };
+        let before = crate::util::regex_compile_count();
+        orphan_gate(&manifest_for(13_000), &suites, 100.0).expect("13k orphan gate");
+        let at_n = crate::util::regex_compile_count();
+        orphan_gate(&manifest_for(26_000), &suites, 100.0).expect("26k orphan gate");
+        let at_2n = crate::util::regex_compile_count();
+        assert_eq!(at_n - before, at_2n - at_n);
+        assert_eq!(
+            at_n - before,
+            suites.iter().flatten().count() as u64,
+            "one compilation per suite glob, none per file"
+        );
+    }
+
+    /// The gate only needs the bytes of files that carry checked content.
+    /// This predicates out excluded data directories, docs and site assets,
+    /// while every shell/code/pipeline file the checks inspect stays in.
+    #[test]
+    fn yaml_policy_reads_only_paths_with_checked_content() {
+        let code = re(r"\.(ts|tsx|js|jsx|mjs|cjs|py|kt|swift|rs|cs|go)$").expect("code ext");
+        assert!(yaml_scan_relevant("tools/run.sh", false, true, &code));
+        assert!(yaml_scan_relevant("tools/run.sh", true, false, &code));
+        assert!(!yaml_scan_relevant("tools/run.sh", false, false, &code));
+        assert!(yaml_scan_relevant(
+            "rust/crates/apex-core/src/lib.rs",
+            true,
+            false,
+            &code
+        ));
+        assert!(!yaml_scan_relevant("docs/page.md", true, true, &code));
+        assert!(!yaml_scan_relevant(
+            ".apex/clickhouse/data/part.bin",
+            true,
+            true,
+            &code
+        ));
+        assert!(!yaml_scan_relevant(
+            "site/public/app.js.map",
+            true,
+            true,
+            &code
+        ));
+        assert!(yaml_scan_relevant(
+            ".woodpecker/lane.yml",
+            true,
+            false,
+            &code
+        ));
+        assert!(yaml_scan_relevant(
+            ".github/workflows/ci.yml",
+            true,
+            false,
+            &code
+        ));
+        assert!(!yaml_scan_relevant("site/data.yml", true, false, &code));
+    }
+
+    /// The indexed stale check must decide exactly like the old pair scan
+    /// (`v == b || v.starts_with("{b}:")`), including baseline keys that
+    /// themselves contain colons and items that only share a textual prefix.
+    #[test]
+    fn stale_entries_equal_the_naive_prefix_scan() {
+        let items: Vec<String> = [
+            "file.rs: 3",
+            "file.rs:12",
+            "dir/a.ts: 1",
+            "weird:name: 2",
+            "plain",
+            "x: y",
+            "prefix-only",
+        ]
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+        let base: BTreeSet<String> = [
+            "file.rs",
+            "dir/a.ts",
+            "weird:name",
+            "weird",
+            "missing",
+            "plain",
+            "x",
+            "x: y",
+            "prefix",
+            "prefix-only",
+        ]
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect();
+        let present: BTreeSet<&str> = items.iter().flat_map(|item| colon_prefixes(item)).collect();
+        let got = stale_baseline_entries("skip", &base, &present);
+        let want: Vec<String> = base
+            .iter()
+            .filter(|entry| {
+                !items
+                    .iter()
+                    .any(|item| item == *entry || item.starts_with(&format!("{entry}:")))
+            })
+            .map(|entry| {
+                format!(
+                    "[skip] '{entry}' is no longer a violation; remove it from policy-baseline.json"
+                )
+            })
+            .collect();
+        assert_eq!(got, want);
     }
 }

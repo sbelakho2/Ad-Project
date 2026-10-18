@@ -43,10 +43,19 @@
 //!   through `GET /console/signin?token=`. The link is emailed through the
 //!   transactional sink when `APEX_NOTIFY_SINK=email` (with
 //!   `APEX_NOTIFY_FROM`) is configured; without it the link creation is
-//!   logged as a warning and the audit still succeeds. `APEX_CONSOLE_URL`
-//!   (optional) is the public console base the emailed link starts with.
-//!   Without `APEX_LEADS_FILE` there is no leads root, so the sign-in route
-//!   answers the documented `503` not-configured panel;
+//!   logged as a warning and the audit still succeeds. `APEX_CONSOLE_URL` is
+//!   the public console origin the emailed link starts with and is required
+//!   to issue links: it must be an absolute `http(s)` URL with a host and no
+//!   query/fragment (`https` unless the host is `localhost` or `127.0.0.1`).
+//!   A configured but invalid value refuses startup with a typed error;
+//!   unset disables links with a startup warning ("sign-in links are
+//!   disabled: APEX_CONSOLE_URL is not configured") while the saved-lead
+//!   contract is kept. Without `APEX_LEADS_FILE` there is no leads root, so
+//!   the sign-in route answers the documented `503` not-configured panel;
+//! - `APEX_SUPPORT_URL` — the absolute `http(s)` Help destination of the
+//!   authenticated console pages (default `https://apexmediation.ee/support/`).
+//!   It follows the same validation as `APEX_CONSOLE_URL`; the marketing
+//!   pages (free audit, watch) keep the on-site relative `/support/`;
 //! - `APEX_COLLECTION_FILE` — the append-only collection log the Adyen
 //!   webhook records accepted events into (replay-protected); the console
 //!   billing pages read the same file for payment facts. Without it the
@@ -160,6 +169,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(raw) => parse_keys(&raw)?,
         None => HashMap::new(),
     };
+    // The emailed sign-in link needs an absolute console origin. Unset is a
+    // supported deployment (links disabled); a configured invalid value is a
+    // loud startup refusal. The Help destination is validated here too so a
+    // bad value can never reach rendered pages.
+    let console_base =
+        apex_api::config::console_url(env_value(apex_api::config::CONSOLE_URL_ENV).as_deref())?;
+    let _support_url =
+        apex_api::config::support_url(env_value(apex_api::config::SUPPORT_URL_ENV).as_deref())?;
+    if console_base.is_none() {
+        tracing::warn!("{}", apex_api::signin::SIGNIN_LINKS_DISABLED_WARNING);
+    }
 
     let mut state = AppState::new(
         Arc::new(JsonFileAuditSource::new(snapshot_root)),
@@ -236,6 +256,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The default root resolves under the unit's WorkingDirectory.
     state = state.with_watch(Arc::new(apex_watch::SubscriberStore::from_env(env_value)));
 
+    // The first setup-watch invoice needs the seller VAT profile, the same
+    // gapless register the monthly bill writes and the VIES seam. When
+    // `APEX_BILLING_PROFILE` is not configured the billing-profile form still
+    // stores the profile; the invoice is issued at activation instead.
+    if let Some(profile_path) = env_value(apex_billing::PROFILE_ENV) {
+        let seller = apex_billing::BillingProfile::from_env_values(
+            Some(&profile_path),
+            env_value(apex_billing::VAT_RATE_ENV).as_deref(),
+        )
+        .map_err(|error| format!("{} could not be loaded: {error}", apex_billing::PROFILE_ENV))?;
+        state = state.with_watch_billing(Arc::new(apex_api::WatchBilling {
+            seller: Arc::new(seller),
+            register_path: std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH),
+            vies: Arc::new(apex_billing::HttpViesClient::default()),
+        }));
+    }
+
     // The frozen sales-outcomes appender: best effort at every call site.
     state = state.with_outcomes(Arc::new(apex_api::OutcomesAppender::from_env(env_value)));
 
@@ -284,8 +321,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             let mut signin = apex_api::SigninService::open(root).with_ttl_hours(signin_ttl_hours);
-            if let Some(base) = env_value("APEX_CONSOLE_URL") {
-                signin = signin.with_public_base(base);
+            if let Some(base) = &console_base {
+                signin = signin.with_public_base(base.clone());
             }
             if let Some(mailer) = apex_api::email_sink_from_env(env_value) {
                 signin = signin.with_mailer(mailer);

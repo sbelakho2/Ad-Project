@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use apex_proof::VerifyingKey;
+use url::Url;
 
 use crate::is_valid_publisher;
 
@@ -16,6 +17,162 @@ pub fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+/// The environment variable naming the public console origin the emailed
+/// sign-in link starts with.
+pub const CONSOLE_URL_ENV: &str = "APEX_CONSOLE_URL";
+/// The environment variable naming the public Help destination of the
+/// authenticated console pages.
+pub const SUPPORT_URL_ENV: &str = "APEX_SUPPORT_URL";
+/// The Help destination used when [`SUPPORT_URL_ENV`] is unset.
+pub const DEFAULT_SUPPORT_URL: &str = "https://apexmediation.ee/support/";
+
+/// Why a configured public URL was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicUrlProblem {
+    /// The value is not an absolute URL (`console.example`, `/support/`).
+    NotAbsolute,
+    /// The scheme is neither `http` nor `https` (`javascript:`, `ftp://`).
+    NotHttp,
+    /// The URL carries no host (`https://`).
+    MissingHost,
+    /// The URL carries a query or fragment.
+    QueryOrFragment,
+    /// Plain `http` is only accepted for the loopback dev hosts.
+    InsecureScheme,
+}
+
+impl PublicUrlProblem {
+    /// The operator-facing description of the refusal.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            PublicUrlProblem::NotAbsolute => "it must be an absolute URL with a host",
+            PublicUrlProblem::NotHttp => "the scheme must be http or https",
+            PublicUrlProblem::MissingHost => "the URL must name a host",
+            PublicUrlProblem::QueryOrFragment => "the URL must not carry a query or fragment",
+            PublicUrlProblem::InsecureScheme => {
+                "http is only accepted for localhost, a *.localhost name or 127.0.0.1"
+            }
+        }
+    }
+}
+
+/// A public URL configuration value that failed validation. The error names
+/// the variable and the offending value so an operator log points at the
+/// exact setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicUrlError {
+    variable: String,
+    value: String,
+    problem: PublicUrlProblem,
+}
+
+impl PublicUrlError {
+    fn new(variable: &str, value: &str, problem: PublicUrlProblem) -> Self {
+        Self {
+            variable: variable.to_string(),
+            value: value.to_string(),
+            problem,
+        }
+    }
+
+    /// The environment variable that carried the invalid value.
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+
+    /// The refused value, trimmed as it was validated.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// The rule the value broke.
+    pub fn problem(&self) -> PublicUrlProblem {
+        self.problem
+    }
+}
+
+impl fmt::Display for PublicUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is not a valid public URL: {} (got '{}')",
+            self.variable,
+            self.problem.reason(),
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for PublicUrlError {}
+
+/// Validate an absolute `http(s)` URL with a host and no query/fragment.
+///
+/// `https` is required unless the host is the loopback dev host `localhost`
+/// or `127.0.0.1`. The trimmed value is returned unchanged so callers can
+/// apply their own trailing-slash policy.
+pub fn validate_public_url(variable: &str, raw: &str) -> Result<String, PublicUrlError> {
+    let raw = raw.trim();
+    let parsed = Url::parse(raw)
+        .map_err(|_| PublicUrlError::new(variable, raw, PublicUrlProblem::NotAbsolute))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(PublicUrlError::new(
+                variable,
+                raw,
+                PublicUrlProblem::NotHttp,
+            ))
+        }
+    }
+    let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) else {
+        return Err(PublicUrlError::new(
+            variable,
+            raw,
+            PublicUrlProblem::MissingHost,
+        ));
+    };
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(PublicUrlError::new(
+            variable,
+            raw,
+            PublicUrlProblem::QueryOrFragment,
+        ));
+    }
+    // RFC 6761 reserves the whole `.localhost` namespace for loopback, so a
+    // dev host such as `console.localhost` is just as local as `localhost`.
+    let loopback = host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost");
+    if parsed.scheme() == "http" && !loopback {
+        return Err(PublicUrlError::new(
+            variable,
+            raw,
+            PublicUrlProblem::InsecureScheme,
+        ));
+    }
+    Ok(raw.to_string())
+}
+
+/// Parse [`CONSOLE_URL_ENV`]. Unset (or blank) means sign-in links are
+/// disabled; a configured value must pass [`validate_public_url`]. Trailing
+/// slashes are normalized away, as the link builder has always done.
+pub fn console_url(value: Option<&str>) -> Result<Option<String>, PublicUrlError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            let validated = validate_public_url(CONSOLE_URL_ENV, raw)?;
+            Ok(Some(validated.trim_end_matches('/').to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Parse [`SUPPORT_URL_ENV`], falling back to [`DEFAULT_SUPPORT_URL`] when
+/// unset. A configured value follows the same rules as the console origin.
+pub fn support_url(value: Option<&str>) -> Result<String, PublicUrlError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => validate_public_url(SUPPORT_URL_ENV, raw),
+        None => Ok(DEFAULT_SUPPORT_URL.to_string()),
+    }
 }
 
 /// Parse `publisher=<64 hex>` entries into the key allow-list.
@@ -241,6 +398,100 @@ mod tests {
             "{non_hex}"
         );
         assert!(non_hex.to_string().to_ascii_lowercase().contains("hex"));
+    }
+
+    #[test]
+    fn console_url_is_optional_normalized_and_strictly_validated() {
+        assert_eq!(console_url(None).expect("unset"), None);
+        assert_eq!(console_url(Some("   ")).expect("blank"), None);
+        assert_eq!(
+            console_url(Some(" https://console.example/ "))
+                .expect("configured")
+                .as_deref(),
+            Some("https://console.example")
+        );
+        assert_eq!(
+            console_url(Some("https://console.example///"))
+                .expect("slashes")
+                .as_deref(),
+            Some("https://console.example")
+        );
+        assert_eq!(
+            console_url(Some("http://localhost:8787"))
+                .expect("loopback http")
+                .as_deref(),
+            Some("http://localhost:8787")
+        );
+        assert_eq!(
+            console_url(Some("http://console.localhost:8081"))
+                .expect("loopback namespace")
+                .as_deref(),
+            Some("http://console.localhost:8081")
+        );
+        assert_eq!(
+            console_url(Some("http://127.0.0.1:8787"))
+                .expect("loopback ip")
+                .as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+
+        let cases = [
+            ("console.example", PublicUrlProblem::NotAbsolute),
+            ("/console", PublicUrlProblem::NotAbsolute),
+            ("javascript:alert(1)", PublicUrlProblem::NotHttp),
+            ("ftp://console.example", PublicUrlProblem::NotHttp),
+            ("https://", PublicUrlProblem::NotAbsolute),
+            (
+                "https://console.example?token=1",
+                PublicUrlProblem::QueryOrFragment,
+            ),
+            (
+                "https://console.example#fragment",
+                PublicUrlProblem::QueryOrFragment,
+            ),
+            ("http://console.example", PublicUrlProblem::InsecureScheme),
+        ];
+        for (bad, problem) in cases {
+            let error = console_url(Some(bad)).expect_err(bad);
+            assert_eq!(error.variable(), CONSOLE_URL_ENV, "{bad}");
+            assert_eq!(error.value(), bad, "{bad}");
+            assert_eq!(error.problem(), problem, "{bad}");
+            assert!(
+                error.to_string().contains(CONSOLE_URL_ENV),
+                "{bad}: {error}"
+            );
+            assert!(error.to_string().contains(bad), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn support_url_defaults_and_follows_the_same_rules() {
+        assert_eq!(
+            support_url(None).expect("default"),
+            DEFAULT_SUPPORT_URL.to_string()
+        );
+        assert_eq!(
+            support_url(Some(" https://help.example/support/ ")).expect("configured"),
+            "https://help.example/support/"
+        );
+        assert_eq!(
+            support_url(Some("http://localhost:3000/support/")).expect("loopback"),
+            "http://localhost:3000/support/"
+        );
+        for bad in [
+            "/support/",
+            "javascript:void(0)",
+            "ftp://help.example",
+            "https://help.example?q=1",
+            "http://help.example/support/",
+        ] {
+            let error = support_url(Some(bad)).expect_err(bad);
+            assert_eq!(error.variable(), SUPPORT_URL_ENV, "{bad}");
+            assert!(
+                error.to_string().contains(SUPPORT_URL_ENV),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]

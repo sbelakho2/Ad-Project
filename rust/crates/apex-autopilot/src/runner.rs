@@ -47,9 +47,10 @@ use apex_metrics::vocab::{Decision, RestoreOperation, RestoreOutcome};
 use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 
 use crate::alerts::{Alert, AlertSink, NoopAlertSink};
+use crate::ledger_index::{parse_lift_record, LedgerIndex};
 use crate::model::{AutopilotPolicy, PlanError, SettleOutcome};
 use crate::ops::PlatformOps;
-use crate::settle::settle_experiment;
+use crate::settle::settle_experiment_indexed;
 
 /// What one daily pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -311,14 +312,28 @@ impl Runner {
         if publisher.is_empty() {
             return Ok(None);
         }
+        let path =
+            apex_billing::PlanState::path_for(root, publisher, apex_billing::PlanId::Monitoring);
+        let recorded = apex_billing::PlanState::load(&path).map_err(|error| error.to_string())?;
+        // Activation runs on every cycle, but the snapshot only supplies
+        // evidence once: an already-recorded plan (or a cancelled one) is
+        // settled and must not pay to read and parse a 10k-row snapshot again
+        // on every pass. Only a revenue-less monthly activation needs the
+        // once-only upgrade.
+        let needs_evidence = match &recorded {
+            Some(existing) => {
+                existing.active && !existing.cancelled() && existing.revenue_30d.is_none()
+            }
+            None => true,
+        };
+        if !needs_evidence {
+            return Ok(None);
+        }
         let raw = std::fs::read(snapshot_path)
             .map_err(|error| format!("{}: {error}", snapshot_path.display()))?;
         let snapshot: apex_audit::Snapshot = serde_json::from_slice(&raw)
             .map_err(|error| format!("{}: not a snapshot: {error}", snapshot_path.display()))?;
         let revenue_30d = snapshot.platform_totals_30d.revenue_30d;
-        let path =
-            apex_billing::PlanState::path_for(root, publisher, apex_billing::PlanId::Monitoring);
-        let recorded = apex_billing::PlanState::load(&path).map_err(|error| error.to_string())?;
         let since = crate::calendar::format_day(now_unix_ms.div_euclid(86_400_000));
         match recorded {
             Some(existing)
@@ -625,9 +640,10 @@ impl Runner {
         }
 
         let mut readiness = PullReadiness::default();
-        // One scan serves both the settle loop and the pull range events; a
+        // One index serves the running scan and every settle below; a
         // per-experiment ledger scan would repeat the whole history.
-        let scan = running_scan(ledger)?;
+        let mut ledger_index = LedgerIndex::build(ledger);
+        let scan = running_scan_indexed(&ledger_index)?;
         // A signed result without its observation is a settled experiment
         // the settle path refuses. Report that typed refusal without pulling:
         // a repeated pass appends nothing for an experiment that can never
@@ -756,13 +772,14 @@ impl Runner {
                 .record
                 .canonical_json()
                 .map_err(|error| PlanError::Validation(format!("data pull: {error}")))?;
-            ledger
+            let pulled = ledger
                 .append(LedgerRecord::lift_record(
                     now_unix_ms,
                     &pull.sha256,
                     &payload,
                 ))
                 .map_err(PlanError::Ledger)?;
+            ledger_index.observe(&pulled);
             report.pulled += 1;
             if let Some(events) = self.events.as_ref() {
                 events
@@ -777,9 +794,10 @@ impl Runner {
             }
 
             let settings_changed = self.settings_changed(&experiment).await;
-            let outcome = match settle_experiment(
+            let outcome = match settle_experiment_indexed(
                 self.ops.as_ref(),
                 ledger,
+                &mut ledger_index,
                 &experiment.experiment_id,
                 experiment.change_seq,
                 self.fill_format,
@@ -885,7 +903,7 @@ impl Runner {
                 }
                 SettleOutcome::Pending { .. } => {}
             }
-            self.learn(&experiment, ledger, &outcome).await;
+            self.learn(&experiment, &ledger_index, &outcome).await;
             report.settled += 1;
             report
                 .outcomes
@@ -1062,7 +1080,7 @@ impl Runner {
     async fn learn(
         &self,
         experiment: &RunningExperiment,
-        ledger: &dyn LedgerLog,
+        index: &LedgerIndex,
         outcome: &SettleOutcome,
     ) {
         let (Some(priors), Some(path)) = (&self.priors, &self.priors_path) else {
@@ -1072,7 +1090,7 @@ impl Runner {
         if !matches!(label.as_str(), "kept" | "rolled_back") {
             return;
         }
-        let Some(bucket) = change_bucket(ledger, experiment.change_seq) else {
+        let Some(bucket) = change_bucket(index, experiment.change_seq) else {
             return;
         };
         let ratios = match outcome {
@@ -1922,27 +1940,17 @@ fn kept_changes(
     Ok(out)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Signed lift payload parses since the last reset; the scan tests count
-    /// parse work through this seam.
-    static PARSE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-fn parse_lift_record(payload: &str) -> Result<apex_lift::records::LiftRecord, serde_json::Error> {
-    #[cfg(test)]
-    PARSE_CALLS.with(|count| count.set(count.get() + 1));
-    serde_json::from_str(payload)
-}
-
+/// Signed lift payload parses since the last reset; the scan tests count
+/// parse work through the shared ledger-index seam, so a payload parsed
+/// while building the index is not parsed again by the scan.
 #[cfg(test)]
 fn parse_call_count() -> u64 {
-    PARSE_CALLS.with(std::cell::Cell::get)
+    crate::ledger_index::parse_call_count()
 }
 
 #[cfg(test)]
 fn reset_parse_call_count() {
-    PARSE_CALLS.with(|count| count.set(0));
+    crate::ledger_index::reset_parse_call_count();
 }
 
 /// Whether two settings encodings describe the same value, comparing parsed
@@ -2054,140 +2062,80 @@ struct RunningScan {
     started_days: std::collections::BTreeMap<String, String>,
 }
 
-/// One `records()` read, two iterations: the first builds every per-id index
-/// (pre-registered names with their `beforeValue`, settled ids, rolled-back
-/// sequences, start days) — a terminal record can appear after the start it
-/// settles, so these must reflect the whole ledger before any start is judged;
-/// the second walks the starts in order carrying the last applied change
-/// sequence seen. The old shape rescanned the whole ledger per started
+/// One `records()` read, folded once into a [`LedgerIndex`]: the index holds
+/// every per-id fact (pre-registered names with their `beforeValue`, settled
+/// ids, rolled-back sequences, start days, and each start paired with the
+/// last applied change before it) — a terminal record can appear after the
+/// start it settles, so these must reflect the whole ledger before any start
+/// is judged. The old shape rescanned the whole ledger per started
 /// experiment. An unparseable lift payload refuses the scan with the record's
 /// sequence instead of being skipped: failing open would silently drop the
 /// experiment it belongs to.
+#[cfg(test)]
 fn running_scan(ledger: &dyn LedgerLog) -> Result<RunningScan, PlanError> {
-    let records = ledger.records();
+    let index = LedgerIndex::build(ledger);
+    running_scan_indexed(&index)
+}
+
+/// The running scan over an index the caller already built (the daily pass
+/// shares one index across the scan and every settle).
+fn running_scan_indexed(index: &LedgerIndex) -> Result<RunningScan, PlanError> {
+    if let Some((seq, detail)) = index.parse_failure() {
+        return Err(PlanError::MalformedLiftRecord {
+            seq,
+            detail: detail.to_string(),
+        });
+    }
     // Only experiments with a signed pre-registration are settled here; an
     // A/A (null) run has none and is evaluated through `aa_conclusion`
     // instead, so it never gets mis-attributed to another change's sequence.
-    let mut pre_registered: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut before_values: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    let mut result_experiments: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut settled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut rolled_back: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut started_days: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    for record in &records {
-        match record {
-            LedgerRecord::LiftRecord { seq, payload, .. } => {
-                let parsed =
-                    parse_lift_record(payload).map_err(|error| PlanError::MalformedLiftRecord {
-                        seq: *seq,
-                        detail: error.to_string(),
-                    })?;
-                match &parsed {
-                    apex_lift::records::LiftRecord::PreRegistration { experiment_id, .. } => {
-                        pre_registered.insert(experiment_id.clone());
-                        if let Ok(prereg) =
-                            apex_lift::decision::PreRegistration::from_record(&parsed)
-                        {
-                            before_values
-                                .entry(prereg.experiment_id)
-                                .or_insert(prereg.before_value);
-                        }
-                    }
-                    apex_lift::records::LiftRecord::Result { experiment_id, .. } => {
-                        result_experiments.insert(experiment_id.clone());
-                    }
-                    _ => {}
-                }
-            }
-            LedgerRecord::ExperimentObserved { experiment_id, .. } => {
-                settled.insert(experiment_id.clone());
-            }
-            LedgerRecord::RollbackPerformed {
-                rolled_back_seq, ..
-            } => {
-                rolled_back.insert(*rolled_back_seq);
-            }
-            LedgerRecord::ExperimentStarted {
-                experiment_id,
-                at_unix_ms,
-                ..
-            } => {
-                started_days
-                    .entry(experiment_id.clone())
-                    .or_insert_with(|| {
-                        crate::calendar::format_day(at_unix_ms.div_euclid(86_400_000))
-                    });
-            }
-            _ => {}
-        }
-    }
     let mut experiments = Vec::new();
     let mut settled_by_result = Vec::new();
-    let mut last_change_seq: Option<u64> = None;
-    for record in &records {
-        match record {
-            LedgerRecord::ChangeApplied { seq, .. } => {
-                // Records are walked in chain order, so the sequence just seen
-                // is the nearest applied change before any later start.
-                last_change_seq = Some(last_change_seq.map_or(*seq, |seen| seen.max(*seq)));
-            }
-            LedgerRecord::ExperimentStarted {
-                experiment_id,
-                spec,
-                ..
-            } => {
-                if !pre_registered.contains(&spec.name) {
-                    continue;
-                }
-                let Some(change_seq) = last_change_seq else {
-                    continue;
-                };
-                if settled.contains(experiment_id) || rolled_back.contains(&change_seq) {
-                    continue;
-                }
-                if result_experiments.contains(&spec.name) {
-                    settled_by_result.push(experiment_id.clone());
-                    continue;
-                }
-                let expected_settings = before_values.get(&spec.name).cloned().unwrap_or_default();
-                experiments.push(RunningExperiment {
-                    experiment_id: experiment_id.clone(),
-                    change_seq,
-                    ad_unit_id: spec.ad_unit_id.clone(),
-                    expected_settings,
-                });
-            }
-            _ => {}
+    for start in index.starts() {
+        if !index.is_pre_registered(&start.spec.name) {
+            continue;
         }
+        let Some(change_seq) = start.change_seq else {
+            continue;
+        };
+        if index.is_observed(&start.experiment_id) || index.is_rolled_back(change_seq) {
+            continue;
+        }
+        if index.has_result(&start.spec.name) {
+            settled_by_result.push(start.experiment_id.clone());
+            continue;
+        }
+        let expected_settings = index
+            .before_value(&start.spec.name)
+            .unwrap_or_default()
+            .to_string();
+        experiments.push(RunningExperiment {
+            experiment_id: start.experiment_id.clone(),
+            change_seq,
+            ad_unit_id: start.spec.ad_unit_id.clone(),
+            expected_settings,
+        });
     }
     Ok(RunningScan {
         experiments,
         settled_by_result,
-        started_days,
+        started_days: index.started_days().clone(),
     })
 }
 
 /// The prior bucket a settled change belongs to: a country-floor move on its
 /// platform. The ad format is not carried by the change record, so the bucket
-/// pools across formats for the platform and tier.
-fn change_bucket(ledger: &dyn LedgerLog, change_seq: u64) -> Option<apex_lift::priors::Bucket> {
-    let record = ledger
-        .records()
-        .into_iter()
-        .find(|r| r.seq() == change_seq)?;
-    match record {
-        LedgerRecord::ChangeApplied {
-            platform,
-            change: ChangeKind::CountryFloorSet { country, .. },
-            ..
-        } => Some(apex_lift::priors::Bucket {
+/// pools across formats for the platform and tier. This is an index lookup:
+/// with priors configured the learning step previously rescanned the whole
+/// ledger once per settled experiment.
+fn change_bucket(index: &LedgerIndex, change_seq: u64) -> Option<apex_lift::priors::Bucket> {
+    let applied = index.change(change_seq)?;
+    match &applied.change {
+        ChangeKind::CountryFloorSet { country, .. } => Some(apex_lift::priors::Bucket {
             lever: "floor".into(),
             ad_format: "unknown".into(),
             country_tier: country.clone(),
-            platform: platform.as_str().to_string(),
+            platform: applied.platform.as_str().to_string(),
         }),
         _ => None,
     }
@@ -2702,6 +2650,145 @@ mod tests {
             l.records().is_empty(),
             "a skipped plan writes no ledger record"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn monitoring_activation_chooses_the_tier_from_the_snapshot_platform_total() {
+        // The documented apex-billing thresholds: Base below $100k, Mid from
+        // $100k through $500k inclusive, Top above $500k. The activation seam
+        // is pinned on both exact boundaries, one micro on each side, and the
+        // dogfood totals; zero revenue stays Base ($500).
+        for (label, revenue, tier) in [
+            ("zero", 0, apex_billing::MonitoringTier::Base),
+            (
+                "just-below-100k",
+                99_999_999_999,
+                apex_billing::MonitoringTier::Base,
+            ),
+            (
+                "exactly-100k",
+                100_000 * 1_000_000,
+                apex_billing::MonitoringTier::Mid,
+            ),
+            (
+                "max-120k",
+                120_000 * 1_000_000,
+                apex_billing::MonitoringTier::Mid,
+            ),
+            (
+                "exactly-500k",
+                500_000 * 1_000_000,
+                apex_billing::MonitoringTier::Mid,
+            ),
+            (
+                "one-micro-above-500k",
+                500_000 * 1_000_000 + 1,
+                apex_billing::MonitoringTier::Top,
+            ),
+            (
+                "levelplay-600k",
+                600_000 * 1_000_000,
+                apex_billing::MonitoringTier::Top,
+            ),
+            (
+                "admob-100k",
+                100_000 * 1_000_000,
+                apex_billing::MonitoringTier::Mid,
+            ),
+        ] {
+            let dir = billing_dir(label);
+            let snapshot_path = dir.join("snapshot.json");
+            let snapshot = serde_json::json!({
+                "platform": "admob",
+                "fetchedAtUnixMs": NOW,
+                "adUnits": [],
+                "waterfall": [],
+                "mediationGroups": [],
+                "bidderAccounts": [],
+                "countryRevenue": [],
+                "appAdsTxt": {"present": false, "lines": [], "expectedNetworks": []},
+                "platformTotals30d": {"revenue30d": revenue, "impressions30d": 0},
+                "mediationTotals30d": {"revenue30d": 0, "impressions30d": 0}
+            });
+            std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let runner = Runner::new(
+                Arc::new(RecordingOps::new()),
+                policy(),
+                FillFormat::Rewarded,
+            )
+            .with_publisher("pub1")
+            .with_monitoring(apex_billing::MonitoringPlan::default())
+            .with_connections_root(&dir);
+            let activated = runner
+                .activate_monitoring_from_snapshot(&snapshot_path, NOW)
+                .expect("activation");
+            assert_eq!(activated, Some(tier), "{label}");
+            let state = apex_billing::PlanState::load(&dir.join("pub1.monitoring.json"))
+                .expect("loadable")
+                .expect("recorded");
+            assert_eq!(state.tier, Some(tier), "{label}");
+            assert_eq!(state.revenue_30d, Some(revenue), "{label}");
+            assert_eq!(
+                state.monthly_fee_micros,
+                tier.default_fee_micros(),
+                "{label}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_settled_monitoring_plan_does_not_reparse_the_snapshot() {
+        // Every cycle calls the activation seam, but a recorded plan is
+        // settled. The proof is deterministic: the snapshot path does not
+        // exist, so a read attempt is an error; the settled plan returns
+        // Ok(None) without touching it.
+        let dir = billing_dir("activation-settled");
+        let state = apex_billing::MonitoringPlan::default().activate(1_000_000, "2026-10-01");
+        let path =
+            apex_billing::PlanState::path_for(&dir, "pub1", apex_billing::PlanId::Monitoring);
+        state.save(&path).expect("state");
+        let runner = Runner::new(
+            Arc::new(RecordingOps::new()),
+            policy(),
+            FillFormat::Rewarded,
+        )
+        .with_publisher("pub1")
+        .with_monitoring(apex_billing::MonitoringPlan::default())
+        .with_connections_root(&dir);
+        let missing = dir.join("no-such-snapshot.json");
+        assert_eq!(
+            runner
+                .activate_monitoring_from_snapshot(&missing, NOW)
+                .expect("settled plan needs no evidence"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_revenue_less_plan_still_reads_the_snapshot_for_the_once_only_upgrade() {
+        // The monthly fallback has no evidence, so the first cycle must read
+        // it. A missing snapshot is then a real error, not a silent skip.
+        let dir = billing_dir("activation-upgrade");
+        let state = apex_billing::MonitoringPlan::default().activate_without_snapshot("2026-10-01");
+        let path =
+            apex_billing::PlanState::path_for(&dir, "pub1", apex_billing::PlanId::Monitoring);
+        state.save(&path).expect("state");
+        let runner = Runner::new(
+            Arc::new(RecordingOps::new()),
+            policy(),
+            FillFormat::Rewarded,
+        )
+        .with_publisher("pub1")
+        .with_monitoring(apex_billing::MonitoringPlan::default())
+        .with_connections_root(&dir);
+        let missing = dir.join("no-such-snapshot.json");
+        assert!(runner
+            .activate_monitoring_from_snapshot(&missing, NOW)
+            .expect_err("the upgrade needs the snapshot")
+            .contains("no-such-snapshot.json"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3772,7 +3859,8 @@ Gross total: 10300000 micros
             "p",
         ))
         .expect("append");
-        assert!(change_bucket(&l, 0).is_none());
+        let index = LedgerIndex::build(&l);
+        assert!(change_bucket(&index, 0).is_none());
     }
 
     #[tokio::test]
@@ -4582,6 +4670,189 @@ Gross total: 10300000 micros
         }
     }
 
+    /// A writable variant of [`VecLedger`]: appends get the next sequence
+    /// without sealing a chain, and `records()` counts reads. The settle-loop
+    /// scaling test needs both a 10k-record fixture and per-pass append
+    /// accounting; `InMemoryLedger` re-verifies the whole chain per append.
+    struct CountedVecLedger {
+        records: Vec<LedgerRecord>,
+        next_seq: u64,
+        scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountedVecLedger {
+        fn new(records: Vec<LedgerRecord>) -> Self {
+            let next_seq = records
+                .iter()
+                .map(|record| record.seq() + 1)
+                .max()
+                .unwrap_or(0);
+            Self {
+                records,
+                next_seq,
+                scans: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn scans(&self) -> usize {
+            self.scans.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn reseq(record: LedgerRecord, seq: u64) -> LedgerRecord {
+        match record {
+            LedgerRecord::ChangeApplied {
+                at_unix_ms,
+                platform,
+                ad_unit_id,
+                change,
+                idempotency_key,
+                prev_value,
+                ..
+            } => LedgerRecord::ChangeApplied {
+                seq,
+                at_unix_ms,
+                platform,
+                ad_unit_id,
+                change,
+                idempotency_key,
+                prev_value,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::ExperimentStarted {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                spec,
+                ..
+            } => LedgerRecord::ExperimentStarted {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                spec,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::ExperimentObserved {
+                at_unix_ms,
+                platform,
+                experiment_id,
+                result,
+                ..
+            } => LedgerRecord::ExperimentObserved {
+                seq,
+                at_unix_ms,
+                platform,
+                experiment_id,
+                result,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::LiftRecord {
+                at_unix_ms,
+                payload_sha256,
+                payload,
+                ..
+            } => LedgerRecord::LiftRecord {
+                seq,
+                at_unix_ms,
+                payload_sha256,
+                payload,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::RollbackPerformed {
+                at_unix_ms,
+                platform,
+                ad_unit_id,
+                rolled_back_seq,
+                reason,
+                ..
+            } => LedgerRecord::RollbackPerformed {
+                seq,
+                at_unix_ms,
+                platform,
+                ad_unit_id,
+                rolled_back_seq,
+                reason,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+            LedgerRecord::BillingProof {
+                at_unix_ms,
+                publisher_id,
+                experiment_id,
+                proven_lift,
+                rate_bp,
+                fee_micros,
+                ..
+            } => LedgerRecord::BillingProof {
+                seq,
+                at_unix_ms,
+                publisher_id,
+                experiment_id,
+                proven_lift,
+                rate_bp,
+                fee_micros,
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            },
+        }
+    }
+
+    impl apex_proof::LedgerLog for CountedVecLedger {
+        fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, apex_proof::LedgerError> {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            let record = reseq(draft, seq);
+            self.records.push(record.clone());
+            Ok(record)
+        }
+
+        fn append_rollback(
+            &mut self,
+            at_unix_ms: i64,
+            platform: apex_core::PlatformId,
+            ad_unit_id: &str,
+            rolled_back_seq: u64,
+            reason: &str,
+        ) -> Result<LedgerRecord, apex_proof::LedgerError> {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            let record = LedgerRecord::RollbackPerformed {
+                seq,
+                at_unix_ms,
+                platform,
+                ad_unit_id: ad_unit_id.to_string(),
+                rolled_back_seq,
+                reason: reason.to_string(),
+                prev_hash: [0u8; 32],
+                hash: [0u8; 32],
+            };
+            self.records.push(record.clone());
+            Ok(record)
+        }
+
+        fn records(&self) -> Vec<&LedgerRecord> {
+            self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.records.iter().collect()
+        }
+
+        fn len(&self) -> usize {
+            self.records.len()
+        }
+
+        fn get(&self, index: usize) -> Option<&LedgerRecord> {
+            self.records.get(index)
+        }
+
+        fn is_empty(&self) -> bool {
+            self.records.is_empty()
+        }
+    }
+
     fn vec_lift(seq: u64, record: apex_lift::records::LiftRecord) -> LedgerRecord {
         LedgerRecord::LiftRecord {
             seq,
@@ -4822,6 +5093,80 @@ Gross total: 10300000 micros
             .collect()
     }
 
+    /// The old per-experiment `started_experiment_name` scan, kept verbatim
+    /// as the index equivalence reference.
+    fn naive_started_experiment_name(
+        ledger: &dyn LedgerLog,
+        experiment_id: &str,
+    ) -> Option<String> {
+        ledger.records().iter().find_map(|record| match record {
+            LedgerRecord::ExperimentStarted {
+                experiment_id: e,
+                spec,
+                ..
+            } if e == experiment_id => Some(spec.name.clone()),
+            _ => None,
+        })
+    }
+
+    /// The old per-experiment signed pre-registration scan, kept verbatim as
+    /// the index equivalence reference.
+    fn naive_signed_pre_registration(
+        ledger: &dyn LedgerLog,
+        experiment_id: &str,
+    ) -> Result<apex_lift::decision::PreRegistration, PlanError> {
+        let name = naive_started_experiment_name(ledger, experiment_id).ok_or_else(|| {
+            PlanError::NoBaseline {
+                reason: format!("experiment {experiment_id} was never started in this ledger"),
+            }
+        })?;
+        ledger
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                LedgerRecord::LiftRecord { payload, .. } => {
+                    let parsed = parse_lift_record(payload).ok()?;
+                    let prereg = apex_lift::decision::PreRegistration::from_record(&parsed).ok()?;
+                    (prereg.experiment_id == name).then_some(prereg)
+                }
+                _ => None,
+            })
+            .ok_or(PlanError::NoBaseline {
+                reason: format!("no signed pre-registration for experiment {name}"),
+            })
+    }
+
+    /// The old per-experiment settled-refusal scan, kept verbatim as the
+    /// index equivalence reference.
+    fn naive_settled_refusal(
+        ledger: &dyn LedgerLog,
+        experiment_id: &str,
+        change_seq: u64,
+    ) -> Option<PlanError> {
+        let settled_name = naive_started_experiment_name(ledger, experiment_id).unwrap_or_default();
+        let settled = ledger.records().iter().any(|record| match record {
+            LedgerRecord::ExperimentObserved {
+                experiment_id: e, ..
+            } => e == experiment_id,
+            LedgerRecord::RollbackPerformed {
+                rolled_back_seq, ..
+            } => *rolled_back_seq == change_seq,
+            LedgerRecord::LiftRecord { payload, .. } => {
+                parse_lift_record(payload).ok().is_some_and(|record| {
+                    matches!(
+                        record,
+                        apex_lift::records::LiftRecord::Result { experiment_id: e, .. }
+                            if e == settled_name
+                    )
+                })
+            }
+            _ => false,
+        });
+        settled.then(|| {
+            PlanError::Validation(format!("experiment {experiment_id} is already settled"))
+        })
+    }
+
     /// The pre-index shape of `kept_changes`, kept verbatim as the equivalence
     /// reference.
     fn naive_kept_changes(
@@ -5008,6 +5353,250 @@ Gross total: 10300000 micros
             matches!(&error, PlanError::Validation(reason) if reason.contains("already settled")),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn settle_loop_reads_the_ledger_once_for_five_hundred_experiments() {
+        let experiments = 500usize;
+        let synthetic = synthetic_ledger(experiments, 17);
+        assert!(
+            synthetic.len() >= 10_000,
+            "the fixture holds a whole history: {}",
+            synthetic.len()
+        );
+        let mut ledger = CountedVecLedger::new(synthetic.records);
+        let ops = RecordingOps::new();
+        for e in 0..experiments {
+            let id = format!("floors-ee-u{e}");
+            ops.put_experiment(
+                &id,
+                ExperimentResult {
+                    experiment_id: id.clone(),
+                    state: ExperimentState::Running,
+                    results: vec![],
+                    lift_percent_bp: None,
+                    confidence: None,
+                    winner_variant_id: None,
+                },
+            );
+            ops.put_experiment_days(&id, constant_days(4_000_000, 4_400_000));
+        }
+
+        // One index build serves the whole pass; then every iteration appends
+        // its pull and settles against the same index.
+        let mut index = LedgerIndex::build(&ledger);
+        assert_eq!(ledger.scans(), 1, "the pass builds the index once");
+        let starts: Vec<(String, u64)> = index
+            .starts()
+            .iter()
+            .map(|start| {
+                (
+                    start.experiment_id.clone(),
+                    start.change_seq.expect("every start follows a change"),
+                )
+            })
+            .collect();
+        assert_eq!(starts.len(), experiments);
+        for (experiment_id, change_seq) in starts {
+            let pull = apex_lift::records::LiftRecord::DataPull {
+                day: "2026-10-01".into(),
+                rows_sha256: "0".repeat(64),
+                rows: serde_json::json!([]),
+            };
+            let record = ledger.append(vec_lift(0, pull)).expect("data pull");
+            index.observe(&record);
+            let _ = crate::settle::settle_experiment_indexed(
+                &ops,
+                &mut ledger,
+                &mut index,
+                &experiment_id,
+                change_seq,
+                FillFormat::Rewarded,
+                &[],
+                NOW,
+            )
+            .await;
+        }
+        assert_eq!(
+            ledger.scans(),
+            1,
+            "settling 500 experiments never rescans the ledger"
+        );
+    }
+
+    #[test]
+    fn ledger_index_matches_the_per_experiment_scans_on_a_randomized_ledger() {
+        let synthetic = synthetic_ledger(210, 45);
+        let mut records = synthetic.records;
+        // Deterministic xorshift shuffle: record order (and therefore every
+        // first-match answer) is randomized without a test-only RNG crate.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for i in (1..records.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let j = (state as usize) % (i + 1);
+            records.swap(i, j);
+        }
+        let ledger = VecLedger { records };
+        assert!(ledger.len() >= 10_000, "fixture size: {}", ledger.len());
+        let index = LedgerIndex::build(&ledger);
+        let mut compared = 0usize;
+        for start in index.starts() {
+            let id = &start.experiment_id;
+            assert_eq!(
+                index.started_experiment_name(id),
+                naive_started_experiment_name(&ledger, id).as_deref(),
+                "started name for {id}"
+            );
+            match (
+                index.signed_pre_registration(id),
+                naive_signed_pre_registration(&ledger, id),
+            ) {
+                (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "prereg for {id}"),
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(actual.to_string(), expected.to_string(), "prereg for {id}")
+                }
+                (actual, expected) => panic!("prereg for {id}: {actual:?} vs {expected:?}"),
+            }
+            for change_seq in [
+                start.change_seq.unwrap_or(0),
+                0,
+                start.change_seq.unwrap_or(0) + 1,
+            ] {
+                let actual = index
+                    .settled_refusal(id, change_seq)
+                    .map(|error| error.to_string());
+                let expected =
+                    naive_settled_refusal(&ledger, id, change_seq).map(|error| error.to_string());
+                assert_eq!(actual, expected, "settled refusal for {id} at {change_seq}");
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 210, "every start was compared");
+    }
+
+    #[test]
+    fn ledger_index_build_is_deterministic_and_preserves_start_order() {
+        let ledger = synthetic_ledger(60, 5);
+        let first = LedgerIndex::build(&ledger);
+        let second = LedgerIndex::build(&ledger);
+        let ids = |index: &LedgerIndex| -> Vec<String> {
+            index
+                .starts()
+                .iter()
+                .map(|start| start.experiment_id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&first), ids(&second), "builds are deterministic");
+        let expected: Vec<String> = ledger
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                LedgerRecord::ExperimentStarted { experiment_id, .. } => {
+                    Some(experiment_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids(&first), expected, "starts stay in ledger order");
+        assert_eq!(first.started_days(), second.started_days());
+        assert_eq!(
+            first
+                .starts()
+                .iter()
+                .map(|start| start.change_seq)
+                .collect::<Vec<_>>(),
+            second
+                .starts()
+                .iter()
+                .map(|start| start.change_seq)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// n/2n/4n evidence: the index is built once per pass and the settle loop
+    /// is linear in experiments. Timings are printed, never asserted.
+    // dogfood:skip: this evidence test is deliberately ignored in the default
+    // suite and is run explicitly with `--ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "n/2n/4n ledger-index scaling evidence; run with --ignored --nocapture"]
+    async fn ledger_index_scales_linearly_in_experiments_and_records() {
+        for experiments in [125usize, 250, 500] {
+            let synthetic = synthetic_ledger(experiments, 17);
+            let records = synthetic.len();
+            let lift_records = lift_record_count(&synthetic);
+            let mut ledger = CountedVecLedger::new(synthetic.records);
+            let ops = RecordingOps::new();
+            for e in 0..experiments {
+                let id = format!("floors-ee-u{e}");
+                ops.put_experiment(
+                    &id,
+                    ExperimentResult {
+                        experiment_id: id.clone(),
+                        state: ExperimentState::Running,
+                        results: vec![],
+                        lift_percent_bp: None,
+                        confidence: None,
+                        winner_variant_id: None,
+                    },
+                );
+                ops.put_experiment_days(&id, constant_days(4_000_000, 4_400_000));
+            }
+
+            crate::ledger_index::reset_index_metrics();
+            let started = std::time::Instant::now();
+            let mut index = LedgerIndex::build(&ledger);
+            let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let (visits, parses, entries) = crate::ledger_index::index_metrics();
+            assert_eq!(visits, records as u64);
+            assert_eq!(parses, lift_records);
+
+            let starts: Vec<(String, u64)> = index
+                .starts()
+                .iter()
+                .map(|start| {
+                    (
+                        start.experiment_id.clone(),
+                        start.change_seq.expect("change before start"),
+                    )
+                })
+                .collect();
+            crate::ledger_index::reset_index_metrics();
+            let started = std::time::Instant::now();
+            for (experiment_id, change_seq) in starts {
+                let pull = apex_lift::records::LiftRecord::DataPull {
+                    day: "2026-10-01".into(),
+                    rows_sha256: "0".repeat(64),
+                    rows: serde_json::json!([]),
+                };
+                let record = ledger.append(vec_lift(0, pull)).expect("pull");
+                index.observe(&record);
+                let _ = crate::settle::settle_experiment_indexed(
+                    &ops,
+                    &mut ledger,
+                    &mut index,
+                    &experiment_id,
+                    change_seq,
+                    FillFormat::Rewarded,
+                    &[],
+                    NOW,
+                )
+                .await;
+            }
+            let settle_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let (settle_visits, settle_parses, settle_entries) =
+                crate::ledger_index::index_metrics();
+            eprintln!(
+                "AUTOPILOT experiments={experiments:>4} records={records:>6} \
+                 build={build_ms:8.1}ms settle={settle_ms:8.1}ms \
+                 build[visits={visits} parses={parses} entries={entries}] \
+                 loop[visits={settle_visits} parses={settle_parses} entries={settle_entries}] \
+                 scans={}",
+                ledger.scans()
+            );
+            assert_eq!(ledger.scans(), 1, "one scan for the whole pass");
+        }
     }
 
     #[test]

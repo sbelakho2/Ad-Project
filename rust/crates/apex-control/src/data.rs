@@ -388,12 +388,33 @@ pub struct DurableReader {
     /// form per invoice capability), and the file rarely changes between the
     /// monthly syncs.
     invoice_cache: Arc<Mutex<Option<CachedInvoices>>>,
+    /// The merged experiment projection, reused while the directory scan's
+    /// per-file identities are unchanged. Page reads used to replay every
+    /// cached ledger line on every request (20k records at the reference
+    /// size) even though no file had changed.
+    experiments_cache: Arc<Mutex<Option<CachedExperiments>>>,
     #[cfg(test)]
     invoice_parses: Arc<AtomicU64>,
+    #[cfg(test)]
+    experiment_builds: Arc<AtomicU64>,
+    #[cfg(test)]
+    ledger_stats: Arc<AtomicU64>,
 }
 
 /// One parsed publisher ledger: the publisher name and its parsed lines.
 type LedgerLines = (String, Arc<Vec<serde_json::Value>>);
+
+/// The identity of one ledger-directory scan: every path still present with
+/// its hardened file stamp. Appending, rewriting or removing any ledger
+/// changes this key, so an external write invalidates the projection.
+type LedgerStamp = Vec<(PathBuf, FileStamp)>;
+
+/// The result of one directory scan: the cached lines plus the identity that
+/// the derived caches key on.
+struct LedgerScan {
+    files: Vec<LedgerLines>,
+    stamp: LedgerStamp,
+}
 
 /// A durable file's cache identity: byte length, modification time (`None`
 /// when the filesystem does not expose one) and, on Unix, the ctime and
@@ -448,6 +469,13 @@ struct CachedInvoices {
     invoices: Arc<Vec<InvoiceRecord>>,
 }
 
+/// One cached experiment projection.
+#[derive(Debug, Clone)]
+struct CachedExperiments {
+    stamp: LedgerStamp,
+    experiments: Arc<Vec<DurableExperiment>>,
+}
+
 impl DurableReader {
     /// A reader over the given roots.
     pub fn new(ledger_root: impl Into<PathBuf>, invoice_register: impl Into<PathBuf>) -> Self {
@@ -456,8 +484,13 @@ impl DurableReader {
             invoice_register: invoice_register.into(),
             cache: Arc::new(Mutex::new(HashMap::new())),
             invoice_cache: Arc::new(Mutex::new(None)),
+            experiments_cache: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             invoice_parses: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            experiment_builds: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            ledger_stats: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -475,8 +508,23 @@ impl DurableReader {
         self.cache.lock().map(|cache| cache.len()).unwrap_or(0)
     }
 
+    /// The number of experiment projections this reader built (test seam
+    /// proving a cached scan does not replay the records).
+    #[cfg(test)]
+    pub(crate) fn experiment_build_count(&self) -> u64 {
+        self.experiment_builds.load(Ordering::SeqCst)
+    }
+
+    /// The number of ledger file stamps taken (one `stat` per present
+    /// ledger), the per-request read cost the cache cannot remove: external
+    /// writes must be observed.
+    #[cfg(test)]
+    pub(crate) fn ledger_stat_count(&self) -> u64 {
+        self.ledger_stats.load(Ordering::SeqCst)
+    }
+
     /// Every `<publisher>.jsonl` ledger file, as (publisher, lines).
-    fn ledger_files(&self) -> Result<Vec<LedgerLines>, Unavailable> {
+    fn ledger_files(&self) -> Result<LedgerScan, Unavailable> {
         let entries = match std::fs::read_dir(&self.ledger_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -497,6 +545,7 @@ impl DurableReader {
         // pruned below, so a rotating ledger directory cannot grow the cache
         // without bound.
         let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut stamp: LedgerStamp = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| {
                 Unavailable::new(format!(
@@ -513,7 +562,10 @@ impl DurableReader {
             let metadata = std::fs::metadata(&path).map_err(|error| {
                 Unavailable::new(format!("the ledger {name} could not be read: {error}"))
             })?;
-            let stamp = FileStamp::of(&metadata);
+            #[cfg(test)]
+            self.ledger_stats.fetch_add(1, Ordering::SeqCst);
+            let file_stamp = FileStamp::of(&metadata);
+            stamp.push((path.clone(), file_stamp));
             let cached = {
                 let cache = self
                     .cache
@@ -521,7 +573,7 @@ impl DurableReader {
                     .map_err(|_| Unavailable::new("ledger cache lock poisoned"))?;
                 cache
                     .get(&path)
-                    .filter(|cached| cached.stamp == stamp)
+                    .filter(|cached| cached.stamp == file_stamp)
                     .map(|cached| cached.lines.clone())
             };
             let lines = match cached {
@@ -552,7 +604,7 @@ impl DurableReader {
                     cache.insert(
                         path,
                         CachedLedger {
-                            stamp,
+                            stamp: file_stamp,
                             lines: lines.clone(),
                         },
                     );
@@ -575,17 +627,28 @@ impl DurableReader {
             )));
         }
         files.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(files)
+        stamp.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(LedgerScan { files, stamp })
     }
 
     /// The experiment records the ledgers carry, read-only.
     pub fn experiments(&self) -> Result<Vec<DurableExperiment>, Unavailable> {
-        let files = self.ledger_files()?;
+        Ok((*self.experiments_shared()?).clone())
+    }
+
+    /// The merged experiment projection without cloning it per call: the
+    /// returned handle is shared while the directory stamp is unchanged.
+    pub fn experiments_shared(&self) -> Result<Arc<Vec<DurableExperiment>>, Unavailable> {
+        let scan = self.ledger_files()?;
+        if let Some(cached) = self.cached_experiments(&scan.stamp)? {
+            return Ok(cached);
+        }
+        let files = &scan.files;
         let mut experiments: Vec<DurableExperiment> = Vec::new();
         // Experiment ids are only unique per publisher: two publishers may
         // reuse one id, so the merge index is keyed by (publisher, id).
         let mut index: HashMap<(String, String), usize> = HashMap::new();
-        for (publisher, lines) in &files {
+        for (publisher, lines) in files {
             for line in lines.iter() {
                 let kind = line.get("type").and_then(|value| value.as_str());
                 let at = line.get("atUnixMs").and_then(|value| value.as_i64());
@@ -674,7 +737,32 @@ impl DurableReader {
             ));
         }
         experiments.sort_by(|left, right| left.experiment_id.cmp(&right.experiment_id));
+        #[cfg(test)]
+        self.experiment_builds.fetch_add(1, Ordering::SeqCst);
+        let experiments = Arc::new(experiments);
+        let mut cache = self
+            .experiments_cache
+            .lock()
+            .map_err(|_| Unavailable::new("experiment cache lock poisoned"))?;
+        *cache = Some(CachedExperiments {
+            stamp: scan.stamp,
+            experiments: Arc::clone(&experiments),
+        });
         Ok(experiments)
+    }
+
+    fn cached_experiments(
+        &self,
+        stamp: &LedgerStamp,
+    ) -> Result<Option<Arc<Vec<DurableExperiment>>>, Unavailable> {
+        let cache = self
+            .experiments_cache
+            .lock()
+            .map_err(|_| Unavailable::new("experiment cache lock poisoned"))?;
+        Ok(cache
+            .as_ref()
+            .filter(|cached| cached.stamp == *stamp)
+            .map(|cached| Arc::clone(&cached.experiments)))
     }
 
     /// The invoice register, read-only.
@@ -684,6 +772,20 @@ impl DurableReader {
     /// finance page makes do not re-parse the whole file each time. A stale
     /// cache is impossible: the same identity rules as the ledger cache apply.
     pub fn invoices(&self) -> Result<Vec<InvoiceRecord>, Unavailable> {
+        Ok((*self.invoices_shared()?).clone())
+    }
+
+    /// One invoice by identity, cloned alone instead of the whole register.
+    pub fn invoice_by_id(&self, id: &str) -> Result<Option<InvoiceRecord>, Unavailable> {
+        Ok(self
+            .invoices_shared()?
+            .iter()
+            .find(|invoice| invoice.id() == id)
+            .cloned())
+    }
+
+    /// The parsed register without cloning it per call.
+    pub fn invoices_shared(&self) -> Result<Arc<Vec<InvoiceRecord>>, Unavailable> {
         let stamp = match std::fs::metadata(&self.invoice_register) {
             Ok(metadata) => Some(FileStamp::of(&metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -708,7 +810,7 @@ impl DurableReader {
                     .map(|cached| cached.invoices.clone())
             };
             if let Some(invoices) = cached {
-                return Ok((*invoices).clone());
+                return Ok(invoices);
             }
         }
         let raw = match std::fs::read_to_string(&self.invoice_register) {
@@ -749,10 +851,10 @@ impl DurableReader {
                 .map_err(|_| Unavailable::new("invoice cache lock poisoned"))?;
             *cache = Some(CachedInvoices {
                 stamp,
-                invoices: invoices.clone(),
+                invoices: Arc::clone(&invoices),
             });
         }
-        Ok((*invoices).clone())
+        Ok(invoices)
     }
 }
 
@@ -1213,11 +1315,60 @@ impl ControlData {
         }
     }
 
+    /// One durable experiment by id, cloned alone instead of the whole
+    /// projection.
+    pub fn experiment_by_id(&self, id: &str) -> Result<Option<DurableExperiment>, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => Ok(demo
+                .durable_experiments()
+                .into_iter()
+                .find(|experiment| experiment.experiment_id == id)),
+            ControlData::Live(live) => Ok(live
+                .durable
+                .experiments_shared()?
+                .iter()
+                .find(|experiment| experiment.experiment_id == id)
+                .cloned()),
+        }
+    }
+
+    /// The durable experiments of one publisher, cloned alone.
+    pub fn experiments_for_publisher(
+        &self,
+        publisher: &str,
+    ) -> Result<Vec<DurableExperiment>, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => Ok(demo
+                .durable_experiments()
+                .into_iter()
+                .filter(|experiment| experiment.publisher == publisher)
+                .collect()),
+            ControlData::Live(live) => Ok(live
+                .durable
+                .experiments_shared()?
+                .iter()
+                .filter(|experiment| experiment.publisher == publisher)
+                .cloned()
+                .collect()),
+        }
+    }
+
     /// Durable invoice register.
     pub fn invoices(&self) -> Result<Vec<InvoiceRecord>, Unavailable> {
         match self {
             ControlData::Fixtures(demo) => Ok(demo.invoices()),
             ControlData::Live(live) => live.durable.invoices(),
+        }
+    }
+
+    /// One durable invoice by identity, cloned alone.
+    pub fn invoice_by_id(&self, id: &str) -> Result<Option<InvoiceRecord>, Unavailable> {
+        match self {
+            ControlData::Fixtures(demo) => Ok(demo
+                .invoices()
+                .into_iter()
+                .find(|invoice| invoice.id() == id)),
+            ControlData::Live(live) => live.durable.invoice_by_id(id),
         }
     }
 
@@ -1276,10 +1427,10 @@ mod tests {
         let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
 
         let first = reader.ledger_files().expect("first read");
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.files.len(), 1);
         let second = reader.ledger_files().expect("second read");
         // The unchanged file reuses the cached parse (same allocation).
-        assert!(Arc::ptr_eq(&first[0].1, &second[0].1));
+        assert!(Arc::ptr_eq(&first.files[0].1, &second.files[0].1));
 
         std::fs::write(
             &ledger,
@@ -1287,8 +1438,8 @@ mod tests {
         )
         .expect("append");
         let third = reader.ledger_files().expect("third read");
-        assert_eq!(third[0].1.len(), 2, "the changed file re-parses");
-        assert!(!Arc::ptr_eq(&second[0].1, &third[0].1));
+        assert_eq!(third.files[0].1.len(), 2, "the changed file re-parses");
+        assert!(!Arc::ptr_eq(&second.files[0].1, &third.files[0].1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1315,7 +1466,7 @@ mod tests {
 
         let first = reader.ledger_files().expect("first read");
         assert_eq!(
-            first[0].1[0]
+            first.files[0].1[0]
                 .get("experimentId")
                 .and_then(|value| value.as_str()),
             Some("exp_1")
@@ -1342,11 +1493,11 @@ mod tests {
 
         let second = reader.ledger_files().expect("second read");
         assert!(
-            !Arc::ptr_eq(&first[0].1, &second[0].1),
+            !Arc::ptr_eq(&first.files[0].1, &second.files[0].1),
             "the restored-mtime rewrite re-parses"
         );
         assert_eq!(
-            second[0].1[0]
+            second.files[0].1[0]
                 .get("experimentId")
                 .and_then(|value| value.as_str()),
             Some("exp_2"),
@@ -1402,10 +1553,10 @@ mod tests {
         std::fs::write(dir.join("rival.jsonl"), record).expect("second");
         let reader = DurableReader::new(&dir, dir.join("invoices.jsonl"));
 
-        assert_eq!(reader.ledger_files().expect("read").len(), 2);
+        assert_eq!(reader.ledger_files().expect("read").files.len(), 2);
         assert_eq!(reader.ledger_cache_len(), 2);
         std::fs::remove_file(dir.join("rival.jsonl")).expect("remove");
-        assert_eq!(reader.ledger_files().expect("re-read").len(), 1);
+        assert_eq!(reader.ledger_files().expect("re-read").files.len(), 1);
         assert_eq!(
             reader.ledger_cache_len(),
             1,
@@ -1766,5 +1917,81 @@ mod tests {
             sync_marker: None,
         }));
         assert_eq!(live.site_requests_last_30_days(as_of).await, None);
+    }
+
+    /// At the reference size (2k ledgers, 20k records) the merged projection
+    /// is built once; every later page read reuses the same allocation until
+    /// a ledger's hardened stamp changes. Removing a ledger prunes its parse.
+    #[test]
+    fn experiment_projection_is_cached_at_two_thousand_ledgers_and_invalidated() {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-projection-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ledgers = dir.join("ledgers");
+        std::fs::create_dir_all(&ledgers).expect("dir");
+        for publisher in 0..2_000usize {
+            let mut body = format!(
+                "{{\"type\":\"experimentStarted\",\"experimentId\":\"exp_{publisher}\",\"atUnixMs\":{},\"spec\":{{\"name\":\"E\"}}}}\n",
+                publisher * 100
+            );
+            for observation in 1..=9usize {
+                body.push_str(&format!(
+                    "{{\"type\":\"experimentObserved\",\"experimentId\":\"exp_{publisher}\",\"atUnixMs\":{},\"result\":{{\"state\":\"running\",\"liftPercentBp\":10,\"confidence\":90}}}}\n",
+                    publisher * 100 + observation
+                ));
+            }
+            std::fs::write(ledgers.join(format!("publisher{publisher}.jsonl")), body)
+                .expect("ledger");
+        }
+        let reader = DurableReader::new(&ledgers, dir.join("invoices.jsonl"));
+
+        let started = std::time::Instant::now();
+        let first = reader.experiments().expect("first projection");
+        let first_elapsed = started.elapsed();
+        assert_eq!(first.len(), 2_000);
+        assert_eq!(reader.experiment_build_count(), 1);
+        assert_eq!(reader.ledger_cache_len(), 2_000);
+
+        let shared_a = reader.experiments_shared().expect("cached");
+        let shared_b = reader.experiments_shared().expect("cached again");
+        assert!(Arc::ptr_eq(&shared_a, &shared_b), "one shared projection");
+        assert_eq!(reader.experiment_build_count(), 1, "no rebuild on read");
+        let stats_after_first = reader.ledger_stat_count();
+        let cached_started = std::time::Instant::now();
+        for _ in 0..10 {
+            let shared = reader.experiments_shared().expect("cached read");
+            assert!(Arc::ptr_eq(&shared_a, &shared));
+        }
+        let cached_ms = cached_started.elapsed().as_secs_f64() * 1_000.0 / 10.0;
+        let stats_per_cached_read = (reader.ledger_stat_count() - stats_after_first) / 10;
+        assert_eq!(
+            stats_per_cached_read, 2_000,
+            "one stat per present ledger keeps external writes visible"
+        );
+
+        // An external append changes one ledger's stamp and invalidates.
+        let ledger = ledgers.join("publisher0.jsonl");
+        let mut body = std::fs::read_to_string(&ledger).expect("read");
+        body.push_str("{\"type\":\"experimentStarted\",\"experimentId\":\"exp_new\",\"atUnixMs\":999999,\"spec\":{\"name\":\"New\"}}\n");
+        std::fs::write(&ledger, body).expect("append");
+        assert_eq!(reader.experiments().expect("rebuilt").len(), 2_001);
+        assert_eq!(reader.experiment_build_count(), 2);
+
+        // Removing a ledger prunes its cached parse (no unbounded index).
+        std::fs::remove_file(ledgers.join("publisher1.jsonl")).expect("remove");
+        assert_eq!(reader.experiments().expect("pruned").len(), 2_000);
+        assert_eq!(reader.experiment_build_count(), 3);
+        assert_eq!(reader.ledger_cache_len(), 1_999);
+
+        eprintln!(
+            "experiment_projection files=2000 records=20000 build_ms={:.2} cached_read_ms={cached_ms:.2} stats_per_read={stats_per_cached_read} builds={} cache_entries={}",
+            first_elapsed.as_secs_f64() * 1_000.0,
+            reader.experiment_build_count(),
+            reader.ledger_cache_len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

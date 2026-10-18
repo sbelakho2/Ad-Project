@@ -59,7 +59,8 @@
 //! | `POST /console/ledger` | `303` to the change log + session cookie | `400` invalid publisher, `401` invalid access, `503` ledger_auth_not_configured |
 //! | `GET /console/ledger/records/{seq}` | `200` record detail | `303` to the change log without a session, `404` unknown sequence |
 //! | `POST /console/ledger/session/end` | `303` to the change log | `400` missing or wrong CSRF token |
-//! | `GET /console/signin?token=` | `303` to `/` with a session cookie | `200` refusal page for a used, expired or unknown link, `400` for a missing or malformed token, `503` when the sign-in store is not configured |
+//! | `GET /console/signin?token=` | `200` landing page with a POST button (never consumes the link) | `200` refusal page for a used, expired or unknown link, `400` for a missing or malformed token, `503` when the sign-in store is not configured |
+//! | `POST /console/signin` | `303` to `/` with a session cookie | `200` refusal page for a used, expired or unknown token, `400` for a missing or malformed token, `503` when the sign-in store is not configured |
 //! | `GET /console/connections` | `200` platform list | `303` without a session, `503` not configured (no console credentials), `500` store read failure |
 //! | `GET /console/connections/{platform}` | `200` detail | `404` unknown platform |
 //! | `POST /console/connections/{platform}/submit` | `303` back to the detail | `303` to the change log without a session, `400` field errors or wrong CSRF token, `404` unknown platform, `503` vault not configured |
@@ -83,11 +84,13 @@
 //! | `GET /free-audit` | `303` to `/free-audit/` | — |
 //! | `GET /free-audit/` | `200` request page | — |
 //! | `GET /audit-requested/` | `200` confirmation | — |
-//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber + Adyen payment link; tier from the reported app count; confirmation link mailed best effort; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
+//! | `POST /watch` | `303` to `/watch/requested?ref=` (pending subscriber + Adyen payment link; tier from the distinct apps the subscriber names; confirmation link mailed best effort; repeat submissions inside 24 h deduplicate) | `400` field errors, `500`/`503` store unavailable |
 //! | `GET /watch` | `303` to `/watch/` | — |
 //! | `GET /watch/` | `200` sign-up page | — |
 //! | `GET /watch/requested` | `200` confirmation with the checkout link when one exists, otherwise the honest "we will email a payment link" state | — |
-//! | `GET /watch/confirm?token=` | `200` confirmed or refused page | `400` missing or malformed token, `503` watch store not configured |
+//! | `GET /watch/confirm?token=` | `200` the billing-profile form after a confirmed email (or the refusal page) | `400` missing or malformed token, `503` watch store not configured |
+//! | `POST /watch/billing-profile` | `303` to `/watch/billing-profile/recorded?ref=` (profile stored; the first invoice is issued when the subscriber is active and billing is configured) | `400` field errors or a spent/mismatched profile token, `200` used/expired/unknown token refusal, `503` watch store not configured |
+//! | `GET /watch/billing-profile/recorded?ref=` | `200` stable recorded page | — |
 //!
 //! Refusals produced inside route extraction follow the same audience split:
 //! a malformed path segment or duplicated query key on `/v1/*` is
@@ -108,6 +111,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
 use apex_core::PlatformId;
@@ -154,7 +158,10 @@ pub fn router(state: AppState) -> Router {
             "/console/ledger/session/end",
             post(console_ledger_session_end),
         )
-        .route("/console/signin", get(console_signin))
+        .route(
+            "/console/signin",
+            get(console_signin).post(console_signin_submit),
+        )
         .route("/console/connections", get(console_connections))
         .route(
             "/console/connections/{platform}",
@@ -221,6 +228,11 @@ pub fn router(state: AppState) -> Router {
         .route("/watch/", get(watch_page))
         .route("/watch/requested", get(watch_requested))
         .route("/watch/confirm", get(watch_confirm))
+        .route("/watch/billing-profile", post(watch_billing_profile))
+        .route(
+            "/watch/billing-profile/recorded",
+            get(watch_billing_profile_recorded),
+        )
         .method_not_allowed_fallback(console_method_not_allowed)
         .route("/healthz", get(healthz))
         .route("/favicon.ico", get(crate::favicon::ico))
@@ -913,8 +925,8 @@ fn activate_watch_subscriber(
         );
         return;
     };
-    // One fold read serves both the stored-card check and the outcome
-    // publisher; the store's list clones every subscriber row.
+    // One indexed read serves both the stored-card check and the outcome
+    // publisher; it never clones or scans the whole subscriber set.
     let recorded = find_subscriber(store, reference);
     let recorded_card = recorded
         .as_ref()
@@ -1016,7 +1028,7 @@ async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
         let Some(platform) = parse_platform(name) else {
             continue;
         };
-        match state.audit_source.snapshot(publisher, platform).await {
+        match state.audit_source.snapshot_arc(publisher, platform).await {
             Ok(snapshot) => {
                 if latest.as_ref().is_some_and(|current| {
                     current.captured_at_unix_ms >= snapshot.fetched_at_unix_ms
@@ -1028,7 +1040,7 @@ async fn collect_overview(state: &AppState, publisher: &str) -> OverviewData {
                 // every console page load.
                 let (reported, report) = match state
                     .audit_source
-                    .snapshot_report(publisher, platform)
+                    .snapshot_report_arc(publisher, platform)
                     .await
                 {
                     Ok(pair) => pair,
@@ -1137,7 +1149,7 @@ async fn console_audit(
     };
     match state
         .audit_source
-        .snapshot_report(&view.publisher, platform)
+        .snapshot_report_arc(&view.publisher, platform)
         .await
     {
         Ok((snapshot, report)) => page(
@@ -1189,7 +1201,7 @@ async fn console_finding(
         };
         match state
             .audit_source
-            .snapshot_report(&view.publisher, platform)
+            .snapshot_report_arc(&view.publisher, platform)
             .await
         {
             Ok((snapshot, report)) => {
@@ -1266,7 +1278,7 @@ async fn console_audit_csv(
     };
     match state
         .audit_source
-        .snapshot_report(&view.publisher, platform)
+        .snapshot_report_arc(&view.publisher, platform)
         .await
     {
         Ok((snapshot, report)) => {
@@ -1303,6 +1315,31 @@ async fn console_audit_csv(
     }
 }
 
+/// Query parameters of the paginated change log.
+#[derive(Debug, Deserialize, Default)]
+struct LedgerPageParams {
+    /// The 1-based page number; absent means page 1. Kept as a string so the
+    /// handler can answer with its own typed 400 page instead of a serde
+    /// rejection.
+    #[serde(default)]
+    page: Option<String>,
+}
+
+/// Parse the `page` parameter: absent is page 1, a positive whole number is
+/// accepted, and everything else (non-numeric, zero, overflow, duplicate or
+/// unreadable query) is rejected so the caller can render the typed 400.
+fn requested_ledger_page(
+    params: Result<Query<LedgerPageParams>, QueryRejection>,
+) -> Result<u64, ()> {
+    let Ok(Query(params)) = params else {
+        return Err(());
+    };
+    match params.page.as_deref() {
+        None => Ok(1),
+        Some(raw) => raw.parse::<u64>().ok().filter(|page| *page >= 1).ok_or(()),
+    }
+}
+
 /// The session view of a request, if the cookie carries a live session.
 fn live_session(
     state: &AppState,
@@ -1318,7 +1355,11 @@ fn live_session(
     (id, view)
 }
 
-async fn console_ledger(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn console_ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    params: Result<Query<LedgerPageParams>, QueryRejection>,
+) -> Response {
     let ctx = ConsoleCtx::from_env();
     let (id, view) = live_session(&state, &headers);
     let Some(view) = view else {
@@ -1328,21 +1369,49 @@ async fn console_ledger(State(state): State<AppState>, headers: HeaderMap) -> Re
             ledger::render_access_panel(&ctx, problem, None),
         );
     };
+    // The session gate runs first: an anonymous request never learns whether
+    // its page parameter was well formed.
+    let Ok(requested_page) = requested_ledger_page(params) else {
+        return page(StatusCode::BAD_REQUEST, errors::ledger_page_invalid(&ctx));
+    };
+    let offset = usize::try_from(
+        requested_page
+            .saturating_sub(1)
+            .saturating_mul(ledger::RECORDS_PER_PAGE as u64),
+    )
+    .unwrap_or(usize::MAX);
     let publisher = view.publisher.clone();
-    match state.ledger_source.records(&publisher).await {
-        Ok(records) => {
+    match state
+        .ledger_source
+        .records_page(&publisher, offset, ledger::RECORDS_PER_PAGE)
+        .await
+    {
+        Ok(found) => {
+            let last_page = found.total.div_ceil(ledger::RECORDS_PER_PAGE as u64).max(1);
+            if requested_page > last_page {
+                return page(StatusCode::BAD_REQUEST, errors::ledger_page_invalid(&ctx));
+            }
             state
                 .analytics
                 .emit_ledger_verified(
                     now_unix_ms(&state),
                     &publisher,
-                    records.iter().map(|record| record.seq()).max().unwrap_or(0),
+                    found.total.saturating_sub(1),
                     env!("CARGO_PKG_NAME"),
                     0,
                 )
                 .await;
-            let html =
-                ledger::render_records(&ctx, &publisher, &records, now_unix_ms(&state), &view.csrf);
+            let html = ledger::render_records(
+                &ctx,
+                &publisher,
+                ledger::RecordsPage {
+                    records: &found.records,
+                    total: found.total,
+                    page: requested_page,
+                },
+                now_unix_ms(&state),
+                &view.csrf,
+            );
             let mut response = page(StatusCode::OK, html);
             renew_session_cookie(&mut response, id.as_deref(), &headers);
             response
@@ -1553,20 +1622,17 @@ struct SigninParams {
 
 /// `GET /console/signin?token=<opaque>`: the self-serve one-time link.
 ///
-/// A valid, unused, unexpired token mints the same session the ledger-token
-/// exchange mints (the same [`session::LedgerSessions`] store and the same
-/// `Set-Cookie` shape) and answers `303` to the console overview. The token
-/// is consumed under the store lock before the session exists, so a replay
-/// mints nothing while sessions already minted live their own idle window.
-/// The response never contains the token.
+/// The GET is deliberately inert: it validates the token's shape and shows a
+/// page with a POST button, so a mail scanner that follows the link cannot
+/// burn it. The POST consumes the token once, mints the same session the
+/// ledger-token exchange mints and answers `303` to the console overview.
 ///
 /// Status precedence, pinned by tests: a missing or malformed token is the
-/// `400` refusal page (the request names no link; the same shape rule as the
-/// other console query refusals), a well-formed but unknown, used or expired
-/// token is the same refusal page with `200` (the page is the state, exactly
-/// like the change-log access panel answering `200` with an expired-session
-/// notice), and a deployment without a leads root answers the `503`
-/// not-configured panel: the sign-in path fails closed.
+/// `400` refusal page on both methods; a well-formed but unknown, used or
+/// expired token is the same refusal page with `200` (the page is the state,
+/// exactly like the change-log access panel answering `200` with an
+/// expired-session notice), and a deployment without a leads root answers the
+/// `503` not-configured panel: the sign-in path fails closed.
 async fn console_signin(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1586,7 +1652,49 @@ async fn console_signin(
     let Some(token) = token.filter(|token| crate::signin::is_signin_token(token)) else {
         return page(StatusCode::BAD_REQUEST, errors::signin_refused(&ctx));
     };
-    match signin.consume(&token, now_unix_ms(&state)) {
+    match signin.is_live(&token, now_unix_ms(&state)) {
+        Ok(true) => page(StatusCode::OK, errors::signin_confirm(&ctx, &token)),
+        Ok(false) => page(StatusCode::OK, errors::signin_refused(&ctx)),
+        Err(error) => {
+            // Fail closed: an unreadable sign-in store mints nothing.
+            tracing::warn!(%error, "sign-in store unavailable; the link was refused");
+            page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                errors::not_configured(&ctx),
+            )
+        }
+    }
+}
+
+/// `POST /console/signin`: consume the one-time link and mint the session.
+///
+/// The token arrives in the landing page's hidden field (or a direct form
+/// POST). Consumption is single-use under the store lock, so a replay is
+/// refused without a cookie and without touching the already-used row. The
+/// cookie flags are exactly the ledger-token exchange's.
+async fn console_signin_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ctx = ctx_for_request(&headers);
+    let Some(signin) = &state.signin else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let Ok(fields) = leads::parse_form(&body) else {
+        return page(StatusCode::BAD_REQUEST, errors::signin_refused(&ctx));
+    };
+    let Some(token) = fields
+        .get("token")
+        .map(|token| token.trim())
+        .filter(|token| crate::signin::is_signin_token(token))
+    else {
+        return page(StatusCode::BAD_REQUEST, errors::signin_refused(&ctx));
+    };
+    match signin.consume(token, now_unix_ms(&state)) {
         Ok(Some(publisher)) => {
             let opened = state.ledger_sessions.open(&publisher, now_unix_ms(&state));
             let cookie = session::session_cookie(&opened.id, session::request_is_secure(&headers));
@@ -1716,7 +1824,7 @@ async fn console_connections(State(state): State<AppState>, headers: HeaderMap) 
         };
         let last_report = state
             .audit_source
-            .snapshot(&publisher, platform)
+            .snapshot_arc(&publisher, platform)
             .await
             .ok()
             .map(|snapshot| snapshot.fetched_at_unix_ms);
@@ -1756,6 +1864,8 @@ fn connection_store_failure(state: &AppState, ctx: &ConsoleCtx, error: ApiError)
     let reference = console_reference(state, "/console/connections");
     if status == StatusCode::BAD_REQUEST {
         page(status, errors::bad_request(ctx, None))
+    } else if status == StatusCode::CONFLICT {
+        page(status, errors::conflict(ctx))
     } else {
         page(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1813,7 +1923,7 @@ async fn connection_detail_response(
     let running_work = running_experiments(state, publisher, Some(platform)).await;
     let last_report = state
         .audit_source
-        .snapshot(publisher, platform)
+        .snapshot_arc(publisher, platform)
         .await
         .ok()
         .map(|snapshot| snapshot.fetched_at_unix_ms);
@@ -3039,7 +3149,7 @@ async fn console_settings_monitoring(
         let Some(platform) = parse_platform(capability.wire) else {
             continue;
         };
-        if let Ok(snapshot) = state.audit_source.snapshot(&publisher, platform).await {
+        if let Ok(snapshot) = state.audit_source.snapshot_arc(&publisher, platform).await {
             snapshots.push((platform, snapshot.fetched_at_unix_ms));
         }
     }
@@ -3518,8 +3628,14 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
             ),
         );
     };
+    // The workspace key is the proven email domain, never the free-text
+    // studio name: two studios behind one domain share one workspace, and a
+    // studio name cannot be claimed by whoever types it first. The studio
+    // stays the lead's human label (`display_name`).
+    let publisher = crate::signin::workspace_key_for_email(&request.email)
+        .unwrap_or_else(|| leads::publisher_slug(&request.studio));
     let lead = Lead {
-        publisher: leads::publisher_slug(&request.studio),
+        publisher: publisher.clone(),
         email: request.email.trim().to_string(),
         platforms: request.platforms.clone(),
         monthly_revenue_range: request.revenue.clone(),
@@ -3534,10 +3650,10 @@ async fn free_audit_submit(State(state): State<AppState>, body: Bytes) -> Respon
             // An existing workspace only accepts its recorded contacts, and
             // a new one needs the creating email domain's app-ads.txt proof;
             // a refusal is recorded and no link is issued.
-            match record_workspace(&state, &lead.publisher, &lead.email).await {
-                Ok(()) => issue_signin_link(&state, &lead.publisher, lead.email.trim()).await,
+            match record_workspace(&state, &publisher, &lead.email).await {
+                Ok(()) => issue_signin_link(&state, &publisher, lead.email.trim()).await,
                 Err(refusal) => {
-                    record_workspace_refusal(&state, &lead.publisher, &refusal);
+                    record_workspace_refusal(&state, &publisher, &refusal);
                 }
             }
             let (from_day, to_day) = default_audit_window(now_unix_ms(&state));
@@ -3697,15 +3813,78 @@ async fn watch_page() -> Html<String> {
     ))
 }
 
+/// Parse the optional apps textarea: one app-store id or URL per line.
+///
+/// Blank lines are ignored, duplicate values collapse to their first
+/// occurrence, and more than [`watch_html::MAX_WATCH_APPS`] distinct apps or
+/// any malformed line is the typed field error. Duplicates use the exact
+/// [`apex_watch::app_identity`] rule of [`apex_watch::distinct_app_count`]
+/// (Unicode lowercase after trimming), so the fifty-line bound and the tier
+/// count cannot disagree about whether two lines name one app — including
+/// the Kelvin sign, which folds to `k`. The tier is the number of distinct
+/// apps the subscriber named, never a form field.
+fn parse_watch_apps(text: &str) -> Result<Vec<String>, &'static str> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut apps = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !is_watch_app_line(line) {
+            return Err(watch_html::WATCH_APPS_ERROR);
+        }
+        if seen.insert(apex_watch::app_identity(line)) {
+            apps.push(line.to_string());
+            if apps.len() > watch_html::MAX_WATCH_APPS {
+                return Err(watch_html::WATCH_APPS_ERROR);
+            }
+        }
+    }
+    Ok(apps)
+}
+
+/// Whether one trimmed line names an app-store id or an http(s) URL. Values
+/// are compared through the Unicode identity rule and stored as submitted;
+/// the check only refuses whitespace/control characters, overlong lines,
+/// empty values and URLs without a host. Unicode letters are accepted in an
+/// id (the Kelvin sign included) so the parser can apply the same fold as
+/// [`apex_watch::distinct_app_count`].
+fn is_watch_app_line(line: &str) -> bool {
+    if line.chars().count() > 2_048
+        || line
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return false;
+    }
+    if let Some((scheme, rest)) = line.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return false;
+        }
+        let host = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        return !host.is_empty() && host.contains('.');
+    }
+    !line.is_empty()
+        && line.chars().all(|character| {
+            character.is_alphanumeric() || "._~:/?#[]@!$&'()*+,;=%-".contains(character)
+        })
+}
+
 /// `POST /watch`: validate the form fields, create a pending subscriber and
 /// an Adyen payment link, email the one-time email-confirmation link and
 /// redirect to the confirmation. Nothing is switched on here: the watch has
 /// no active checks until the payment webhook activates the pending row.
 ///
-/// The tier is derived from the reported app count (the evidence), never from
-/// a form checkbox. Validation failures re-render the request page with the
-/// exact field copy and the safe values preserved; storage failures re-render
-/// it with the submission-failure copy and the retry action.
+/// The tier is the number of distinct apps the subscriber names (the store's
+/// `tier_from_apps` rule), never a form checkbox and never the account ids in
+/// app-ads.txt. Validation failures re-render the request page with the exact
+/// field copy and the safe values preserved; storage failures re-render it
+/// with the submission-failure copy and the retry action.
 async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
     let ctx = ConsoleCtx::from_env();
     let Ok(fields) = leads::parse_form(&body) else {
@@ -3715,20 +3894,31 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
         domain: fields.get("domain").cloned().unwrap_or_default(),
         email: fields.get("email").cloned().unwrap_or_default(),
         accounts: fields.get("accounts").cloned().unwrap_or_default(),
+        apps: fields.get("apps").cloned().unwrap_or_default(),
     };
-    let errors =
+    let mut errors =
         apex_watch::validate_watch_signup(&values.domain, &values.email, &values.accounts, false)
             .err()
             .unwrap_or_default();
+    let apps = match parse_watch_apps(&values.apps) {
+        Ok(apps) => apps,
+        Err(message) => {
+            errors.push(apex_watch::WatchFieldError {
+                field: "apps",
+                message,
+            });
+            Vec::new()
+        }
+    };
     if !errors.is_empty() {
         return page(
             StatusCode::BAD_REQUEST,
             watch_html::render_request_page(&ctx, &WatchPageState::Invalid { values, errors }),
         );
     }
-    // Refuse before any network work when the store that would receive the
+    // Refuse before any work when the store that would receive the
     // subscriber is not configured: a form that can never be stored must not
-    // fetch the tier evidence first.
+    // be accepted first.
     let Some(store) = &state.watch else {
         return page(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3738,31 +3928,16 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             ),
         );
     };
-    // The tier is evidence, not a form field: the domain's public app-ads.txt
-    // is fetched behind the guarded proof source and the distinct publisher
-    // account ids count the portfolio. Unavailable evidence records the
-    // normal tier with a warning and never blocks the pending sign-up. This
-    // is the request's only guarded fetch.
-    let app_count = match &state.app_ads_proof {
-        Some(proof) => match proof.app_count(&values.domain).await {
-            Ok(count) => count,
-            Err(refusal) => {
-                tracing::warn!(
-                    domain = %values.domain,
-                    ?refusal,
-                    "watch tier evidence unavailable; recording the normal tier"
-                );
-                0
-            }
-        },
-        None => 0,
-    };
+    // The tier is the count of distinct apps the subscriber names, never the
+    // ad-system account ids in app-ads.txt (one publisher commonly lists
+    // several account ids for one app). The store derives it with
+    // `tier_from_apps`; nothing in this form can choose a tier.
     let now = now_unix_ms(&state);
     let request = apex_watch::model::SubscribeRequest {
         domain: values.domain.clone(),
         email: values.email.clone(),
         accounts: values.accounts.clone(),
-        app_count,
+        apps,
     };
     match store.subscribe_pending(now, &request) {
         Ok(outcome) => {
@@ -3800,15 +3975,15 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
 }
 
 /// One recorded subscriber row by reference.
+///
+/// The store's id index answers this in one probe. The previous `list()`
+/// implementation cloned every subscriber row and scanned the vector, which
+/// made every confirmation and recorded-page render O(subscribers).
 fn find_subscriber(
     store: &apex_watch::SubscriberStore,
     reference: &str,
 ) -> Option<apex_watch::model::Subscriber> {
-    store
-        .list()
-        .ok()?
-        .into_iter()
-        .find(|subscriber| subscriber.id == reference)
+    store.get(reference).ok().flatten()
 }
 
 /// The publisher slug the subscriber store derives for `domain` (its one
@@ -3904,13 +4079,10 @@ async fn watch_requested(
     };
     let reference = reference.filter(|value| is_subscriber_id(value));
     let subscriber = reference.as_deref().and_then(|reference| {
-        state.watch.as_ref().and_then(|store| {
-            store
-                .list()
-                .ok()?
-                .into_iter()
-                .find(|subscriber| subscriber.id == reference)
-        })
+        state
+            .watch
+            .as_ref()
+            .and_then(|store| find_subscriber(store, reference))
     });
     let checkout = subscriber
         .as_ref()
@@ -3964,11 +4136,33 @@ async fn watch_confirm(
             watch_html::render_email_confirmation_refused(&ctx),
         );
     };
-    match store.confirm_email(now_unix_ms(&state), &token) {
-        Ok(outcome) => page(
-            StatusCode::OK,
-            watch_html::render_email_confirmed(&ctx, &outcome.email),
-        ),
+    let now = now_unix_ms(&state);
+    match store.confirm_email(now, &token) {
+        Ok(outcome) => match store.create_profile_token_at(now, &outcome.reference) {
+            Ok(profile_token) => {
+                let values = watch_html::BillingProfileFormValues {
+                    profile_token,
+                    reference: outcome.reference,
+                    ..Default::default()
+                };
+                page(
+                    StatusCode::OK,
+                    watch_html::render_billing_profile_form(
+                        &ctx,
+                        Some(&outcome.email),
+                        &values,
+                        &[],
+                    ),
+                )
+            }
+            Err(error) => {
+                tracing::error!(%error, "billing-profile token could not be created");
+                page(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    errors::internal(&ctx, &console_reference(&state, "/watch/confirm")),
+                )
+            }
+        },
         Err(
             apex_watch::WatchError::ConfirmationUsed
             | apex_watch::WatchError::ConfirmationExpired
@@ -3986,6 +4180,269 @@ async fn watch_confirm(
             )
         }
     }
+}
+
+/// The stable recorded page after the billing profile is stored.
+#[derive(Debug, Deserialize, Default)]
+struct BillingProfileRecordedParams {
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+}
+
+async fn watch_billing_profile_recorded(
+    State(state): State<AppState>,
+    params: Result<Query<BillingProfileRecordedParams>, QueryRejection>,
+) -> Html<String> {
+    let ctx = ConsoleCtx::from_env();
+    let reference = match params {
+        Ok(Query(params)) => params.reference,
+        Err(_) => None,
+    };
+    let reference = reference.filter(|value| is_subscriber_id(value));
+    let subscriber = reference.as_deref().and_then(|reference| {
+        state
+            .watch
+            .as_ref()
+            .and_then(|store| find_subscriber(store, reference))
+    });
+    let active = subscriber
+        .as_ref()
+        .is_some_and(|subscriber| subscriber.is_active());
+    let invoice_number = subscriber
+        .as_ref()
+        .and_then(|subscriber| subscriber.first_invoice_number);
+    Html(watch_html::render_billing_profile_recorded(
+        &ctx,
+        reference.as_deref().unwrap_or_default(),
+        active,
+        invoice_number,
+    ))
+}
+
+/// Parse and validate the billing-profile form. Every refusal carries the
+/// exact field copy and the safe values are preserved by the caller.
+fn billing_profile_from_values(
+    values: &watch_html::BillingProfileFormValues,
+) -> Result<apex_watch::BillingProfile, Vec<watch_html::BillingProfileError>> {
+    let mut errors = Vec::new();
+    let legal_name = values.legal_name.trim();
+    if legal_name.is_empty() || legal_name.chars().count() > 200 {
+        errors.push(watch_html::BillingProfileError {
+            field: "legal_name",
+            message: watch_html::LEGAL_NAME_ERROR,
+        });
+    }
+    let address_lines: Vec<String> = values
+        .address_lines
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if address_lines.is_empty()
+        || address_lines.len() > 10
+        || address_lines.iter().any(|line| line.chars().count() > 500)
+    {
+        errors.push(watch_html::BillingProfileError {
+            field: "address_lines",
+            message: watch_html::ADDRESS_ERROR,
+        });
+    }
+    let country = values.country.trim().to_ascii_uppercase();
+    if !apex_billing::vat::is_valid_country_code(&country) {
+        errors.push(watch_html::BillingProfileError {
+            field: "country",
+            message: watch_html::COUNTRY_ERROR,
+        });
+    }
+    let vat = values.vat_number.trim();
+    let vat_number = if vat.is_empty() {
+        None
+    } else if apex_billing::is_valid_vat_number(vat) {
+        Some(vat.to_string())
+    } else {
+        errors.push(watch_html::BillingProfileError {
+            field: "vat_number",
+            message: watch_html::VAT_ERROR,
+        });
+        None
+    };
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(apex_watch::BillingProfile {
+        legal_name: legal_name.to_string(),
+        address_lines,
+        country,
+        vat_number,
+    })
+}
+
+/// `POST /watch/billing-profile`: consume the one-time profile token and
+/// store the customer's legal identity. The token is validated and the form
+/// checked before it is consumed, so a correctable field error does not burn
+/// the link. A replay is refused without overwriting the stored profile.
+async fn watch_billing_profile(State(state): State<AppState>, body: Bytes) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let Ok(fields) = leads::parse_form(&body) else {
+        return page(StatusCode::BAD_REQUEST, errors::bad_request(&ctx, None));
+    };
+    let values = watch_html::BillingProfileFormValues {
+        profile_token: fields.get("profile_token").cloned().unwrap_or_default(),
+        reference: fields.get("reference").cloned().unwrap_or_default(),
+        legal_name: fields.get("legal_name").cloned().unwrap_or_default(),
+        address_lines: fields.get("address_lines").cloned().unwrap_or_default(),
+        country: fields.get("country").cloned().unwrap_or_default(),
+        vat_number: fields.get("vat_number").cloned().unwrap_or_default(),
+    };
+    let token = values.profile_token.trim();
+    if !apex_watch::is_confirmation_token(token) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_billing_profile_refused(&ctx),
+        );
+    }
+    let reference = values.reference.trim();
+    if !reference.is_empty() && !is_subscriber_id(reference) {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_billing_profile_refused(&ctx),
+        );
+    }
+    let profile = match billing_profile_from_values(&values) {
+        Ok(profile) => profile,
+        Err(errors) => {
+            return page(
+                StatusCode::BAD_REQUEST,
+                watch_html::render_billing_profile_form(&ctx, None, &values, &errors),
+            )
+        }
+    };
+    let now = now_unix_ms(&state);
+    match store.consume_profile_token(now, token) {
+        Ok(consumed_reference) => {
+            // The token is authoritative; a mismatched hidden reference is a
+            // refusal (the token is already spent, so nothing can be
+            // replayed against the other row).
+            if !reference.is_empty() && reference != consumed_reference {
+                return page(
+                    StatusCode::BAD_REQUEST,
+                    watch_html::render_billing_profile_refused(&ctx),
+                );
+            }
+            match store.set_billing_profile(&consumed_reference, &profile, now) {
+                Ok(subscriber) => {
+                    if subscriber.is_active() {
+                        match issue_watch_first_invoice(&state, store, &subscriber, now).await {
+                            Ok(Some(number)) => tracing::info!(
+                                reference = %subscriber.id,
+                                invoice = number,
+                                "setup-watch first invoice issued"
+                            ),
+                            Ok(None) => tracing::warn!(
+                                reference = %subscriber.id,
+                                "setup-watch first invoice deferred: billing dependencies are not configured"
+                            ),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                reference = %subscriber.id,
+                                "setup-watch first invoice could not be issued"
+                            ),
+                        }
+                    }
+                    Redirect::to(&format!(
+                        "{}?ref={}",
+                        watch_html::BILLING_PROFILE_RECORDED_PATH,
+                        subscriber.id
+                    ))
+                    .into_response()
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "billing profile could not be stored");
+                    page(
+                        StatusCode::OK,
+                        watch_html::render_billing_profile_refused(&ctx),
+                    )
+                }
+            }
+        }
+        Err(
+            apex_watch::WatchError::ProfileTokenUsed
+            | apex_watch::WatchError::ProfileTokenExpired
+            | apex_watch::WatchError::ProfileTokenUnknown,
+        ) => page(
+            StatusCode::OK,
+            watch_html::render_billing_profile_refused(&ctx),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "billing-profile token could not be consumed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errors::internal(&ctx, &console_reference(&state, "/watch/billing-profile")),
+            )
+        }
+    }
+}
+
+/// Issue the first payment's invoice when the deployment configured the
+/// seller profile, register and VIES seam. `Ok(None)` means the profile is
+/// stored but the invoice is deferred (activation or configuration).
+async fn issue_watch_first_invoice(
+    state: &AppState,
+    store: &apex_watch::SubscriberStore,
+    subscriber: &apex_watch::Subscriber,
+    now_unix_ms: i64,
+) -> Result<Option<u64>, apex_watch::WatchError> {
+    let amount_micros = match subscriber.tier {
+        apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
+        apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
+    };
+    // The wired dependencies win. A deployment that only configured the
+    // standard billing environment still issues the first invoice; when
+    // neither is present the profile is stored and the invoice is deferred.
+    let configured = state.watch_billing.as_ref().map(|billing| {
+        (
+            Arc::clone(&billing.seller),
+            billing.register_path.clone(),
+            Arc::clone(&billing.vies),
+        )
+    });
+    let (seller, register_path, vies) = match configured {
+        Some(configured) => configured,
+        None => match apex_billing::BillingProfile::from_env() {
+            Ok(seller) => (
+                Arc::new(seller),
+                std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH),
+                Arc::new(apex_billing::HttpViesClient::default())
+                    as Arc<dyn apex_billing::ViesClient>,
+            ),
+            Err(_) => return Ok(None),
+        },
+    };
+    let month = apex_watch::current_month(now_unix_ms);
+    let deps = apex_watch::BillDeps {
+        seller: seller.as_ref(),
+        register_path: &register_path,
+        vies: vies.as_ref(),
+        adyen: state.adyen.as_deref(),
+        transport: state.billing_transport.as_ref().map(|t| t.get()),
+    };
+    let invoice = apex_watch::issue_first_invoice(
+        store,
+        &subscriber.id,
+        &month,
+        amount_micros,
+        apex_billing::PLAN_CURRENCY,
+        &deps,
+    )
+    .await?;
+    Ok(Some(invoice.number))
 }
 
 /// `sub_` plus 10 hex characters, the subscriber-id shape.
@@ -4024,6 +4481,71 @@ mod tests {
     use crate::state::AppState;
 
     use super::*;
+
+    #[test]
+    fn the_apps_textarea_is_bounded_and_deduped_like_the_tier_count() {
+        // Fifty case-insensitive-distinct apps fit exactly.
+        let fifty: Vec<String> = (0..50)
+            .map(|index| format!("com.example.app{index}"))
+            .collect();
+        assert_eq!(
+            parse_watch_apps(&fifty.join("\n")).expect("fifty").len(),
+            50
+        );
+        // Case and whitespace variants of the same app are one line.
+        let variants = "App.One\n app.one \nAPP.ONE\n";
+        assert_eq!(
+            parse_watch_apps(variants).expect("variants"),
+            vec!["App.One".to_string()],
+            "the first spelling is preserved"
+        );
+        // The Kelvin reproduction: 49 ASCII apps plus K (U+212A) and k are
+        // 50 distinct under the Unicode identity the tier count uses. The old
+        // ASCII fold counted 51 and refused a valid core signup.
+        let mut kelvin: Vec<String> = (1..=49)
+            .map(|index| format!("com.example.app{index}"))
+            .collect();
+        kelvin.push("K".to_string());
+        kelvin.push("k".to_string());
+        let parsed = parse_watch_apps(&kelvin.join("\n")).expect("kelvin fifty");
+        assert_eq!(parsed.len(), 50);
+        assert_eq!(
+            apex_watch::distinct_app_count(&parsed),
+            50,
+            "the parser and the tier count agree on the Kelvin fold"
+        );
+        assert_eq!(
+            apex_watch::tier_from_apps(apex_watch::distinct_app_count(&parsed)),
+            apex_watch::Tier::Core,
+            "fifty distinct apps are the core tier"
+        );
+        // Blank lines are ignored; the bound counts distinct apps.
+        let fifty_one = format!(
+            "{}\n",
+            (0..51)
+                .map(|index| format!("app{index}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            parse_watch_apps(&fifty_one),
+            Err(watch_html::WATCH_APPS_ERROR)
+        );
+        // Malformed lines are typed refusals, not silently dropped.
+        let long = "a".repeat(2_049);
+        for bad in [
+            "app with spaces",
+            "https://",
+            "ftp://example.com/app",
+            long.as_str(),
+        ] {
+            assert_eq!(
+                parse_watch_apps(bad),
+                Err(watch_html::WATCH_APPS_ERROR),
+                "{bad}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn metrics_endpoint_counts_requests_and_exposes_uptime() {

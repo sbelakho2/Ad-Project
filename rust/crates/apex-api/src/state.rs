@@ -40,6 +40,20 @@ impl BillingTransport {
     }
 }
 
+/// The billing dependencies the first setup-watch invoice needs: the seller
+/// VAT profile, the invoice register path and the VIES seam. Present only
+/// when the deployment configured `APEX_BILLING_PROFILE`; without it the
+/// billing profile is still stored and the invoice is issued at activation.
+#[derive(Clone, Debug)]
+pub struct WatchBilling {
+    /// The seller identity the invoice renders with.
+    pub seller: Arc<apex_billing::BillingProfile>,
+    /// The gapless invoice register path.
+    pub register_path: std::path::PathBuf,
+    /// The EU VAT register seam reverse charge is decided through.
+    pub vies: Arc<dyn apex_billing::ViesClient>,
+}
+
 /// The complete dependency set of the HTTP surface.
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -91,6 +105,10 @@ pub struct AppState {
     /// The setup-watch subscriber store behind `GET`/`POST /watch`. `None`
     /// makes `POST /watch` answer the not-configured page (`503`).
     pub watch: Option<Arc<apex_watch::SubscriberStore>>,
+    /// The first-invoice billing dependencies for the watch billing-profile
+    /// form. `None` still stores the profile; the invoice is issued when the
+    /// deployment configures the seller profile and register.
+    pub watch_billing: Option<Arc<WatchBilling>>,
     /// The frozen sales-outcomes appender. `None` (tests, or a deployment
     /// that removed the variable) makes every call site a no-op; the primary
     /// action never depends on it.
@@ -151,6 +169,7 @@ impl AppState {
             app_ads_proof: None,
             leads: None,
             watch: None,
+            watch_billing: None,
             outcomes: None,
             collection: None,
             ledger_sessions: Arc::new(LedgerSessions::new(
@@ -235,6 +254,14 @@ impl AppState {
     #[must_use]
     pub fn with_watch(mut self, store: Arc<apex_watch::SubscriberStore>) -> Self {
         self.watch = Some(store);
+        self
+    }
+
+    /// Attach the first-invoice billing dependencies (seller profile,
+    /// register and VIES seam) for the watch billing-profile form.
+    #[must_use]
+    pub fn with_watch_billing(mut self, billing: Arc<WatchBilling>) -> Self {
+        self.watch_billing = Some(billing);
         self
     }
 

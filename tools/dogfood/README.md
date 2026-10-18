@@ -92,22 +92,60 @@ the fix has not landed the cell fails (that failure is the adversarial proof):
   `GET`, the `publisher` body field on `POST`), and the `200` read carries
   only that publisher's snapshot. A second publisher is read through the same
   route to prove the bytes never cross. The session-gated console GETs answer
-  `303 -> /console/ledger`.
+  `303 -> /console/ledger`; the `/` overview is one of them and must render
+  `200` under the same session. Both mint paths (the ledger-token `POST
+  /console/ledger` exchange and `POST /console/signin`) must set the session
+  cookie with `Path=/;` (exact, host-only, `HttpOnly`, `SameSite=Lax`,
+  `Secure` on HTTPS): a `Path=/console;` cookie is never sent by a browser to
+  `/`, which is the pre-fix bug the auth cells now refuse.
+- `input-corpus` also covers `GET /console/ledger?page=N`. The 24-record
+  fixture renders one page with the pinned `Showing 1-24 of 24 records` note
+  and no `rel=prev`/`rel=next`; `page=1` is the same page; `page=2` (past the
+  last page), `page=abc`, `page=0`, `page=-1`, `page=1e3` and an overflowing
+  page are the typed HTML 400 that echoes no rejected value and links only
+  the stable first page. The overview's verified-records KPI stays 24.
 - `signin-ownership`: the free-audit sign-in link for an existing workspace is
   delivered only to its recorded contacts (never the form-supplied email), a
-  brand-new workspace with a mismatched-domain email is refused, and a spent
-  single-use link is refused on every repeat. The accepted submission stores
-  the lead and answers `303` even when the workspace/link is refused.
+  brand-new workspace with a mismatched-domain email is refused, and a new
+  workspace is keyed by the **proven email domain** (`digitalturbine.com` ->
+  `digitalturbine-com` or the exact-domain form), never by the free-text
+  studio slug; the studio is only the lead's display label. Two different
+  studios on one proven domain therefore map to one workspace/token entry.
+  The primary instance boots with `APEX_CONSOLE_URL` set to its own loopback
+  origin and `APEX_SUPPORT_URL` set to an absolute Help URL: the delivered
+  link is exactly `{base}/console/signin?token=<32 hex>`, console pages carry
+  the configured absolute Help link, and the free-audit and watch forms keep
+  the on-site relative `/support/`. Sign-in links are scanner-safe: repeated
+  `GET /console/signin?token=` render a page with a form that POSTs the
+  hidden token to `/console/signin` and mint nothing; the POST consumes
+  exactly once and answers `303` with `Location: /` and the session cookie
+  flags (`Path=/; HttpOnly; SameSite=Lax`; host-only, `Secure` on HTTPS), the
+  follow-up `GET /` renders the overview, and a second POST is refused. A
+  second, otherwise fully configured instance starts with
+  `APEX_CONSOLE_URL` unset: its free audit still answers the saved-lead `303`,
+  but `signin.jsonl` stays empty, no email is delivered, and the startup
+  warning plus the typed `missing_base` refusal are recorded in its log. The
+  accepted free-audit submission on the primary still answers `303` to its
+  confirmation page even when the workspace/link is refused.
 - `payment-activation`: a setup-watch sign-up lands pending with no check run,
-  the checkout link recorded, and the confirmation email sent; the tier comes
-  from the domain's app-ads evidence (the form's `tier`/`app_count` fields are
-  ignored; unavailable evidence records the honest Normal tier). The mailed
-  `GET /watch/confirm?token=` confirms the address (missing/garbage tokens are
-  `400`; a used token is the `200` refusal), the signed Adyen webhook
-  activates the row (both the bare subscriber id and `apex-watch:<id>`), the
-  stored card is recorded, a replay adds nothing, a daily pass sees the
-  confirmed subscriber as checkable, and the monthly bill charges the card
-  idempotently.
+  the checkout link recorded, and the confirmation email sent. The tier comes
+  from the **distinct apps the subscriber names** in the optional `apps`
+  textarea (one app-store id or URL per line, max 50): at least
+  `CORE_TIER_MIN_APP_COUNT = 10` distinct apps is Core, nine is Normal, and
+  account ids have no influence; the form has no tier/account-count input.
+  The mailed `GET /watch/confirm?token=` confirms the address (missing/garbage
+  tokens are `400`; a used token is the `200` refusal) and renders the
+  one-time `POST /watch/billing-profile` form (`profile_token` + `reference`;
+  `legal_name`, `address_lines`, `country`, optional `vat_number`). A valid
+  profile is stored on the subscriber; a replay is refused and never
+  overwrites it; bad country, overlong address and malformed VAT are typed
+  refusals (nothing stored). The signed Adyen webhook activates the row (both
+  the bare subscriber id and `apex-watch:<id>`), stores the card, and a replay
+  adds nothing. The monthly bill then issues the first payment's invoice with
+  gapless numbers, the next month charges the stored card for the renewal,
+  a rerun is idempotent, and a subscriber without a profile is refused with
+  the documented "no customer billing profile" reason (never silently
+  skipped).
 - `GET /watch/confirm` gets its own response contract in the loop: a missing
   or malformed token is `400` with the typed refusal copy, a fresh mailed
   token is `200` "Your email is confirmed.", and a spent token is the `200`
@@ -117,12 +155,25 @@ the fix has not landed the cell fails (that failure is the adversarial proof):
 
 `differential-truth` gained the LevelPlay revenue-vs-users cell (the reporting
 request carries `metrics=revenue,activeUsers` and `breakdowns=date,abTest`, so
-the lift value is revenue and the active users ride separately) and the VIES
+the lift value is revenue and the active users ride separately), the VIES
 cell (reverse charge only with a recorded VIES confirmation; without one the
-invoice is held with the documented reason). `failure-injection` gained the
-DNS-rebinding cell (the watch fetch must pass
+invoice is held with the documented reason), the **monitoring-tier** cell (the
+fleet audit fills `platform_totals_30d` from MAX country revenue, LevelPlay app
+revenue and AdMob mediation revenue; the seeded revenues select the matching
+$1,500/$3,000 tier in the recorded plan state instead of always $500), and the
+**platform-proposal** cell (a LevelPlay B-group waterfall instance and an
+AdMob mediation group each make the cycle propose at least one action).
+`failure-injection` gained the DNS-rebinding cell (the watch fetch must pass
 `curl --resolve host:port:address` with the guard-approved address) and the
 unpaid-subscriber cell (a subscriber that has not paid runs no daily check).
+
+The new public routes are declared in the catalog with their implementers:
+`POST /console/signin` (`routes.rs`, `signin.rs`, `session.rs`, the html
+module) and `POST /watch/billing-profile` (`routes.rs`, `watch_html.rs`,
+`apex-watch` store/model/bill). On a pre-fix tree the static gate reports the
+two routes as declared-but-not-registered and the `signin-ownership`,
+`payment-activation`, `differential-truth` cells above fail — the adversarial
+proof the fixes have not landed yet.
 
 
 Enforcement: every required cell must be attempted and pass. Any failed cell,

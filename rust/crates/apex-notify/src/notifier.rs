@@ -87,10 +87,12 @@ impl Notifier {
         let mut report = NotifyReport::default();
         for contact in contacts {
             let to = contact.email();
-            if self
-                .log
-                .has_sent(message.template_class.as_str(), &message.dedup_key, to)
-            {
+            if self.log.has_sent_at(
+                message.template_class.as_str(),
+                &message.dedup_key,
+                to,
+                now_unix_ms,
+            ) {
                 report.duplicates += 1;
                 self.count(message.template_class, NotificationOutcome::Duplicate);
                 continue;

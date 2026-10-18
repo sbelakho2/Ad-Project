@@ -4,16 +4,18 @@ Current deployment layout for the no-SDK autopilot product:
 
 - `deployment.toml`: the deployment inventory (service, site, edge,
   monitoring paths; no secrets).
-- `caddy/`: the edge config. Two public origins, both fronting `apex-api`
-  on the console host: the marketing host serves the built Zola site and
-  proxies only `POST /free-audit`, `/audit-requested/*` and `/console*` to
-  `apex-api`; the API host fronts `apex-api` whole. The operator origin is
-  not on this edge: `apex-control` runs on the control host and binds
-  loopback there (see "Hosting split" below). Host names come from
-  `SITE_DOMAIN` and `APEX_DOMAIN`; the marketing JSON access log path comes
-  from `APEX_ACCESS_LOG` (default `/var/log/caddy/apex-access.json`). The
-  routing contract lives in `infrastructure/caddy/tests/contract.sh` and
-  runs in CI.
+- `caddy/`: the edge config. Three public origins front `apex-api`: the
+  marketing host serves the built Zola site and proxies only
+  `POST /free-audit`, `/audit-requested/*` and `/assets/fonts/*` to `apex-api`; the API host
+  fronts `apex-api` whole; the console host fronts `apex-api` whole, so its
+  overview is `/` and `/console/*` the console pages. The marketing host no
+  longer serves `/console`. The operator origin is not on this edge:
+  `apex-control` runs on the control host and binds loopback there (see
+  "Hosting split" below). Host names come from `SITE_DOMAIN`, `APEX_DOMAIN`
+  and `CONSOLE_DOMAIN` (default `console.apexmediation.ee`); the marketing
+  JSON access log path comes from `APEX_ACCESS_LOG` (default
+  `/var/log/caddy/apex-access.json`). The routing contract lives in
+  `infrastructure/caddy/tests/contract.sh` and runs in CI.
 - `systemd/apex-api.service`: the service unit; the environment file holds
   the vault key, account root, live-audit token, per-publisher ledger tokens
   (`APEX_LEDGER_TOKENS_FILE`, a JSON object of publisher to token) and Adyen
@@ -229,9 +231,9 @@ cd monitoring && envsubst < alertmanager.yml > alertmanager.generated.yml
 docker compose up -d
 ```
 
-Start Caddy with `SITE_DOMAIN`, `APEX_DOMAIN` and `APEX_ACCESS_LOG` in its
-environment (see `caddy/README.md`); the access-log directory must exist
-first.
+Start Caddy with `SITE_DOMAIN`, `APEX_DOMAIN`, `CONSOLE_DOMAIN` and
+`APEX_ACCESS_LOG` in its environment (see `caddy/README.md`); the access-log
+directory must exist first.
 
 ## Hosting split
 
@@ -241,6 +243,18 @@ host runs the operator plane and the analytics store and reads one-way copies
 of those files from the Object Storage bucket. Only the push exports, only
 the pull imports, and the pull side accepts an object only after its sha256
 matches the manifest.
+
+Public origins on the console host's Caddy edge:
+
+| origin | visibility | upstream | notes |
+|---|---|---|---|
+| marketing (`SITE_DOMAIN`) | public | `apex-api` for `POST /free-audit`, `/audit-requested/*` and `/assets/fonts/*` only | static Zola site; no `/console` path; access log |
+| API (`APEX_DOMAIN`) | public | `apex-api` whole | `/metrics` refused |
+| console (`CONSOLE_DOMAIN`) | public | `apex-api` whole | console overview at `/`; `/console/*` pages; `/metrics` refused |
+
+The marketing host no longer serves `/console`: that prefix is static there
+and the console lives on its own origin. The control host remains separate
+and carries no public host block.
 
 Console host:
 
@@ -285,15 +299,32 @@ host, `GET` and `POST /v1/operator/jobs` on apex-api serve the operator jobs;
 without the variable the control plane keeps its local
 `.apex/control/jobs` directory.
 
+### Public URLs
+
+Customer links are absolute and never depend on the request host:
+
+- `APEX_CONSOLE_URL` (required for sign-in links): the absolute console
+  origin, `https://console.<domain>`, matching `CONSOLE_DOMAIN`. apex-api
+  uses it for the emailed one-time sign-in link, and the runner and watch
+  use it for their email links. A root-relative link would land on the
+  marketing homepage instead of the console overview, so set it explicitly
+  on the console host's services.
+- `APEX_SUPPORT_URL`: the absolute support page the console Help link opens,
+  for example `https://www.example.com/support`. Keeping Help off the
+  console origin means it needs no console route.
+
+The control host remains separate: it serves no public origin, and its
+operator plane is reachable only on loopback.
+
 ### Metrics rule
 
-`/metrics` never crosses a public origin. The API host refuses the path with
-a 404 before the catch-all proxy and apex-api serves it on its loopback bind;
-the edge contract fails if `/metrics` is proxied on either host or if any
-port other than `8787` appears in the config. After the split the scrape of
-`apex-api` and the textfile exports happen on each host's private boundary,
-and apex-control exposes no `/metrics` route at all (textfile export only,
-see `monitoring/README.md`).
+`/metrics` never crosses a public origin. The API and console hosts refuse
+the path with a 404 before the catch-all proxy and apex-api serves it on its
+loopback bind; the edge contract fails if `/metrics` is proxied on any host
+or if any port other than `8787` appears in the config. After the split the
+scrape of `apex-api` and the textfile exports happen on each host's private
+boundary, and apex-control exposes no `/metrics` route at all (textfile
+export only, see `monitoring/README.md`).
 
 ### Sync flow
 

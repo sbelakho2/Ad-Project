@@ -29,12 +29,12 @@ pub struct CycleJobReport {
 }
 
 /// Run one write cycle from `snapshot_paths`: load each audit snapshot, load
-/// the persisted bucket model when present, generate the ranked floor
-/// proposals per snapshot, and run the gated loop. A publisher with several
-/// platforms is handed several files (its own per-platform snapshots); the
-/// default single-file call is the one-element list. Proposals from every
-/// snapshot are accumulated, so a MAX snapshot yields floor moves while a
-/// LevelPlay or AdMob snapshot (which carry no ad units) yields none.
+/// the persisted bucket model when present, generate the ranked proposals per
+/// snapshot, and run the gated loop. A publisher with several platforms is
+/// handed several files (its own per-platform snapshots); the default
+/// single-file call is the one-element list. Proposals from every snapshot are
+/// accumulated: MAX yields country-floor moves, LevelPlay yields waterfall
+/// instance-price moves, and AdMob yields mediation-group floor moves.
 pub async fn run(
     runner: &Runner,
     ledger: &mut dyn LedgerLog,
@@ -71,7 +71,7 @@ pub async fn run(
             ledger,
             runner.policy(),
             &[],
-            proposals.clone(),
+            &proposals,
             runner.events().map(AsRef::as_ref),
             now_unix_ms,
         )
@@ -89,16 +89,26 @@ pub async fn run(
         // not grant approval.
         let snapshot_digest = apex_audit::snapshot_digest(&snapshot);
         let policy_version = format!("apex-lift-{}", apex_lift::ENGINE_VERSION);
+        // Index the plan once, lazily: an approval pass with N held proposals
+        // must not rescan (and re-key) the plan N times. Duplicate keys keep
+        // the first proposal, which is the candidate the loop acted on.
+        let mut proposals_by_key: Option<
+            std::collections::HashMap<String, &crate::model::Proposal>,
+        > = None;
         for outcome in &outcome.outcomes {
             let ActionOutcome::AwaitingApproval { idempotency_key } = outcome else {
                 continue;
             };
-            let proposal = proposals.iter().find(|proposal| {
-                crate::keys::idempotency_key(&proposal.action)
-                    .ok()
-                    .as_deref()
-                    == Some(idempotency_key.as_str())
+            let index = proposals_by_key.get_or_insert_with(|| {
+                let mut index = std::collections::HashMap::with_capacity(proposals.len());
+                for proposal in &proposals {
+                    if let Ok(key) = crate::keys::idempotency_key(&proposal.action) {
+                        index.entry(key).or_insert(proposal);
+                    }
+                }
+                index
             });
+            let proposal = index.get(idempotency_key.as_str()).copied();
             let (test_label, country) = proposal
                 .map(|proposal| crate::notify::proposal_label(&proposal.action))
                 .unwrap_or_else(|| ("Change".to_string(), "all countries".to_string()));
@@ -162,6 +172,14 @@ pub(crate) fn action_label(action: &Action) -> String {
             ad_unit_id,
             entry_id,
         } => format!("remove:{ad_unit_id}:{entry_id}"),
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => format!("instance-price:{instance_id}:{price_micros}"),
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => format!("mediation-floor:{group_id}:{floor_micros}"),
     }
 }
 

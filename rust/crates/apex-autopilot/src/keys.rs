@@ -69,6 +69,26 @@ fn action_slug(action: &Action) -> String {
         } => {
             format!("wfr-{}-{}", slug(ad_unit_id), slug(entry_id))
         }
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => {
+            format!(
+                "ip-{}-{}",
+                slug(instance_id),
+                slug(&apex_core::format_micros_short(*price_micros))
+            )
+        }
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => {
+            format!(
+                "mf-{}-{}",
+                slug(group_id),
+                slug(&apex_core::format_micros_short(*floor_micros))
+            )
+        }
     }
 }
 
@@ -115,6 +135,14 @@ pub fn idempotency_key(action: &Action) -> Result<String, PlatformError> {
             ad_unit_id,
             entry_id,
         } => levelplay_remove_key(ad_unit_id, entry_id),
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => levelplay_price_key(instance_id, instance_id, *price_micros),
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => admob_ecpm_key(group_id, group_id, *floor_micros),
     })
 }
 
@@ -127,10 +155,11 @@ pub fn experiment_name(action: &Action) -> String {
 pub fn platform_of(action: &Action) -> PlatformId {
     match action {
         Action::SetCountryFloor { .. } => PlatformId::AppLovinMax,
-        Action::SetMappingEcpm { .. } => PlatformId::Admob,
+        Action::SetMappingEcpm { .. } | Action::SetAdmobMediationFloor { .. } => PlatformId::Admob,
         Action::SetWaterfallPrice { .. }
         | Action::CreateWaterfallEntry { .. }
-        | Action::RemoveWaterfallEntry { .. } => PlatformId::LevelPlay,
+        | Action::RemoveWaterfallEntry { .. }
+        | Action::SetLevelplayInstancePrice { .. } => PlatformId::LevelPlay,
     }
 }
 
@@ -142,5 +171,7 @@ pub fn operation_of(action: &Action) -> &'static str {
         Action::SetWaterfallPrice { .. } => "updateEntryPrice",
         Action::CreateWaterfallEntry { .. } => "createEntry",
         Action::RemoveWaterfallEntry { .. } => "removeEntry",
+        Action::SetLevelplayInstancePrice { .. } => "updateEntryPrice",
+        Action::SetAdmobMediationFloor { .. } => "updateMediationGroup",
     }
 }

@@ -46,6 +46,25 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(test)]
+thread_local! {
+    /// Rows serialized into a ClickHouse `JSONEachRow` body. One insert path
+    /// used to build a `serde_json::Value` per row and then serialize that
+    /// value again; the seam counts the serialization passes so the test can
+    /// pin one pass per row.
+    static SERIALIZED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_serialized_rows() {
+    SERIALIZED_ROWS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn serialized_rows() -> u64 {
+    SERIALIZED_ROWS.with(std::cell::Cell::get)
+}
+
 use async_trait::async_trait;
 
 use crate::envelope::DomainEvent;
@@ -245,7 +264,40 @@ pub struct RequestLogRow {
     pub environment: String,
 }
 
+/// Borrowed `request_logs` table shape used for insertion, so the row is
+/// serialized once instead of through an intermediate `Value`.
+#[derive(serde::Serialize)]
+struct RequestLogStorage<'a> {
+    event_id: &'a str,
+    occurred_at_utc: String,
+    received_at_utc: String,
+    route_template: &'a str,
+    status: u16,
+    status_class: &'a str,
+    bot_class: &'a str,
+    referrer_host: &'a Option<String>,
+    campaign_code: &'a Option<String>,
+    query_keys: &'a [String],
+    environment: &'a str,
+}
+
 impl RequestLogRow {
+    fn storage(&self) -> RequestLogStorage<'_> {
+        RequestLogStorage {
+            event_id: &self.event_id,
+            occurred_at_utc: self.occurred_at_utc.to_clickhouse(),
+            received_at_utc: self.received_at_utc.to_clickhouse(),
+            route_template: &self.route_template,
+            status: self.status,
+            status_class: &self.status_class,
+            bot_class: &self.bot_class,
+            referrer_host: &self.referrer_host,
+            campaign_code: &self.campaign_code,
+            query_keys: &self.query_keys,
+            environment: &self.environment,
+        }
+    }
+
     /// The `JSONEachRow` shape of the `request_logs` table: the times render
     /// as ClickHouse `DateTime64(3)` text and absent fields stay absent.
     pub fn to_storage_value(&self) -> serde_json::Value {
@@ -606,10 +658,16 @@ impl ClickHouseStore {
             .collect()
     }
 
-    async fn insert_json_rows(
+    /// Serialize each row into one `JSONEachRow` body and POST it.
+    ///
+    /// Each row is serialized exactly once, straight from its typed shape.
+    /// The previous path built a `serde_json::Value` per row first and then
+    /// serialized that value again, doubling the per-row JSON work on every
+    /// ingestion batch.
+    async fn insert_rows<T: serde::Serialize>(
         &self,
         table: &str,
-        rows: &[serde_json::Value],
+        rows: &[T],
     ) -> Result<(), StoreError> {
         if rows.is_empty() {
             return Ok(());
@@ -620,12 +678,22 @@ impl ClickHouseStore {
             self.config.database
         ));
         for row in rows {
+            #[cfg(test)]
+            SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
             body.push_str(
                 &serde_json::to_string(row).map_err(|error| StoreError::Json(error.to_string()))?,
             );
             body.push('\n');
         }
         self.post_text(&body, &[]).await.map(|_| ())
+    }
+
+    async fn insert_json_rows(
+        &self,
+        table: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<(), StoreError> {
+        self.insert_rows(table, rows).await
     }
 
     /// Drop this store's database. Used by integration tests and by an
@@ -705,14 +773,8 @@ impl EventStore for ClickHouseStore {
     }
 
     async fn insert(&self, events: &[DomainEvent]) -> Result<InsertOutcome, StoreError> {
-        let rows: Vec<serde_json::Value> = events
-            .iter()
-            .map(|event| {
-                serde_json::to_value(event.to_row())
-                    .map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
-        self.insert_json_rows("domain_events", &rows).await?;
+        let rows: Vec<crate::envelope::EventRow> = events.iter().map(DomainEvent::to_row).collect();
+        self.insert_rows("domain_events", &rows).await?;
         Ok(InsertOutcome {
             inserted: events.len() as u64,
             duplicates_observed: None,
@@ -720,13 +782,7 @@ impl EventStore for ClickHouseStore {
     }
 
     async fn insert_report_days(&self, rows: &[ReportDayRow]) -> Result<InsertOutcome, StoreError> {
-        let rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                serde_json::to_value(row).map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
-        self.insert_json_rows("report_days", &rows).await?;
+        self.insert_rows("report_days", rows).await?;
         Ok(InsertOutcome {
             inserted: rows.len() as u64,
             duplicates_observed: None,
@@ -734,13 +790,7 @@ impl EventStore for ClickHouseStore {
     }
 
     async fn insert_accounts(&self, rows: &[AccountRow]) -> Result<InsertOutcome, StoreError> {
-        let rows: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                serde_json::to_value(row).map_err(|error| StoreError::Json(error.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
-        self.insert_json_rows("accounts", &rows).await?;
+        self.insert_rows("accounts", rows).await?;
         Ok(InsertOutcome {
             inserted: rows.len() as u64,
             duplicates_observed: None,
@@ -751,9 +801,8 @@ impl EventStore for ClickHouseStore {
         &self,
         rows: &[RequestLogRow],
     ) -> Result<InsertOutcome, StoreError> {
-        let values: Vec<serde_json::Value> =
-            rows.iter().map(RequestLogRow::to_storage_value).collect();
-        self.insert_json_rows("request_logs", &values).await?;
+        let rows: Vec<RequestLogStorage<'_>> = rows.iter().map(RequestLogRow::storage).collect();
+        self.insert_rows("request_logs", &rows).await?;
         Ok(InsertOutcome {
             inserted: rows.len() as u64,
             duplicates_observed: None,
@@ -874,6 +923,20 @@ impl MemoryStore {
     /// read-back of the 30-day retention table).
     pub fn request_logs(&self) -> Vec<RequestLogRow> {
         self.with_state(|state| state.request_logs.clone())
+    }
+
+    /// Retained projection version count per projection. Test seam for the
+    /// publish-time pruning contract (the memory store mirrors the server's
+    /// `prune_superseded_versions`).
+    #[cfg(test)]
+    pub(crate) fn projection_version_counts(&self) -> BTreeMap<&'static str, usize> {
+        self.with_state(|state| {
+            state
+                .projections
+                .iter()
+                .map(|(name, versions)| (*name, versions.len()))
+                .collect()
+        })
     }
 }
 
@@ -1019,10 +1082,9 @@ impl ProjectionStore for ClickHouseStore {
                 &[],
             )
             .await?;
-        rows.iter()
+        rows.into_iter()
             .map(|row| {
-                serde_json::from_value(row.clone())
-                    .map_err(|error| StoreError::Json(error.to_string()))
+                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
             })
             .collect()
     }
@@ -1044,10 +1106,9 @@ impl ProjectionStore for ClickHouseStore {
                 &[],
             )
             .await?;
-        rows.iter()
+        rows.into_iter()
             .map(|row| {
-                serde_json::from_value(row.clone())
-                    .map_err(|error| StoreError::Json(error.to_string()))
+                serde_json::from_value(row).map_err(|error| StoreError::Json(error.to_string()))
             })
             .collect()
     }
@@ -1104,8 +1165,8 @@ impl ProjectionStore for ClickHouseStore {
         let rows = self
             .fetch_rows(&select, &[("projection", name.as_str())])
             .await?;
-        rows.iter()
-            .map(|row| ProjectionRow::from_table_json(name, row))
+        rows.into_iter()
+            .map(|row| ProjectionRow::from_table_json_owned(name, row))
             .collect()
     }
 
@@ -1249,8 +1310,8 @@ impl ProjectionStore for ClickHouseStore {
         .ok_or_else(|| StoreError::Schema(format!("unknown projection {name:?}")))?;
         let rows = self.fetch_rows(&select, &[]).await?;
         let rows = rows
-            .iter()
-            .map(|row| ProjectionRow::from_table_json(name, row))
+            .into_iter()
+            .map(|row| ProjectionRow::from_table_json_owned(name, row))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(StagedProjection {
             as_of_version,
@@ -1592,6 +1653,18 @@ impl ProjectionStore for MemoryStore {
                         );
                     }
                 }
+                // Mirror the ClickHouse publish step: versions below the
+                // newest published one are superseded, so retaining them
+                // would grow the in-memory index without changing any read.
+                // A staged version newer than the published tip is kept.
+                let newest_published = versions
+                    .iter()
+                    .filter(|(_, snapshot)| snapshot.published)
+                    .map(|(version, _)| *version)
+                    .max();
+                if let Some(newest) = newest_published {
+                    versions.retain(|version, _| *version >= newest);
+                }
             }
             Ok(published_version)
         })
@@ -1894,9 +1967,9 @@ mod tests {
     }
 
     /// A one-shot HTTP/1.1 capture server: accepts one connection, reads the
-    /// request head and body, answers `200` with an empty body, and hands the
-    /// raw request text to the test through the returned channel.
-    fn capture_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+    /// request head and body, answers `200` with `response_body`, and hands
+    /// the raw request text to the test through the returned channel.
+    fn serve_one_request(response_body: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -1927,11 +2000,18 @@ mod tests {
                     break;
                 }
             }
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
             let _ = sender.send(String::from_utf8_lossy(&raw).to_string());
         });
         (port, receiver)
+    }
+
+    fn capture_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+        serve_one_request("")
     }
 
     #[tokio::test]
@@ -2054,6 +2134,160 @@ mod tests {
         // hung or failed differently; the certificate error above proves the
         // handshake happened and verification ran.)
         let _ = std::io::stderr().flush();
+    }
+
+    #[tokio::test]
+    async fn event_insert_serializes_each_row_once_into_the_body() {
+        let events: Vec<DomainEvent> = (0..8)
+            .map(|index| {
+                valid_event_builder(EventType::JobRun)
+                    .with_event_id(format!("evt_{index:04}"))
+                    .build()
+                    .expect("event")
+            })
+            .collect();
+        let (port, capture) = serve_one_request("");
+        let store = ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            user: None,
+            password: None,
+        })
+        .expect("store");
+
+        reset_serialized_rows();
+        let outcome = store.insert(&events).await.expect("insert");
+        assert_eq!(outcome.inserted, 8);
+        assert_eq!(
+            serialized_rows(),
+            8,
+            "each row must take exactly one serialization pass"
+        );
+
+        let raw = capture
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        let body = raw.split_once("\r\n\r\n").expect("head and body").1;
+        let lines: Vec<&str> = body.lines().filter(|line| line.starts_with('{')).collect();
+        let expected: Vec<String> = events
+            .iter()
+            .map(|event| serde_json::to_string(&event.to_row()).expect("row json"))
+            .collect();
+        let expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+        assert_eq!(lines, expected, "the body is the typed row shape");
+    }
+
+    #[test]
+    fn request_log_storage_shape_matches_the_public_value() {
+        let row = RequestLogRow {
+            event_id: "req_1".into(),
+            occurred_at_utc: UtcMillis::from_unix_millis(1_792_055_400_125),
+            received_at_utc: UtcMillis::from_unix_millis(1_792_055_401_000),
+            route_template: "/pricing".into(),
+            status: 200,
+            status_class: "2xx".into(),
+            bot_class: "automation_client".into(),
+            referrer_host: Some("example.test".into()),
+            campaign_code: Some("launch-2026".into()),
+            query_keys: vec!["utm_source".into()],
+            environment: "production".into(),
+        };
+        let value = serde_json::to_value(row.storage()).expect("storage json");
+        assert_eq!(value, row.to_storage_value());
+    }
+
+    #[tokio::test]
+    async fn fetched_report_days_are_consumed_without_reshaping() {
+        let (port, _capture) = serve_one_request(
+            "{\"publisher_id\":\"northstar\",\"platform\":\"applovin_max\",\
+             \"platform_account_id\":\"acc_1\",\"day\":\"2026-10-14\",\"finality\":\"final\",\
+             \"revenue_micros\":1500000,\"impressions\":1000,\"currency\":\"USD\",\
+             \"country\":\"DE\",\"ad_unit_id\":\"unit_1\",\"format\":\"rewarded\",\
+             \"source_digest\":\"d\"}\n\
+             {\"publisher_id\":\"northstar\",\"platform\":\"applovin_max\",\
+             \"platform_account_id\":\"acc_2\",\"day\":\"2026-10-14\",\"finality\":\"provisional\",\
+             \"revenue_micros\":2500000,\"impressions\":2000,\"currency\":\"USD\",\
+             \"country\":null,\"ad_unit_id\":null,\"format\":null,\"source_digest\":null}\n",
+        );
+        let store = ClickHouseStore::new(ClickHouseConfig {
+            http_url: format!("http://127.0.0.1:{port}"),
+            database: "apex_test".to_string(),
+            request_timeout_ms: 5_000,
+            user: None,
+            password: None,
+        })
+        .expect("store");
+
+        let days = store.load_report_days().await.expect("read");
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].platform_account_id, "acc_1");
+        assert_eq!(days[0].revenue_micros, Some(1_500_000));
+        assert_eq!(days[1].finality, "provisional");
+        assert_eq!(days[1].country, None);
+    }
+
+    #[tokio::test]
+    async fn publishing_prunes_superseded_memory_versions() {
+        let store = MemoryStore::new();
+        store.ensure_schema().await.expect("schema");
+        // Rebuild and publish 40 times: the retained index stays at one
+        // version per projection instead of growing with every publish.
+        for version in 1..=40u64 {
+            let batch = format!("batch-{version}");
+            store
+                .write_projection(
+                    crate::projections::ProjectionName::OperatorQueues,
+                    version,
+                    &batch,
+                    &[queue_row(&format!("inc_{version}"))],
+                )
+                .await
+                .expect("write");
+            assert_eq!(
+                store.publish_batch(&batch).await.expect("publish"),
+                Some(version)
+            );
+        }
+        let counts = store.projection_version_counts();
+        assert_eq!(counts.get("operator_queues"), Some(&1));
+        assert_eq!(
+            store
+                .load_projection(crate::projections::ProjectionName::OperatorQueues)
+                .await
+                .expect("read"),
+            vec![queue_row("inc_40")]
+        );
+
+        // A staged version newer than the published tip survives the prune
+        // until it is published, exactly like the server's `>=` condition.
+        store
+            .write_projection(
+                crate::projections::ProjectionName::OperatorQueues,
+                41,
+                "batch-41",
+                &[queue_row("inc_41")],
+            )
+            .await
+            .expect("write staged");
+        assert_eq!(
+            store
+                .projection_version_counts()
+                .get("operator_queues")
+                .copied(),
+            Some(2)
+        );
+        assert_eq!(
+            store.publish_batch("batch-41").await.expect("publish"),
+            Some(41)
+        );
+        assert_eq!(
+            store
+                .projection_version_counts()
+                .get("operator_queues")
+                .copied(),
+            Some(1)
+        );
     }
 
     fn queue_row(object_id: &str) -> ProjectionRow {

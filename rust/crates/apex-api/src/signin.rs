@@ -3,34 +3,61 @@
 //! The free-audit form is the front door: when `POST /free-audit` accepts a
 //! submission, two things happen beside storing the lead.
 //!
-//! 1. **A workspace exists.** The publisher key is derived exactly as the
-//!    lead storage derives it ([`crate::leads::publisher_slug`] over the
-//!    studio name), and [`WorkspaceTokens::ensure`] creates or extends that
-//!    publisher's entry in the deployment's ledger-token file
-//!    (`APEX_LEDGER_TOKENS_FILE`, the operator's existing per-publisher
-//!    token model). The studio-to-slug mapping itself is recorded through
-//!    the existing lead store: the stored lead row carries the slug as its
-//!    `publisher` and the studio name as its `displayName`. No second
-//!    identity store exists.
-//! 2. **A one-time sign-in link is issued.** [`SigninStore`] appends a row
-//!    to `signin.jsonl` under the leads root with `at`, `publisher`,
+//! 1. **A workspace exists.** A new workspace's key is derived from the email
+//!    domain the app-ads.txt proof accepted
+//!    ([`workspace_key_for_email`]: `digitalturbine.com` becomes
+//!    `digitalturbine-com`), never from the free-text studio name, and
+//!    [`WorkspaceTokens::ensure`] creates or extends that publisher's entry
+//!    in the deployment's ledger-token file (`APEX_LEDGER_TOKENS_FILE`, the
+//!    operator's existing per-publisher token model). The studio name is
+//!    carried as the lead's `displayName` label; the stored lead remains the
+//!    contract. No second identity store exists.
+//! 2. **A one-time sign-in link is issued.** When `APEX_CONSOLE_URL` names
+//!    the console's public origin, [`SigninStore`] appends a row to
+//!    `signin.jsonl` under the leads root with `at`, `publisher`,
 //!    `token_hash` (SHA-256 hex of the opaque token), `expires_at` and
 //!    `used_at`; the raw token exists only in the email and in memory. The
 //!    email goes through the transactional sink (`APEX_NOTIFY_SINK=email`
 //!    builds [`apex_notify::sink::EmailSink`]); without a mailer the link is
 //!    logged as a warning and the audit success contract is kept — a saved
-//!    lead is success even when the mail path fails.
+//!    lead is success even when the mail path fails. `APEX_CONSOLE_URL` is
+//!    required to issue links: it must be an absolute `http(s)` URL with a
+//!    host and no query/fragment (`https` unless the host is `localhost` or
+//!    `127.0.0.1`), and an invalid configured value refuses startup. When it
+//!    is unset, links are disabled: [`SigninService::issue_link`] returns
+//!    [`ApiError::MissingBase`], records a warning and creates no row, while
+//!    the audit still succeeds with its saved lead.
 //!
-//! `GET /console/signin?token=<opaque>` consumes a row: a valid, unused,
+//! `GET /console/signin?token=<opaque>` is inert: it shows a page whose
+//! button POSTs the token back, so a mail scanner that follows the link
+//! cannot burn it. `POST /console/signin` consumes a row: a valid, unused,
 //! unexpired token mints the **existing** console session (the same
 //! [`crate::session::LedgerSessions`] and cookie the ledger-token exchange
 //! uses) and answers `303` to `/`. Single use is enforced while the store
 //! lock is held, and it applies to minting only: sessions already minted
 //! live out their own idle window. The token is never echoed.
+//!
+//! # The additive consume row
+//!
+//! The log is append-only. Consuming a link appends one marker row instead of
+//! rewriting every earlier row:
+//!
+//! ```json
+//! {"kind":"consumed","tokenHash":"<sha256 hex>","usedAtMs":1700000000000}
+//! ```
+//!
+//! The marker carries the hash only, never the raw token. Readers fold each
+//! marker onto the last create row carrying that hash, so [`SigninStore::read_rows`]
+//! still reports one row per link with `used_at` filled in, and single use is
+//! the same. A create row without a marker (every row written by an older
+//! version) is live, so existing logs keep their meaning. One consume is one
+//! append: durable work per consume is constant instead of proportional to
+//! the log length.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use apex_metrics::vocab::TemplateClass;
 use apex_notify::sink::{DeliveryMessage, EmailSink, NotificationSink, FROM_ENV, SINK_ENV};
@@ -60,14 +87,23 @@ pub const MAX_SIGNIN_FILE_BYTES: u64 = 32 * 1024 * 1024;
 pub const SIGNIN_EMAIL_SUBJECT: &str = "Your Apex sign-in link";
 /// The "if this wasn't you" line of the email body.
 pub const SIGNIN_EMAIL_WRONG_PERSON: &str = "If this wasn't you, you can ignore this email.";
-/// The public console base URL environment variable (optional; when unset the
-/// email carries the root-relative link).
-pub const CONSOLE_URL_ENV: &str = "APEX_CONSOLE_URL";
+/// The public console base URL environment variable. When unset, sign-in
+/// links are disabled: no link row is created, no email is sent and
+/// [`SigninService::issue_link`] returns [`ApiError::MissingBase`].
+pub use crate::config::CONSOLE_URL_ENV;
+/// The warning logged at startup and by [`SigninService::issue_link`] when
+/// [`CONSOLE_URL_ENV`] is unset.
+pub const SIGNIN_LINKS_DISABLED_WARNING: &str =
+    "sign-in links are disabled: APEX_CONSOLE_URL is not configured";
 /// Most recent warnings [`WarningLog`] keeps for diagnostics and tests.
 const MAX_WARNING_LINES: usize = 64;
 
+/// The `kind` value of an additive consume marker row.
+const CONSUMED_KIND: &str = "consumed";
+
 /// One appended sign-in row. The raw token never appears here: only its
-/// SHA-256 hex digest.
+/// SHA-256 hex digest. Rows written by an older version have no marker; a
+/// later consume marker is folded into [`SigninRow::used_at`] when read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SigninRow {
     /// When the link was created, epoch milliseconds.
@@ -79,8 +115,33 @@ pub struct SigninRow {
     /// Absolute expiry, epoch milliseconds.
     pub expires_at: i64,
     /// When the link was consumed, epoch milliseconds; `null` while unused.
+    ///
+    /// New writes leave this `null` and append a [`SigninConsumedRow`]
+    /// marker; the marker is folded into this field when the log is read.
     #[serde(default)]
     pub used_at: Option<i64>,
+}
+
+/// An additive consume marker, appended by one link consumption.
+///
+/// The documented row shape is exactly
+/// `{"kind":"consumed","tokenHash":"<sha256 hex>","usedAtMs":<epoch ms>}`.
+/// Appending one marker is a constant-size durable write, so consuming `n`
+/// links is O(n) instead of the old whole-log rewrite. The raw token is never
+/// stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SigninConsumedRow {
+    kind: String,
+    token_hash: String,
+    used_at_ms: i64,
+}
+
+/// One parsed log line: an original create row or an additive consume marker.
+#[derive(Debug, Clone)]
+enum SigninLogRow {
+    Created(SigninRow),
+    Consumed(SigninConsumedRow),
 }
 
 /// A freshly created link: the raw token (memory only) and its durable facts.
@@ -126,16 +187,156 @@ pub fn is_signin_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// One file's cache identity: byte length, modification time (`None` when the
+/// filesystem does not expose one) and, on Unix, the ctime and inode. A
+/// same-length rewrite that puts the mtime back still changes the ctime, so
+/// the cached parse is invalidated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SigninStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    ctime: i64,
+    #[cfg(unix)]
+    ctime_nsec: i64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl SigninStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let len = metadata.len();
+        let modified = metadata.modified().ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Self {
+                len,
+                modified,
+                ctime: metadata.ctime(),
+                ctime_nsec: metadata.ctime_nsec(),
+                ino: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { len, modified }
+        }
+    }
+}
+
+/// The parsed log plus the hash index the GET and POST look through.
+///
+/// `by_hash` maps each token hash to the last create row carrying it, matching
+/// the old `rposition` lookup exactly while turning every live/consume probe
+/// into one hash-map access. The ordered `rows` vector stays the observable
+/// shape [`SigninStore::read_rows`] returns: consume markers are folded into
+/// the create rows instead of being exposed as rows of their own.
+#[derive(Debug)]
+struct SigninIndex {
+    stamp: Option<SigninStamp>,
+    rows: Vec<SigninRow>,
+    by_hash: HashMap<String, usize>,
+}
+
+impl SigninIndex {
+    fn new(stamp: Option<SigninStamp>, log: Vec<SigninLogRow>) -> Self {
+        let mut rows = Vec::with_capacity(log.len());
+        let mut by_hash = HashMap::with_capacity(log.len());
+        let mut consumed = Vec::new();
+        for entry in log {
+            match entry {
+                SigninLogRow::Created(row) => {
+                    by_hash.insert(row.token_hash.clone(), rows.len());
+                    rows.push(row);
+                }
+                SigninLogRow::Consumed(marker) => consumed.push(marker),
+            }
+        }
+        for marker in consumed {
+            // Fold onto the last create row with this hash. The first marker
+            // wins, exactly like the old lock-protected first consume; a
+            // marker with no create row (an external edit) is ignored.
+            if let Some(&index) = by_hash.get(&marker.token_hash) {
+                if rows[index].used_at.is_none() {
+                    rows[index].used_at = Some(marker.used_at_ms);
+                }
+            }
+        }
+        Self {
+            stamp,
+            rows,
+            by_hash,
+        }
+    }
+}
+
+// The test seam that proves a render does not re-parse the log, a lookup
+// examines one indexed row, and a consume appends exactly one marker. The
+// counters are thread-local so the scaling tests cannot observe another
+// test's work.
+#[cfg(test)]
+thread_local! {
+    static SIGNIN_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SIGNIN_LOOKUP_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SIGNIN_APPENDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_signin_parse() {
+    SIGNIN_PARSES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn note_signin_lookup() {
+    SIGNIN_LOOKUP_PROBES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn note_signin_append() {
+    SIGNIN_APPENDS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn signin_parse_count() -> u64 {
+    SIGNIN_PARSES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn signin_lookup_count() -> u64 {
+    SIGNIN_LOOKUP_PROBES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn signin_append_count() -> u64 {
+    SIGNIN_APPENDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_signin_counters() {
+    SIGNIN_PARSES.with(|count| count.set(0));
+    SIGNIN_LOOKUP_PROBES.with(|count| count.set(0));
+    SIGNIN_APPENDS.with(|count| count.set(0));
+}
+
 /// The append-only `signin.jsonl` log under the leads root.
 ///
-/// One lock guards both appends and the read-modify-write that marks a row
-/// used, so a token can be consumed exactly once even under concurrent
-/// requests. Reads never truncate: a malformed line is skipped and an
-/// oversized file is a typed error, never a silently short view.
+/// One lock guards appends and the fold that marks a row used, so a token can
+/// be consumed exactly once even under concurrent requests. Consumption
+/// appends one [`SigninConsumedRow`] marker; the log is never rewritten.
+/// Reads never truncate: a malformed line is skipped and an oversized file is
+/// a typed error, never a silently short view.
+///
+/// The parsed rows and their hash index are cached against the file's
+/// identity, so rendering the inert GET page after the first render costs a
+/// stat and one hash lookup instead of a full re-parse. An external append
+/// changes the identity and is folded exactly once; our own append or
+/// consume marker advances the cache in place.
 #[derive(Debug)]
 pub struct SigninStore {
     path: PathBuf,
     lock: Mutex<()>,
+    index: Mutex<Option<SigninIndex>>,
 }
 
 impl SigninStore {
@@ -144,6 +345,7 @@ impl SigninStore {
         Self {
             path: leads_root.into().join(SIGNIN_FILE_NAME),
             lock: Mutex::new(()),
+            index: Mutex::new(None),
         }
     }
 
@@ -174,7 +376,8 @@ impl SigninStore {
             used_at: None,
         };
         let _guard = self.lock();
-        self.append_row(&row)?;
+        let mut cached = self.index_lock();
+        self.append_row(&mut cached, &row)?;
         Ok(CreatedSignin {
             token,
             token_hash: hash,
@@ -182,32 +385,136 @@ impl SigninStore {
         })
     }
 
-    /// Consume `token`: on a valid, unused, unexpired row mark `used_at`
-    /// under the same lock and return the publisher. Anything else — wrong
-    /// shape, unknown, used or expired — is `None`, and the file is not
-    /// touched.
+    /// Consume `token`: on a valid, unused, unexpired row append one
+    /// [`SigninConsumedRow`] marker under the same lock and return the
+    /// publisher. Anything else — wrong shape, unknown, used or expired — is
+    /// `None`, and the file is not touched. The row is found through the hash
+    /// index (one probe), never a scan of the parsed log, and the durable
+    /// write is one constant-size append.
     pub fn consume(&self, token: &str, now_unix_ms: i64) -> Result<Option<String>, ApiError> {
         if !is_signin_token(token) {
             return Ok(None);
         }
         let hash = token_hash(token);
         let _guard = self.lock();
-        let mut rows = self.read_rows()?;
-        let Some(index) = rows.iter().rposition(|row| row.token_hash == hash) else {
-            return Ok(None);
+        let mut cached = self.index_lock();
+        self.refresh(&mut cached)?;
+        let (publisher, index) = {
+            let Some(state) = cached.as_ref() else {
+                return Ok(None);
+            };
+            let Some(&index) = state.by_hash.get(&hash) else {
+                return Ok(None);
+            };
+            #[cfg(test)]
+            note_signin_lookup();
+            let row = &state.rows[index];
+            if row.used_at.is_some() || now_unix_ms >= row.expires_at {
+                return Ok(None);
+            }
+            (row.publisher.clone(), index)
         };
-        let row = &rows[index];
-        if row.used_at.is_some() || now_unix_ms >= row.expires_at {
-            return Ok(None);
+        let mut line = serde_json::to_string(&SigninConsumedRow {
+            kind: CONSUMED_KIND.to_string(),
+            token_hash: hash,
+            used_at_ms: now_unix_ms,
+        })
+        .map_err(|error| ApiError::Internal(format!("sign-in consume serialization: {error}")))?;
+        line.push('\n');
+        match self.append_line(&cached, &line)? {
+            Some(stamp) => {
+                if let Some(state) = cached.as_mut() {
+                    state.rows[index].used_at = Some(now_unix_ms);
+                    state.stamp = Some(stamp);
+                }
+            }
+            // A concurrent external change made the cache stale; the marker
+            // is durably appended, so the next lookup re-parses and folds it.
+            None => *cached = None,
         }
-        let publisher = row.publisher.clone();
-        rows[index].used_at = Some(now_unix_ms);
-        self.write_rows(&rows)?;
         Ok(Some(publisher))
+    }
+
+    /// Whether `token` names a live (unused, unexpired) row, without
+    /// consuming it. The GET sign-in page uses this so rendering the page
+    /// cannot burn the link; only the POST consumes. The lookup is one
+    /// indexed probe after the cached parse, so a mail scanner that follows
+    /// the link repeatedly never re-reads the log.
+    pub fn is_live(&self, token: &str, now_unix_ms: i64) -> Result<bool, ApiError> {
+        if !is_signin_token(token) {
+            return Ok(false);
+        }
+        let hash = token_hash(token);
+        let _guard = self.lock();
+        let mut cached = self.index_lock();
+        self.refresh(&mut cached)?;
+        let Some(cached) = cached.as_ref() else {
+            return Ok(false);
+        };
+        let Some(&index) = cached.by_hash.get(&hash) else {
+            return Ok(false);
+        };
+        #[cfg(test)]
+        note_signin_lookup();
+        let row = &cached.rows[index];
+        Ok(row.used_at.is_none() && now_unix_ms < row.expires_at)
     }
 
     /// Every parsed row, in file order. Malformed lines are skipped.
     pub fn read_rows(&self) -> Result<Vec<SigninRow>, ApiError> {
+        let _guard = self.lock();
+        let mut cached = self.index_lock();
+        self.refresh(&mut cached)?;
+        Ok(cached
+            .as_ref()
+            .map(|cached| cached.rows.clone())
+            .unwrap_or_default())
+    }
+
+    /// The cache guard. The caller always holds [`Self::lock`] first, so the
+    /// lock order is fixed and a poisoned cache is recovered rather than
+    /// turning a readable log into an outage.
+    fn index_lock(&self) -> std::sync::MutexGuard<'_, Option<SigninIndex>> {
+        match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The log's current identity: `None` when the file is missing.
+    fn inspect(&self) -> Result<Option<SigninStamp>, ApiError> {
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) => Ok(Some(SigninStamp::of(&metadata))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ApiError::Internal(format!(
+                "sign-in store {} could not be inspected: {error}",
+                self.path.display()
+            ))),
+        }
+    }
+
+    /// Stat the log and re-parse it only when its identity moved. The caller
+    /// holds the index guard, so one change is one parse.
+    fn refresh(&self, cached: &mut Option<SigninIndex>) -> Result<(), ApiError> {
+        let stamp = self.inspect()?;
+        // A missing file is never trusted from the cache: a deletion after a
+        // cached parse must read as the empty store it is now, not as the
+        // rows that used to be there.
+        if stamp.is_some() && cached.as_ref().is_some_and(|state| state.stamp == stamp) {
+            return Ok(());
+        }
+        let rows = self.parse_rows()?;
+        #[cfg(test)]
+        note_signin_parse();
+        *cached = Some(SigninIndex::new(stamp, rows));
+        Ok(())
+    }
+
+    /// Read and parse the log. A malformed line is skipped, exactly as
+    /// before; an oversized or non-UTF-8 file is a typed refusal. Both the
+    /// original create rows and the additive consume markers are recognised;
+    /// any other shape is malformed.
+    fn parse_rows(&self) -> Result<Vec<SigninLogRow>, ApiError> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -232,22 +539,34 @@ impl SigninStore {
         })?;
         let mut rows = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            if let Ok(row) = serde_json::from_str::<SigninRow>(line) {
+            if let Some(row) = parse_log_line(line) {
                 rows.push(row);
             }
         }
         Ok(rows)
     }
 
-    /// Append one serialized row (mode 0600 on unix).
-    fn append_row(&self, row: &SigninRow) -> Result<(), ApiError> {
-        let mut line = serde_json::to_string(row)
-            .map_err(|error| ApiError::Internal(format!("sign-in row serialization: {error}")))?;
-        line.push('\n');
+    /// Append one serialized log line (mode 0600 on unix). Returns the new
+    /// file identity when the cached index can advance in place. `None` means
+    /// a concurrent external change (or a stat failure) makes the cache
+    /// stale: the caller drops it so the next lookup folds exactly once.
+    fn append_line(
+        &self,
+        cached: &Option<SigninIndex>,
+        line: &str,
+    ) -> Result<Option<SigninStamp>, ApiError> {
+        let written = line.len() as u64;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| ApiError::Internal(format!("sign-in store directory: {error}")))?;
         }
+        // A stat before the write marks a missing file as the empty cache; an
+        // existing file that the cache has not parsed is left to fold later.
+        let observed = self.inspect().ok().flatten();
+        let cache_current = match cached.as_ref() {
+            Some(state) => state.stamp == observed,
+            None => observed.is_none(),
+        };
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
@@ -267,47 +586,47 @@ impl SigninStore {
                 "sign-in store write {}: {error}",
                 self.path.display()
             ))
-        })
+        })?;
+        drop(file);
+        #[cfg(test)]
+        note_signin_append();
+        match self.inspect() {
+            Ok(Some(stamp))
+                if cache_current && appended_alone(observed.as_ref(), &stamp, written) =>
+            {
+                Ok(Some(stamp))
+            }
+            _ => Ok(None),
+        }
     }
 
-    /// Replace the whole log atomically (write a sibling temp file, rename
-    /// over the target), so a crash never leaves a half-written row.
-    fn write_rows(&self, rows: &[SigninRow]) -> Result<(), ApiError> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| ApiError::Internal(format!("sign-in store directory: {error}")))?;
+    /// Append one serialized create row and advance the cached index in place
+    /// when it was current. A cache that had not seen the file yet (or a
+    /// concurrent external append between the stat and our write) is dropped
+    /// so the next lookup folds exactly once.
+    fn append_row(
+        &self,
+        cached: &mut Option<SigninIndex>,
+        row: &SigninRow,
+    ) -> Result<(), ApiError> {
+        let mut line = serde_json::to_string(row)
+            .map_err(|error| ApiError::Internal(format!("sign-in row serialization: {error}")))?;
+        line.push('\n');
+        match self.append_line(cached, &line)? {
+            Some(stamp) => {
+                if cached.is_none() {
+                    *cached = Some(SigninIndex::new(None, Vec::new()));
+                }
+                if let Some(state) = cached.as_mut() {
+                    let index = state.rows.len();
+                    state.rows.push(row.clone());
+                    state.by_hash.insert(row.token_hash.clone(), index);
+                    state.stamp = Some(stamp);
+                }
+            }
+            None => *cached = None,
         }
-        let mut body = String::new();
-        for row in rows {
-            let line = serde_json::to_string(row).map_err(|error| {
-                ApiError::Internal(format!("sign-in row serialization: {error}"))
-            })?;
-            body.push_str(&line);
-            body.push('\n');
-        }
-        let mut tmp_name = self.path.clone().into_os_string();
-        tmp_name.push(".tmp");
-        let tmp = PathBuf::from(tmp_name);
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        use std::io::Write;
-        let mut file = options.open(&tmp).map_err(|error| {
-            ApiError::Internal(format!("sign-in store temp {}: {error}", tmp.display()))
-        })?;
-        file.write_all(body.as_bytes())
-            .map_err(|error| ApiError::Internal(format!("sign-in store temp write: {error}")))?;
-        drop(file);
-        std::fs::rename(&tmp, &self.path).map_err(|error| {
-            ApiError::Internal(format!(
-                "sign-in store rename {}: {error}",
-                self.path.display()
-            ))
-        })
+        Ok(())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -316,6 +635,42 @@ impl SigninStore {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
+
+/// Parse one log line as a create row or a consume marker. A line of any
+/// other shape is malformed and skipped, exactly as before.
+fn parse_log_line(line: &str) -> Option<SigninLogRow> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("kind").and_then(serde_json::Value::as_str) == Some(CONSUMED_KIND) {
+        serde_json::from_value(value)
+            .ok()
+            .map(SigninLogRow::Consumed)
+    } else {
+        serde_json::from_value(value)
+            .ok()
+            .map(SigninLogRow::Created)
+    }
+}
+
+/// Whether the file after our append is exactly the file before it plus the
+/// bytes we wrote. A concurrent external append between the stamp and our
+/// write makes the length (or the inode) disagree, so the cached index is
+/// dropped and rebuilt once instead of hiding the external row.
+fn appended_alone(before: Option<&SigninStamp>, after: &SigninStamp, written: u64) -> bool {
+    match before {
+        Some(before) => after.len == before.len.saturating_add(written) && same_file(before, after),
+        None => after.len == written,
+    }
+}
+
+#[cfg(unix)]
+fn same_file(before: &SigninStamp, after: &SigninStamp) -> bool {
+    before.ino == after.ino
+}
+
+#[cfg(not(unix))]
+fn same_file(_before: &SigninStamp, _after: &SigninStamp) -> bool {
+    true
 }
 
 /// Suffix of the workspace-ownership sidecar written beside the token file.
@@ -419,6 +774,22 @@ pub fn canonical_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
+/// The workspace key a new workspace is created under: the email domain that
+/// the app-ads.txt proof accepted, lowercased and folded to the console's
+/// publisher-key charset (`digitalturbine.com` becomes `digitalturbine-com`).
+/// The form is a slug rather than the exact domain because publisher keys may
+/// not contain dots; the mapping is one-way and stable, and the studio name is
+/// carried as the lead's display label instead of the key.
+pub fn workspace_key_for_email(email: &str) -> Option<String> {
+    let (_, domain) = email.trim().split_once('@')?;
+    let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return None;
+    }
+    let key = apex_watch::model::publisher_slug_for_domain(&domain);
+    crate::is_valid_publisher(&key).then_some(key)
+}
+
 /// Whether `email` is a single usable address (the same minimal shape the
 /// lead form accepts, plus a dotted domain).
 pub fn is_recordable_email(email: &str) -> bool {
@@ -446,11 +817,33 @@ pub fn is_recordable_email(email: &str) -> bool {
 pub trait WorkspaceProofSource: Send + Sync + std::fmt::Debug {
     /// Prove that `email`'s domain owns the workspace.
     async fn prove_owner(&self, email: &str) -> Result<(), WorkspaceRefusal>;
-    /// The public evidence used to price the watch tier: the number of
-    /// distinct publisher account ids recorded in `domain`'s app-ads.txt. A
-    /// refusal means the evidence is unavailable; the caller records it and
-    /// falls back to the normal tier instead of inventing a count.
+    /// The account-id histogram of `domain`'s public app-ads.txt, when a
+    /// caller wants that evidence. The watch tier deliberately does not use
+    /// it: it counts the distinct apps the subscriber names.
     async fn app_count(&self, domain: &str) -> Result<u32, WorkspaceRefusal>;
+}
+
+// The number of times a WorkspaceTokens instance parsed its token file and
+// ownership sidecar. The scaling seam asserts an existing workspace's submit
+// path serves the cache instead of re-reading either file.
+#[cfg(test)]
+thread_local! {
+    static WORKSPACE_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_workspace_load() {
+    WORKSPACE_LOADS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn workspace_load_count() -> u64 {
+    WORKSPACE_LOADS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_workspace_counters() {
+    WORKSPACE_LOADS.with(|count| count.set(0));
 }
 
 /// The per-publisher ledger-token file (`APEX_LEDGER_TOKENS_FILE`) behind the
@@ -700,6 +1093,8 @@ impl WorkspaceTokens {
         state.tokens = tokens;
         state.records = records;
         state.loaded = true;
+        #[cfg(test)]
+        note_workspace_load();
         Ok(())
     }
 
@@ -851,8 +1246,9 @@ impl SigninService {
     }
 
     /// Set the public console base the emailed link starts with (for example
-    /// `https://console.apexmediation.ee`). Unset keeps the link
-    /// root-relative.
+    /// `https://console.apexmediation.ee`). Callers pass a value already
+    /// validated by [`crate::config::console_url`]. Unset disables links:
+    /// [`Self::issue_link`] returns [`ApiError::MissingBase`].
     #[must_use]
     pub fn with_public_base(mut self, base: impl Into<String>) -> Self {
         let base = base.into();
@@ -891,20 +1287,28 @@ impl SigninService {
         self.store.consume(token, now_unix_ms)
     }
 
-    /// The link a token travels in.
-    pub fn link_for(&self, token: &str) -> String {
-        match &self.public_base {
-            Some(base) => format!("{base}{SIGNIN_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
-            None => format!("{SIGNIN_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
-        }
+    /// Whether a link token is still live, without consuming it. The GET
+    /// landing page uses this; the POST is the only consumer.
+    pub fn is_live(&self, token: &str, now_unix_ms: i64) -> Result<bool, ApiError> {
+        self.store.is_live(token, now_unix_ms)
+    }
+
+    /// The link a token travels in. A missing public base is the typed
+    /// [`ApiError::MissingBase`] refusal: a relative emailed link cannot work.
+    pub fn link_for(&self, token: &str) -> Result<String, ApiError> {
+        self.link_at(SIGNIN_PATH, token)
     }
 
     /// The setup-watch confirmation link a token travels in.
-    pub fn watch_confirm_link(&self, token: &str) -> String {
-        match &self.public_base {
-            Some(base) => format!("{base}{WATCH_CONFIRM_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
-            None => format!("{WATCH_CONFIRM_PATH}?{SIGNIN_TOKEN_PARAM}={token}"),
-        }
+    pub fn watch_confirm_link(&self, token: &str) -> Result<String, ApiError> {
+        self.link_at(WATCH_CONFIRM_PATH, token)
+    }
+
+    fn link_at(&self, path: &str, token: &str) -> Result<String, ApiError> {
+        let Some(base) = &self.public_base else {
+            return Err(ApiError::MissingBase);
+        };
+        Ok(format!("{base}{path}?{SIGNIN_TOKEN_PARAM}={token}"))
     }
 
     /// Send the setup-watch confirmation link (and the checkout link when one
@@ -919,7 +1323,15 @@ impl SigninService {
         checkout_url: Option<&str>,
         expires_at_unix_ms: i64,
     ) {
-        let link = self.watch_confirm_link(token);
+        let link = match self.watch_confirm_link(token) {
+            Ok(link) => link,
+            Err(_) => {
+                self.warnings.record(format!(
+                    "setup-watch confirmation for '{reference}' was created but not sent: {CONSOLE_URL_ENV} is not configured"
+                ));
+                return;
+            }
+        };
         let expires = apex_ui::format::utc_datetime(expires_at_unix_ms);
         let payment_line = match checkout_url {
             Some(url) => format!("Complete the checkout: {url}"),
@@ -971,6 +1383,10 @@ impl SigninService {
         email: &str,
         now_unix_ms: i64,
     ) -> Result<CreatedSignin, ApiError> {
+        if self.public_base.is_none() {
+            self.warnings.record(SIGNIN_LINKS_DISABLED_WARNING);
+            return Err(ApiError::MissingBase);
+        }
         if let Some(workspaces) = &self.workspaces {
             if !workspaces.contact_recorded(publisher, email) {
                 return Err(ApiError::BadRequest("workspace_contact_not_recorded"));
@@ -1008,7 +1424,13 @@ impl SigninService {
 
     /// Best-effort delivery of one created link.
     async fn deliver(&self, publisher: &str, email: &str, created: &CreatedSignin) {
-        let link = self.link_for(&created.token);
+        let link = match self.link_for(&created.token) {
+            Ok(link) => link,
+            Err(_) => {
+                self.warnings.record(SIGNIN_LINKS_DISABLED_WARNING);
+                return;
+            }
+        };
         let expires = apex_ui::format::utc_datetime(created.expires_at_unix_ms);
         let Some(mailer) = &self.mailer else {
             self.warnings.record(format!(
@@ -1160,6 +1582,224 @@ mod tests {
             store.read_rows().expect("rows")[0].used_at,
             Some(2_000),
             "a refused reuse does not move used_at"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn consume_appends_one_marker_and_folds_it_without_rewriting() {
+        let root = temp_root("consume-marker");
+        let store = SigninStore::new(&root);
+        let created = store
+            .create("northstar-studio", 1_000, 72 * HOUR_MS)
+            .expect("create");
+        let before = std::fs::read_to_string(store.path()).expect("log");
+        assert!(!before.contains(&created.token), "raw token never on disk");
+        assert!(!before.contains("\"kind\":\"consumed\""));
+
+        assert_eq!(
+            store.consume(&created.token, 2_000).expect("consume"),
+            Some("northstar-studio".to_string())
+        );
+        let raw = std::fs::read_to_string(store.path()).expect("log");
+        assert!(raw.starts_with(&before), "the create row is not rewritten");
+        assert!(
+            !raw.contains(&created.token),
+            "the marker stores the hash only"
+        );
+        let marker = raw.lines().last().expect("marker row");
+        assert!(marker.contains("\"kind\":\"consumed\""), "{marker}");
+        assert!(
+            marker.contains(&format!("\"tokenHash\":\"{}\"", created.token_hash)),
+            "{marker}"
+        );
+        assert!(marker.contains("\"usedAtMs\":2000"), "{marker}");
+
+        // The observable row shape is unchanged: one create row, marked used.
+        let rows = store.read_rows().expect("rows");
+        assert_eq!(rows.len(), 1, "a marker is not exposed as a link row");
+        assert_eq!(rows[0].used_at, Some(2_000));
+
+        // Single use: a second call appends nothing and a restart still sees
+        // the folded used marker.
+        assert_eq!(store.consume(&created.token, 3_000).expect("again"), None);
+        assert_eq!(
+            std::fs::read_to_string(store.path()).expect("log"),
+            raw,
+            "a refused reuse performs no write"
+        );
+        let restarted = SigninStore::new(&root);
+        assert!(!restarted.is_live(&created.token, 3_001).expect("spent"));
+        assert_eq!(
+            restarted.consume(&created.token, 3_002).expect("used"),
+            None
+        );
+        assert_eq!(
+            restarted.read_rows().expect("rows")[0].used_at,
+            Some(2_000),
+            "the restart folds the marker"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn older_rows_without_a_marker_still_read_as_live() {
+        let root = temp_root("legacy-rows");
+        let store = SigninStore::new(&root);
+        let token = "a".repeat(SIGNIN_TOKEN_HEX_LEN);
+        let hash = token_hash(&token);
+        let spent = "b".repeat(SIGNIN_TOKEN_HEX_LEN);
+        // The pre-marker row shape: no `kind`, and `used_at` may be absent or
+        // present. Older writers are still readable.
+        std::fs::write(
+            store.path(),
+            format!(
+                "{{\"at\":1000,\"publisher\":\"legacy\",\"token_hash\":\"{hash}\",\"expires_at\":1000000}}\n\
+                 {{\"at\":1100,\"publisher\":\"spent\",\"token_hash\":\"{}\",\"expires_at\":1000000,\"used_at\":1500}}\n",
+                token_hash(&spent)
+            ),
+        )
+        .expect("seed legacy log");
+
+        let rows = store.read_rows().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].used_at, None, "a row without a marker is live");
+        assert!(store.is_live(&token, 2_000).expect("live"));
+        assert_eq!(
+            store.consume(&token, 2_000).expect("consume"),
+            Some("legacy".to_string())
+        );
+        let restarted = SigninStore::new(&root);
+        assert!(!restarted.is_live(&token, 2_001).expect("spent"));
+        assert!(!restarted.is_live(&spent, 2_001).expect("legacy used_at"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The finding's exact scale: `n` durable links followed by `n / 2`
+    /// consumes. Each consume is one fixed-size append (the marker row), the
+    /// log is parsed once (the first lookup), and total durable work is
+    /// linear in the number of links; the old shape rewrote and parsed the
+    /// whole log per consume (quadratic).
+    #[test]
+    fn consume_is_constant_work_per_link_at_every_scale() {
+        for links in [2_000usize, 4_000, 8_000] {
+            let consumes = links / 2;
+            let root = temp_root(&format!("consume-scale-{links}"));
+            let writer = SigninStore::new(&root);
+            let mut tokens = Vec::with_capacity(links);
+            for index in 0..links {
+                tokens.push(
+                    writer
+                        .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                        .expect("create")
+                        .token,
+                );
+            }
+            let initial = std::fs::metadata(writer.path()).expect("stat").len();
+            let reader = SigninStore::new(&root);
+            reset_signin_counters();
+            let started = std::time::Instant::now();
+            let mut deltas = Vec::with_capacity(consumes);
+            let mut previous = initial;
+            for token in tokens.iter().take(consumes) {
+                assert_eq!(
+                    reader.consume(token, 2_000).expect("consume").as_deref(),
+                    Some("northstar-studio")
+                );
+                let current = std::fs::metadata(reader.path()).expect("stat").len();
+                deltas.push(current - previous);
+                previous = current;
+            }
+            let elapsed = started.elapsed();
+            let parses = signin_parse_count();
+            let appends = signin_append_count();
+            let min_delta = deltas.iter().copied().min().expect("one consume");
+            let max_delta = deltas.iter().copied().max().expect("one consume");
+            println!(
+                "signin_consume_scale links={links} consumes={consumes} appends={appends} parses={parses} bytes_per_consume={min_delta}..{max_delta} total_appended={} elapsed_ms={}",
+                previous - initial,
+                elapsed.as_millis()
+            );
+            assert_eq!(
+                appends, consumes as u64,
+                "links={links}: one append per consume"
+            );
+            assert_eq!(
+                parses, 1,
+                "links={links}: one fold for the whole consume run, never one per consume"
+            );
+            assert_eq!(
+                min_delta, max_delta,
+                "links={links}: every consume appends the same fixed marker size"
+            );
+            assert!(
+                min_delta < 512,
+                "links={links}: a consume appends a marker, not the whole log"
+            );
+            assert_eq!(
+                previous - initial,
+                min_delta * consumes as u64,
+                "links={links}: total durable bytes are linear in consumes"
+            );
+            assert_eq!(
+                reader.read_rows().expect("rows").len(),
+                links,
+                "links={links}: markers never become link rows"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A same-length external rewrite with the mtime put back still changes
+    /// the ctime, so the cached parse is not served for the new bytes.
+    #[cfg(unix)]
+    #[test]
+    fn an_external_same_length_rewrite_with_a_restored_mtime_is_detected() {
+        let root = temp_root("consume-rewrite");
+        let store = SigninStore::new(&root);
+        let created = store
+            .create("northstar-studio", 1_000, 72 * HOUR_MS)
+            .expect("create");
+        let path = store.path().to_path_buf();
+        assert!(store.is_live(&created.token, 2_000).expect("live"));
+
+        let original = std::fs::read_to_string(&path).expect("log");
+        let metadata = std::fs::metadata(&path).expect("stat");
+        let modified = metadata.modified().expect("mtime");
+        let expires = created.expires_at_unix_ms;
+        let expired = 259_199_000i64;
+        assert_eq!(expires.to_string().len(), expired.to_string().len());
+        let rewritten = original.replace(
+            &format!("\"expires_at\":{expires}"),
+            &format!("\"expires_at\":{expired}"),
+        );
+        assert_eq!(
+            rewritten.len(),
+            original.len(),
+            "the rewrite keeps the length"
+        );
+        std::fs::write(&path, &rewritten).expect("rewrite");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(modified)
+            .expect("restore mtime");
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            metadata.len(),
+            "length and mtime are restored"
+        );
+
+        reset_signin_counters();
+        assert!(
+            !store.is_live(&created.token, 500_000_000).expect("expired"),
+            "the rewritten expiry is folded"
+        );
+        assert_eq!(
+            signin_parse_count(),
+            1,
+            "the ctime change re-parses the log exactly once"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1400,6 +2040,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn existing_workspace_lookups_parse_the_files_once_at_every_size() {
+        for workspaces in [2_000usize, 4_000, 8_000] {
+            let root = temp_root(&format!("workspace-index-{workspaces}"));
+            let path = root.join("tokens.json");
+            let tokens: BTreeMap<String, String> = (0..workspaces)
+                .map(|index| (format!("pub-{index}"), format!("{index:064x}")))
+                .collect();
+            std::fs::write(&path, serde_json::to_string(&tokens).expect("tokens")).expect("write");
+            let store = WorkspaceTokens::open(path.clone());
+            let records: BTreeMap<String, WorkspaceRecord> = (0..workspaces)
+                .map(|index| {
+                    let email = format!("owner{index}@x.example");
+                    (
+                        format!("pub-{index}"),
+                        WorkspaceRecord {
+                            owner_email: email.clone(),
+                            contacts: BTreeSet::from([email]),
+                        },
+                    )
+                })
+                .collect();
+            std::fs::write(
+                store.records_path(),
+                serde_json::to_string(&records).expect("records"),
+            )
+            .expect("write");
+
+            reset_workspace_counters();
+            let target = format!("pub-{}", workspaces / 2);
+            let email = format!("owner{}@x.example", workspaces / 2);
+            let lookups = 4 * workspaces;
+            for _ in 0..lookups {
+                assert!(store.has_workspace(&target));
+                assert!(store.contact_recorded(&target, &email));
+                assert!(
+                    !store
+                        .ensure(&target, &email, false)
+                        .expect("existing workspace")
+                        .created
+                );
+            }
+            println!(
+                "workspaces={workspaces} lookups={lookups} file_parses={}",
+                workspace_load_count()
+            );
+            assert_eq!(
+                workspace_load_count(),
+                1,
+                "workspaces={workspaces}: every existing-workspace lookup serves one parse"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
     #[tokio::test]
     async fn issue_link_refuses_unrecorded_contacts_and_delivers_recorded_ones() {
         let root = temp_root("workspace-delivery");
@@ -1407,7 +2102,9 @@ mod tests {
         workspaces
             .ensure("northstar-studio", "founder@studio.example", true)
             .expect("workspace");
-        let service = SigninService::open(&root).with_workspaces(Arc::clone(&workspaces));
+        let service = SigninService::open(&root)
+            .with_public_base("https://console.example")
+            .with_workspaces(Arc::clone(&workspaces));
 
         let refused = service
             .issue_link("northstar-studio", "attacker@evil.example", 1_000)
@@ -1450,18 +2147,62 @@ mod tests {
     }
 
     #[test]
-    fn links_carry_the_configured_base_and_warn_without_a_mailer() {
+    fn the_workspace_key_is_the_email_domain_not_the_studio_name() {
+        assert_eq!(
+            workspace_key_for_email("Founder@DigitalTurbine.com").as_deref(),
+            Some("digitalturbine-com")
+        );
+        assert_eq!(
+            workspace_key_for_email("you@studio.example").as_deref(),
+            Some("studio-example")
+        );
+        assert_eq!(
+            workspace_key_for_email("a@b.example").as_deref(),
+            Some("b-example")
+        );
+        assert_eq!(workspace_key_for_email("not-an-email"), None);
+    }
+
+    #[test]
+    fn links_require_the_configured_base() {
         let root = temp_root("link");
         let service = SigninService::open(&root);
-        assert_eq!(
+        assert!(matches!(
             service.link_for("ab12"),
-            "/console/signin?token=ab12".to_string()
-        );
+            Err(ApiError::MissingBase)
+        ));
+        assert!(matches!(
+            service.watch_confirm_link("ab12"),
+            Err(ApiError::MissingBase)
+        ));
         let service = service.with_public_base("https://console.apexmediation.ee/");
         assert_eq!(
-            service.link_for("ab12"),
+            service.link_for("ab12").expect("configured base"),
             "https://console.apexmediation.ee/console/signin?token=ab12"
         );
+        assert_eq!(
+            service.watch_confirm_link("ab12").expect("configured base"),
+            "https://console.apexmediation.ee/watch/confirm?token=ab12"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_missing_base_is_a_typed_refusal_with_no_row() {
+        let root = temp_root("missing-base");
+        let warnings = Arc::new(WarningLog::new());
+        let service = SigninService::open(&root).with_warnings(Arc::clone(&warnings));
+        let error = service
+            .issue_link("northstar-studio", "you@studio.example", 1_000)
+            .await
+            .expect_err("no console base");
+        assert!(matches!(error, ApiError::MissingBase), "{error}");
+        assert!(
+            service.store().read_rows().expect("rows").is_empty(),
+            "a disabled link creates no row"
+        );
+        let lines = warnings.lines();
+        assert_eq!(lines, vec![SIGNIN_LINKS_DISABLED_WARNING.to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1505,11 +2246,187 @@ mod tests {
         assert_eq!(lines.last().map(String::as_str), Some(newest.as_str()));
     }
 
+    #[test]
+    fn inert_gets_parse_once_and_probe_one_indexed_row_at_every_size() {
+        for rows in [250usize, 500, 1_000] {
+            let root = temp_root(&format!("index-{rows}"));
+            let writer = SigninStore::new(&root);
+            let mut token = String::new();
+            for index in 0..rows {
+                let created = writer
+                    .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                    .expect("create");
+                if index + 1 == rows {
+                    token = created.token;
+                }
+            }
+
+            // A fresh store (a restart, or another process) folds the log on
+            // its first lookup; every later lookup serves that one parse.
+            let store = SigninStore::new(&root);
+            reset_signin_counters();
+            let gets = 4 * rows;
+            for _ in 0..gets {
+                assert!(store.is_live(&token, 2_000).expect("live"));
+            }
+            println!(
+                "signin_rows={rows} gets={gets} parses={} lookups={}",
+                signin_parse_count(),
+                signin_lookup_count()
+            );
+            assert_eq!(
+                signin_parse_count(),
+                1,
+                "rows={rows}: every unchanged GET serves the cached parse"
+            );
+            assert_eq!(
+                signin_lookup_count(),
+                gets as u64,
+                "rows={rows}: each GET examines exactly one indexed row"
+            );
+
+            // The POST consumes through the same index: one more probe, no
+            // re-parse, and the row really is marked used on disk.
+            assert_eq!(
+                store.consume(&token, 3_000).expect("consume").as_deref(),
+                Some("northstar-studio")
+            );
+            assert_eq!(signin_parse_count(), 1, "rows={rows}");
+            assert_eq!(signin_lookup_count(), gets as u64 + 1, "rows={rows}");
+            assert!(!store.is_live(&token, 3_001).expect("spent"));
+            assert_eq!(signin_parse_count(), 1, "rows={rows}");
+
+            // An append from another handle changes the identity: exactly one
+            // re-parse, then the cached path resumes.
+            let other = SigninStore::new(&root);
+            let extra = other
+                .create("northstar-studio", 4_000, 72 * HOUR_MS)
+                .expect("external create");
+            assert!(store.is_live(&extra.token, 5_000).expect("live"));
+            assert_eq!(
+                signin_parse_count(),
+                2,
+                "rows={rows}: one external change is one fold"
+            );
+
+            // A deletion is the empty store, never the stale cached rows.
+            std::fs::remove_file(store.path()).expect("remove log");
+            assert!(!store.is_live(&extra.token, 6_000).expect("deleted"));
+            assert_eq!(
+                signin_parse_count(),
+                3,
+                "rows={rows}: the missing file is not served from the cache"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Every create advances the cached index in place, so a deployment that
+    /// interleaves link issuance with renders does not re-parse the growing
+    /// log after each append (the old append-then-invalidate shape). The
+    /// pre-fix code reparsed once per render in this loop.
+    #[test]
+    fn interleaved_creates_and_renders_update_the_index_without_a_reparse() {
+        const LINKS: usize = 1_000;
+        let root = temp_root("index-interleaved");
+        let store = SigninStore::new(&root);
+        reset_signin_counters();
+        for index in 0..LINKS {
+            let created = store
+                .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                .expect("create");
+            assert!(store.is_live(&created.token, 2_000).expect("live"));
+        }
+        let parses = signin_parse_count();
+        let lookups = signin_lookup_count();
+        println!(
+            "signin_interleaved links={LINKS} renders={LINKS} parses={parses} lookups={lookups}"
+        );
+        assert_eq!(parses, 0, "each append advances the index in place");
+        assert_eq!(lookups, LINKS as u64, "one indexed row per render");
+        assert_eq!(store.read_rows().expect("rows").len(), LINKS);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The finding's exact shape: 10k durable links, then 1k GET/POST checks
+    /// through a fresh store. Pre-fix every check read and parsed the whole
+    /// log; the cached index serves all 1k checks from one parse. An external
+    /// append between requests is still discovered with one further parse.
+    #[test]
+    fn ten_thousand_links_then_a_thousand_renders_parse_the_log_once() {
+        const LINKS: usize = 10_000;
+        const CHECKS: usize = 1_000;
+        let root = temp_root("index-10k");
+        let writer = SigninStore::new(&root);
+        let mut tokens = Vec::with_capacity(LINKS);
+        for index in 0..LINKS {
+            let created = writer
+                .create("northstar-studio", 1_000 + index as i64, 72 * HOUR_MS)
+                .expect("create");
+            tokens.push(created.token);
+        }
+        // A fresh store (a restart) starts with no index: its first check
+        // folds the whole log exactly once.
+        let reader = SigninStore::new(&root);
+        reset_signin_counters();
+        for (index, token) in tokens.iter().enumerate().take(CHECKS) {
+            if index % 2 == 0 {
+                assert!(
+                    reader.is_live(token, 2_000).expect("live"),
+                    "GET {index} must not consume"
+                );
+            } else {
+                let now = 2_000 + index as i64;
+                assert_eq!(
+                    reader.consume(token, now).expect("consume").as_deref(),
+                    Some("northstar-studio")
+                );
+            }
+        }
+        let parses = signin_parse_count();
+        let lookups = signin_lookup_count();
+        let appends = signin_append_count();
+        println!(
+            "signin_scale links={LINKS} checks={CHECKS} gets={} posts={} appends={appends} parses={parses} lookups={lookups}",
+            CHECKS / 2,
+            CHECKS / 2
+        );
+        assert_eq!(parses, 1, "1k GET/POST checks share one parse");
+        assert_eq!(
+            lookups, CHECKS as u64,
+            "one indexed lookup per GET/POST check"
+        );
+        assert_eq!(
+            appends,
+            (CHECKS / 2) as u64,
+            "each successful POST appends exactly one marker"
+        );
+
+        // A replay of a spent token is a single-use refusal: one lookup, no
+        // append and no re-parse.
+        assert_eq!(reader.consume(&tokens[1], 9_000).expect("used"), None);
+        assert_eq!(signin_lookup_count(), CHECKS as u64 + 1);
+        assert_eq!(signin_append_count(), (CHECKS / 2) as u64);
+        assert_eq!(signin_parse_count(), 1);
+        assert_eq!(reader.read_rows().expect("rows").len(), LINKS);
+
+        // An append from another handle between requests changes the stamp:
+        // exactly one re-parse, then the cached index resumes.
+        let extra = writer
+            .create("northstar-studio", 5_000, 72 * HOUR_MS)
+            .expect("external append");
+        assert!(reader.is_live(&extra.token, 6_000).expect("live"));
+        assert_eq!(signin_parse_count(), 2, "one external change is one fold");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn a_created_link_is_logged_as_a_warning_without_a_mailer() {
         let root = temp_root("warn");
         let warnings = Arc::new(WarningLog::new());
-        let service = SigninService::open(&root).with_warnings(Arc::clone(&warnings));
+        let service = SigninService::open(&root)
+            .with_public_base("https://console.example")
+            .with_warnings(Arc::clone(&warnings));
         let created = service
             .issue_link("northstar-studio", "you@studio.example", 1_000)
             .await

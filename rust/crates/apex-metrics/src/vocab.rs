@@ -482,6 +482,16 @@ mod tests {
     }
 
     #[test]
+    fn status_classes_cover_every_numeric_family() {
+        assert_eq!(StatusClass::of(100), StatusClass::Informational);
+        assert_eq!(StatusClass::of(204), StatusClass::Success);
+        assert_eq!(StatusClass::of(307), StatusClass::Redirect);
+        assert_eq!(StatusClass::of(404), StatusClass::ClientError);
+        assert_eq!(StatusClass::of(503), StatusClass::ServerError);
+        assert_eq!(StatusClass::of(99), StatusClass::ServerError);
+    }
+
+    #[test]
     fn outcome_class_vocabulary_matches_the_design() {
         assert_eq!(
             OutcomeClass::VALUES,

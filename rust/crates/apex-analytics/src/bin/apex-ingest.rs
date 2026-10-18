@@ -93,6 +93,24 @@ const BATCH_SIZE: usize = 500;
 /// How many bytes of the first line identify a log file across rotations.
 const FILE_IDENTITY_BYTES: usize = 4_096;
 
+#[cfg(test)]
+thread_local! {
+    /// File bytes read while planning and reading one input segment. An
+    /// incremental run must read the identity prefix plus the new tail, not
+    /// the whole growing log.
+    static INPUT_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_input_bytes_read() {
+    INPUT_BYTES_READ.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn input_bytes_read() -> u64 {
+    INPUT_BYTES_READ.with(std::cell::Cell::get)
+}
+
 /// Parsed command-line options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Options {
@@ -197,12 +215,19 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
 /// line (bounded to [`FILE_IDENTITY_BYTES`]). Appending lines leaves the
 /// first line untouched, while a rotated file starts with a different line;
 /// the line's content itself never leaves this function.
+#[cfg(test)]
 fn file_identity(text: &str) -> Option<String> {
-    let first_line = text.split_inclusive('\n').next()?;
+    file_identity_bytes(text.as_bytes())
+}
+
+/// Byte form of [`file_identity`], so the identity can be computed from a
+/// bounded prefix read instead of the whole file.
+fn file_identity_bytes(bytes: &[u8]) -> Option<String> {
+    let first_line = bytes.split_inclusive(|byte| *byte == b'\n').next()?;
     if first_line.is_empty() {
         return None;
     }
-    let bounded = &first_line.as_bytes()[..first_line.len().min(FILE_IDENTITY_BYTES)];
+    let bounded = &first_line[..first_line.len().min(FILE_IDENTITY_BYTES)];
     Some(format!("{}-{}", bounded.len(), fnv1a_hex(bounded)))
 }
 
@@ -241,18 +266,20 @@ fn cursor_path(options: &Options, lookup: &dyn Fn(&str) -> Option<String>) -> Op
 }
 
 /// Decide where this run starts reading a file from, based on the stored
-/// cursor and the file's current identity and size. A missing cursor starts
-/// at 0; a cursor whose file was replaced (identity differs), shrank past
-/// the offset, or holds an offset that is not a line boundary restarts at 0.
+/// cursor, the file's identity and its length. A missing cursor starts at 0;
+/// a cursor whose file was replaced (identity differs), shrank past the
+/// offset, or does not sit on a line boundary restarts at 0. The line
+/// boundary itself is checked by [`read_file_segment`], which reads at most
+/// the identity prefix and the new tail instead of the whole log.
 async fn plan_read(
     options: &Options,
     lookup: &dyn Fn(&str) -> Option<String>,
-    text: &str,
+    identity: Option<String>,
+    file_len: u64,
 ) -> Result<ReadPlan, String> {
     let Some(cursor_path) = cursor_path(options, lookup) else {
         return Ok(ReadPlan::whole());
     };
-    let identity = file_identity(text);
     let stored = match tokio::fs::read_to_string(&cursor_path).await {
         Ok(text) => FileCursor::parse(&text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -271,9 +298,7 @@ async fn plan_read(
     };
     match stored {
         Some(cursor)
-            if Some(&cursor.identity) == identity.as_ref()
-                && cursor.offset <= text.len() as u64
-                && text.is_char_boundary(cursor.offset as usize) =>
+            if Some(&cursor.identity) == identity.as_ref() && cursor.offset <= file_len =>
         {
             Ok(ReadPlan {
                 cursor_path: Some(cursor_path),
@@ -284,6 +309,93 @@ async fn plan_read(
         }
         Some(_) => Ok(restart(true)),
         None => Ok(restart(false)),
+    }
+}
+
+/// Read the bounded identity prefix of a file.
+async fn read_file_prefix(path: &Path) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut prefix = Vec::with_capacity(FILE_IDENTITY_BYTES);
+    file.take(FILE_IDENTITY_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    #[cfg(test)]
+    INPUT_BYTES_READ.with(|count| count.set(count.get() + prefix.len() as u64));
+    Ok(prefix)
+}
+
+/// Read one file segment starting at `offset` (a cursor offset). `None` means
+/// the offset is not a line boundary or does not decode as UTF-8, so the
+/// caller must restart at byte 0. Only one byte before the offset and the
+/// tail after it are read.
+async fn read_file_segment(path: &Path, offset: u64) -> Result<Option<String>, String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if offset > 0 {
+        let mut previous = [0u8; 1];
+        file.seek(std::io::SeekFrom::Start(offset - 1))
+            .await
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        file.read_exact(&mut previous)
+            .await
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        #[cfg(test)]
+        INPUT_BYTES_READ.with(|count| count.set(count.get() + 1));
+        if previous[0] != b'\n' {
+            return Ok(None);
+        }
+    }
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut text = String::new();
+    match file.read_to_string(&mut text).await {
+        Ok(_) => {
+            #[cfg(test)]
+            INPUT_BYTES_READ.with(|count| count.set(count.get() + text.len() as u64));
+            Ok(Some(text))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// Plan and read one file input: the identity prefix plus the cursor tail,
+/// never the whole log unless the cursor is missing or invalid.
+async fn read_file_input(
+    options: &Options,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    path: &Path,
+) -> Result<(String, ReadPlan), String> {
+    let len = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?
+        .len();
+    let identity = file_identity_bytes(&read_file_prefix(path).await?);
+    let mut plan = plan_read(options, lookup, identity, len).await?;
+    match read_file_segment(path, plan.start as u64).await? {
+        Some(text) => Ok((text, plan)),
+        None if plan.start == 0 => Err(format!(
+            "cannot read {}: the file is not valid UTF-8",
+            path.display()
+        )),
+        None => {
+            plan.start = 0;
+            plan.restarted = true;
+            let text = read_file_segment(path, 0).await?.ok_or_else(|| {
+                format!(
+                    "cannot read {}: the file is not valid UTF-8",
+                    path.display()
+                )
+            })?;
+            Ok((text, plan))
+        }
     }
 }
 
@@ -627,11 +739,14 @@ async fn run_with_store<S: EventStore>(
     let received_at =
         UtcMillis::system_now().map_err(|error| format!("system clock unavailable: {error}"))?;
 
-    let text = read_input(options).await?;
-    let plan = if options.check {
-        ReadPlan::whole()
+    let (text, plan) = if options.check {
+        (read_input(options).await?, ReadPlan::whole())
+    } else if let Some(path) = &options.path {
+        // Incremental file runs read only the identity prefix and the tail
+        // after the cursor; a growing access log is never re-read in full.
+        read_file_input(options, lookup, path).await?
     } else {
-        plan_read(options, lookup, &text).await?
+        (read_input(options).await?, ReadPlan::whole())
     };
     let input_label = options
         .path
@@ -672,7 +787,7 @@ async fn run_with_store<S: EventStore>(
     let mut consumed: u64 = 0;
     let mut consumed_lines: u64 = 0;
     let mut rows = Vec::new();
-    let mut rest = &text[plan.start..];
+    let mut rest = text.as_str();
     while let Some(newline) = rest.find('\n') {
         let line = rest[..newline]
             .strip_suffix('\r')
@@ -1078,6 +1193,107 @@ mod tests {
         );
         // stdin input has no cursor.
         assert_eq!(cursor_path(&Options::default(), &none), None);
+    }
+
+    #[tokio::test]
+    async fn incremental_runs_read_only_the_identity_prefix_and_new_tail() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-tail-read");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+
+        // A large first line makes a whole-file read visible in the byte
+        // counter while leaving the identity (its 4 KiB prefix) stable.
+        let mut first: serde_json::Value =
+            serde_json::from_str(&log_line("/pricing", 200, 1_767_225_600.0)).expect("line json");
+        first["request"]["headers"]["User-Agent"] =
+            serde_json::json!([format!("Mozilla/5.0 {}", "x".repeat(200_000))]);
+        let first = first.to_string();
+        let second = log_line("/proof", 200, 1_767_225_601.0);
+        tokio::fs::write(&log, format!("{first}\n"))
+            .await
+            .expect("write log");
+        assert!(first.len() > 200_000);
+
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+        let (_, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("first run");
+        assert_eq!(summary.lines, 1);
+        assert_eq!(summary.cursor_to, (first.len() + 1) as u64);
+
+        let mut content = tokio::fs::read_to_string(&log).await.expect("read");
+        content.push_str(&format!("{second}\n"));
+        tokio::fs::write(&log, &content).await.expect("append");
+        reset_input_bytes_read();
+        let (_, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("incremental run");
+        assert_eq!(summary.lines, 1, "only the appended line is new");
+        assert_eq!(summary.cursor_from, (first.len() + 1) as u64);
+        assert!(
+            input_bytes_read() < 10_000,
+            "one incremental run read {} bytes of a {} byte log; it must read the \
+             4 KiB identity prefix and the new tail, not the whole file",
+            input_bytes_read(),
+            content.len()
+        );
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn a_cursor_inside_a_line_restarts_at_zero() {
+        use apex_analytics::store::MemoryStore;
+        let directory = test_directory("cursor-mid-line");
+        tokio::fs::create_dir_all(&directory).await.expect("dir");
+        let log = directory.join("access.json");
+        let cursor = directory.join("cursor");
+        let spool = directory.join("spool.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            log_line("/pricing", 200, 1_767_225_600.0),
+            log_line("/proof", 200, 1_767_225_601.0)
+        );
+        tokio::fs::write(&log, &content).await.expect("write log");
+        let lookup = test_env(&cursor, &spool);
+        let store = MemoryStore::new();
+        let options = Options {
+            path: Some(log.clone()),
+            ..Options::default()
+        };
+        let (_, first) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("first run");
+        assert_eq!(first.lines, 2);
+
+        // A cursor offset that happens to be a UTF-8 boundary but sits inside
+        // a line is not a durable line boundary: the documented contract is
+        // to restart rather than parse a partial line.
+        let stored = tokio::fs::read_to_string(&cursor).await.expect("cursor");
+        let stored = FileCursor::parse(&stored).expect("cursor parses");
+        let partial = FileCursor {
+            offset: 5,
+            identity: stored.identity,
+        };
+        tokio::fs::write(&cursor, partial.render())
+            .await
+            .expect("write cursor");
+        let (_, summary) = run_with_store(&options, &lookup, Some(store.clone()))
+            .await
+            .expect("mid-line run");
+        assert!(summary.cursor_restarted, "a mid-line cursor restarts");
+        assert_eq!(summary.cursor_from, 0);
+        assert_eq!(summary.lines, 2, "both complete lines are reprocessed");
+
+        let _ = tokio::fs::remove_dir_all(&directory).await;
     }
 
     #[tokio::test]

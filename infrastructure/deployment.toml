@@ -64,6 +64,13 @@ bill_timer = "infrastructure/systemd/apex-watch-bill.timer"
 build = "zola build"
 root = "/srv/site/public"
 
+[console]
+# The separate public console origin: the whole origin proxies to apex-api,
+# so `/` is the console overview and `/console/*` the console pages. Set
+# APEX_CONSOLE_URL to https://<domain> so sign-in links land here.
+domain = "console.apexmediation.ee"
+upstream = "127.0.0.1:8787"
+
 [edge]
 config = "infrastructure/caddy/Caddyfile"
 

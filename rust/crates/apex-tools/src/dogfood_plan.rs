@@ -64,6 +64,7 @@
 //! `"<METHOD> <path>"`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
@@ -223,19 +224,33 @@ struct BaselineRemoval {
 
 /// The allowlisted `.route("<path>", <method-chain>)` matcher. The handler
 /// expression is bounded to a Rust path (`crate::favicon::ico`); chained
-/// methods (`get(a).post(b)`) and the multi-line dangling-comma argument form
-/// are both recognized.
-fn route_re() -> Result<regex::Regex, String> {
-    let handler = r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*";
-    let method = format!(r"(?:get|post)\(\s*{handler}\s*\)");
-    re(&format!(
-        r#"\.route\(\s*"(?P<path>[^"]*)"\s*,\s*(?P<spec>{method}(?:\s*\.\s*{method})*)\s*,?\s*\)"#
-    ))
+/// methods such as `get(a).post(b)` and the multi-line dangling-comma argument form
+/// are both recognized. The pattern is compiled once per process: the parity
+/// pass extracts three route files, and a regex compilation per file would be
+/// pure repeated work.
+fn route_re() -> Result<&'static regex::Regex, String> {
+    static CACHE: OnceLock<Result<regex::Regex, String>> = OnceLock::new();
+    let slot = CACHE.get_or_init(|| {
+        let handler = r"[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)*";
+        let method = format!(r"(?:get|post)\(\s*{handler}\s*\)");
+        re(&format!(
+            r#"\.route\(\s*"(?P<path>[^"]*)"\s*,\s*(?P<spec>{method}(?:\s*\.\s*{method})*)\s*,?\s*\)"#
+        ))
+    });
+    match slot {
+        Ok(regex) => Ok(regex),
+        Err(error) => Err(error.clone()),
+    }
 }
 
-/// The allowlisted `pub const PAGES: [&str; N] = [` matcher.
-fn fixture_pages_re() -> Result<regex::Regex, String> {
-    re(r"pub const PAGES: \[&str; (?P<n>[0-9]+)\] = \[")
+/// The allowlisted `pub const PAGES: [&str; N] = [` matcher, compiled once.
+fn fixture_pages_re() -> Result<&'static regex::Regex, String> {
+    static CACHE: OnceLock<Result<regex::Regex, String>> = OnceLock::new();
+    let slot = CACHE.get_or_init(|| re(r"pub const PAGES: \[&str; (?P<n>[0-9]+)\] = \["));
+    match slot {
+        Ok(regex) => Ok(regex),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 /// Drop `//` line comments so a commented-out registration cannot be read as
@@ -265,7 +280,7 @@ pub fn extract_routes(text: &str, rel: &str) -> Result<Vec<RegisteredRoute>, Str
         ));
     }
     let route_re = route_re()?;
-    let method_re = re(r"\b(get|post)\(")?;
+    let method_re = crate::util::cached_re(r"\b(get|post)\(")?;
     let mut routes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut matched = 0usize;
     for caps in route_re.captures_iter(&stripped) {
@@ -486,6 +501,67 @@ fn declared_route_sources(
     out
 }
 
+/// The changed paths, indexed for prefix matching: exact paths and every
+/// ancestor directory (without a trailing slash). A directory source `d/`
+/// matches `d`, `d/x` and deeper; an exact source matches one path. Building
+/// this once turns the cell and unmatched passes from a path-by-path rescan
+/// into a set lookup per declared source.
+struct ChangedIndex<'a> {
+    exact: BTreeSet<&'a str>,
+    prefixes: BTreeSet<&'a str>,
+}
+
+impl<'a> ChangedIndex<'a> {
+    fn new(changed: &'a [String]) -> Self {
+        let mut exact = BTreeSet::new();
+        let mut prefixes = BTreeSet::new();
+        for change in changed {
+            exact.insert(change.as_str());
+            let mut end = change.len();
+            while let Some(slash) = change[..end].rfind('/') {
+                if slash == 0 {
+                    break;
+                }
+                prefixes.insert(&change[..slash]);
+                end = slash;
+            }
+        }
+        Self { exact, prefixes }
+    }
+
+    fn source_hit(&self, source: &str) -> bool {
+        match source.strip_suffix('/') {
+            Some(dir) => self.exact.contains(dir) || self.prefixes.contains(dir),
+            None => self.exact.contains(source),
+        }
+    }
+}
+
+/// Whether one changed path hits any declared source. The declared set is
+/// indexed here too (exact paths and directory prefixes), so the cost is the
+/// number of path segments rather than the number of changed files times the
+/// number of sources.
+fn change_hits_declared(
+    change: &str,
+    declared_exact: &BTreeSet<&str>,
+    declared_dirs: &BTreeSet<&str>,
+) -> bool {
+    if declared_exact.contains(change) || declared_dirs.contains(change) {
+        return true;
+    }
+    let mut end = change.len();
+    while let Some(slash) = change[..end].rfind('/') {
+        if slash == 0 {
+            break;
+        }
+        if declared_dirs.contains(&change[..slash]) {
+            return true;
+        }
+        end = slash;
+    }
+    false
+}
+
 /// Select the required cells relevant to `changed`. The cell key is
 /// `"<service>|<METHOD path>|<class>"`; its surface key is `"<service>|<path>"`.
 pub fn select_cells(
@@ -500,6 +576,7 @@ pub fn select_cells(
             unmatched: Vec::new(),
         };
     }
+    let changed_index = ChangedIndex::new(changed);
     let mut selected = BTreeSet::new();
     for cell in all_cells {
         let mut parts = cell.split('|');
@@ -509,22 +586,29 @@ pub fn select_cells(
         let path = surface.split_once(' ').map_or(surface, |(_, path)| path);
         let key = format!("{service}|{path}");
         if let Some(sources) = surface_sources.get(&key) {
-            if changed
+            if sources
                 .iter()
-                .any(|change| sources.iter().any(|source| source_matches(change, source)))
+                .any(|source| changed_index.source_hit(source))
             {
                 selected.insert(cell.clone());
             }
         }
     }
+    let mut declared_exact: BTreeSet<&str> = BTreeSet::new();
+    let mut declared_dirs: BTreeSet<&str> = BTreeSet::new();
+    for source in surface_sources.values().flatten() {
+        match source.strip_suffix('/') {
+            Some(dir) => {
+                declared_dirs.insert(dir);
+            }
+            None => {
+                declared_exact.insert(source.as_str());
+            }
+        }
+    }
     let unmatched: Vec<String> = changed
         .iter()
-        .filter(|change| {
-            !surface_sources
-                .values()
-                .flatten()
-                .any(|source| source_matches(change, source))
-        })
+        .filter(|change| !change_hits_declared(change, &declared_exact, &declared_dirs))
         .cloned()
         .collect();
     for cell in CORE_CELLS {
@@ -532,14 +616,17 @@ pub fn select_cells(
             selected.insert(cell.to_string());
         }
     }
-    let skipped_classes: BTreeSet<String> = all_cells
-        .iter()
-        .map(|cell| cell.split('|').nth(2).unwrap_or("").to_string())
-        .filter(|class| {
-            !selected
-                .iter()
-                .any(|cell| cell.split('|').nth(2) == Some(class.as_str()))
-        })
+    // Both class sets are derived in one pass each. The old form scanned
+    // every selected cell for every required cell to decide "skipped", which
+    // is quadratic in the catalog size; the catalog only grows.
+    fn class_of(cell: &str) -> &str {
+        cell.split('|').nth(2).unwrap_or("")
+    }
+    let all_classes: BTreeSet<&str> = all_cells.iter().map(|cell| class_of(cell)).collect();
+    let selected_classes: BTreeSet<&str> = selected.iter().map(|cell| class_of(cell)).collect();
+    let skipped_classes: BTreeSet<String> = all_classes
+        .difference(&selected_classes)
+        .map(|class| (*class).to_string())
         .collect();
     Relevance {
         selected,
@@ -1861,5 +1948,149 @@ mod tests {
         let err = dogfood_plan(&repo).unwrap_err();
         assert!(err.starts_with(SURFACES_REL), "{err}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The route and fixture matchers are process-wide: the parity pass reads
+    /// three route files and three fixture bins, and a compilation per file is
+    /// repeated work. The thread-local compile counter proves every later
+    /// extraction reuses the compiled patterns.
+    #[test]
+    fn route_and_fixture_patterns_compile_once_per_process() {
+        let routes = ".route(\"/a\", get(crate::a)).route(\"/b\", post(crate::b))";
+        let pages = "pub const PAGES: [&str; 2] = [\"a\", \"b\"];";
+        let _ = extract_routes(routes, "routes.rs").expect("warm route matcher");
+        let _ =
+            extract_fixture_page_count(pages, "render-fixtures.rs").expect("warm fixture matcher");
+        let before = crate::util::regex_compile_count();
+        for _ in 0..100 {
+            let extracted = extract_routes(routes, "routes.rs").expect("extract");
+            assert_eq!(extracted.len(), 2);
+            assert_eq!(
+                extract_fixture_page_count(pages, "render-fixtures.rs").expect("pages"),
+                2
+            );
+        }
+        assert_eq!(
+            crate::util::regex_compile_count(),
+            before,
+            "route/fixture patterns must not be recompiled per file"
+        );
+    }
+
+    /// The indexed changed-path selection must decide exactly like the naive
+    /// `source_matches` scan for exact files, directory prefixes, a directory
+    /// named exactly, root-adjacent paths and unknowns.
+    #[test]
+    fn changed_index_matches_the_naive_source_scan() {
+        let (cells, sources) = relevance_fixture();
+        let cases: Vec<Vec<String>> = vec![
+            vec!["rust/crates/apex-api/src/routes.rs".to_string()],
+            vec!["rust/crates/apex-api/src/html/audit.rs".to_string()],
+            vec!["rust/crates/apex-api/src/html/".to_string()],
+            vec!["rust/crates/apex-watch/src/fetch.rs".to_string()],
+            vec!["rust/crates/apex-api/src/html/deep/page.rs".to_string()],
+            vec!["unknown/elsewhere.rs".to_string()],
+            vec![
+                "rust/crates/apex-api/src/html/audit.rs".to_string(),
+                "rust/crates/apex-watch/".to_string(),
+            ],
+        ];
+        for changed in cases {
+            let relevance = select_cells(&cells, &sources, &changed);
+            let mut naive_selected: BTreeSet<String> = cells
+                .iter()
+                .filter(|cell| {
+                    let mut parts = cell.split('|');
+                    let (Some(service), Some(surface)) = (parts.next(), parts.next()) else {
+                        return false;
+                    };
+                    let path = surface.split_once(' ').map_or(surface, |(_, path)| path);
+                    sources
+                        .get(&format!("{service}|{path}"))
+                        .is_some_and(|declared| {
+                            changed.iter().any(|change| {
+                                declared.iter().any(|source| source_matches(change, source))
+                            })
+                        })
+                })
+                .cloned()
+                .collect();
+            for core in CORE_CELLS {
+                if cells.contains(core) {
+                    naive_selected.insert((*core).to_string());
+                }
+            }
+            let naive_unmatched: Vec<String> = changed
+                .iter()
+                .filter(|change| {
+                    !sources
+                        .values()
+                        .flatten()
+                        .any(|source| source_matches(change, source))
+                })
+                .cloned()
+                .collect();
+            assert_eq!(relevance.selected, naive_selected, "changed={changed:?}");
+            assert_eq!(relevance.unmatched, naive_unmatched, "changed={changed:?}");
+        }
+    }
+
+    /// The skipped-class set is derived from the two class sets, not from a
+    /// scan of every selected cell for every required cell. This reference is
+    /// the old nested scan, evaluated at the current catalog size and at
+    /// twice it, so a future change cannot silently drop a class.
+    #[test]
+    fn skipped_classes_equal_the_pre_fix_nested_scan_at_n_and_2n() {
+        for n in [295usize, 590] {
+            let classes = REQUIRED_PROBE_CLASSES;
+            let cells: BTreeSet<String> = (0..n)
+                .map(|index| {
+                    format!(
+                        "apex-api|GET /surface/{index}|{}",
+                        classes[index * classes.len() / n]
+                    )
+                })
+                .collect();
+            let mut sources: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for cell in &cells {
+                let surface = cell.split('|').nth(1).expect("surface");
+                let index: usize = surface
+                    .rsplit('/')
+                    .next()
+                    .expect("surface index")
+                    .parse()
+                    .expect("numeric surface index");
+                let source = if index < n / 2 {
+                    "rust/crates/apex-api/src/routes.rs"
+                } else {
+                    "rust/crates/apex-api/src/other.rs"
+                };
+                sources.insert(
+                    format!("apex-api|{}", surface.split(' ').nth(1).expect("path")),
+                    vec![source.to_string()],
+                );
+            }
+            let changed = vec!["rust/crates/apex-api/src/routes.rs".to_string()];
+            let relevance = select_cells(&cells, &sources, &changed);
+            assert_eq!(relevance.selected.len(), n / 2);
+            assert!(!relevance.skipped_classes.is_empty());
+            let selected_classes: BTreeSet<&str> = relevance
+                .selected
+                .iter()
+                .map(|cell| cell.split('|').nth(2).unwrap_or(""))
+                .collect();
+            let want: BTreeSet<String> = cells
+                .iter()
+                .map(|cell| cell.split('|').nth(2).unwrap_or("").to_string())
+                .filter(|class| {
+                    !relevance
+                        .selected
+                        .iter()
+                        .any(|cell| cell.split('|').nth(2) == Some(class.as_str()))
+                })
+                .collect();
+            assert_eq!(relevance.skipped_classes, want);
+            assert_eq!(selected_classes.len(), classes.len() / 2);
+        }
     }
 }

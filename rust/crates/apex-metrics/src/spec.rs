@@ -409,4 +409,87 @@ mod tests {
         let error = LabelValue::new("x", "").expect_err("empty");
         assert!(error.to_string().contains("empty"));
     }
+
+    #[test]
+    fn every_label_error_displays_its_exact_message() {
+        let cases = [
+            (
+                LabelError::Empty {
+                    label: "service".into(),
+                },
+                "label 'service' value is empty",
+            ),
+            (
+                LabelError::TooLong {
+                    label: "route_template".into(),
+                    length: 65,
+                },
+                "label 'route_template' value is 65 bytes long",
+            ),
+            (
+                LabelError::NotASingleToken {
+                    label: "platform".into(),
+                },
+                "label 'platform' value is not a single token",
+            ),
+            (
+                LabelError::EmailLike {
+                    label: "owner".into(),
+                },
+                "label 'owner' value looks like an email address",
+            ),
+            (
+                LabelError::UrlLike {
+                    label: "source".into(),
+                },
+                "label 'source' value looks like a URL",
+            ),
+            (
+                LabelError::QueryStringLike {
+                    label: "route".into(),
+                },
+                "label 'route' value looks like a query string",
+            ),
+            (
+                LabelError::IdentifierLike {
+                    label: "account".into(),
+                },
+                "label 'account' value looks like an object id",
+            ),
+            (
+                LabelError::ReferenceLike {
+                    label: "invoice".into(),
+                },
+                "label 'invoice' value looks like an invoice or PSP reference",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn label_errors_map_into_write_errors() {
+        use crate::registry::WriteError;
+
+        let label_error = LabelError::TooLong {
+            label: "platform".into(),
+            length: 65,
+        };
+        let write_error = WriteError::from(label_error.clone());
+        assert_eq!(write_error, WriteError::Label(label_error));
+        assert_eq!(
+            write_error.to_string(),
+            "label 'platform' value is 65 bytes long"
+        );
+    }
+
+    #[test]
+    fn vocabulary_kind_names_describe_the_gate() {
+        assert_eq!(
+            Vocab::Values(Platform::VALUES).kind_name(),
+            "declared value set"
+        );
+        assert_eq!(Vocab::RouteTemplate.kind_name(), "route template");
+    }
 }

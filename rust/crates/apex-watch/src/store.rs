@@ -37,9 +37,10 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::model::{
-    publisher_slug_for_domain, tier_from_evidence, validate_watch_signup, ActivateOutcome,
-    ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome, SubscribeRequest, Subscriber,
-    WatchFieldError, WatchSignup, CONFIRMATION_TOKEN_HEX_LEN, CONFIRMATION_TTL_MS,
+    distinct_app_count, publisher_slug_for_domain, tier_from_apps, validate_watch_signup,
+    ActivateOutcome, BillingProfile, ConfirmOutcome, PendingOutcome, Status, SubscribeOutcome,
+    SubscribeRequest, Subscriber, WatchFieldError, WatchSignup, CONFIRMATION_TOKEN_HEX_LEN,
+    CONFIRMATION_TTL_MS,
 };
 
 /// Environment variable naming the watch root directory.
@@ -102,6 +103,36 @@ pub enum WatchError {
     /// The email was already confirmed by an earlier token.
     #[error("the email address is already confirmed")]
     AlreadyConfirmed,
+    /// The billing-profile token is unknown.
+    #[error("the billing-profile token is not recognised")]
+    ProfileTokenUnknown,
+    /// The billing-profile token has expired.
+    #[error("the billing-profile token has expired")]
+    ProfileTokenExpired,
+    /// The billing-profile token was already used (single use).
+    #[error("the billing-profile token was already used")]
+    ProfileTokenUsed,
+    /// The subscriber already has a different billing profile. A recorded
+    /// profile is never silently replaced.
+    #[error("subscriber '{reference}' already has a different customer billing profile")]
+    BillingProfileLocked {
+        /// The row's id.
+        reference: String,
+    },
+    /// The subscriber has no customer billing profile to invoice with.
+    #[error("subscriber '{reference}' has no customer billing profile recorded")]
+    BillingProfileMissing {
+        /// The row's id.
+        reference: String,
+    },
+    /// The row is canceled, so it cannot receive a profile or an invoice.
+    #[error("subscriber '{reference}' is {status}; the action needs a pending or active row")]
+    NotBillable {
+        /// The row's id.
+        reference: String,
+        /// The row's current status.
+        status: Status,
+    },
 }
 
 /// The append-only subscriber store.
@@ -117,7 +148,6 @@ pub struct SubscriberStore {
     lock: Mutex<()>,
     folded: Mutex<Option<Folded>>,
     folds: AtomicU64,
-    #[cfg(test)]
     row_probes: AtomicU64,
 }
 
@@ -203,6 +233,7 @@ struct Folded {
     by_dedup: HashMap<DedupKey, Vec<usize>>,
     by_cancel_token: HashMap<String, Vec<usize>>,
     by_confirmation_token: HashMap<String, Vec<usize>>,
+    by_profile_token: HashMap<String, Vec<usize>>,
 }
 
 impl Folded {
@@ -212,6 +243,7 @@ impl Folded {
         let mut by_dedup: HashMap<DedupKey, Vec<usize>> = HashMap::new();
         let mut by_cancel_token: HashMap<String, Vec<usize>> = HashMap::new();
         let mut by_confirmation_token: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_profile_token: HashMap<String, Vec<usize>> = HashMap::new();
         for (index, subscriber) in subscribers.iter().enumerate() {
             by_id.insert(subscriber.id.clone(), index);
             insert_sorted(by_dedup.entry(DedupKey::of(subscriber)).or_default(), index);
@@ -227,6 +259,9 @@ impl Folded {
                     index,
                 );
             }
+            if let Some(hash) = &subscriber.profile_token_hash {
+                insert_sorted(by_profile_token.entry(hash.clone()).or_default(), index);
+            }
         }
         Self {
             stamp,
@@ -235,6 +270,7 @@ impl Folded {
             by_dedup,
             by_cancel_token,
             by_confirmation_token,
+            by_profile_token,
         }
     }
 
@@ -249,6 +285,23 @@ impl Folded {
             probes += 1;
             let subscriber = &self.subscribers[index];
             if subscriber.confirmation_token_hash.as_deref() == Some(hash) {
+                return (Some(index), probes);
+            }
+        }
+        (None, probes)
+    }
+
+    /// The first row carrying the billing-profile `hash`, and how many rows
+    /// the indexed lookup examined.
+    fn find_profile_token(&self, hash: &str) -> (Option<usize>, u64) {
+        let Some(indexes) = self.by_profile_token.get(hash) else {
+            return (None, 0);
+        };
+        let mut probes = 0;
+        for &index in indexes {
+            probes += 1;
+            let subscriber = &self.subscribers[index];
+            if subscriber.profile_token_hash.as_deref() == Some(hash) {
                 return (Some(index), probes);
             }
         }
@@ -327,6 +380,12 @@ impl Folded {
                     index,
                 );
             }
+            if let Some(hash) = &subscriber.profile_token_hash {
+                insert_sorted(
+                    self.by_profile_token.entry(hash.clone()).or_default(),
+                    index,
+                );
+            }
             0
         }
     }
@@ -366,6 +425,17 @@ impl Folded {
                 );
             }
         }
+        if replaced.profile_token_hash != subscriber.profile_token_hash {
+            if let Some(old_hash) = &replaced.profile_token_hash {
+                remove_sorted(&mut self.by_profile_token, old_hash, index);
+            }
+            if let Some(new_hash) = &subscriber.profile_token_hash {
+                insert_sorted(
+                    self.by_profile_token.entry(new_hash.clone()).or_default(),
+                    index,
+                );
+            }
+        }
     }
 }
 
@@ -397,7 +467,6 @@ impl SubscriberStore {
             lock: Mutex::new(()),
             folded: Mutex::new(None),
             folds: AtomicU64::new(0),
-            #[cfg(test)]
             row_probes: AtomicU64::new(0),
         }
     }
@@ -516,19 +585,26 @@ impl SubscriberStore {
         self.folds.load(Ordering::Relaxed)
     }
 
-    /// Count the rows the indexed lookups had to examine. The scaling seam
-    /// asserts this stays linear in the number of operations (one indexed
-    /// position per lookup) instead of quadratic.
+    /// Count the rows the indexed lookups had to examine. The scaling seams
+    /// assert this stays linear in the number of operations (one indexed
+    /// position per lookup) instead of quadratic. The counter is a relaxed
+    /// atomic add per lookup, cheap enough to leave on in production and the
+    /// only way the HTTP-level tests can prove a request used the index.
     #[inline]
-    fn observe_row_probes(&self, _probes: u64) {
-        #[cfg(test)]
-        self.row_probes.fetch_add(_probes, Ordering::Relaxed);
+    fn observe_row_probes(&self, probes: u64) {
+        self.row_probes.fetch_add(probes, Ordering::Relaxed);
+    }
+
+    /// The rows examined by indexed lookups so far (the diagnostics seam).
+    #[must_use]
+    pub fn indexed_row_probes(&self) -> u64 {
+        self.row_probes.load(Ordering::Relaxed)
     }
 
     /// The rows examined by indexed lookups so far.
     #[cfg(test)]
     fn row_probe_count(&self) -> u64 {
-        self.row_probes.load(Ordering::Relaxed)
+        self.indexed_row_probes()
     }
 
     /// The current subscribers, oldest first.
@@ -589,6 +665,9 @@ impl SubscriberStore {
             confirmation_expires_at: None,
             confirmation_used_at: None,
             email_confirmed_at: Some(now_ms),
+            profile_token_hash: None,
+            profile_token_expires_at: None,
+            profile_token_used_at: None,
             paid_at: Some(now_ms),
             payment_link: None,
             shopper_reference: None,
@@ -598,7 +677,14 @@ impl SubscriberStore {
             last_findings: None,
             last_alert_at: None,
             cancel_token_hash: sha256_hex(&cancel_token),
-            billing: None,
+            billing_profile: None,
+            first_payment_amount_micros: None,
+            first_payment_currency: None,
+            first_invoice_number: None,
+            first_invoice_month: None,
+            first_invoice_net_micros: None,
+            first_invoice_gross_micros: None,
+            first_invoice_document: None,
             last_billed_month: None,
             last_paid_month: None,
             last_invoice_number: None,
@@ -616,9 +702,10 @@ impl SubscriberStore {
 
     /// Create one pending sign-up: no check runs until the payment is
     /// accepted and the creating email is confirmed. The tier is derived
-    /// from `request.app_count` (never a checkbox), the subscriber id is the
-    /// durable reference, and the plaintext one-time confirmation token is
-    /// returned exactly once.
+    /// from the distinct named apps in `request.apps` (never from ad-system
+    /// account ids and never a checkbox), the subscriber id is the durable
+    /// reference, and the plaintext one-time confirmation token is returned
+    /// exactly once.
     ///
     /// A repeat submission for the same `(domain, email)` inside
     /// [`DEDUP_WINDOW_MS`] is the same subscription: it keeps the reference
@@ -635,7 +722,7 @@ impl SubscriberStore {
         let _guard = self.lock()?;
         let mut cached = self.fold_lock()?;
         self.refresh(&mut cached)?;
-        let tier = tier_from_evidence(request.app_count);
+        let tier = tier_from_apps(distinct_app_count(&request.apps));
         let token = random_hex(CONFIRMATION_TOKEN_HEX_LEN / 2);
         let token_hash = sha256_hex(&token);
         let expires_at = now_ms.saturating_add(CONFIRMATION_TTL_MS);
@@ -674,6 +761,9 @@ impl SubscriberStore {
             confirmation_expires_at: Some(expires_at),
             confirmation_used_at: None,
             email_confirmed_at: None,
+            profile_token_hash: None,
+            profile_token_expires_at: None,
+            profile_token_used_at: None,
             paid_at: None,
             payment_link: None,
             shopper_reference: Some(id.clone()),
@@ -683,7 +773,14 @@ impl SubscriberStore {
             last_findings: None,
             last_alert_at: None,
             cancel_token_hash: sha256_hex(&random_hex(16)),
-            billing: None,
+            billing_profile: None,
+            first_payment_amount_micros: None,
+            first_payment_currency: None,
+            first_invoice_number: None,
+            first_invoice_month: None,
+            first_invoice_net_micros: None,
+            first_invoice_gross_micros: None,
+            first_invoice_document: None,
             last_billed_month: None,
             last_paid_month: None,
             last_invoice_number: None,
@@ -810,6 +907,168 @@ impl SubscriberStore {
         self.update_by_reference(reference, |subscriber| {
             subscriber.stored_payment_method_id = Some(stored_payment_method_id.to_string());
         })
+    }
+
+    /// The current row with `reference`, when one exists.
+    pub fn get(&self, reference: &str) -> Result<Option<Subscriber>, WatchError> {
+        let reference = reference.trim();
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        Ok(cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_id(reference);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        }))
+    }
+
+    /// Mint the one-time billing-profile token for `reference`.
+    ///
+    /// The token has the email-confirmation shape (32 lowercase hex
+    /// characters), lives for [`CONFIRMATION_TTL_MS`] and only its SHA-256
+    /// hash is stored. At most one token is outstanding per subscriber: a
+    /// second call replaces the previous hash, so the older token stops
+    /// matching. Unknown and canceled subscribers are typed refusals.
+    pub fn create_profile_token(&self, reference: &str) -> Result<String, WatchError> {
+        self.create_profile_token_at(now_unix_ms(), reference)
+    }
+
+    /// [`Self::create_profile_token`] with an explicit clock, for tests and
+    /// deterministic callers.
+    pub fn create_profile_token_at(
+        &self,
+        now_ms: i64,
+        reference: &str,
+    ) -> Result<String, WatchError> {
+        let reference = reference.trim();
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_id(reference);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::UnknownSubscriber {
+                reference: reference.to_string(),
+            });
+        };
+        if subscriber.status == Status::Canceled {
+            return Err(WatchError::NotBillable {
+                reference: subscriber.id,
+                status: Status::Canceled,
+            });
+        }
+        let token = random_hex(CONFIRMATION_TOKEN_HEX_LEN / 2);
+        subscriber.profile_token_hash = Some(sha256_hex(&token));
+        subscriber.profile_token_expires_at = Some(now_ms.saturating_add(CONFIRMATION_TTL_MS));
+        subscriber.profile_token_used_at = None;
+        self.append(&mut cached, &subscriber)?;
+        Ok(token)
+    }
+
+    /// Consume one billing-profile token exactly once, returning the
+    /// subscriber reference it was tied to. An expired, already-used,
+    /// unknown or malformed token is a typed refusal; nothing else is
+    /// written.
+    pub fn consume_profile_token(&self, now_ms: i64, token: &str) -> Result<String, WatchError> {
+        let token = token.trim();
+        if !is_confirmation_token(token) {
+            return Err(WatchError::ProfileTokenUnknown);
+        }
+        let hash = sha256_hex(token);
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_profile_token(&hash);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::ProfileTokenUnknown);
+        };
+        if subscriber.profile_token_used_at.is_some() {
+            return Err(WatchError::ProfileTokenUsed);
+        }
+        if subscriber.status == Status::Canceled {
+            return Err(WatchError::NotBillable {
+                reference: subscriber.id,
+                status: Status::Canceled,
+            });
+        }
+        if subscriber
+            .profile_token_expires_at
+            .is_none_or(|expires| now_ms >= expires)
+        {
+            return Err(WatchError::ProfileTokenExpired);
+        }
+        subscriber.profile_token_used_at = Some(now_ms);
+        self.append(&mut cached, &subscriber)?;
+        Ok(subscriber.id)
+    }
+
+    /// Validate and record the customer billing profile the first and monthly
+    /// invoices render with.
+    ///
+    /// The profile is trimmed and the country is canonicalised before it is
+    /// stored. A replay with the same profile returns the stored row without
+    /// appending a duplicate; a different profile after one is set is a typed
+    /// refusal. Unknown and canceled subscribers are refused.
+    pub fn set_billing_profile(
+        &self,
+        reference: &str,
+        profile: &BillingProfile,
+        _now_ms: i64,
+    ) -> Result<Subscriber, WatchError> {
+        let reference = reference.trim();
+        let profile = normalize_billing_profile(profile);
+        profile.validate()?;
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        let found = cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_id(reference);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        });
+        let Some(mut subscriber) = found else {
+            return Err(WatchError::UnknownSubscriber {
+                reference: reference.to_string(),
+            });
+        };
+        if subscriber.status == Status::Canceled {
+            return Err(WatchError::NotBillable {
+                reference: subscriber.id,
+                status: Status::Canceled,
+            });
+        }
+        match &subscriber.billing_profile {
+            Some(existing) if existing == &profile => return Ok(subscriber),
+            Some(_) => {
+                return Err(WatchError::BillingProfileLocked {
+                    reference: subscriber.id,
+                })
+            }
+            None => {}
+        }
+        subscriber.billing_profile = Some(profile);
+        self.append(&mut cached, &subscriber)?;
+        Ok(subscriber)
+    }
+
+    /// Consume a billing-profile token and record the profile it authorises
+    /// in one call. The token is single-use, so a replay is a typed refusal
+    /// even when the same profile is presented.
+    pub fn set_billing_profile_with_token(
+        &self,
+        token: &str,
+        profile: &BillingProfile,
+        now_ms: i64,
+    ) -> Result<Subscriber, WatchError> {
+        let reference = self.consume_profile_token(now_ms, token)?;
+        self.set_billing_profile(&reference, profile, now_ms)
     }
 
     /// Read-modify-append one row by reference. An unknown reference is a
@@ -986,6 +1245,25 @@ fn same_file(before: &FileStamp, after: &FileStamp) -> bool {
 #[cfg(not(unix))]
 fn same_file(_before: &FileStamp, _after: &FileStamp) -> bool {
     true
+}
+
+/// Trim the profile's text and canonicalise the country to uppercase, so an
+/// idempotent replay with the same values compares equal. Validation happens
+/// after this normalization.
+fn normalize_billing_profile(profile: &BillingProfile) -> BillingProfile {
+    BillingProfile {
+        legal_name: profile.legal_name.trim().to_string(),
+        address_lines: profile
+            .address_lines
+            .iter()
+            .map(|line| line.trim().to_string())
+            .collect(),
+        country: profile.country.trim().to_ascii_uppercase(),
+        vat_number: profile
+            .vat_number
+            .as_ref()
+            .map(|vat| vat.trim().to_string()),
+    }
 }
 
 /// Hex-encode `bytes`.
@@ -1319,6 +1597,9 @@ mod tests {
             confirmation_expires_at: None,
             confirmation_used_at: None,
             email_confirmed_at: Some(created_ms),
+            profile_token_hash: None,
+            profile_token_expires_at: None,
+            profile_token_used_at: None,
             paid_at: Some(created_ms),
             payment_link: None,
             shopper_reference: None,
@@ -1328,7 +1609,14 @@ mod tests {
             last_findings: None,
             last_alert_at: None,
             cancel_token_hash: sha256_hex(id),
-            billing: None,
+            billing_profile: None,
+            first_payment_amount_micros: None,
+            first_payment_currency: None,
+            first_invoice_number: None,
+            first_invoice_month: None,
+            first_invoice_net_micros: None,
+            first_invoice_gross_micros: None,
+            first_invoice_document: None,
             last_billed_month: None,
             last_paid_month: None,
             last_invoice_number: None,
@@ -1750,29 +2038,56 @@ mod tests {
         assert_eq!(store.list().unwrap(), naive_fold(&path));
     }
 
-    fn pending_request(domain: &str, email: &str, app_count: u32) -> SubscribeRequest {
+    fn pending_request(domain: &str, email: &str, apps: &[&str]) -> SubscribeRequest {
         SubscribeRequest {
             domain: domain.to_string(),
             email: email.to_string(),
             accounts: "admob.com = pub-1".to_string(),
-            app_count,
+            apps: apps.iter().map(|app| (*app).to_string()).collect(),
         }
     }
 
     #[test]
-    fn pending_signup_records_no_check_and_derives_the_tier_from_evidence() {
+    fn pending_signup_records_no_check_and_derives_the_tier_from_named_apps() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
+        let nine: Vec<String> = (0..9).map(|index| format!("app-{index}")).collect();
+        let ten: Vec<String> = (0..10).map(|index| format!("app-{index}")).collect();
+        let nine_refs: Vec<&str> = nine.iter().map(String::as_str).collect();
+        let ten_refs: Vec<&str> = ten.iter().map(String::as_str).collect();
         let normal = store
-            .subscribe_pending(10, &pending_request("normal.example", "a@x.example", 9))
+            .subscribe_pending(
+                10,
+                &pending_request("normal.example", "a@x.example", &nine_refs),
+            )
             .expect("pending");
         assert_eq!(normal.tier, crate::model::Tier::Normal);
         let core = store
-            .subscribe_pending(11, &pending_request("core.example", "b@x.example", 10))
+            .subscribe_pending(
+                11,
+                &pending_request("core.example", "b@x.example", &ten_refs),
+            )
             .expect("pending");
         assert_eq!(core.tier, crate::model::Tier::Core);
+        // Account ids never affect the tier: the same nine-app signup lists
+        // one account-id textarea row, and a ten-row account list with one
+        // app still stays Normal.
+        let one_app_many_accounts = store
+            .subscribe_pending(
+                12,
+                &SubscribeRequest {
+                    domain: "accounts.example".to_string(),
+                    email: "c@x.example".to_string(),
+                    accounts: (0..10)
+                        .map(|index| format!("net{index}.example = pub-{index}\n"))
+                        .collect(),
+                    apps: vec!["OnlyApp".to_string()],
+                },
+            )
+            .expect("pending");
+        assert_eq!(one_app_many_accounts.tier, crate::model::Tier::Normal);
         let rows = store.list().unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         for row in rows {
             assert_eq!(row.status, Status::Pending);
             assert!(!row.confirmed);
@@ -1798,7 +2113,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let pending = store
-            .subscribe_pending(10, &pending_request("activate.example", "a@x.example", 1))
+            .subscribe_pending(
+                10,
+                &pending_request("activate.example", "a@x.example", &["app"]),
+            )
             .expect("pending");
         assert!(matches!(
             store.activate(11, "sub_nope"),
@@ -1836,7 +2154,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
         let pending = store
-            .subscribe_pending(10, &pending_request("confirm.example", "a@x.example", 1))
+            .subscribe_pending(
+                10,
+                &pending_request("confirm.example", "a@x.example", &["app"]),
+            )
             .expect("pending");
         let confirmed = store
             .confirm_email(11, &pending.confirmation_token)
@@ -1860,7 +2181,10 @@ mod tests {
 
         // Expiry is refused too, and a malformed token never looks up.
         let expiring = store
-            .subscribe_pending(20, &pending_request("late.example", "b@x.example", 1))
+            .subscribe_pending(
+                20,
+                &pending_request("late.example", "b@x.example", &["app"]),
+            )
             .expect("pending");
         assert!(matches!(
             store.confirm_email(20 + CONFIRMATION_TTL_MS, &expiring.confirmation_token),
@@ -1875,5 +2199,175 @@ mod tests {
             .unwrap()
             .iter()
             .any(|row| row.domain == "late.example" && row.confirmed));
+    }
+
+    fn buyer() -> BillingProfile {
+        BillingProfile {
+            legal_name: "Buyer OÜ".to_string(),
+            address_lines: vec!["Telliskivi 1".to_string()],
+            country: "ee".to_string(),
+            vat_number: Some("EE111111111".to_string()),
+        }
+    }
+
+    #[test]
+    fn profile_tokens_are_single_outstanding_and_single_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let pending = store
+            .subscribe_pending(
+                10,
+                &pending_request("profile.example", "a@x.example", &["app"]),
+            )
+            .expect("pending");
+
+        let first = store
+            .create_profile_token_at(20, &pending.reference)
+            .expect("token");
+        assert_eq!(first.len(), CONFIRMATION_TOKEN_HEX_LEN);
+        assert!(is_confirmation_token(&first));
+        let raw = std::fs::read_to_string(store.subscribers_path()).unwrap();
+        assert!(raw.contains(&sha256_hex(&first)), "{raw}");
+        assert!(!raw.contains(&first), "only the hash is stored");
+
+        // Single-outstanding: the second token replaces the first.
+        let second = store
+            .create_profile_token_at(21, &pending.reference)
+            .expect("second token");
+        assert_ne!(first, second);
+        assert!(matches!(
+            store.consume_profile_token(22, &first),
+            Err(WatchError::ProfileTokenUnknown)
+        ));
+        assert_eq!(
+            store.consume_profile_token(22, &second).expect("consume"),
+            pending.reference
+        );
+        assert!(matches!(
+            store.consume_profile_token(23, &second),
+            Err(WatchError::ProfileTokenUsed)
+        ));
+
+        // Expiry and malformed input are typed refusals.
+        let expiring = store
+            .create_profile_token_at(30, &pending.reference)
+            .expect("expiring token");
+        assert!(matches!(
+            store.consume_profile_token(30 + CONFIRMATION_TTL_MS, &expiring),
+            Err(WatchError::ProfileTokenExpired)
+        ));
+        assert!(matches!(
+            store.consume_profile_token(31, "short"),
+            Err(WatchError::ProfileTokenUnknown)
+        ));
+    }
+
+    #[test]
+    fn setting_a_profile_validates_and_is_idempotent_but_never_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let pending = store
+            .subscribe_pending(
+                10,
+                &pending_request("buyer.example", "a@x.example", &["app"]),
+            )
+            .expect("pending");
+
+        assert!(matches!(
+            store.set_billing_profile("sub_nope", &buyer(), 11),
+            Err(WatchError::UnknownSubscriber { .. })
+        ));
+
+        let stored = store
+            .set_billing_profile(&pending.reference, &buyer(), 12)
+            .expect("set");
+        assert_eq!(
+            stored.billing_profile.as_ref().expect("profile").country,
+            "EE",
+            "the stored country is canonical"
+        );
+        let rows_after_first = std::fs::read_to_string(store.subscribers_path())
+            .unwrap()
+            .lines()
+            .count();
+
+        // The same profile (modulo trimming and country case) is a replay:
+        // it returns the stored row and appends nothing.
+        let mut replay = buyer();
+        replay.legal_name = "  Buyer OÜ  ".to_string();
+        replay.country = " EE ".to_string();
+        let replay = store
+            .set_billing_profile(&pending.reference, &replay, 13)
+            .expect("replay");
+        assert_eq!(replay.billing_profile, stored.billing_profile);
+        assert_eq!(
+            std::fs::read_to_string(store.subscribers_path())
+                .unwrap()
+                .lines()
+                .count(),
+            rows_after_first,
+            "an identical replay appends no row"
+        );
+
+        // A different profile after one is set is refused typed.
+        let mut different = buyer();
+        different.legal_name = "Someone Else OÜ".to_string();
+        assert!(matches!(
+            store.set_billing_profile(&pending.reference, &different, 14),
+            Err(WatchError::BillingProfileLocked { .. })
+        ));
+
+        // An unusable profile is refused before any write.
+        let mut broken = buyer();
+        broken.legal_name = "  ".to_string();
+        assert!(matches!(
+            store.set_billing_profile(&pending.reference, &broken, 15),
+            Err(WatchError::Billing(_))
+        ));
+    }
+
+    #[test]
+    fn canceled_subscribers_are_refused_a_profile_and_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let signup = store
+            .subscribe(10, "gone.example", "a@x.example", "", false)
+            .expect("subscribe");
+        store
+            .cancel(signup.cancel_token.as_deref().expect("token"), 11)
+            .expect("cancel")
+            .expect("match");
+        assert!(matches!(
+            store.create_profile_token(&signup.subscriber.id),
+            Err(WatchError::NotBillable { .. })
+        ));
+        assert!(matches!(
+            store.set_billing_profile(&signup.subscriber.id, &buyer(), 12),
+            Err(WatchError::NotBillable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_profile_token_authorises_recording_the_profile_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let pending = store
+            .subscribe_pending(
+                10,
+                &pending_request("token.example", "a@x.example", &["app"]),
+            )
+            .expect("pending");
+        let token = store
+            .create_profile_token_at(11, &pending.reference)
+            .expect("token");
+        let stored = store
+            .set_billing_profile_with_token(&token, &buyer(), 12)
+            .expect("profile");
+        assert_eq!(stored.id, pending.reference);
+        assert!(stored.billing_profile.is_some());
+        assert!(matches!(
+            store.set_billing_profile_with_token(&token, &buyer(), 13),
+            Err(WatchError::ProfileTokenUsed)
+        ));
     }
 }

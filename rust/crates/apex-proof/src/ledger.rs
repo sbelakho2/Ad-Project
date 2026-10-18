@@ -59,7 +59,15 @@
 //! verifying.
 //!
 //! Writes are `sync_data`-durable; a failed write is rolled back by truncation,
-//! and a failed rollback is reported loudly instead of being discarded.
+//! and a failed rollback is reported loudly instead of being discarded. The
+//! durability point is **one record per append**: every [`Ledger::append`]
+//! seals, writes and syncs that record before returning, so a caller that
+//! performs a platform side effect between two records keeps the ledger fact
+//! durable at the same point in the flow. There is deliberately no batch
+//! append: the in-repo write flows (pre-registration before a platform call,
+//! the change record before an experiment start, the rollback after a failed
+//! start) interleave records with side effects, so deferring the sync across
+//! them would weaken crash recovery rather than improve it.
 //!
 //! The ledger is single-writer by contract: concurrent handles must be
 //! externally coordinated. An out-of-contract interleaved append is still
@@ -101,6 +109,14 @@ thread_local! {
     /// Consecutive self-appends must leave both at zero.
     static APPEND_PREFIX_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static APPEND_PREFIX_HASHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Logical durable write and `sync_data` calls issued by appends. Every
+    /// append is one of each: the per-record durability point is the contract.
+    static WRITE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Verification threads spawned by the parallel signature path. The
+    /// calling thread participates as one worker, so a call spawns at most
+    /// `workers - 1` threads.
+    static WORKER_THREADS_SPAWNED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -127,6 +143,32 @@ pub(crate) fn append_prefix_reads() -> u64 {
 #[cfg(test)]
 pub(crate) fn append_prefix_hashed() -> u64 {
     APPEND_PREFIX_HASHED.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_write_metrics() {
+    WRITE_CALLS.with(|count| count.set(0));
+    SYNC_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn write_calls() -> u64 {
+    WRITE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn sync_calls() -> u64 {
+    SYNC_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_worker_spawns() {
+    WORKER_THREADS_SPAWNED.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn worker_spawns() -> u64 {
+    WORKER_THREADS_SPAWNED.with(std::cell::Cell::get)
 }
 
 /// Identity of the file a handle left behind after its last successful write.
@@ -318,17 +360,20 @@ impl Ledger {
 
     /// Seal, sign and append one record after verifying the bytes not yet
     /// verified (identity-gated tail, with the content-digest fallback on any
-    /// identity mismatch). Returns the sealed record. On any error the file and
-    /// the handle state are unchanged (or the partial write is rolled back and
-    /// reported).
+    /// identity mismatch). Returns the sealed record. This record is the
+    /// durability point: one write and one `sync_data`, exactly as the
+    /// documented contract states. On any error the file and the handle state
+    /// are unchanged (or the partial write is rolled back and reported).
     pub fn append(&mut self, draft: LedgerRecord) -> Result<LedgerRecord, LedgerError> {
         self.refresh_from_disk()?;
+        // Validate and encode the record before touching the file: a refused
+        // record leaves the on-disk prefix and the handle unchanged.
         let mut record = draft;
         record.seal(self.next_seq, self.last_hash)?;
         // Same-record validation as the read path: chain rules AND money
         // invariants (a forged BillingProof must never reach the disk).
-        let mut validator = ChainValidator::resume(self.last_hash, self.next_seq);
-        validator.check(&record, self.records.len() + 1)?;
+        ChainValidator::resume(self.last_hash, self.next_seq)
+            .check(&record, self.records.len() + 1)?;
         let next_seq = self
             .next_seq
             .checked_add(1)
@@ -336,11 +381,14 @@ impl Ledger {
         let signature = self.keypair.sign(&record.hash());
         let bytes = canonical_line(&record, &signature, &self.verifying_key)?;
         let end = self.file.metadata()?.len();
-        if let Err(error) = self
-            .file
-            .write_all(&bytes)
-            .and_then(|()| self.file.sync_data())
-        {
+        #[cfg(test)]
+        WRITE_CALLS.with(|count| count.set(count.get() + 1));
+        let result = self.file.write_all(&bytes).and_then(|()| {
+            #[cfg(test)]
+            SYNC_CALLS.with(|count| count.set(count.get() + 1));
+            self.file.sync_data()
+        });
+        if let Err(error) = result {
             self.identity = None;
             return Err(undo_partial_write(&self.file, end, error));
         }
@@ -352,8 +400,8 @@ impl Ledger {
         self.next_seq = next_seq;
         self.records.push(record.clone());
         // The verified prefix deliberately stays at the pre-append file: the
-        // next refresh re-checks the line just written as tail (one line)
-        // instead of the handle blindly trusting its own write.
+        // next refresh re-checks this line as tail instead of the handle
+        // blindly trusting its own write.
         Ok(record)
     }
 
@@ -766,10 +814,18 @@ fn first_bad_signature(
         return Ok(first_bad_in(parsed, expected_pubkey));
     }
     let chunk_size = parsed.len().div_ceil(workers);
+    let chunks: Vec<&[ParsedLine]> = parsed.chunks(chunk_size).collect();
     let mut first_bad = None;
     std::thread::scope(|scope| -> Result<(), LedgerError> {
-        let mut handles = Vec::with_capacity(parsed.len().div_ceil(chunk_size));
-        for chunk in parsed.chunks(chunk_size) {
+        // The calling thread is one of the workers: a call with `k` chunks
+        // spawns only `k - 1` threads. Verification is CPU-bound and the
+        // caller must wait for the result anyway, so making it work costs
+        // nothing and removes one thread creation per call.
+        let mut handles = Vec::with_capacity(chunks.len().saturating_sub(1));
+        for chunk in &chunks[1..] {
+            let chunk = *chunk;
+            #[cfg(test)]
+            WORKER_THREADS_SPAWNED.with(|count| count.set(count.get() + 1));
             handles.push(scope.spawn(move || {
                 if let Some(probe) = probe {
                     probe.fetch_add(1, Ordering::Relaxed);
@@ -777,6 +833,10 @@ fn first_bad_signature(
                 first_bad_in(chunk, expected_pubkey)
             }));
         }
+        if let Some(probe) = probe {
+            probe.fetch_add(1, Ordering::Relaxed);
+        }
+        first_bad = first_bad_in(chunks[0], expected_pubkey);
         let mut panicked = false;
         for handle in handles {
             match handle.join() {

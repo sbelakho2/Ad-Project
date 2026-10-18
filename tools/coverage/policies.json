@@ -173,7 +173,8 @@
     "**/*.{service,timer}",
     "infrastructure/**/*.xml",
     "infrastructure/**/*.sh",
-    "infrastructure/**/*.sample"
+    "infrastructure/**/*.sample",
+    ".kiwi/**/*.{yml,yaml}"
    ]
   },
   {

@@ -12,7 +12,9 @@
 //! - one `<style>` block from [`apex_ui::tokens::console_css`], no `<script>`
 //!   element and no external fetch;
 //! - exactly one `<h1>` owned by the page body (the shell emits none);
-//! - breadcrumb `Workspace / <area>` with Help pointing at `/support/`;
+//! - breadcrumb `Workspace / <area>` with Help pointing at the configured
+//!   absolute `APEX_SUPPORT_URL` (the marketing pages keep the on-site
+//!   relative `/support/`);
 //! - the read-only chip and footer line whenever the deployment serves
 //!   [`crate::cycle::READ_ONLY_MODE`];
 //! - the publisher label from `APEX_CONSOLE_PUBLISHER_NAME` (default
@@ -47,7 +49,8 @@ pub const CURRENCY_ENV: &str = "APEX_CONSOLE_CURRENCY";
 pub const DEFAULT_PUBLISHER_LABEL: &str = "Publisher workspace";
 /// Default display currency when the environment does not set one.
 pub const DEFAULT_CURRENCY: &str = "USD";
-/// The Help destination of every console page.
+/// The on-site Help destination of the marketing-shell pages. Console pages
+/// use the configured absolute [`crate::config::SUPPORT_URL_ENV`] instead.
 pub const HELP_HREF: &str = "/support/";
 
 /// Per-deployment rendering context shared by every page: the publisher
@@ -60,6 +63,8 @@ pub struct ConsoleCtx {
     pub currency: String,
     /// Whether the shell shows the read-only chip and footer line.
     pub read_only: bool,
+    /// The absolute Help destination of the authenticated console pages.
+    pub support_url: String,
     /// The resolved theme of this request (the `apex_theme` cookie).
     pub theme: Theme,
 }
@@ -75,8 +80,16 @@ impl ConsoleCtx {
             publisher_label: publisher_label.into(),
             currency: currency.into(),
             read_only,
+            support_url: crate::config::DEFAULT_SUPPORT_URL.to_string(),
             theme: Theme::Auto,
         }
+    }
+
+    /// The same context with an explicit absolute Help destination.
+    #[must_use]
+    pub fn with_support_url(mut self, support_url: impl Into<String>) -> Self {
+        self.support_url = support_url.into();
+        self
     }
 
     /// The same context with a resolved theme.
@@ -94,6 +107,10 @@ impl ConsoleCtx {
             currency: crate::config::env_value(CURRENCY_ENV)
                 .unwrap_or_else(|| DEFAULT_CURRENCY.to_string()),
             read_only: deployment_is_read_only(),
+            support_url: crate::config::support_url(
+                crate::config::env_value(crate::config::SUPPORT_URL_ENV).as_deref(),
+            )
+            .unwrap_or_else(|_| crate::config::DEFAULT_SUPPORT_URL.to_string()),
             theme: Theme::Auto,
         }
     }
@@ -127,7 +144,7 @@ pub fn console_document(ctx: &ConsoleCtx, title: &str, area: &str, body: &str) -
             breadcrumb: vec!["Workspace".to_string(), area.to_string()],
             read_only: ctx.read_only,
             theme: ctx.theme,
-            help_href: Some(HELP_HREF.to_string()),
+            help_href: Some(ctx.support_url.clone()),
             marketing_header: false,
         },
         body,
@@ -161,7 +178,9 @@ mod tests {
         let ctx = ConsoleCtx::new("Northstar Studio", "USD", true);
         let html = console_document(&ctx, "Audit", "Audit", "<h1>Audit</h1>");
         assert!(html.contains("<strong>Northstar Studio</strong> / Workspace / Audit"));
-        assert!(html.contains("<a class=\"topbar-help\" href=\"/support/\">Help</a>"));
+        assert!(html.contains(
+            "<a class=\"topbar-help\" href=\"https://apexmediation.ee/support/\">Help</a>"
+        ));
         assert!(html.contains("<span class=\"status status-read-only\">Read-only</span>"));
         assert!(html.contains("Read-only mode. No platform settings are changed here."));
         assert!(html.contains("<title>Audit \u{2014} Apex console</title>"));
@@ -177,10 +196,29 @@ mod tests {
     }
 
     #[test]
-    fn marketing_document_uses_the_light_shell() {
+    fn console_document_uses_the_configured_absolute_support_url() {
+        let ctx = ConsoleCtx::new("Northstar Studio", "USD", true)
+            .with_support_url("https://help.example/support/");
+        let html = console_document(&ctx, "Audit", "Audit", "<h1>Audit</h1>");
+        assert!(
+            html.contains(
+                "<a class=\"topbar-help\" href=\"https://help.example/support/\">Help</a>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("href=\"/support/\""), "{html}");
+    }
+
+    #[test]
+    fn marketing_document_uses_the_light_shell_and_the_on_site_help_link() {
         let html = marketing_document(&ConsoleCtx::default(), "Free audit", "<h1>x</h1>");
         assert!(html.contains("<header class=\"marketing-header\">"));
         assert!(!html.contains("class=\"rail\""));
+        assert!(
+            html.contains("<a href=\"/support/\">Support</a>"),
+            "marketing pages keep the on-site relative support link: {html}"
+        );
+        assert!(!html.contains("apexmediation.ee/support"), "{html}");
     }
 
     #[test]
@@ -188,9 +226,11 @@ mod tests {
         let fallback = ConsoleCtx::default();
         assert_eq!(fallback.publisher_label, "Publisher workspace");
         assert_eq!(fallback.currency, "USD");
+        assert_eq!(fallback.support_url, crate::config::DEFAULT_SUPPORT_URL);
         assert!(fallback.read_only, "this deployment is read-only");
         let from_env = ConsoleCtx::from_env();
         assert!(!from_env.publisher_label.is_empty());
         assert!(!from_env.currency.is_empty());
+        assert!(!from_env.support_url.is_empty());
     }
 }

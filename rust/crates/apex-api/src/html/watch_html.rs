@@ -29,6 +29,10 @@ pub const WATCH_INTRO: &str =
 pub const WATCH_NO_KEYS_NOTE: &str = "No platform keys are needed for the watch.";
 /// The honest confirmation line when no checkout URL is configured.
 pub const WATCH_PAYMENT_LINE: &str = "We will email a payment link before the watch starts.";
+/// The most distinct apps one submission may name.
+pub const MAX_WATCH_APPS: usize = 50;
+/// Exact field copy for a malformed or oversized apps textarea.
+pub const WATCH_APPS_ERROR: &str = "Enter one app-store id or URL per line, up to 50 lines.";
 /// The checkout action label.
 pub const WATCH_CHECKOUT_LABEL: &str = "Complete the checkout";
 /// The preserved form values of one submission.
@@ -40,6 +44,8 @@ pub struct WatchFormValues {
     pub email: String,
     /// The submitted account-id textarea.
     pub accounts: String,
+    /// The submitted app textarea: one app-store id or URL per line.
+    pub apps: String,
 }
 
 /// What the request page is rendering.
@@ -101,7 +107,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
         "Start the setup watch"
     };
     let form = format!(
-        "<form method=\"post\" action=\"{WATCH_ACTION}\">{}{}{}\
+        "<form method=\"post\" action=\"{WATCH_ACTION}\">{}{}{}{}\
          <div class=\"form-actions\">\
          <button class=\"action action-primary\" type=\"submit\">{submit_label}</button></div>\
          <p class=\"field-help\">We use these details to run the watch and send its alerts. \
@@ -135,6 +141,13 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
             ),
         ),
         field(
+            "apps",
+            "Apps (optional)",
+            Some("One app-store id or URL per line. Ten or more apps make this a core portfolio."),
+            error_for("apps"),
+            &textarea("apps", "apps", Some(&values.apps), 5, None),
+        ),
+        field(
             "accounts",
             "Network account ids (optional)",
             Some("One network = account id per line. Do not include passwords."),
@@ -150,7 +163,7 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &WatchPageState) -> String {
     );
     let mut aside = panel(
         "What you get",
-        "<p>$99 per month. $199 per month for core portfolios (ten or more publisher account ids in your public app-ads.txt).</p>\
+        "<p>$99 per month. $199 per month for core portfolios (ten or more apps you name at sign-up).</p>\
          <p>A daily check of the public app-ads.txt file and an email when something leaks.</p>",
         None,
     );
@@ -227,6 +240,198 @@ pub fn render_email_confirmation_refused(ctx: &ConsoleCtx) -> String {
     marketing_document(ctx, "Confirmation link refused", body)
 }
 
+/// The billing-profile form action.
+pub const BILLING_PROFILE_ACTION: &str = "/watch/billing-profile";
+/// The stable result page the form redirects to.
+pub const BILLING_PROFILE_RECORDED_PATH: &str = "/watch/billing-profile/recorded";
+/// Legal-name field copy.
+pub const LEGAL_NAME_ERROR: &str = "Enter the legal name that should appear on the invoice.";
+/// Address field copy.
+pub const ADDRESS_ERROR: &str =
+    "Enter one address line per line (at least one, at most ten, 500 characters each).";
+/// Country field copy.
+pub const COUNTRY_ERROR: &str = "Enter the two-letter country code.";
+/// VAT field copy.
+pub const VAT_ERROR: &str = "Enter a VAT number of 4 to 14 letters and digits, or leave it blank.";
+/// The invoice-deferred note shown when the watch is still pending.
+pub const INVOICE_AT_ACTIVATION: &str =
+    "The invoice for the first payment will be issued when your watch activates.";
+
+/// One billing-profile field error, with the exact house copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BillingProfileError {
+    /// The field id the error belongs to.
+    pub field: &'static str,
+    /// The exact message.
+    pub message: &'static str,
+}
+
+/// The values the billing-profile form re-renders after a refusal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingProfileFormValues {
+    /// The one-time profile token (hidden).
+    pub profile_token: String,
+    /// The subscriber reference (hidden).
+    pub reference: String,
+    /// The customer's legal name.
+    pub legal_name: String,
+    /// Newline-separated address lines.
+    pub address_lines: String,
+    /// The two-letter country code.
+    pub country: String,
+    /// The optional VAT number.
+    pub vat_number: String,
+}
+
+/// Render the billing-profile form shown after a confirmed watch email.
+pub fn render_billing_profile_form(
+    ctx: &ConsoleCtx,
+    email: Option<&str>,
+    values: &BillingProfileFormValues,
+    errors: &[BillingProfileError],
+) -> String {
+    let mut body = String::from("<h1>Confirm your billing details.</h1>");
+    match email {
+        Some(email) => body.push_str(&format!(
+            "<p>We record the legal details this watch and its monthly invoices are issued to. The contact email {} was confirmed.</p>",
+            html_escape(email)
+        )),
+        None => body.push_str(
+            "<p>We record the legal details this watch and its monthly invoices are issued to. The contact email on this watch was confirmed.</p>",
+        ),
+    }
+    if !errors.is_empty() {
+        body.push_str(&format!(
+            "<p class=\"form-errors-headline\">{}</p>",
+            html_escape(apex_watch::FORM_SUMMARY)
+        ));
+        let summary: Vec<(String, String)> = errors
+            .iter()
+            .map(|error| (error.field.to_string(), error.message.to_string()))
+            .collect();
+        body.push_str(&form_error_summary(&summary));
+    }
+    let error_for = |field_id: &str| {
+        errors
+            .iter()
+            .find(|error| error.field == field_id)
+            .map(|error| error.message)
+    };
+    let form = format!(
+        "<form method=\"post\" action=\"{BILLING_PROFILE_ACTION}\">\
+         <input type=\"hidden\" name=\"profile_token\" value=\"{}\">\
+         <input type=\"hidden\" name=\"reference\" value=\"{}\">\
+         {}{}{}{}\
+         <div class=\"form-actions\">\
+         <button class=\"action action-primary\" type=\"submit\">Save billing details</button>\
+         </div>\
+         <p class=\"field-help\">The billing profile is stored once; a resubmission of this          form is refused. <a href=\"{PRIVACY_HREF}\">Read the privacy notice</a>.</p></form>",
+        html_escape(&values.profile_token),
+        html_escape(&values.reference),
+        field(
+            "legal_name",
+            "Legal name",
+            Some("The company or person the invoice is addressed to."),
+            error_for("legal_name"),
+            &input(
+                "legal_name",
+                "legal_name",
+                "text",
+                Some(&values.legal_name),
+                false,
+                None
+            ),
+        ),
+        field(
+            "address_lines",
+            "Address",
+            Some("One line per row."),
+            error_for("address_lines"),
+            &textarea(
+                "address_lines",
+                "address_lines",
+                Some(&values.address_lines),
+                4,
+                None
+            ),
+        ),
+        field(
+            "country",
+            "Country",
+            Some("Two-letter country code, for example EE."),
+            error_for("country"),
+            &input(
+                "country",
+                "country",
+                "text",
+                Some(&values.country),
+                false,
+                None
+            ),
+        ),
+        field(
+            "vat_number",
+            "VAT number (optional)",
+            None,
+            error_for("vat_number"),
+            &input(
+                "vat_number",
+                "vat_number",
+                "text",
+                Some(&values.vat_number),
+                false,
+                None
+            ),
+        ),
+    );
+    body.push_str(&form);
+    marketing_document(ctx, "Billing details", &body)
+}
+
+/// Render the stable recorded page after a billing profile is stored.
+pub fn render_billing_profile_recorded(
+    ctx: &ConsoleCtx,
+    reference: &str,
+    active: bool,
+    invoice_number: Option<u64>,
+) -> String {
+    let mut body = String::from("<h1>Your billing details are recorded.</h1>");
+    body.push_str(
+        "<p>The monthly bill renders against this profile. The billing details cannot be \
+         replaced from this form.</p>",
+    );
+    match invoice_number {
+        Some(number) => body.push_str(&format!(
+            "<p>The first payment's invoice is issued as invoice {number}.</p>"
+        )),
+        None if active => body.push_str(
+            "<p>The invoice for the first payment will be issued by the billing run.</p>",
+        ),
+        None => body.push_str(&format!(
+            "<p class=\"table-note\">{INVOICE_AT_ACTIVATION}</p>"
+        )),
+    }
+    if !reference.is_empty() {
+        body.push_str(&format!(
+            "<p class=\"table-note\">Confirmation ID: <code>{}</code></p>",
+            html_escape(reference)
+        ));
+    }
+    body.push_str(
+        "<p><a class=\"action action-secondary\" href=\"/watch/\">Back to the setup watch</a></p>",
+    );
+    marketing_document(ctx, "Billing details recorded", &body)
+}
+
+/// Render the refusal state for a used, expired or unknown profile token.
+pub fn render_billing_profile_refused(ctx: &ConsoleCtx) -> String {
+    let body = "<h1>This billing link is no longer valid.</h1>\
+                <p>The link was used already, expired, or never existed. The billing details\
+                cannot be changed from an old link.</p>\
+                <p><a class=\"action action-secondary\" href=\"/watch/\">Back to the setup watch</a></p>";
+    marketing_document(ctx, "Billing link refused", body)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -247,7 +452,7 @@ mod tests {
             ">Email</label>",
             ">Network account ids (optional)</label>",
             ">Start the setup watch</button>",
-            "$199 per month for core portfolios (ten or more publisher account ids in your public app-ads.txt).",
+            "$199 per month for core portfolios (ten or more apps you name at sign-up).",
             WATCH_NO_KEYS_NOTE,
             "Read the privacy notice",
         ] {
@@ -267,6 +472,7 @@ mod tests {
                     domain: "\" onmouseover=\"alert(1)".into(),
                     email: "founder@northstar.example".into(),
                     accounts: "admob.com = pub-1".into(),
+                    apps: "com.example.app".into(),
                 },
                 errors: vec![
                     apex_watch::WatchFieldError {
@@ -300,6 +506,7 @@ mod tests {
                 domain: "northstar.example".into(),
                 email: "founder@northstar.example".into(),
                 accounts: String::new(),
+                apps: "com.example.app".into(),
             })),
         );
         assert!(html.contains(SUBMISSION_FAILURE_TITLE));

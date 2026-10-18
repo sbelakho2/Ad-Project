@@ -7,18 +7,24 @@
 //! [`apex_billing::watch_plan`] shape: $99 for the normal tier and $199 for
 //! the core tier, in [`apex_billing::PLAN_CURRENCY`].
 //!
-//! The customer profile comes from the subscriber row (`billing`), or from
-//! the operator sidecar `<watch root>/<publisher>.billing.json` when the row
-//! does not carry one. A subscriber without either is refused with a typed
-//! reason before the register is touched, so a refusal never consumes a
-//! number and no half invoice is ever rendered. A subscriber already
-//! recorded as billed for the month is skipped, so rerunning the monthly
-//! timer cannot issue a second line.
+//! The customer profile comes from the subscriber row (`billing_profile`).
+//! A subscriber without one is refused with a typed reason before the
+//! register is touched, so a refusal never consumes a number and no half
+//! invoice is ever rendered. A subscriber already recorded as billed for the
+//! month is skipped, so rerunning the monthly timer cannot issue a second
+//! line.
+//!
+//! [`issue_first_invoice`] issues the invoice for the first payment too: an
+//! active subscriber with a stored profile and an accepted first payment gets
+//! one gapless register number for the payment's month, and a replay returns
+//! the recorded invoice without consuming a second number. The first payment's
+//! amount and currency are recorded on the subscriber.
 //!
 //! Cancelled subscribers are never billed: the cancel action flips `status`
 //! to `canceled` and the monthly pass only walks active rows.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use apex_billing::{
     compute_invoice, watch_plan, AdyenClient, BillingPeriod, BillingProfile, InvoiceLineItem,
@@ -30,6 +36,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Subscriber, Tier};
 use crate::store::{SubscriberStore, WatchError};
+
+/// Serializes first-invoice checks and the register issue across concurrent
+/// callers, so two requests cannot both observe "not issued yet" and consume
+/// two numbers. The function holds no await point while this guard is held.
+static FIRST_INVOICE_LOCK: Mutex<()> = Mutex::new(());
+
+// The register opens this process made from the watch billing code. The
+// scaling seam asserts one open serves every subscriber in a run instead of
+// one open per subscriber; it is thread-local so parallel tests do not see
+// each other's work.
+#[cfg(test)]
+thread_local! {
+    static REGISTER_OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_register_opens() {
+    REGISTER_OPENS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn register_open_count() -> u64 {
+    REGISTER_OPENS.with(std::cell::Cell::get)
+}
+
+/// Open a register through the one seam the billing code uses, so the
+/// scaling test can count opens without changing the register itself.
+fn open_register(path: &Path) -> Result<InvoiceRegister, apex_billing::BillingError> {
+    #[cfg(test)]
+    REGISTER_OPENS.with(|count| count.set(count.get() + 1));
+    InvoiceRegister::open(path)
+}
 
 /// One issued invoice line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +257,7 @@ pub async fn run_bill(
             "month '{month}' is not a YYYY-MM calendar month"
         )));
     };
-    let register = InvoiceRegister::open(deps.register_path)?;
+    let register = open_register(deps.register_path)?;
     let mut report = BillReport::default();
     // Several subscribers may be the same legal customer. One register
     // question per canonical (country, number) per run is enough; each
@@ -356,6 +394,45 @@ async fn bill_one(
     register: &InvoiceRegister,
     report: &mut BillReport,
 ) -> Result<(), WatchError> {
+    // An accepted first payment whose invoice is not issued yet is the first
+    // invoice, not a renewal: issuing the plan line and charging the card
+    // again would collect the first month twice. The first payment's month is
+    // the month containing `paid_at`; the price the payment link charged is
+    // the tier price.
+    //
+    // The condition stays scoped to the month being billed: the legacy
+    // immediate-activation path also records a `paid_at`, but its row is not
+    // a first payment and must not receive a retroactive first invoice.
+    if subscriber.first_invoice_number.is_none()
+        && subscriber.first_payment_amount_micros.is_none()
+        && subscriber
+            .paid_at
+            .is_some_and(|paid_at| (start_unix_ms..end_unix_ms).contains(&paid_at))
+    {
+        let price = match subscriber.tier {
+            Tier::Core => WATCH_CORE_PRICE_MICROS,
+            Tier::Normal => WATCH_PRICE_MICROS,
+        };
+        match issue_first_invoice_with_register(
+            store,
+            &subscriber.id,
+            month,
+            price,
+            PLAN_CURRENCY,
+            deps,
+            register,
+        )
+        .await
+        {
+            Ok(invoice) => report.issued.push(invoice),
+            Err(error) => refuse(
+                report,
+                subscriber.publisher.as_str(),
+                format!("the first invoice could not be issued: {error}"),
+            ),
+        }
+        return Ok(());
+    }
     if subscriber.last_billed_month.as_deref() == Some(month) {
         if subscriber.last_paid_month.as_deref() == Some(month) {
             report.skipped.push(SkippedInvoice {
@@ -367,27 +444,14 @@ async fn bill_one(
         return retry_charge(store, subscriber, month, deps, report).await;
     }
     let publisher = subscriber.publisher.as_str();
-    let customer = match subscriber.billing.clone() {
-        Some(customer) => customer,
-        None => match store.billing_sidecar(publisher) {
-            Ok(Some(customer)) => customer,
-            Ok(None) => {
-                refuse(
-                    report,
-                    publisher,
-                    "the subscriber has no customer billing profile recorded; the invoice is refused until one is".to_string(),
-                );
-                return Ok(());
-            }
-            Err(error) => {
-                refuse(
-                    report,
-                    publisher,
-                    format!("the customer billing profile could not be read: {error}"),
-                );
-                return Ok(());
-            }
-        },
+    let Some(customer) = subscriber.billing_profile.clone() else {
+        refuse(
+            report,
+            publisher,
+            "the subscriber has no customer billing profile recorded; the invoice is refused until one is"
+                .to_string(),
+        );
+        return Ok(());
     };
     if let Err(error) = customer.validate() {
         refuse(
@@ -583,6 +647,204 @@ async fn retry_charge(
     Ok(())
 }
 
+/// Issue the invoice for a subscriber's accepted first payment.
+///
+/// The subscriber must be active, have an accepted payment (`paid_at`) and
+/// carry a [`crate::model::BillingProfile`]. The invoice is issued through
+/// the same register as the monthly pass, so its number is gapless, and it is
+/// rendered through the billing crate with the stored customer profile and
+/// the injected VAT register. `amount_micros` is the accepted first payment's
+/// amount (the invoice's net plan line) and `currency` its ISO currency; both
+/// are recorded on the subscriber.
+///
+/// Idempotent per subscriber/period: once the first invoice exists, a replay
+/// for the same `month` returns the recorded invoice without a register
+/// question, a second number or a second row. A first invoice for a different
+/// period, or a subscriber already billed for that month by the monthly pass,
+/// is a typed refusal.
+pub async fn issue_first_invoice(
+    store: &SubscriberStore,
+    reference: &str,
+    month: &str,
+    amount_micros: i64,
+    currency: &str,
+    deps: &BillDeps<'_>,
+) -> Result<IssuedInvoice, WatchError> {
+    // A one-off call opens its own register and VIES cache. The monthly run
+    // shares both across every subscriber through
+    // [`issue_first_invoice_with_register`], so a run performs one open and
+    // one register question per distinct legal identity, not one per row.
+    let register = open_register(deps.register_path)?;
+    let vies = apex_billing::CachedVies::new(deps.vies);
+    let deps = BillDeps {
+        seller: deps.seller,
+        register_path: deps.register_path,
+        vies: &vies,
+        adyen: deps.adyen,
+        transport: deps.transport,
+    };
+    issue_first_invoice_with_register(
+        store,
+        reference,
+        month,
+        amount_micros,
+        currency,
+        &deps,
+        &register,
+    )
+    .await
+}
+
+/// [`issue_first_invoice`] over an already-open register and the caller's
+/// (already cached) VIES seam. The monthly pass uses this so the register is
+/// opened once per run and one VIES cache is shared by every subscriber.
+#[allow(clippy::too_many_arguments)]
+async fn issue_first_invoice_with_register(
+    store: &SubscriberStore,
+    reference: &str,
+    month: &str,
+    amount_micros: i64,
+    currency: &str,
+    deps: &BillDeps<'_>,
+    register: &InvoiceRegister,
+) -> Result<IssuedInvoice, WatchError> {
+    let Some((start_unix_ms, end_unix_ms)) = month_bounds(month) else {
+        return Err(WatchError::Malformed(format!(
+            "month '{month}' is not a YYYY-MM calendar month"
+        )));
+    };
+    let _guard = FIRST_INVOICE_LOCK
+        .lock()
+        .map_err(|_| WatchError::StoreCorrupt {
+            detail: "the first-invoice lock is poisoned".to_string(),
+        })?;
+    let reference = reference.trim();
+    let subscriber = store
+        .get(reference)?
+        .ok_or_else(|| WatchError::UnknownSubscriber {
+            reference: reference.to_string(),
+        })?;
+    if subscriber.status == crate::model::Status::Canceled {
+        return Err(WatchError::NotBillable {
+            reference: subscriber.id,
+            status: crate::model::Status::Canceled,
+        });
+    }
+    if !subscriber.is_active() {
+        return Err(WatchError::NotBillable {
+            reference: subscriber.id,
+            status: subscriber.status,
+        });
+    }
+    if subscriber.paid_at.is_none() {
+        return Err(WatchError::Malformed(format!(
+            "subscriber '{}' has no accepted first payment; no first invoice can be issued",
+            subscriber.id
+        )));
+    }
+    let customer =
+        subscriber
+            .billing_profile
+            .clone()
+            .ok_or_else(|| WatchError::BillingProfileMissing {
+                reference: subscriber.id.clone(),
+            })?;
+
+    if let Some(number) = subscriber.first_invoice_number {
+        if subscriber.first_invoice_month.as_deref() != Some(month) {
+            return Err(WatchError::Malformed(format!(
+                "subscriber '{}' already has first invoice {number} for {}; first invoices are per period",
+                subscriber.id,
+                subscriber
+                    .first_invoice_month
+                    .as_deref()
+                    .unwrap_or("an unknown month")
+            )));
+        }
+        return Ok(IssuedInvoice {
+            publisher: subscriber.publisher.clone(),
+            tier: subscriber.tier,
+            number,
+            net_micros: subscriber.first_invoice_net_micros.unwrap_or(amount_micros),
+            gross_micros: subscriber
+                .first_invoice_gross_micros
+                .unwrap_or(amount_micros),
+            document: subscriber
+                .first_invoice_document
+                .clone()
+                .unwrap_or_default(),
+            charged: true,
+            charge_reference: subscriber.last_charge_reference.clone(),
+            psp_reference: None,
+            charge_error: None,
+        });
+    }
+    if subscriber.last_billed_month.as_deref() == Some(month) {
+        return Err(WatchError::Malformed(format!(
+            "subscriber '{}' was already billed for {month}; the first invoice would duplicate the period",
+            subscriber.id
+        )));
+    }
+    if amount_micros <= 0 {
+        return Err(WatchError::Malformed(format!(
+            "the first payment amount {amount_micros} micros is not positive"
+        )));
+    }
+    if amount_micros.checked_rem(MICROS_PER_MINOR_UNIT) != Some(0) {
+        return Err(WatchError::Malformed(format!(
+            "the first payment amount {amount_micros} micros is not an exact cent amount"
+        )));
+    }
+    let currency = currency.trim().to_ascii_uppercase();
+    if currency != PLAN_CURRENCY {
+        return Err(WatchError::Malformed(format!(
+            "the first payment currency '{currency}' is not the plan currency {PLAN_CURRENCY}"
+        )));
+    }
+
+    let period = BillingPeriod {
+        year_month: month.to_string(),
+        start_unix_ms,
+        end_unix_ms,
+    };
+    let plan = watch_plan(move || amount_micros, &currency);
+    let mut invoice = compute_invoice(&subscriber.publisher, period, &[])?;
+    invoice.push_plan_line(plan.monthly_line(1, month))?;
+    let mut prepared = invoice
+        .with_customer(customer)
+        .apply_vat_treatment_with_vies(deps.seller, deps.vies)?;
+    let number = register.issue(&mut prepared)?;
+    let document = prepared.render_vat_invoice(deps.seller)?;
+    let reference = format!("watch:{}:{month}", subscriber.id);
+    let mut updated = subscriber.clone();
+    updated.first_payment_amount_micros = Some(amount_micros);
+    updated.first_payment_currency = Some(currency);
+    updated.first_invoice_number = Some(number);
+    updated.first_invoice_month = Some(month.to_string());
+    updated.first_invoice_net_micros = Some(prepared.total_micros);
+    updated.first_invoice_gross_micros = Some(prepared.gross_micros);
+    updated.first_invoice_document = Some(document.clone());
+    updated.last_billed_month = Some(month.to_string());
+    updated.last_paid_month = Some(month.to_string());
+    updated.last_invoice_number = Some(number);
+    updated.last_charge_reference = Some(reference.clone());
+    updated.last_charge_amount_micros = Some(amount_micros);
+    updated.last_charge_error = None;
+    store.update(&updated)?;
+    Ok(IssuedInvoice {
+        publisher: subscriber.publisher,
+        tier: subscriber.tier,
+        number,
+        net_micros: prepared.total_micros,
+        gross_micros: prepared.gross_micros,
+        document,
+        charged: true,
+        charge_reference: Some(reference),
+        psp_reference: None,
+        charge_error: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -745,8 +1007,285 @@ mod tests {
     }
 
     fn with_billing(subscriber: &mut Subscriber) {
-        subscriber.billing = Some(customer("Buyer OÜ"));
+        subscriber.billing_profile = Some(customer("Buyer OÜ"));
         subscriber.stored_payment_method_id = Some("card-1".to_string());
+    }
+
+    fn active_with_profile(
+        store: &SubscriberStore,
+        domain: &str,
+        email: &str,
+        now: i64,
+    ) -> Subscriber {
+        let pending = store
+            .subscribe_pending(
+                now,
+                &crate::model::SubscribeRequest {
+                    domain: domain.to_string(),
+                    email: email.to_string(),
+                    accounts: String::new(),
+                    apps: vec!["app".to_string()],
+                },
+            )
+            .expect("pending");
+        store
+            .confirm_email(now + 1, &pending.confirmation_token)
+            .expect("confirm");
+        store
+            .activate(now + 2, &pending.reference)
+            .expect("activate");
+        store
+            .set_billing_profile(&pending.reference, &customer("Buyer OÜ"), now + 3)
+            .expect("profile");
+        let mut subscriber = store.get(&pending.reference).expect("get").expect("row");
+        subscriber.stored_payment_method_id = Some("card-1".to_string());
+        store.update(&subscriber).expect("card");
+        store.get(&pending.reference).expect("get").expect("row")
+    }
+
+    #[tokio::test]
+    async fn first_invoices_are_gapless_replay_without_a_second_number_and_record_the_payment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let first = active_with_profile(&store, "first.example", "ops@first.example", 10);
+        let second = active_with_profile(&store, "second.example", "ops@second.example", 20);
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(Vec::new());
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+
+        let first_invoice =
+            issue_first_invoice(&store, &first.id, "2026-10", 99_000_000, "USD", &deps)
+                .await
+                .expect("first invoice");
+        assert_eq!(first_invoice.number, 1, "the register starts at one");
+        assert!(first_invoice.charged, "the first payment was accepted");
+        assert!(first_invoice.document.contains("VAT invoice No. 1"));
+        assert_eq!(first_invoice.net_micros, 99_000_000);
+        assert_eq!(first_invoice.gross_micros, 118_800_000);
+
+        // A replay returns the same invoice and consumes no second number.
+        let replay = issue_first_invoice(&store, &first.id, "2026-10", 99_000_000, "USD", &deps)
+            .await
+            .expect("replay");
+        assert_eq!(replay.number, first_invoice.number);
+        assert_eq!(replay.document, first_invoice.document);
+        let register_raw = std::fs::read_to_string(&register_path).unwrap();
+        assert_eq!(register_raw.lines().count(), 1, "still one invoice");
+
+        // A second subscriber issued in between gets the next gapless number.
+        let second_invoice =
+            issue_first_invoice(&store, &second.id, "2026-10", 199_000_000, "USD", &deps)
+                .await
+                .expect("second invoice");
+        assert_eq!(second_invoice.number, 2);
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+
+        let row = store.get(&first.id).unwrap().unwrap();
+        assert_eq!(row.first_payment_amount_micros, Some(99_000_000));
+        assert_eq!(row.first_payment_currency.as_deref(), Some("USD"));
+        assert_eq!(row.first_invoice_number, Some(1));
+        assert_eq!(row.first_invoice_month.as_deref(), Some("2026-10"));
+        assert_eq!(row.last_paid_month.as_deref(), Some("2026-10"));
+
+        // The monthly pass sees the first payment's month as paid: no second
+        // invoice and no charge request.
+        let report = run_bill(&store, "2026-10", &deps).await.expect("monthly");
+        assert_eq!(report.issued.len(), 0);
+        assert_eq!(report.charged.len(), 0);
+        assert_eq!(report.skipped.len(), 2);
+        assert!(
+            transport.requests().is_empty(),
+            "the first payment is never charged again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_month_charges_the_stored_card_with_the_exact_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber = active_with_profile(&store, "renew.example", "ops@renew.example", 10);
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let first_transport = ScriptedTransport::new(Vec::new());
+        let adyen = adyen();
+        issue_first_invoice(
+            &store,
+            &subscriber.id,
+            "2026-10",
+            99_000_000,
+            "USD",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&first_transport),
+            },
+        )
+        .await
+        .expect("first invoice");
+
+        let transport = ScriptedTransport::new(vec![accepted()]);
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+        let report = run_bill(&store, "2026-11", &deps).await.expect("monthly");
+        assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
+        assert_eq!(report.issued.len(), 1);
+        assert_eq!(report.charged.len(), 1);
+        let issued = &report.issued[0];
+        assert_eq!(issued.number, 2, "numbering continues gaplessly");
+        assert!(issued.charged);
+        assert_eq!(issued.net_micros, 99_000_000);
+        assert_eq!(issued.gross_micros, 118_800_000);
+        assert!(issued.document.contains("VAT invoice No. 2"));
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, HttpMethod::Post);
+        assert_eq!(request.url, "https://checkout.test/v71/payments");
+        let body = match request.body.as_ref() {
+            Some(HttpBody::Json(body)) => body,
+            other => panic!("expected a JSON body, got {other:?}"),
+        };
+        assert_eq!(body["shopperReference"], subscriber.id.as_str());
+        assert_eq!(body["storedPaymentMethodId"], "card-1");
+        assert_eq!(body["shopperInteraction"], "ContAuth");
+        assert_eq!(body["recurringProcessingModel"], "Subscription");
+        assert_eq!(
+            body["reference"],
+            format!("watch:{}:2026-11", subscriber.id).as_str()
+        );
+        assert_eq!(body["amount"]["value"], 11_880);
+        assert_eq!(body["amount"]["currency"], "USD");
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            2,
+            "the first invoice and the renewal are the only register lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_monthly_pass_issues_an_uninvoiced_first_payment_without_charging_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let mut subscriber = store
+            .subscribe(
+                OCT_START + 1_000,
+                "activated.example",
+                "ops@activated.example",
+                "",
+                false,
+            )
+            .expect("subscribe")
+            .subscriber;
+        with_billing(&mut subscriber);
+        store.update(&subscriber).expect("update");
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let transport = ScriptedTransport::new(Vec::new());
+        let adyen = adyen();
+        let deps = BillDeps {
+            seller: &seller,
+            register_path: &register_path,
+            vies: &vies,
+            adyen: Some(&adyen),
+            transport: Some(&transport),
+        };
+
+        let report = run_bill(&store, "2026-10", &deps).await.expect("run");
+        assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
+        assert_eq!(report.issued.len(), 1);
+        assert_eq!(report.issued[0].number, 1);
+        assert!(report.issued[0].charged);
+        assert_eq!(report.issued[0].net_micros, 99_000_000);
+        assert_eq!(
+            report.charged.len(),
+            0,
+            "the first payment was collected by the payment link, not charged again"
+        );
+        assert!(
+            transport.requests().is_empty(),
+            "no card charge for an already-collected first payment"
+        );
+        let row = store.get(&subscriber.id).unwrap().unwrap();
+        assert_eq!(row.first_payment_amount_micros, Some(99_000_000));
+        assert_eq!(row.first_invoice_number, Some(1));
+        assert_eq!(row.last_paid_month.as_deref(), Some("2026-10"));
+
+        // The next run of the same month is a skip, not a second charge.
+        let replay = run_bill(&store, "2026-10", &deps).await.expect("replay");
+        assert_eq!(replay.issued.len(), 0);
+        assert_eq!(replay.charged.len(), 0);
+        assert_eq!(replay.skipped.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&register_path)
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_invoice_without_a_profile_is_the_documented_typed_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SubscriberStore::open(dir.path());
+        let subscriber = store
+            .subscribe(10, "noprofile.example", "ops@noprofile.example", "", false)
+            .expect("subscribe")
+            .subscriber;
+        let seller = seller();
+        let register_path = register_path(&dir);
+        let vies = DomesticVies;
+        let adyen = adyen();
+        let transport = ScriptedTransport::new(Vec::new());
+        let error = issue_first_invoice(
+            &store,
+            &subscriber.id,
+            "2026-10",
+            99_000_000,
+            "USD",
+            &BillDeps {
+                seller: &seller,
+                register_path: &register_path,
+                vies: &vies,
+                adyen: Some(&adyen),
+                transport: Some(&transport),
+            },
+        )
+        .await
+        .expect_err("no profile");
+        assert!(
+            error.to_string().contains("no customer billing profile"),
+            "{error}"
+        );
+        assert!(!register_path.exists(), "a refusal consumes no number");
     }
 
     #[test]
@@ -882,7 +1421,7 @@ mod tests {
                 .subscribe(port, domain, &format!("ops@{domain}"), "", false)
                 .expect("subscribe")
                 .subscriber;
-            subscriber.billing = Some(cross_border_customer("Shared Buyer GmbH"));
+            subscriber.billing_profile = Some(cross_border_customer("Shared Buyer GmbH"));
             subscriber.stored_payment_method_id = Some("card-1".to_string());
             store.update(&subscriber).expect("update");
         }
@@ -964,7 +1503,7 @@ mod tests {
 
         // A malformed profile inside the row is also refused before issue.
         let mut broken = store.list().expect("list").remove(0);
-        broken.billing = Some(CustomerProfile {
+        broken.billing_profile = Some(CustomerProfile {
             legal_name: " ".into(),
             address_lines: vec!["x".into()],
             country: "EE".into(),
@@ -985,7 +1524,7 @@ mod tests {
             .subscribe(10, "northstar.example", "ops@northstar.example", "", false)
             .expect("subscribe")
             .subscriber;
-        subscriber.billing = Some(customer("Buyer OÜ"));
+        subscriber.billing_profile = Some(customer("Buyer OÜ"));
         subscriber.stored_payment_method_id = None;
         store.update(&subscriber).expect("update");
         let seller = seller();
@@ -1247,6 +1786,76 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[tokio::test]
+    async fn one_run_opens_one_register_and_asks_one_vies_question_per_identity() {
+        for subscribers in [16usize, 32, 64] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SubscriberStore::open(dir.path());
+            let (oct_start, _) = month_bounds("2026-10").expect("bounds");
+            for index in 0..subscribers {
+                let subscriber = active_with_profile(
+                    &store,
+                    &format!("shared{index}.example"),
+                    &format!("ops{index}@shared.example"),
+                    oct_start + 1_000 + index as i64,
+                );
+                let mut row = subscriber;
+                row.billing_profile = Some(cross_border_customer("Shared Buyer GmbH"));
+                store.update(&row).expect("shared profile");
+            }
+            let seller = seller();
+            let register_path = register_path(&dir);
+            let vies = CountingVies::default();
+            let transport = ScriptedTransport::new(Vec::new());
+            let adyen = adyen();
+            reset_register_opens();
+            let report = run_bill(
+                &store,
+                "2026-10",
+                &BillDeps {
+                    seller: &seller,
+                    register_path: &register_path,
+                    vies: &vies,
+                    adyen: Some(&adyen),
+                    transport: Some(&transport),
+                },
+            )
+            .await
+            .expect("run");
+            println!(
+                "subscribers={subscribers} register_opens={} vies_calls={} issued={}",
+                register_open_count(),
+                vies.calls(),
+                report.issued.len()
+            );
+            assert_eq!(report.issued.len(), subscribers);
+            assert_eq!(report.issued[0].number, 1);
+            assert_eq!(
+                report.issued[subscribers - 1].number,
+                subscribers as u64,
+                "numbers stay gapless"
+            );
+            assert_eq!(
+                register_open_count(),
+                1,
+                "subscribers={subscribers}: the run opens the register once"
+            );
+            assert_eq!(
+                vies.calls(),
+                1,
+                "subscribers={subscribers}: one legal identity is one register question"
+            );
+            assert!(
+                transport.requests().is_empty(),
+                "the accepted first payment is never charged again"
+            );
+            for row in store.list().expect("list") {
+                assert!(row.first_invoice_number.is_some());
+                assert!(row.first_payment_amount_micros.is_some());
+            }
+        }
     }
 
     #[tokio::test]

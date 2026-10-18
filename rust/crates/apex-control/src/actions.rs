@@ -670,10 +670,7 @@ pub async fn object_state(
             json!({"publisher_id": target}),
         )),
         Capability::RestoreReconcileRequest => {
-            let experiments = state.data.durable_experiments().ok()?;
-            let experiment = experiments
-                .iter()
-                .find(|experiment| experiment.experiment_id == target)?;
+            let experiment = state.data.experiment_by_id(target).ok()??;
             Some((
                 format!("experiment:{target}"),
                 json!({
@@ -703,8 +700,7 @@ pub async fn object_state(
         | Capability::CollectionRetry
         | Capability::DisputeMark
         | Capability::ManualReconcile => {
-            let invoices = state.data.invoices().ok()?;
-            let invoice = invoices.iter().find(|invoice| invoice.id() == target)?;
+            let invoice = state.data.invoice_by_id(target).ok()??;
             Some((
                 format!("invoice:{target}"),
                 json!({

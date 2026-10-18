@@ -2,8 +2,8 @@
 //!
 //! The token exchange on `POST /console/ledger` never keeps the publisher's
 //! access token: it mints an opaque, short-lived session id and puts only that
-//! id in an `HttpOnly`, host-only cookie scoped to `/console`. The session is
-//! the console's whole access boundary: every console page except the access
+//! id in an `HttpOnly`, host-only cookie scoped to `/`. The session is the
+//! console's whole access boundary: every console page except the access
 //! panel itself resolves its publisher from the live session, so one
 //! deployment serves many publishers without ever falling back to a
 //! deployment-wide default. The store here is the only place a session lives:
@@ -295,11 +295,14 @@ fn random_hex_16() -> String {
 /// The `Set-Cookie` value for a session id. `secure` adds the `Secure`
 /// attribute (true when the request arrived over HTTPS). The cookie is
 /// host-only (no `Domain` attribute), `HttpOnly` and `SameSite=Lax`, scoped to
-/// `/console` so every console surface shares the session and no other surface
-/// sees it.
+/// `/` so a browser sends it to the console overview at `/` as well as every
+/// `/console` surface. Browsers never send a `Path=/console` cookie to `/`,
+/// which made the overview unreachable from a browser; the host-only boundary
+/// (not a path boundary) keeps it on this deployment's origin. Every route
+/// still enforces the session, so the wider path grants no additional access.
 pub fn session_cookie(id: &str, secure: bool) -> String {
     let mut cookie = format!(
-        "{SESSION_COOKIE}={id}; Path=/console; Max-Age={}; HttpOnly; SameSite=Lax",
+        "{SESSION_COOKIE}={id}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
         SESSION_IDLE_MS / 1000
     );
     if secure {
@@ -308,9 +311,10 @@ pub fn session_cookie(id: &str, secure: bool) -> String {
     cookie
 }
 
-/// The `Set-Cookie` value that clears the session cookie.
+/// The `Set-Cookie` value that clears the session cookie. The `Path` must
+/// match the minted cookie's `Path=/` or the browser would keep the old one.
 pub fn cleared_session_cookie() -> String {
-    format!("{SESSION_COOKIE}=; Path=/console; Max-Age=0; HttpOnly; SameSite=Lax")
+    format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
 }
 
 /// Read the session id from a `Cookie` header value.
@@ -572,7 +576,7 @@ mod tests {
         let plain = session_cookie("abc", false);
         assert!(plain.contains("HttpOnly"));
         assert!(plain.contains("SameSite=Lax"));
-        assert!(plain.contains("Path=/console;"));
+        assert!(plain.contains("Path=/;"));
         assert!(!plain.contains("Secure"));
         assert!(!plain.contains("Domain="));
         assert!(plain.contains("Max-Age=900"));
@@ -580,8 +584,45 @@ mod tests {
         assert!(secure.ends_with("; Secure"));
         let cleared = cleared_session_cookie();
         assert!(cleared.contains("Max-Age=0"));
-        assert!(cleared.contains("Path=/console;"));
+        assert!(cleared.contains("Path=/;"));
         assert!(!cleared.contains("Domain="));
+    }
+
+    /// A browser sends a cookie only when its `Path` path-matches the request
+    /// (RFC 6265 section 5.1.4). The minted cookie's `Path=/` therefore
+    /// reaches the overview at `/`, every `/console/*` page and any other path
+    /// on the same host; the `Domain`-less cookie is host-only and is never
+    /// sent to another origin.
+    #[test]
+    fn session_cookie_path_reaches_the_overview_and_the_console() {
+        let cookie = session_cookie("abc", false);
+        let path = cookie
+            .split(';')
+            .find_map(|part| part.trim().strip_prefix("Path="))
+            .expect("the cookie carries a Path");
+        assert_eq!(path, "/");
+        for request in ["/", "/console", "/console/ledger", "/console/ledger?page=2"] {
+            assert!(
+                cookie_path_matches(path, request),
+                "browser would send the session cookie to {request}"
+            );
+        }
+        assert!(
+            cookie_path_matches(path, "/healthz"),
+            "a non-console path on the same host receives the host-only cookie"
+        );
+        assert!(!cookie.contains("Domain="), "host-only: {cookie}");
+    }
+
+    /// RFC 6265 path-match, used by the browser-semantics test above.
+    fn cookie_path_matches(cookie_path: &str, request_path: &str) -> bool {
+        if request_path == cookie_path {
+            return true;
+        }
+        if !request_path.starts_with(cookie_path) {
+            return false;
+        }
+        cookie_path.ends_with('/') || request_path.as_bytes()[cookie_path.len()] == b'/'
     }
 
     #[test]

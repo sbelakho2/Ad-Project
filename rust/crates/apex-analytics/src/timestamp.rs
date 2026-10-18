@@ -144,6 +144,21 @@ impl UtcMillis {
         format!("{year:04}-{month:02}-{day:02}")
     }
 
+    /// The UTC calendar month as `YYYY-MM`. Cohort folds only need the month;
+    /// formatting the day first and then slicing it allocated two strings per
+    /// event, so this renders the month directly.
+    pub fn to_month_string(self) -> String {
+        let (days, _) = self.split_days();
+        let (year, month, _) = civil_from_days(days);
+        if (0..=9_999).contains(&year) {
+            return format!("{year:04}-{month:02}");
+        }
+        // Preserve the historical seven-character projection for years that
+        // render with more than four digits.
+        let day = self.to_day_string();
+        day.get(..7).map_or_else(|| day.clone(), str::to_string)
+    }
+
     /// The calendar day index (days since 1970-01-01) of this instant.
     pub fn day_index(self) -> i64 {
         self.split_days().0
@@ -375,6 +390,8 @@ mod tests {
         let instant = UtcMillis::parse_rfc3339("2026-10-15T09:10:00.000Z").expect("instant");
         assert_eq!(instant.day_index(), days_from_civil(2026, 10, 15));
         assert_eq!(instant.to_day_string(), "2026-10-15");
+        assert_eq!(instant.to_month_string(), "2026-10");
+        assert_eq!(&instant.to_day_string()[..7], instant.to_month_string());
         assert_eq!(
             UtcMillis::from_unix_millis(instant.unix_millis()).to_rfc3339_millis(),
             "2026-10-15T09:10:00.000Z"

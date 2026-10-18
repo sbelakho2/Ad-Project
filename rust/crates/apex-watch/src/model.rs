@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use apex_billing::CustomerProfile;
+pub use apex_billing::CustomerProfile as BillingProfile;
 
 use crate::fetch::normalize_domain;
 
@@ -25,10 +25,11 @@ use crate::fetch::normalize_domain;
 pub const MAX_ACCOUNT_TEXT_CHARS: usize = 2_000;
 /// The most account-id rows one submission may carry.
 pub const MAX_ACCOUNT_ROWS: usize = 20;
-/// The evidence threshold that makes a sign-up the core-portfolio tier: a
-/// publisher with at least this many apps is core. The tier is derived from
-/// the evidence (the app count the caller observed) and never from a form
-/// checkbox.
+/// The app-count threshold that makes a sign-up the core-portfolio tier: a
+/// publisher with at least this many distinct named apps is core. The tier is
+/// derived from the distinct apps the subscriber names, never from the
+/// ad-system account ids in app-ads.txt (one publisher routinely lists many
+/// account ids for one app) and never from a form checkbox.
 pub const CORE_TIER_MIN_APP_COUNT: u32 = 10;
 /// Lifetime of the one-time email-confirmation token, mirroring the
 /// self-serve sign-in link: 72 hours.
@@ -81,13 +82,20 @@ impl Tier {
     }
 }
 
-/// Derive the subscription tier from the evidence: the number of apps the
-/// publisher reported. A publisher with at least
-/// [`CORE_TIER_MIN_APP_COUNT`] apps is the core-portfolio tier; every smaller
-/// count is the standard tier. The sign-up form has no tier input that this
-/// reads: a checkbox can never buy the higher tier.
+/// Derive the subscription tier from the number of distinct named apps the
+/// publisher reported. A publisher with at least [`CORE_TIER_MIN_APP_COUNT`]
+/// apps is the core-portfolio tier; every smaller count is the standard tier.
+///
+/// The count is apps, not ad-system account ids: an app-ads.txt with ten
+/// `admob.com` account id rows for one app is still one app. The sign-up form
+/// has no tier input that this reads, so a checkbox can never buy the higher
+/// tier.
 #[must_use]
-pub fn tier_from_evidence(app_count: u32) -> Tier {
+pub fn tier_from_apps(app_count: impl TryInto<u32>) -> Tier {
+    // A count that cannot be represented is not evidence of a large
+    // portfolio: fail to the standard tier instead of letting an overflow or
+    // a negative count buy the core price.
+    let app_count = app_count.try_into().unwrap_or(0);
     if app_count >= CORE_TIER_MIN_APP_COUNT {
         Tier::Core
     } else {
@@ -167,6 +175,18 @@ pub struct Subscriber {
     /// When the creating email address was confirmed, in unix milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_confirmed_at: Option<i64>,
+    /// SHA-256 (lowercase hex) of the one-time billing-profile token. The
+    /// token itself is returned once by [`crate::store::SubscriberStore::create_profile_token`]
+    /// and never stored. At most one token is outstanding: a second call
+    /// replaces the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_token_hash: Option<String>,
+    /// Absolute expiry of the billing-profile token, in unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_token_expires_at: Option<i64>,
+    /// When the billing-profile token was consumed, in unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_token_used_at: Option<i64>,
     /// When the payment was accepted and the watch switched on, in unix
     /// milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,10 +220,38 @@ pub struct Subscriber {
     /// SHA-256 (lowercase hex) of the cancel token. The token itself is
     /// returned once by `subscribe` and never stored.
     pub cancel_token_hash: String,
-    /// The customer billing profile the monthly line renders with, when the
-    /// operator has recorded one on the subscriber row.
+    /// The customer billing profile the first and monthly invoices render
+    /// with, recorded through
+    /// [`crate::store::SubscriberStore::set_billing_profile`]. `billing` is
+    /// accepted as the legacy field name so rows written before this field
+    /// existed keep their profile.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "billing")]
+    pub billing_profile: Option<BillingProfile>,
+    /// The accepted first payment's amount in micros, recorded when the first
+    /// invoice was issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub billing: Option<CustomerProfile>,
+    pub first_payment_amount_micros: Option<i64>,
+    /// The accepted first payment's ISO currency, recorded when the first
+    /// invoice was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_payment_currency: Option<String>,
+    /// The register number of the first invoice. Its presence is the
+    /// idempotency key: re-issuing never consumes a second number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_invoice_number: Option<u64>,
+    /// The `YYYY-MM` period the first invoice covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_invoice_month: Option<String>,
+    /// The net amount of the first invoice, in micros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_invoice_net_micros: Option<i64>,
+    /// The gross amount of the first invoice, in micros.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_invoice_gross_micros: Option<i64>,
+    /// The rendered first invoice document, kept so a replay can return it
+    /// without another register or VIES question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_invoice_document: Option<String>,
     /// The last month (`YYYY-MM`) this subscriber was billed, so a rerun of
     /// the monthly pass can never issue a second line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,8 +297,9 @@ fn confirmed_by_default() -> bool {
     true
 }
 
-/// One public sign-up as the pending flow consumes it. `app_count` is the
-/// evidence the tier is derived from; there is deliberately no tier checkbox.
+/// One public sign-up as the pending flow consumes it. `apps` is the evidence
+/// the tier is derived from — the distinct named apps, not ad-system account
+/// ids; there is deliberately no tier checkbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscribeRequest {
     /// The submitted domain (normalized by the store).
@@ -259,8 +308,34 @@ pub struct SubscribeRequest {
     pub email: String,
     /// The optional `network = account id` textarea.
     pub accounts: String,
-    /// The number of apps the sign-up reported; the tier evidence.
-    pub app_count: u32,
+    /// The distinct app names the sign-up reported; the tier evidence.
+    pub apps: Vec<String>,
+}
+
+/// The identity of one submitted app name: surrounding whitespace is ignored
+/// and Unicode case is folded. `"Northstar"`, `" northstar "` and the Kelvin
+/// sign `"K"`/`"k"` therefore name one app. The sign-up parser and
+/// [`distinct_app_count`] both use this one rule, so the fifty-app bound and
+/// the tier count can never disagree.
+#[must_use]
+pub fn app_identity(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// Count the distinct named apps in `apps`: blank names are ignored and
+/// names are compared through [`app_identity`] (Unicode lowercase after
+/// trimming), so `"Northstar"` and `" northstar "` are one app. Ad-system
+/// account ids never enter this count.
+#[must_use]
+pub fn distinct_app_count(apps: &[String]) -> u32 {
+    let mut names: Vec<String> = apps
+        .iter()
+        .map(|name| app_identity(name))
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    u32::try_from(names.len()).unwrap_or(u32::MAX)
 }
 
 /// What one accepted `subscribe_pending` call reports.
@@ -622,14 +697,44 @@ mod tests {
 
     #[test]
     fn the_tier_comes_from_the_app_count_boundary_never_a_checkbox() {
-        assert_eq!(tier_from_evidence(0), Tier::Normal);
+        assert_eq!(tier_from_apps(0), Tier::Normal);
+        assert_eq!(tier_from_apps(CORE_TIER_MIN_APP_COUNT - 1), Tier::Normal);
+        assert_eq!(tier_from_apps(CORE_TIER_MIN_APP_COUNT), Tier::Core);
+        assert_eq!(tier_from_apps(CORE_TIER_MIN_APP_COUNT + 1), Tier::Core);
+        assert_eq!(tier_from_apps(u32::MAX), Tier::Core);
         assert_eq!(
-            tier_from_evidence(CORE_TIER_MIN_APP_COUNT - 1),
-            Tier::Normal
+            tier_from_apps(-1i64),
+            Tier::Normal,
+            "an unrepresentable count never buys the core tier"
         );
-        assert_eq!(tier_from_evidence(CORE_TIER_MIN_APP_COUNT), Tier::Core);
-        assert_eq!(tier_from_evidence(CORE_TIER_MIN_APP_COUNT + 1), Tier::Core);
-        assert_eq!(tier_from_evidence(u32::MAX), Tier::Core);
+
+        // The count is distinct named apps, never ad-system account ids.
+        let nine: Vec<String> = (0..9).map(|index| format!("App {index}")).collect();
+        assert_eq!(tier_from_apps(distinct_app_count(&nine)), Tier::Normal);
+        let ten: Vec<String> = (0..10).map(|index| format!("App {index}")).collect();
+        assert_eq!(tier_from_apps(distinct_app_count(&ten)), Tier::Core);
+        assert_eq!(
+            distinct_app_count(&[
+                "Northstar".to_string(),
+                " northstar ".to_string(),
+                "NORTHSTAR".to_string(),
+                String::new(),
+            ]),
+            1,
+            "case and surrounding whitespace do not create a second app"
+        );
+        assert_eq!(
+            distinct_app_count(&(0..10).map(|i| format!("app-{i}")).collect::<Vec<_>>()),
+            10
+        );
+        // The Kelvin sign lowercases to `k`, so `K` and `k` are one app under
+        // the same Unicode rule the sign-up parser uses.
+        assert_eq!(
+            distinct_app_count(&["K".to_string(), "k".to_string()]),
+            1,
+            "the Kelvin sign folds to k"
+        );
+        assert_eq!(app_identity(" K "), app_identity("k"));
     }
 
     #[test]
@@ -651,6 +756,9 @@ mod tests {
             confirmation_expires_at: Some(11),
             confirmation_used_at: Some(12),
             email_confirmed_at: Some(12),
+            profile_token_hash: Some("12".to_string()),
+            profile_token_expires_at: Some(14),
+            profile_token_used_at: None,
             paid_at: Some(13),
             payment_link: Some("https://checkout.example/pl_1".to_string()),
             shopper_reference: Some("sub_0123456789".to_string()),
@@ -664,7 +772,14 @@ mod tests {
             }]),
             last_alert_at: Some(10),
             cancel_token_hash: "cd".to_string(),
-            billing: None,
+            billing_profile: None,
+            first_payment_amount_micros: Some(99_000_000),
+            first_payment_currency: Some("USD".to_string()),
+            first_invoice_number: Some(4),
+            first_invoice_month: Some("2026-10".to_string()),
+            first_invoice_net_micros: Some(99_000_000),
+            first_invoice_gross_micros: Some(118_800_000),
+            first_invoice_document: Some("VAT invoice No. 4".to_string()),
             last_billed_month: Some("2026-10".to_string()),
             last_paid_month: Some("2026-10".to_string()),
             last_invoice_number: Some(4),

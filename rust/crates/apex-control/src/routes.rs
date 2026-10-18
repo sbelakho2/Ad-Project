@@ -24,7 +24,6 @@ use axum::Router;
 use crate::actions::{ActionRequest, ActionState, SubmitOutcome};
 use crate::auth::{self, CodeOutcome, PasswordOutcome};
 use crate::capabilities::{Capability, Role};
-use crate::data::DurableExperiment;
 use crate::pages::{self, ActionFormSpec, PageMeta};
 use crate::session::{self, SessionView};
 use crate::signing::random_hex_32;
@@ -226,13 +225,7 @@ async fn customer_detail(
         .map_err(|error| error.reason);
     let experiments = state
         .data
-        .durable_experiments()
-        .map(|experiments| {
-            experiments
-                .into_iter()
-                .filter(|experiment| experiment.publisher == row.publisher_id)
-                .collect::<Vec<DurableExperiment>>()
-        })
+        .experiments_for_publisher(&row.publisher_id)
         .map_err(|error| error.reason);
     let filters = pages::customers::CustomerFilters::from_query(&pairs);
     let tab = pages::customers::DetailTab::parse(
@@ -430,16 +423,11 @@ async fn experiment_detail(
     let meta = meta(&state, Some(&session));
     let experiment = state
         .data
-        .durable_experiments()
-        .and_then(|experiments| {
-            experiments
-                .into_iter()
-                .find(|experiment| experiment.experiment_id == id)
-                .ok_or_else(|| {
-                    crate::data::Unavailable::new(format!(
-                        "no durable record names experiment {id}"
-                    ))
-                })
+        .experiment_by_id(&id)
+        .and_then(|experiment| {
+            experiment.ok_or_else(|| {
+                crate::data::Unavailable::new(format!("no durable record names experiment {id}"))
+            })
         })
         .map_err(|error| error.reason);
     let lift = state
@@ -712,17 +700,15 @@ async fn invoice_detail(
         Err(response) => return *response,
     };
     let meta = meta(&state, Some(&session));
-    let invoices = match state.data.invoices() {
-        Ok(invoices) => invoices,
+    let invoice = match state.data.invoice_by_id(&id) {
+        Ok(Some(invoice)) => invoice,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta)),
         Err(error) => {
             return html_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 pages::errors::not_configured(&meta, &error.reason),
             )
         }
-    };
-    let Some(invoice) = invoices.into_iter().find(|invoice| invoice.id() == id) else {
-        return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
     let payments = match state.data.as_ref() {
         crate::data::ControlData::Fixtures(demo) => demo

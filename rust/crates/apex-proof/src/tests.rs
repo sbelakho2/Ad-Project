@@ -1108,6 +1108,122 @@ fn the_first_append_after_open_reads_no_prefix() {
 }
 
 #[test]
+fn every_append_is_one_durable_write_and_one_chain_link() {
+    let dir = TempDir::new("append-durability");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(66);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+
+    for index in 0..8u64 {
+        crate::ledger::reset_write_metrics();
+        let record = ledger.append(change(index)).expect("append");
+        assert_eq!(record.seq(), index);
+        assert_eq!(
+            crate::ledger::write_calls(),
+            1,
+            "record {index}: one durable write"
+        );
+        assert_eq!(crate::ledger::sync_calls(), 1, "record {index}: one sync");
+    }
+
+    let verified = Ledger::read_verified(&path, &keys.verifying_key()).expect("verify");
+    assert_eq!(verified.len(), 8);
+    for (index, record) in verified.iter().enumerate() {
+        assert_eq!(record.seq(), index as u64);
+        if index > 0 {
+            assert_eq!(record.prev_hash(), verified[index - 1].hash());
+        }
+    }
+}
+
+#[test]
+fn per_record_appends_produce_the_byte_identical_chain() {
+    let dir = TempDir::new("append-bytes");
+    let first_path = dir.file("first.jsonl");
+    let second_path = dir.file("second.jsonl");
+    let keys = keypair(67);
+    let mut first = Ledger::open(&first_path, keys.clone()).expect("open first");
+    let mut second = Ledger::open(&second_path, keys.clone()).expect("open second");
+
+    // The same drafts appended one at a time on two independently opened
+    // handles must produce exactly the same bytes: sealing, signing and the
+    // canonical line format are deterministic.
+    for index in 0..8u64 {
+        first.append(change(index)).expect("first append");
+        let sealed = second.append(change(index)).expect("second append");
+        assert_eq!(sealed.seq(), index);
+    }
+    let first_bytes = std::fs::read(&first_path).expect("read first");
+    let second_bytes = std::fs::read(&second_path).expect("read second");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "one record per append, same bytes"
+    );
+}
+
+#[test]
+fn a_refused_append_writes_nothing() {
+    let dir = TempDir::new("append-refused");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(68);
+    let mut ledger = Ledger::open(&path, keys).expect("open");
+    ledger.append(change(0)).expect("prefix");
+    let before = std::fs::read(&path).expect("bytes");
+
+    // A BillingProof with non-positive lift is refused by the chain validator
+    // before any byte is written.
+    let bad = LedgerRecord::billing_proof(1_700_000_000_000, "p", "e", 0, 2_000, 0);
+    crate::ledger::reset_write_metrics();
+    let error = ledger.append(bad).expect_err("invalid append");
+    assert!(
+        matches!(error, LedgerError::InvalidBillingProof { line: 2, .. }),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).expect("bytes"), before);
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(crate::ledger::write_calls(), 0);
+    assert_eq!(crate::ledger::sync_calls(), 0);
+}
+
+#[test]
+fn every_complete_line_prefix_of_a_per_record_ledger_verifies() {
+    let dir = TempDir::new("append-crash");
+    let path = dir.file("ledger.jsonl");
+    let keys = keypair(69);
+    let mut ledger = Ledger::open(&path, keys.clone()).expect("open");
+    let count = 24usize;
+    for index in 0..count as u64 {
+        ledger.append(change(index)).expect("append");
+    }
+    let bytes = std::fs::read(&path).expect("bytes");
+    let line_ends: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index + 1))
+        .collect();
+    assert_eq!(line_ends.len(), count);
+
+    // A crash at a line boundary leaves exactly the completed prefix, which
+    // is a fully valid chain because every record was synced on its own.
+    for (index, end) in line_ends.iter().enumerate() {
+        std::fs::write(&path, &bytes[..*end]).expect("prefix");
+        let records = Ledger::read_verified(&path, &keys.verifying_key()).expect("prefix verifies");
+        assert_eq!(records.len(), index + 1);
+        assert_eq!(records[index].seq(), index as u64);
+    }
+
+    // A crash inside the next line is detected as a truncated final line,
+    // never accepted as a shortened record.
+    let partial = line_ends[10] + (line_ends[11] - line_ends[10]) / 2;
+    std::fs::write(&path, &bytes[..partial]).expect("torn");
+    let error = Ledger::read_verified(&path, &keys.verifying_key()).expect_err("torn line");
+    assert!(
+        matches!(error, LedgerError::Truncated { line: 12 }),
+        "{error}"
+    );
+}
+
+#[test]
 fn an_external_append_is_tail_verified_and_picked_up() {
     let dir = TempDir::new("tail-external");
     let path = dir.file("ledger.jsonl");
@@ -1615,6 +1731,41 @@ fn large_ledgers_verify_signatures_on_multiple_workers() {
         1,
         "forcing one thread must run exactly one verification worker"
     );
+}
+
+#[test]
+fn verification_uses_the_calling_thread_as_one_worker() {
+    let keys = keypair(72);
+    let expected_key = keys.verifying_key();
+    let lines = chained_lines(64, &keys);
+    let bytes = chain_bytes(&lines);
+
+    // Four chunks: the caller verifies the first, so three threads are
+    // spawned instead of four.
+    crate::ledger::reset_worker_spawns();
+    let probe = AtomicU64::new(0);
+    crate::ledger::read_verified_bytes_with_threads(&bytes, &expected_key, 4, Some(&probe))
+        .expect("parallel verify");
+    assert_eq!(
+        probe.load(Ordering::Relaxed),
+        4,
+        "every chunk, including the caller's, is one worker"
+    );
+    assert_eq!(
+        crate::ledger::worker_spawns(),
+        3,
+        "the calling thread participates, so four workers spawn three threads"
+    );
+
+    // Below the parallel threshold the caller is the only worker and no
+    // thread is created at all.
+    let small = chain_bytes(&chained_lines(7, &keys));
+    crate::ledger::reset_worker_spawns();
+    let small_probe = AtomicU64::new(0);
+    crate::ledger::read_verified_bytes_with_threads(&small, &expected_key, 8, Some(&small_probe))
+        .expect("sequential verify");
+    assert_eq!(small_probe.load(Ordering::Relaxed), 1);
+    assert_eq!(crate::ledger::worker_spawns(), 0);
 }
 
 #[test]

@@ -267,6 +267,42 @@ mod tests {
     }
 
     #[test]
+    fn unlabeled_series_and_missing_histogram_bodies_render_safely() {
+        let snapshot = vec![
+            FamilySnapshot {
+                name: "apex_probe_no_labels",
+                help: "No labels.",
+                kind: MetricKind::Counter,
+                series: vec![SeriesSnapshot {
+                    labels: Vec::new(),
+                    counter: Some(3),
+                    gauge: None,
+                    histogram: None,
+                }],
+            },
+            FamilySnapshot {
+                name: "apex_probe_missing_histogram",
+                help: "Missing body.",
+                kind: MetricKind::Histogram {
+                    buckets: &[1.0, 5.0],
+                },
+                series: vec![SeriesSnapshot {
+                    labels: vec![("service", "apex-api".to_string())],
+                    counter: None,
+                    gauge: None,
+                    histogram: None,
+                }],
+            },
+        ];
+        let text = render_snapshot(&snapshot);
+        assert!(text.contains("apex_probe_no_labels 3\n"));
+        assert!(!text.contains("apex_probe_no_labels{"));
+        assert!(text.contains("# TYPE apex_probe_missing_histogram histogram\n"));
+        assert!(!text.contains("apex_probe_missing_histogram_bucket"));
+        assert!(!text.contains("apex_probe_missing_histogram_count"));
+    }
+
+    #[test]
     fn render_metric_returns_only_that_family() {
         let registry = Registry::new();
         registry

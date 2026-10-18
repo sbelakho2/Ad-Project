@@ -196,6 +196,28 @@ pub fn setting_row(proposal: &ConsoleProposal, currency: &str) -> (String, Strin
             or_raw(&proposal.proposal.prev_value),
             "Removed".to_string(),
         ),
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => (
+            format!("LevelPlay instance price ({instance_id})"),
+            match prior_micros(instance_id) {
+                Some(old) => format!("{} eCPM", ecpm(old, currency)),
+                None => or_raw(&proposal.proposal.prev_value),
+            },
+            format!("{} eCPM", ecpm(*price_micros, currency)),
+        ),
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => (
+            format!("AdMob mediation floor ({group_id})"),
+            match prior_micros(group_id) {
+                Some(old) => format!("{} eCPM", ecpm(old, currency)),
+                None => or_raw(&proposal.proposal.prev_value),
+            },
+            format!("{} eCPM", ecpm(*floor_micros, currency)),
+        ),
     }
 }
 
@@ -558,6 +580,31 @@ mod tests {
     }
 
     #[test]
+    fn levelplay_and_admob_actions_render_their_ids_and_micros() {
+        let mut proposal = proposal();
+
+        proposal.proposal.action = Action::SetLevelplayInstancePrice {
+            instance_id: "inst_lp_1".to_string(),
+            price_micros: 1_250_000,
+        };
+        proposal.proposal.prev_value = "{\"inst_lp_1\":1000000}".to_string();
+        let (object, current, test) = setting_row(&proposal, "USD");
+        assert_eq!(object, "LevelPlay instance price (inst_lp_1)");
+        assert_eq!(current, "$1.00 eCPM");
+        assert_eq!(test, "$1.25 eCPM");
+
+        proposal.proposal.action = Action::SetAdmobMediationFloor {
+            group_id: "g_admob_1".to_string(),
+            floor_micros: 2_500_000,
+        };
+        proposal.proposal.prev_value = "{\"g_admob_1\":2000000}".to_string();
+        let (object, current, test) = setting_row(&proposal, "USD");
+        assert_eq!(object, "AdMob mediation floor (g_admob_1)");
+        assert_eq!(current, "$2.00 eCPM");
+        assert_eq!(test, "$2.50 eCPM");
+    }
+
+    #[test]
     fn every_action_kind_renders_current_and_test() {
         let cases: Vec<Action> = vec![
             Action::SetMappingEcpm {
@@ -579,6 +626,14 @@ mod tests {
             Action::RemoveWaterfallEntry {
                 ad_unit_id: "u1".to_string(),
                 entry_id: "e1".to_string(),
+            },
+            Action::SetLevelplayInstancePrice {
+                instance_id: "inst_lp_1".to_string(),
+                price_micros: 1_250_000,
+            },
+            Action::SetAdmobMediationFloor {
+                group_id: "g_admob_1".to_string(),
+                floor_micros: 2_500_000,
             },
         ];
         for action in cases {

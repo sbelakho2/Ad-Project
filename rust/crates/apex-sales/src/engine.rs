@@ -26,7 +26,7 @@
 //! Random draws for a contact are seeded from its touch id, so the plan for
 //! one day is stable across the hourly runs that execute it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::bandit::{choose, Arm, BanditConfig};
 use crate::cadence::{SendTimeModel, StepModel};
@@ -223,6 +223,108 @@ pub fn offset_for(publisher: &Publisher, contact: &Contact) -> i32 {
         .unwrap_or(0)
 }
 
+// The replay seam: one visit per (domain, day) and one indexed reset-set
+// probe per set consulted. A regression to the old per-domain-day reset scan
+// makes the reset probe count grow with the reset count and fail the
+// scaling test.
+#[cfg(test)]
+thread_local! {
+    static REPLAY_DAY_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static REPLAY_RESET_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_replay_day() {
+    REPLAY_DAY_VISITS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn note_reset_probes(probes: u64) {
+    REPLAY_RESET_PROBES.with(|count| count.set(count.get() + probes));
+}
+
+#[cfg(test)]
+fn reset_replay_counters() {
+    REPLAY_DAY_VISITS.with(|count| count.set(0));
+    REPLAY_RESET_PROBES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn replay_day_visits() -> u64 {
+    REPLAY_DAY_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn replay_reset_probes() -> u64 {
+    REPLAY_RESET_PROBES.with(std::cell::Cell::get)
+}
+
+/// Raw per-domain daily counts and the operator resets, already grouped by
+/// day so the replay applies them in one ordered pass instead of scanning the
+/// whole reset list at every (domain, day) pair.
+struct HealthDays<'a> {
+    sends: &'a BTreeMap<String, BTreeMap<i64, u32>>,
+    complaints: &'a BTreeMap<String, BTreeMap<i64, u32>>,
+    bounces: &'a BTreeMap<String, BTreeMap<i64, u32>>,
+    global_resets: &'a BTreeSet<i64>,
+    domain_resets: &'a BTreeMap<String, BTreeSet<i64>>,
+    first_day: i64,
+    today: i64,
+}
+
+/// Replay the health of every configured domain over `first_day..=today`.
+///
+/// The domains are independent, so each is walked once with its own running
+/// [`HealthBook`] entry; for a day, the named and global resets are one
+/// bounded set lookup each. The order of operations inside a day is exactly
+/// the original fold: reset, record the day's raw counts, then close the day
+/// (or record today's send count).
+fn replay_health(config: &HealthConfig, domains: &[String], days: &HealthDays<'_>) -> HealthBook {
+    let mut health = HealthBook::new(config, domains);
+    let ordered = health.domains().to_vec();
+    for domain in ordered {
+        let own_resets = days.domain_resets.get(&domain);
+        for day in days.first_day..=days.today {
+            #[cfg(test)]
+            note_replay_day();
+            #[cfg(test)]
+            note_reset_probes(if own_resets.is_some() { 2 } else { 1 });
+            if days.global_resets.contains(&day)
+                || own_resets.is_some_and(|resets| resets.contains(&day))
+            {
+                health.reset(Some(&domain), config);
+            }
+            let n = days
+                .sends
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            let c = days
+                .complaints
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            let b = days
+                .bounces
+                .get(&domain)
+                .and_then(|m| m.get(&day))
+                .copied()
+                .unwrap_or(0);
+            health.record_day(&domain, n, c, b, config);
+            if day < days.today {
+                if let Some(h) = health.health_mut(&domain) {
+                    h.end_day(day, n, config);
+                }
+            } else {
+                health.set_sent_today(&domain, n);
+            }
+        }
+    }
+    health
+}
+
 /// Rebuild every model from `snap` as of `now`.
 pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
     let mut mediation = MediationModel::default();
@@ -248,7 +350,8 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
     let mut day_sends: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
     let mut day_complaints: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
     let mut day_bounces: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
-    let mut resets: Vec<(Option<String>, i64)> = Vec::new();
+    let mut global_resets: BTreeSet<i64> = BTreeSet::new();
+    let mut domain_resets: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
     let mut email_domain: BTreeMap<String, String> = BTreeMap::new();
     let mut publisher_domain: BTreeMap<String, String> = BTreeMap::new();
     let publisher_of = |email: &str| snap.contacts.get(email).map(|c| c.publisher_key.clone());
@@ -389,20 +492,30 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
                 }
             }
             Event::HealthReset { at, domain } => {
-                resets.push((domain.clone(), at.div_euclid(DAY)));
+                let day = at.div_euclid(DAY);
+                match domain {
+                    Some(domain) => {
+                        domain_resets.entry(domain.clone()).or_default().insert(day);
+                    }
+                    None => {
+                        global_resets.insert(day);
+                    }
+                }
             }
         }
     }
 
-    // Sending-domain health, replayed day by day, one independent health per
-    // domain. One domain's complaints never move another domain's state.
+    // Sending-domain health, replayed once per domain with its own running
+    // state. Days and resets are applied in one ordered pass: a reset is a
+    // set-membership test, so daily resets never turn the replay into a
+    // domain-day-by-reset scan. One domain's complaints never move another
+    // domain's state.
     let today = now.div_euclid(DAY);
     let domains: Vec<String> = config
         .senders
         .iter()
         .map(|s| s.domain().to_string())
         .collect();
-    let mut health = HealthBook::new(&config.health, &domains);
     let first_day = day_sends
         .values()
         .flat_map(|m| m.keys())
@@ -411,39 +524,19 @@ pub fn learn(snap: &Snapshot, config: &Config, now: UnixSecs) -> Learned {
         .copied()
         .min()
         .unwrap_or(today);
-    for day in first_day..=today {
-        for domain in health.domains().to_vec() {
-            if resets
-                .iter()
-                .any(|(d, at)| *at == day && d.as_deref().is_none_or(|d| d == domain.as_str()))
-            {
-                health.reset(Some(&domain), &config.health);
-            }
-            let n = day_sends
-                .get(&domain)
-                .and_then(|m| m.get(&day))
-                .copied()
-                .unwrap_or(0);
-            let c = day_complaints
-                .get(&domain)
-                .and_then(|m| m.get(&day))
-                .copied()
-                .unwrap_or(0);
-            let b = day_bounces
-                .get(&domain)
-                .and_then(|m| m.get(&day))
-                .copied()
-                .unwrap_or(0);
-            health.record_day(&domain, n, c, b, &config.health);
-            if day < today {
-                if let Some(h) = health.health_mut(&domain) {
-                    h.end_day(day, n, &config.health);
-                }
-            } else {
-                health.set_sent_today(&domain, n);
-            }
-        }
-    }
+    let health = replay_health(
+        &config.health,
+        &domains,
+        &HealthDays {
+            sends: &day_sends,
+            complaints: &day_complaints,
+            bounces: &day_bounces,
+            global_resets: &global_resets,
+            domain_resets: &domain_resets,
+            first_day,
+            today,
+        },
+    );
 
     // Funnel transitions, settled only.
     let mut funnel = FunnelModel::default();
@@ -1396,6 +1489,221 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("consent")));
+    }
+
+    /// The pre-fix fold, kept verbatim as the equivalence oracle: a reset is
+    /// discovered by scanning the whole reset list at every (domain, day).
+    fn naive_replay_health(
+        config: &HealthConfig,
+        domains: &[String],
+        days: &HealthDays<'_>,
+        resets: &[(Option<String>, i64)],
+    ) -> HealthBook {
+        let mut health = HealthBook::new(config, domains);
+        for day in days.first_day..=days.today {
+            for domain in health.domains().to_vec() {
+                if resets
+                    .iter()
+                    .any(|(d, at)| *at == day && d.as_deref().is_none_or(|d| d == domain.as_str()))
+                {
+                    health.reset(Some(&domain), config);
+                }
+                let n = days
+                    .sends
+                    .get(&domain)
+                    .and_then(|m| m.get(&day))
+                    .copied()
+                    .unwrap_or(0);
+                let c = days
+                    .complaints
+                    .get(&domain)
+                    .and_then(|m| m.get(&day))
+                    .copied()
+                    .unwrap_or(0);
+                let b = days
+                    .bounces
+                    .get(&domain)
+                    .and_then(|m| m.get(&day))
+                    .copied()
+                    .unwrap_or(0);
+                health.record_day(&domain, n, c, b, config);
+                if day < days.today {
+                    if let Some(h) = health.health_mut(&domain) {
+                        h.end_day(day, n, config);
+                    }
+                } else {
+                    health.set_sent_today(&domain, n);
+                }
+            }
+        }
+        health
+    }
+
+    fn grouped_resets(
+        resets: &[(Option<String>, i64)],
+    ) -> (BTreeSet<i64>, BTreeMap<String, BTreeSet<i64>>) {
+        let mut global = BTreeSet::new();
+        let mut per_domain: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+        for (domain, day) in resets {
+            match domain {
+                Some(domain) => {
+                    per_domain.entry(domain.clone()).or_default().insert(*day);
+                }
+                None => {
+                    global.insert(*day);
+                }
+            }
+        }
+        (global, per_domain)
+    }
+
+    #[test]
+    fn single_pass_health_replay_matches_the_day_by_day_fold_on_ten_thousand_days() {
+        const DAYS: i64 = 10_000;
+        let domains: Vec<String> = ["a.example", "b.example", "c.example"]
+            .iter()
+            .map(|domain| domain.to_string())
+            .collect();
+        let base = HealthConfig::default();
+        let mut rng = Rng::seeded(0xA12026);
+        let mut sends: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+        let mut complaints: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+        let mut bounces: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+        let mut resets: Vec<(Option<String>, i64)> = Vec::new();
+        for day in 0..DAYS {
+            // Daily resets: R ≈ D, the shape that made the old lookup
+            // quadratic. The named reset lands on a random domain so every
+            // domain also has unreset days to warm, pause and recover; a rare
+            // global reset exercises the domain-free event too.
+            if day < DAYS - 10 {
+                let reset_domain = &domains[(rng.below(domains.len() as u64)) as usize];
+                resets.push((Some(reset_domain.clone()), day));
+                if day % 997 == 0 {
+                    resets.push((None, day));
+                }
+            }
+            for domain in &domains {
+                let n = rng.below(26) as u32;
+                let mut c = if n > 0 && rng.below(12) == 0 {
+                    rng.below(2) as u32 + 1
+                } else {
+                    0
+                };
+                let mut b = if n > 0 && rng.below(25) == 0 {
+                    rng.below(2) as u32 + 1
+                } else {
+                    0
+                };
+                // Deterministic late bursts exercise quarantine (complaints)
+                // and pause (bounces) in the final, reset-free window.
+                if domain == "b.example" && day == DAYS - 5 {
+                    c = 8;
+                }
+                if domain == "c.example" && day == DAYS - 4 {
+                    b = 20;
+                }
+                if n > 0 {
+                    sends.entry(domain.clone()).or_default().insert(day, n);
+                }
+                if c > 0 {
+                    complaints.entry(domain.clone()).or_default().insert(day, c);
+                }
+                if b > 0 {
+                    bounces.entry(domain.clone()).or_default().insert(day, b);
+                }
+            }
+        }
+        let (global, per_domain) = grouped_resets(&resets);
+        let days = HealthDays {
+            sends: &sends,
+            complaints: &complaints,
+            bounces: &bounces,
+            global_resets: &global,
+            domain_resets: &per_domain,
+            first_day: 0,
+            today: DAYS - 1,
+        };
+        let single_pass = replay_health(&base, &domains, &days);
+        let fold = naive_replay_health(&base, &domains, &days, &resets);
+        assert_eq!(
+            single_pass, fold,
+            "health states, pauses, caps, raw counts and today's sends must match"
+        );
+        println!(
+            "health_replay_equivalence days={DAYS} domains={} resets={} states={:?}",
+            domains.len(),
+            resets.len(),
+            domains
+                .iter()
+                .map(|d| single_pass.get(d).map(|h| h.state))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn health_replay_visits_each_domain_day_once_and_resets_are_indexed() {
+        for domains_n in [1usize, 3, 10] {
+            for days in [2_500i64, 5_000, 10_000] {
+                let domains: Vec<String> = (0..domains_n)
+                    .map(|index| format!("d{index}.example"))
+                    .collect();
+                let base = HealthConfig::default();
+                let mut sends: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+                let mut complaints: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+                let mut bounces: BTreeMap<String, BTreeMap<i64, u32>> = BTreeMap::new();
+                let mut global = BTreeSet::new();
+                let mut per_domain: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+                for day in 0..days {
+                    // Every day resets every domain: R = days, the worst case
+                    // for the old per-domain-day reset scan.
+                    global.insert(day);
+                    for domain in &domains {
+                        per_domain.entry(domain.clone()).or_default().insert(day);
+                        sends
+                            .entry(domain.clone())
+                            .or_default()
+                            .insert(day, 5 + (day as u32 % 15));
+                        if day % 97 == 0 {
+                            complaints.entry(domain.clone()).or_default().insert(day, 1);
+                        }
+                        if day % 131 == 0 {
+                            bounces.entry(domain.clone()).or_default().insert(day, 1);
+                        }
+                    }
+                }
+                let trace = HealthDays {
+                    sends: &sends,
+                    complaints: &complaints,
+                    bounces: &bounces,
+                    global_resets: &global,
+                    domain_resets: &per_domain,
+                    first_day: 0,
+                    today: days - 1,
+                };
+                reset_replay_counters();
+                let health = replay_health(&base, &domains, &trace);
+                let visits = replay_day_visits();
+                let probes = replay_reset_probes();
+                println!(
+                    "health_replay domains={domains_n} days={days} visits={visits} reset_probes={probes} cap={}",
+                    health.total_cap()
+                );
+                assert_eq!(
+                    visits,
+                    days as u64 * domains_n as u64,
+                    "each (domain, day) is visited exactly once"
+                );
+                assert_eq!(
+                    probes,
+                    days as u64 * domains_n as u64 * 2,
+                    "one global and one named reset-set probe per (domain, day)"
+                );
+                assert!(
+                    probes < days as u64 * days as u64 * domains_n as u64 / 10,
+                    "a reset scan would grow quadratically: {probes} probes"
+                );
+            }
+        }
     }
 
     #[test]

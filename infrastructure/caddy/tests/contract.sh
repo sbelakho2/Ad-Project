@@ -3,9 +3,10 @@
 # and assert the routing table. Run from the repository root with `caddy` and
 # `python3` on PATH. Exits nonzero on any violation.
 #
-# The checks pin the two-origin public layout: the marketing host serves the
-# static site and proxies only POST /free-audit, /audit-requested/* and
-# /console* to apex-api; the API host fronts apex-api; the operator origin is
+# The checks pin the three-origin public layout: the marketing host serves the
+# static site and proxies only POST /free-audit and /audit-requested/* to
+# apex-api (the /console prefix is gone from that host); the API and console
+# hosts each front apex-api whole and refuse /metrics; the operator origin is
 # removed from this edge (apex-control binds loopback on the control host);
 # the marketing host carries the JSON access log `apex-ingest` reads; and no
 # route reaches anything but apex-api (ClickHouse is never exposed).
@@ -17,6 +18,7 @@ trap 'rm -f "$ADAPTED"' EXIT
 
 APEX_ACCESS_LOG=/tmp/apex-access-contract.json \
 APEX_DOMAIN=api.edge.test \
+CONSOLE_DOMAIN=console.edge.test \
 SITE_DOMAIN=www.edge.test \
 	caddy adapt --config "$CONFIG" --adapter caddyfile > "$ADAPTED"
 
@@ -107,6 +109,14 @@ def has_file_server(handlers):
     return any(handler.get("handler") == "file_server" for handler in handlers)
 
 
+def refuses_with_404(handlers):
+    return any(
+        handler.get("handler") in {"respond", "static_response"}
+        and handler.get("status_code") == 404
+        for handler in handlers
+    )
+
+
 def dials_in_routes(routes):
     dials = set()
     for route in routes:
@@ -122,9 +132,11 @@ def dials_in_routes(routes):
 
 site = host_routes("www.edge.test")
 api = host_routes("api.edge.test")
+console = host_routes("console.edge.test")
 control = host_routes("control.edge.test")
 check(site is not None, "marketing host block is missing")
 check(api is not None, "API host block is missing")
+check(console is not None, "console host block is missing")
 # The operator origin was removed from the public edge; the control plane is
 # not routed here at all (it binds loopback on the control host).
 check(control is None, "the removed operator host block must not return")
@@ -151,25 +163,42 @@ if site is not None:
         has_file_server(handlers_for(site, "GET", "/pricing")),
         "marketing pages must be served by the static file server",
     )
-    # The confirmation pages and the console reach apex-api.
+    # The confirmation pages reach apex-api.
     check(
         proxies_in(handlers_for(site, "GET", "/audit-requested/?ref=req_0123456789"))
         == ["127.0.0.1:8787"],
         "GET /audit-requested/* must proxy to apex-api",
     )
+    # The console left the marketing host: /console is now static there, and
+    # nothing under the prefix may reach apex-api.
     for path in ("/console", "/console/", "/console/audit", "/console/ledger"):
         check(
-            proxies_in(handlers_for(site, "GET", path)) == ["127.0.0.1:8787"],
-            f"GET {path} must proxy to apex-api",
+            not proxies_in(handlers_for(site, "GET", path)),
+            f"GET {path} must not proxy on the marketing host",
+        )
+        check(
+            has_file_server(handlers_for(site, "GET", path)),
+            f"GET {path} must be served by the static file server",
         )
     check(
-        proxies_in(handlers_for(site, "POST", "/console/ledger")) == ["127.0.0.1:8787"],
-        "POST /console/ledger must proxy to apex-api",
+        not proxies_in(handlers_for(site, "POST", "/console/ledger")),
+        "POST /console/ledger must not proxy on the marketing host",
     )
-    # Static assets are untouched.
+    # Static site assets stay on the file server; the shared design-system
+    # font path that apex-api HTML uses is proxied so the confirmation pages
+    # render with the real faces.
     check(
         has_file_server(handlers_for(site, "GET", "/fonts/manrope-latin.woff2")),
         "static asset paths must be served by the static file server",
+    )
+    check(
+        proxies_in(handlers_for(site, "GET", "/assets/fonts/manrope-400.woff2"))
+        == ["127.0.0.1:8787"],
+        "GET /assets/fonts/* on the marketing host must proxy to apex-api",
+    )
+    check(
+        not proxies_in(handlers_for(site, "GET", "/assets/site.css")),
+        "other /assets paths must stay static",
     )
     # Metrics never reach the public marketing host either.
     check(
@@ -198,6 +227,35 @@ if api is not None:
         "GET /v1/audit/{platform} on the API host must still proxy to apex-api",
     )
 
+if console is not None:
+    # The console origin owns `/`: the overview is the root of this host, not
+    # the marketing homepage. Every console surface rides the same proxy.
+    for method, path in (
+        ("GET", "/"),
+        ("GET", "/console"),
+        ("GET", "/console/"),
+        ("GET", "/console/audit"),
+        ("GET", "/console/ledger"),
+        ("GET", "/assets/apex.css"),
+        ("GET", "/favicon.svg"),
+        ("GET", "/watch/confirm"),
+        ("POST", "/free-audit"),
+        ("POST", "/console/ledger"),
+    ):
+        check(
+            proxies_in(handlers_for(console, method, path)) == ["127.0.0.1:8787"],
+            f"{method} {path} on the console host must proxy to apex-api",
+        )
+    # Metrics are operator-only on this origin too.
+    check(
+        not proxies_in(handlers_for(console, "GET", "/metrics")),
+        "GET /metrics must not be proxied on the console host",
+    )
+    check(
+        refuses_with_404(handlers_for(console, "GET", "/metrics")),
+        "GET /metrics on the console host must be refused with 404",
+    )
+
 # Host isolation: each host reaches exactly its own service, and the control
 # plane's port appears nowhere.
 if site is not None:
@@ -209,6 +267,11 @@ if api is not None:
     check(
         dials_in_routes(api) == {"127.0.0.1:8787"},
         "the API host must only reach apex-api",
+    )
+if console is not None:
+    check(
+        dials_in_routes(console) == {"127.0.0.1:8787"},
+        "the console host must only reach apex-api",
     )
 
 # No route anywhere reaches ClickHouse or any other service.
@@ -260,12 +323,17 @@ for server in servers().values():
     skipped.update(server.get("logs", {}).get("skip_hosts", []))
 check("www.edge.test" in attached, "the marketing host must write the access log")
 check(
-    "api.edge.test" not in attached and "control.edge.test" not in attached,
+    "api.edge.test" not in attached and "console.edge.test" not in attached
+    and "control.edge.test" not in attached,
     "only the marketing host carries the access log",
 )
 check(
     "api.edge.test" in skipped,
     "the API host must be excluded from the marketing access log",
+)
+check(
+    "console.edge.test" in skipped,
+    "the console host must be excluded from the marketing access log",
 )
 
 if failures:
@@ -274,9 +342,11 @@ if failures:
         print(f"  - {failure}")
     sys.exit(1)
 print(
-    "caddy-edge-contract PASS: 2 hosts, POST /free-audit + /audit-requested/* + "
-    "/console* to apex-api, GET marketing pages static, no operator block on the "
-    "edge, /metrics refused on the public hosts, JSON access log on the marketing "
+    "caddy-edge-contract PASS: 3 hosts, POST /free-audit + /audit-requested/* + "
+    "/assets/fonts/* to "
+    "apex-api, no /console on the marketing host, GET marketing pages static, "
+    "API and console origins whole to apex-api, no operator block on the edge, "
+    "/metrics refused on every public host, JSON access log on the marketing "
     "origin, no ClickHouse route"
 )
 PY

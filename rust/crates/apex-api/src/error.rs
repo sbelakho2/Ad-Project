@@ -66,6 +66,16 @@ pub enum ApiError {
     #[error("invalid webhook signature")]
     InvalidSignature,
 
+    /// A request conflicts with the current state: another writer owns the
+    /// resource this call tried to publish. The code names the conflict.
+    #[error("conflict: {0}")]
+    Conflict(&'static str),
+
+    /// The public console origin is not configured, so no sign-in link can
+    /// be issued: a relative emailed link cannot work.
+    #[error("sign-in link base is not configured")]
+    MissingBase,
+
     /// An unexpected failure while reading a source; the detail is logged but
     /// not exposed.
     #[error("internal error: {0}")]
@@ -87,6 +97,8 @@ impl ApiError {
             ApiError::CollectionStoreNotConfigured => "collection_store_not_configured",
             ApiError::PlatformUnavailable(_) => "platform_unavailable",
             ApiError::InvalidSignature => "invalid_signature",
+            ApiError::Conflict(code) => code,
+            ApiError::MissingBase => "missing_base",
             ApiError::Internal(_) => "internal",
         }
     }
@@ -101,9 +113,11 @@ impl ApiError {
             | ApiError::LiveAuditNotConfigured
             | ApiError::LedgerAuthNotConfigured
             | ApiError::LeadCaptureNotConfigured
-            | ApiError::CollectionStoreNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::CollectionStoreNotConfigured
+            | ApiError::MissingBase => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::PlatformUnavailable(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -132,6 +146,8 @@ impl IntoResponse for ApiError {
             }
             ApiError::Unauthorized => json!({ "error": "unauthorized" }),
             ApiError::InvalidSignature => json!({ "error": "invalid_signature" }),
+            ApiError::Conflict(code) => json!({ "error": code }),
+            ApiError::MissingBase => json!({ "error": "missing_base" }),
             ApiError::PlatformUnavailable(detail) => {
                 tracing::error!(error = %detail, "platform call failed");
                 json!({ "error": "platform_unavailable" })
@@ -192,6 +208,12 @@ mod tests {
             ),
             (ApiError::Unauthorized, 401, "unauthorized"),
             (ApiError::InvalidSignature, 400, "invalid_signature"),
+            (
+                ApiError::Conflict("credential_write_conflict"),
+                409,
+                "credential_write_conflict",
+            ),
+            (ApiError::MissingBase, 503, "missing_base"),
             (ApiError::Internal("/etc/secret".into()), 500, "internal"),
         ];
         for (error, status, code) in cases {

@@ -1,6 +1,7 @@
 //! Operator workflows: importing leads, discovering public signals,
 //! recording replies and reporting what the models believe.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::bandit::report as arm_report;
@@ -75,6 +76,46 @@ pub struct Imported {
     pub already: usize,
 }
 
+// The membership probes a seed import performs. The scaling test asserts one
+// index probe per accepted-but-not-refused row; the pre-fix `iter().find`
+// pattern probed the growing output once per earlier publisher, which is
+// quadratic in the row count.
+#[cfg(test)]
+thread_local! {
+    static SEED_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static OUTCOME_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_seed_probe() {
+    SEED_PROBES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn seed_probe_count() -> u64 {
+    SEED_PROBES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_seed_probes() {
+    SEED_PROBES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn note_outcome_probe() {
+    OUTCOME_PROBES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn outcome_probe_count() -> u64 {
+    OUTCOME_PROBES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_outcome_probes() {
+    OUTCOME_PROBES.with(|count| count.set(0));
+}
+
 /// Import a seed list. Header (any order, case-insensitive): `domain`,
 /// `name`, `country`, `app_store_ids` (semicolon-separated), `email`,
 /// `contact_name`, `role`. A row needs a domain and a valid email at it or
@@ -99,6 +140,15 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
         col("contact_name"),
         col("role"),
     );
+    // One slot per distinct domain, plus `key -> slot` and the last-seen
+    // order. The previous shape scanned the growing output per seed and
+    // retained over it (`iter().find`, then `retain`), so `n` rows with
+    // repeated domains cost O(n^2); a hash lookup and a slot update make the
+    // membership probe and the merge O(1) while the final order stays the
+    // order of each domain's last row, exactly as before.
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut slots: Vec<Option<Publisher>> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
     for (i, row) in rows.iter().enumerate().skip(1) {
         let get = |c: Option<usize>| {
             c.and_then(|c| row.get(c))
@@ -117,11 +167,13 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
             out.refused.push(format!("row {}: no usable domain", i + 1));
             continue;
         };
+        #[cfg(test)]
+        note_seed_probe();
         let mut p = existing
             .publishers
             .get(&domain)
             .cloned()
-            .or_else(|| out.publishers.iter().find(|p| p.key == domain).cloned())
+            .or_else(|| positions.get(&domain).and_then(|&slot| slots[slot].clone()))
             .unwrap_or_else(|| Publisher::new(domain.clone(), get(c_name).unwrap_or(&domain)));
         p.domain = Some(domain.clone());
         if let Some(name) = get(c_name) {
@@ -148,8 +200,14 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
                 });
             }
         }
-        out.publishers.retain(|q| q.key != p.key);
-        out.publishers.push(p);
+        match positions.get(&domain) {
+            Some(&slot) => slots[slot] = Some(p),
+            None => {
+                positions.insert(domain.clone(), slots.len());
+                slots.push(Some(p));
+            }
+        }
+        order.push(domain.clone());
         out.contacts.push(Contact {
             kind: ContactKind::of_email(&email),
             email,
@@ -160,6 +218,21 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
             consent: false,
         });
     }
+    // The old retain-and-push kept each domain at the position of its last
+    // row. Walking the row order backwards and keeping the first sight of a
+    // key reproduces that order in one linear pass.
+    let mut emitted = HashSet::with_capacity(order.len());
+    let mut keys = Vec::with_capacity(order.len());
+    for key in order.iter().rev() {
+        if emitted.insert(key) {
+            keys.push(key);
+        }
+    }
+    keys.reverse();
+    out.publishers = keys
+        .into_iter()
+        .filter_map(|key| positions.get(key).and_then(|&slot| slots[slot].take()))
+        .collect();
     out
 }
 
@@ -170,6 +243,26 @@ pub fn import_seeds(csv: &str, existing: &Snapshot) -> Imported {
 /// keeps it out of cold sequences.
 pub fn import_leads(jsonl: &str, existing: &Snapshot) -> Imported {
     let mut out = Imported::default();
+    // Two linear indexes replace the pre-fix scans: a set of already-recorded
+    // (submission time, address) audits and a domain-slot map. The old path
+    // scanned every event and retained over the growing publisher output per
+    // line, which is O(n^2) on a 10k-lead file.
+    let mut seen_audits: HashSet<(i64, String)> = existing
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Outcome {
+                at,
+                email: Some(email),
+                outcome: Outcome::AuditRequested,
+                ..
+            } => Some((*at, email.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut slots: Vec<Option<Publisher>> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
     for (i, line) in jsonl.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -188,15 +281,7 @@ pub fn import_leads(jsonl: &str, existing: &Snapshot) -> Imported {
         };
         // The leads file is append-only and re-imported on every run: a lead
         // already recorded (same address and submission time) is skipped.
-        let seen = existing.events.iter().any(|e| {
-            matches!(e, Event::Outcome {
-                at: a,
-                email: Some(m),
-                outcome: crate::model::Outcome::AuditRequested,
-                ..
-            } if *a == at && *m == email)
-        });
-        if seen {
+        if !seen_audits.insert((at, email.clone())) {
             out.already += 1;
             continue;
         }
@@ -248,13 +333,33 @@ pub fn import_leads(jsonl: &str, existing: &Snapshot) -> Imported {
             email,
             name: None,
             role: None,
-            publisher_key: key,
+            publisher_key: key.clone(),
             source: "inbound".into(),
             consent: true,
         });
-        out.publishers.retain(|q| q.key != p.key);
-        out.publishers.push(p);
+        match positions.get(&key) {
+            Some(&slot) => slots[slot] = Some(p),
+            None => {
+                positions.insert(key.clone(), slots.len());
+                slots.push(Some(p));
+            }
+        }
+        order.push(key);
     }
+    // Last occurrence per key wins the position, exactly like the previous
+    // retain-then-push.
+    let mut emitted = HashSet::with_capacity(order.len());
+    let mut keys = Vec::with_capacity(order.len());
+    for key in order.iter().rev() {
+        if emitted.insert(key) {
+            keys.push(key);
+        }
+    }
+    keys.reverse();
+    out.publishers = keys
+        .into_iter()
+        .filter_map(|key| positions.get(key).and_then(|&slot| slots[slot].take()))
+        .collect();
     out
 }
 
@@ -288,6 +393,23 @@ pub fn record_outcome(target: &str, outcome: Outcome, note: Option<String>, at: 
 /// idempotent. A malformed line is skipped and counted, never fatal.
 pub fn import_outcomes(jsonl: &str, existing: &Snapshot) -> Imported {
     let mut out = Imported::default();
+    // One membership set for the history and the lines of this file. The
+    // previous shape scanned `existing.events` and the growing output for
+    // every line (O(n^2) at 10k outcomes); the identity is the same triple
+    // the scan compared: (publisher, outcome, reference note).
+    let mut seen_pairs: HashSet<(String, Outcome, String)> = existing
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Outcome {
+                publisher: Some(publisher),
+                outcome,
+                note: Some(note),
+                ..
+            } => Some((publisher.clone(), *outcome, note.clone())),
+            _ => None,
+        })
+        .collect();
     for (i, line) in jsonl.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -302,6 +424,8 @@ pub fn import_outcomes(jsonl: &str, existing: &Snapshot) -> Imported {
             }
             Some((at_ms, publisher, kind, reference))
         });
+        #[cfg(test)]
+        note_outcome_probe();
         let Some((at_ms, publisher, kind, reference)) = record else {
             out.refused
                 .push(format!("line {}: not an outcomes record", i + 1));
@@ -317,20 +441,7 @@ pub fn import_outcomes(jsonl: &str, existing: &Snapshot) -> Imported {
                 continue;
             }
         };
-        let seen = |events: &[Event]| {
-            events.iter().any(|e| {
-                matches!(
-                    e,
-                    Event::Outcome {
-                        publisher: Some(p),
-                        outcome: o,
-                        note: Some(n),
-                        ..
-                    } if *p == publisher && *o == outcome && *n == reference
-                )
-            })
-        };
-        if seen(&existing.events) || seen(&out.events) {
+        if !seen_pairs.insert((publisher.clone(), outcome, reference.clone())) {
             out.already += 1;
             continue;
         }
@@ -732,6 +843,226 @@ mod tests {
     use crate::compose::Sender;
     use crate::engine::learn;
     use crate::io::MapFetcher;
+
+    /// A seed CSV with `domains` distinct publishers, each submitted
+    /// `revisions` times in an interleaved order with different names,
+    /// countries and app ids. Duplicate domains exercise the merge rule.
+    fn seed_csv(domains: usize, revisions: usize) -> String {
+        let mut csv = String::from("domain,name,country,app_store_ids,email,contact_name,role\n");
+        for revision in 0..revisions {
+            for index in 0..domains {
+                let domain = format!("studio{index}.example");
+                let country = ["FI", "SE", "EE"][(index + revision) % 3];
+                let ids = format!("{};{}", index * 10, index * 10 + (revision % 3));
+                let _ = writeln!(
+                    csv,
+                    "{domain},Studio {index} r{revision},{country},{ids},owner{index}@{domain},Owner {index},CEO"
+                );
+            }
+        }
+        csv
+    }
+
+    /// The pre-fix algorithm, copied shape for shape: a scan of the growing
+    /// output for every seed and a retain over it. Used as the correctness
+    /// oracle and as the comparison-count baseline.
+    fn naive_import_seeds(csv: &str, existing: &Snapshot) -> Imported {
+        let rows = parse_csv(csv);
+        let mut out = Imported::default();
+        let Some(header) = rows.first() else {
+            return out;
+        };
+        let col = |name: &str| {
+            header
+                .iter()
+                .position(|h| h.trim().eq_ignore_ascii_case(name))
+        };
+        let (c_domain, c_name, c_country, c_ids, c_email, c_cname, c_role) = (
+            col("domain"),
+            col("name"),
+            col("country"),
+            col("app_store_ids"),
+            col("email"),
+            col("contact_name"),
+            col("role"),
+        );
+        for (i, row) in rows.iter().enumerate().skip(1) {
+            let get = |c: Option<usize>| {
+                c.and_then(|c| row.get(c))
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+            };
+            let Some(email) = get(c_email).and_then(normalize_email) else {
+                out.refused
+                    .push(format!("row {}: missing or invalid email", i + 1));
+                continue;
+            };
+            let domain = get(c_domain)
+                .and_then(normalize_domain)
+                .or_else(|| normalize_domain(email.rsplit('@').next().unwrap_or_default()));
+            let Some(domain) = domain else {
+                out.refused.push(format!("row {}: no usable domain", i + 1));
+                continue;
+            };
+            let mut p = existing
+                .publishers
+                .get(&domain)
+                .cloned()
+                .or_else(|| out.publishers.iter().find(|p| p.key == domain).cloned())
+                .unwrap_or_else(|| Publisher::new(domain.clone(), get(c_name).unwrap_or(&domain)));
+            p.domain = Some(domain.clone());
+            if let Some(name) = get(c_name) {
+                p.name = name.to_string();
+            }
+            if let Some(c) = get(c_country) {
+                p.country = Some(c.to_ascii_uppercase());
+            }
+            for id in get(c_ids)
+                .unwrap_or_default()
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if id.chars().all(|c| c.is_ascii_digit()) && !p.apps.iter().any(|a| a.id == id) {
+                    p.apps.push(App {
+                        store: Store::AppStore,
+                        id: id.to_string(),
+                        name: format!("App {id}"),
+                        genre: None,
+                        rating_count: None,
+                        free: None,
+                        days_since_update: None,
+                    });
+                }
+            }
+            out.publishers.retain(|q| q.key != p.key);
+            out.publishers.push(p);
+            out.contacts.push(Contact {
+                kind: ContactKind::of_email(&email),
+                email,
+                name: get(c_cname).map(str::to_string),
+                role: get(c_role).map(str::to_string),
+                publisher_key: domain,
+                source: "seed list".into(),
+                consent: false,
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn sixteen_thousand_seed_rows_match_the_naive_reference() {
+        let csv = seed_csv(4_000, 4);
+        assert_eq!(csv.lines().count(), 16_001, "16k data rows plus header");
+
+        // A seed that already exists in the snapshot must merge the same way.
+        let mut existing = Snapshot::default();
+        let mut seeded = Publisher::new("studio0.example", "Existing Studio");
+        seeded.country = Some("DE".to_string());
+        existing
+            .publishers
+            .insert("studio0.example".to_string(), seeded);
+
+        let fast = import_seeds(&csv, &existing);
+        let naive = naive_import_seeds(&csv, &existing);
+        assert_eq!(
+            fast, naive,
+            "the indexed import preserves order, merges and contacts exactly"
+        );
+        assert_eq!(fast.publishers.len(), 4_000);
+        assert_eq!(fast.contacts.len(), 16_000);
+        assert!(fast.refused.is_empty());
+        assert_eq!(
+            fast.publishers.last().map(|p| p.key.as_str()),
+            Some("studio3999.example"),
+            "the last row's domain is last"
+        );
+        let first = fast
+            .publishers
+            .iter()
+            .find(|p| p.key == "studio0.example")
+            .expect("merged seed");
+        assert_eq!(first.name, "Studio 0 r3", "the last update wins");
+        assert_eq!(
+            first.apps.len(),
+            1,
+            "an existing snapshot row is the base for every repeat, as before"
+        );
+        let merged = fast
+            .publishers
+            .iter()
+            .find(|p| p.key == "studio1.example")
+            .expect("new seed");
+        assert_eq!(
+            merged.apps.len(),
+            3,
+            "app ids merge across revisions for a new seed"
+        );
+    }
+
+    #[test]
+    fn seed_membership_probes_are_linear_in_the_row_count() {
+        for row_count in [4_000usize, 8_000, 16_000] {
+            let domains = row_count / 4;
+            let csv = seed_csv(domains, 4);
+            reset_seed_probes();
+            let out = import_seeds(&csv, &Snapshot::default());
+            let probes = seed_probe_count();
+            // The old `out.publishers.iter().find` scanned every distinct
+            // publisher already emitted: on the first revision that is
+            // d(d-1)/2 comparisons and on each later revision d*d, so this
+            // baseline quadruples when the fixture doubles in both rows and
+            // domains. The counter shows the fixed path at one probe per row.
+            let naive_comparisons =
+                (domains * (domains - 1) / 2) as u64 + ((3 * domains * domains) as u64);
+            println!(
+                "seed_probes rows={row_count} domains={domains} probes={probes} naive_comparisons={naive_comparisons}"
+            );
+            assert_eq!(out.publishers.len(), domains);
+            assert_eq!(
+                probes, row_count as u64,
+                "rows={row_count}: one index probe per row, linear"
+            );
+            assert!(
+                naive_comparisons > probes * 100,
+                "rows={row_count}: the pre-fix scan is quadratic"
+            );
+        }
+    }
+
+    #[test]
+    fn outcome_membership_probes_are_linear_at_ten_thousand_records() {
+        let line = |index: usize| {
+            format!(
+                "{{\"atUnixMs\":{},\"publisher\":\"studio{index}.example\",\"kind\":\"connected\",\"ref\":\"evt_{index}\"}}",
+                index * 1_000
+            )
+        };
+        let jsonl: String = (0..10_000)
+            .map(|index| format!("{}\n", line(index)))
+            .collect();
+        reset_outcome_probes();
+        let first = import_outcomes(&jsonl, &Snapshot::default());
+        let probes = outcome_probe_count();
+        assert_eq!(first.events.len(), 10_000);
+        assert_eq!(probes, 10_000, "one set probe per line, linear");
+        // Replay: every line is found in the existing history, still one
+        // probe per line rather than a scan of the growing history.
+        let snapshot = Snapshot {
+            events: first.events,
+            ..Snapshot::default()
+        };
+        reset_outcome_probes();
+        let replay = import_outcomes(&jsonl, &snapshot);
+        let replay_probes = outcome_probe_count();
+        assert_eq!(replay.already, 10_000);
+        assert!(replay.events.is_empty());
+        assert_eq!(replay_probes, 10_000, "the replay is linear too");
+        println!(
+            "outcome_probes records=10000 first={probes} replay={replay_probes} naive_scan={}",
+            10_000u64 * 10_000
+        );
+    }
 
     #[test]
     fn csv_parses_quotes_and_line_endings() {

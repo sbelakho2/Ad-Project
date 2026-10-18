@@ -75,6 +75,11 @@ pub(crate) fn event_in_scope(scope: &QueryScope, event: &DomainEvent) -> bool {
             return false;
         }
     }
+    // Most reads are unbounded; formatting a day string per event only to
+    // find both bounds absent was the dominant allocation in scoped filtering.
+    if scope.from_day.is_none() && scope.to_day.is_none() {
+        return true;
+    }
     let day = event.occurred_at_utc.to_day_string();
     day_in_scope(scope, &day)
 }
@@ -907,8 +912,7 @@ fn reached_stages<'a>(
 }
 
 fn month_of(event: &DomainEvent) -> Option<String> {
-    let day = event.occurred_at_utc.to_day_string();
-    day.get(..7).map(str::to_string)
+    Some(event.occurred_at_utc.to_month_string())
 }
 
 /// Growth cohorts by request month.
@@ -1206,7 +1210,10 @@ pub fn page_requests_daily(
     from_day: &str,
     to_day: &str,
 ) -> Vec<PageRequestsDay> {
-    let mut days: BTreeMap<String, (u64, u64, BTreeMap<String, u64>)> = BTreeMap::new();
+    // Bot classes are borrowed from the events: only the handful of distinct
+    // classes per day are turned into owned strings when the result is built,
+    // instead of cloning a class name for every request.
+    let mut days: BTreeMap<String, (u64, u64, BTreeMap<&str, u64>)> = BTreeMap::new();
     for event in events {
         if event.event_type != EventType::PublicPageRequested {
             continue;
@@ -1225,11 +1232,7 @@ pub fn page_requests_daily(
         }
         // A stored event always carries the bounded class; a row without one
         // is reported as `unknown` rather than being guessed at.
-        let bot_class = event
-            .payload
-            .bot_class
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
+        let bot_class = event.payload.bot_class.as_deref().unwrap_or("unknown");
         *entry.2.entry(bot_class).or_insert(0) += 1;
     }
     days.into_iter()
@@ -1237,7 +1240,10 @@ pub fn page_requests_daily(
             day,
             requests,
             not_found,
-            bot_class_mix: mix.into_iter().collect(),
+            bot_class_mix: mix
+                .into_iter()
+                .map(|(class, count)| (class.to_string(), count))
+                .collect(),
         })
         .collect()
 }

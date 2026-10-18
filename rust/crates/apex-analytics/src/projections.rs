@@ -250,19 +250,29 @@ impl ProjectionRow {
         name: ProjectionName,
         value: &serde_json::Value,
     ) -> Result<ProjectionRow, StoreError> {
+        Self::from_table_json_owned(name, value.clone())
+    }
+
+    /// Owned counterpart of [`Self::from_table_json`]: the read path already
+    /// owns the `Value` returned by the fetch, so consuming it avoids a deep
+    /// clone (all string and array fields) per row.
+    pub fn from_table_json_owned(
+        name: ProjectionName,
+        value: serde_json::Value,
+    ) -> Result<ProjectionRow, StoreError> {
         let parse = |error: serde_json::Error| StoreError::Json(error.to_string());
         Ok(match name {
             ProjectionName::CustomerDaily => {
-                ProjectionRow::CustomerDaily(serde_json::from_value(value.clone()).map_err(parse)?)
+                ProjectionRow::CustomerDaily(serde_json::from_value(value).map_err(parse)?)
             }
             ProjectionName::PlatformDaily => {
-                ProjectionRow::PlatformDaily(serde_json::from_value(value.clone()).map_err(parse)?)
+                ProjectionRow::PlatformDaily(serde_json::from_value(value).map_err(parse)?)
             }
-            ProjectionName::LifecycleCohorts => ProjectionRow::LifecycleCohorts(
-                serde_json::from_value(value.clone()).map_err(parse)?,
-            ),
+            ProjectionName::LifecycleCohorts => {
+                ProjectionRow::LifecycleCohorts(serde_json::from_value(value).map_err(parse)?)
+            }
             ProjectionName::OperatorQueues => {
-                ProjectionRow::OperatorQueues(serde_json::from_value(value.clone()).map_err(parse)?)
+                ProjectionRow::OperatorQueues(serde_json::from_value(value).map_err(parse)?)
             }
         })
     }

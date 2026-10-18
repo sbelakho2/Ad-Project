@@ -5,6 +5,7 @@ use apex_audit::{Finding, Severity};
 use apex_proof::{ChangeKind, LedgerLog, LedgerRecord};
 
 use crate::keys::{experiment_name, idempotency_key, operation_of, platform_of};
+use crate::ledger_index::LedgerIndex;
 use crate::model::{Action, ActionOutcome, AutopilotPolicy, CycleOutcome, PlanError, Proposal};
 use crate::ops::PlatformOps;
 
@@ -14,7 +15,7 @@ fn utc_day(at_unix_ms: i64) -> i64 {
     at_unix_ms.div_euclid(DAY_MS)
 }
 
-fn change_kind_of(action: &Action) -> ChangeKind {
+pub(crate) fn change_kind_of(action: &Action) -> ChangeKind {
     match action {
         Action::SetCountryFloor {
             country,
@@ -59,6 +60,27 @@ fn change_kind_of(action: &Action) -> ChangeKind {
         } => ChangeKind::WaterfallEntryRemoved {
             ad_unit_id: ad_unit_id.clone(),
             entry_id: entry_id.clone(),
+        },
+        // The frozen instance/mediation actions ride the platform's existing
+        // ledger change kinds: LevelPlay's instance price is a waterfall-entry
+        // price write and AdMob's group floor is a mediation-group eCPM write.
+        // The action names only the platform resource id, so that id is both
+        // the scope and the existing kind's target id.
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => ChangeKind::WaterfallEntryPriceSet {
+            ad_unit_id: instance_id.clone(),
+            entry_id: instance_id.clone(),
+            price_ecpm: *price_micros,
+        },
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => ChangeKind::EcpmSet {
+            mediation_group_id: group_id.clone(),
+            ad_unit_id: group_id.clone(),
+            ecpm: *floor_micros,
         },
     }
 }
@@ -112,6 +134,30 @@ fn validate_action_values(action: &Action) -> Result<(), PlanError> {
                 ));
             }
         }
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => {
+            if instance_id.trim().is_empty() {
+                return Err(PlanError::Validation(
+                    "instanceId is required to set an instance price".into(),
+                ));
+            }
+            apex_core::validate_ecpm(*price_micros)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => {
+            if group_id.trim().is_empty() {
+                return Err(PlanError::Validation(
+                    "mediationGroupId is required to set a mediation floor".into(),
+                ));
+            }
+            apex_core::validate_ecpm(*floor_micros)
+                .map_err(|e| PlanError::Validation(e.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -128,64 +174,13 @@ fn registered_metric(metric: &apex_lift::decision::Metric) -> &'static str {
 /// is already in the ledger; a rerun must never re-apply it, and a rerun with
 /// a different value under a colliding key must never be mistaken for it.
 pub fn already_applied(ledger: &dyn LedgerLog, key: &str, action: &Action) -> bool {
-    let expected = change_kind_of(action);
-    let rolled_back: std::collections::HashSet<u64> = ledger
-        .records()
-        .iter()
-        .filter_map(|record| match record {
-            LedgerRecord::RollbackPerformed {
-                rolled_back_seq, ..
-            } => Some(*rolled_back_seq),
-            _ => None,
-        })
-        .collect();
-    ledger.records().iter().any(|record| match record {
-        LedgerRecord::ChangeApplied {
-            seq,
-            idempotency_key,
-            change,
-            ..
-        } => idempotency_key == key && *change == expected && !rolled_back.contains(seq),
-        _ => false,
-    })
-}
-
-/// The experiment id inside a signed pre-registration payload, when the
-/// payload is in fact a pre-registration.
-fn prereg_experiment_id(payload: &str) -> Option<String> {
-    match serde_json::from_str::<apex_lift::records::LiftRecord>(payload) {
-        Ok(apex_lift::records::LiftRecord::PreRegistration { experiment_id, .. }) => {
-            Some(experiment_id)
-        }
-        _ => None,
-    }
+    LedgerIndex::build(ledger).already_applied(key, action)
 }
 
 /// True when the ledger already carries the signed pre-registration for
 /// `experiment_id` (a rerun must not stack duplicate registrations).
 pub fn pre_registration_exists(ledger: &dyn LedgerLog, experiment_id: &str) -> bool {
-    ledger.records().iter().any(|record| match record {
-        LedgerRecord::LiftRecord { payload, .. } => {
-            prereg_experiment_id(payload).as_deref() == Some(experiment_id)
-        }
-        _ => false,
-    })
-}
-
-/// The ledger sequence of the signed pre-registration for `experiment_id`.
-fn pre_registration_seq(ledger: &dyn LedgerLog, experiment_id: &str) -> u64 {
-    ledger
-        .records()
-        .iter()
-        .find_map(|record| match record {
-            LedgerRecord::LiftRecord { seq, payload, .. }
-                if prereg_experiment_id(payload).as_deref() == Some(experiment_id) =>
-            {
-                Some(*seq)
-            }
-            _ => None,
-        })
-        .unwrap_or(0)
+    LedgerIndex::build(ledger).pre_registration_exists(experiment_id)
 }
 
 /// Run one write cycle. All gates run before any side effect of the gated step:
@@ -198,7 +193,7 @@ pub async fn run_cycle(
     proposals: Vec<Proposal>,
     now_unix_ms: i64,
 ) -> Result<CycleOutcome, PlanError> {
-    run_cycle_observed(ops, ledger, policy, findings, proposals, None, now_unix_ms).await
+    run_cycle_observed(ops, ledger, policy, findings, &proposals, None, now_unix_ms).await
 }
 
 /// Run one write cycle with the analytics emitter attached: the
@@ -210,7 +205,7 @@ pub async fn run_cycle_observed(
     ledger: &mut dyn LedgerLog,
     policy: &AutopilotPolicy,
     findings: &[Finding],
-    proposals: Vec<Proposal>,
+    proposals: &[Proposal],
     events: Option<&crate::events::RunnerEvents>,
     now_unix_ms: i64,
 ) -> Result<CycleOutcome, PlanError> {
@@ -232,30 +227,11 @@ pub async fn run_cycle_observed(
     }
 
     let day = utc_day(now_unix_ms);
-    let rolled_back: std::collections::HashSet<u64> = ledger
-        .records()
-        .iter()
-        .filter_map(|record| match record {
-            LedgerRecord::RollbackPerformed {
-                rolled_back_seq, ..
-            } => Some(*rolled_back_seq),
-            _ => None,
-        })
-        .collect();
+    let mut index = LedgerIndex::build(ledger);
     // Clock skew must not consume the day: only records at or before `now`
     // count, and a change that was rolled back frees its slot for a retry.
-    let mut applied_today: u32 = ledger
-        .records()
-        .iter()
-        .filter(|record| match record {
-            LedgerRecord::ChangeApplied { at_unix_ms, .. } => {
-                utc_day(*at_unix_ms) == day
-                    && *at_unix_ms <= now_unix_ms
-                    && !rolled_back.contains(&record.seq())
-            }
-            _ => false,
-        })
-        .count()
+    let mut applied_today: u32 = index
+        .applied_on_day(day, now_unix_ms)
         .try_into()
         .map_err(|_| PlanError::Validation("applied count overflow".into()))?;
 
@@ -290,7 +266,7 @@ pub async fn run_cycle_observed(
         validate_action_values(&proposal.action)?;
         let key = idempotency_key(&proposal.action)
             .map_err(|source| PlanError::Validation(source.to_string()))?;
-        if already_applied(ledger, &key, &proposal.action) {
+        if index.already_applied(&key, &proposal.action) {
             skipped_this_cycle += 1;
             outcomes.push(ActionOutcome::Skipped {
                 reason: "already_applied".into(),
@@ -357,13 +333,7 @@ pub async fn run_cycle_observed(
         // before its bookkeeping was written. Refuse to start a second one;
         // the operator investigates. A resolved attempt (a change record
         // exists, whether live or rolled back) does not block a retry.
-        let prior_change_exists = ledger.records().iter().any(|record| {
-            matches!(
-                record,
-                LedgerRecord::ChangeApplied { idempotency_key, .. } if idempotency_key == &key
-            )
-        });
-        if pre_registration_exists(ledger, &spec.name) && !prior_change_exists {
+        if index.pre_registration_exists(&spec.name) && !index.prior_change_exists(&key) {
             skipped_this_cycle += 1;
             outcomes.push(ActionOutcome::Skipped {
                 reason: "experiment_in_flight".into(),
@@ -371,21 +341,26 @@ pub async fn run_cycle_observed(
             continue;
         }
 
-        let source_digest = {
+        let (source_digest, prereg_seq) = {
             let signed = apex_lift::emit::pre_registration(&prereg)
                 .map_err(|error| PlanError::Validation(format!("pre-registration: {error}")))?;
             let payload = signed
                 .record
                 .canonical_json()
                 .map_err(|error| PlanError::Validation(format!("pre-registration: {error}")))?;
-            ledger
+            let record = ledger
                 .append(LedgerRecord::lift_record(
                     now_unix_ms,
                     &signed.sha256,
                     &payload,
                 ))
                 .map_err(PlanError::Ledger)?;
-            signed.sha256.clone()
+            index.observe(&record);
+            // A retry may append a duplicate registration; the old scan
+            // reported the first one, so the index's first-wins entry is the
+            // sequence the rollback outcome names.
+            let seq = index.pre_registration_seq(&spec.name).unwrap_or(0);
+            (signed.sha256.clone(), seq)
         };
         // Step 1's registration is complete; the event lands before the
         // platform start so a registered-but-unstarted attempt stays visible.
@@ -402,20 +377,20 @@ pub async fn run_cycle_observed(
                 )
                 .await;
         }
-        let prereg_seq = pre_registration_seq(ledger, &spec.name);
-
-        let record_change = |ledger: &mut dyn LedgerLog| -> Result<u64, PlanError> {
-            Ok(ledger
+        let change = change_kind_of(&proposal.action);
+        let mut record_change = |ledger: &mut dyn LedgerLog| -> Result<u64, PlanError> {
+            let record = ledger
                 .append(LedgerRecord::change_applied(
                     now_unix_ms,
                     platform_of(&proposal.action),
                     proposal.action.ad_unit_id(),
-                    change_kind_of(&proposal.action),
+                    change.clone(),
                     &key,
                     &proposal.prev_value,
                 ))
-                .map_err(PlanError::Ledger)?
-                .seq())
+                .map_err(PlanError::Ledger)?;
+            index.observe(&record);
+            Ok(record.seq())
         };
 
         // 2. An adapter that cannot carry the change in a test arm mutates the
@@ -444,7 +419,7 @@ pub async fn run_cycle_observed(
                     Some(seq) => seq,
                     None => record_change(ledger)?,
                 };
-                ledger
+                let started = ledger
                     .append(LedgerRecord::experiment_started(
                         now_unix_ms,
                         platform_of(&proposal.action),
@@ -452,6 +427,7 @@ pub async fn run_cycle_observed(
                         spec,
                     ))
                     .map_err(PlanError::Ledger)?;
+                index.observe(&started);
                 // The platform start is confirmed (the adapter returned the
                 // running experiment): record the lifecycle fact.
                 if let Some(events) = events {
@@ -476,7 +452,7 @@ pub async fn run_cycle_observed(
                             ),
                         });
                     }
-                    ledger
+                    let rollback = ledger
                         .append_rollback(
                             now_unix_ms,
                             platform_of(&proposal.action),
@@ -485,6 +461,7 @@ pub async fn run_cycle_observed(
                             "experiment_start_failed",
                         )
                         .map_err(PlanError::Ledger)?;
+                    index.observe(&rollback);
                     outcomes.push(ActionOutcome::RolledBack {
                         change_seq,
                         reason: "experiment_start_failed".into(),

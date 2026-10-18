@@ -258,11 +258,11 @@ pub fn app_ads_proves_owner(text: &str, domain: &str, email: &str) -> bool {
     })
 }
 
-/// The public evidence used to price the watch tier: the number of distinct
-/// publisher account ids in a fetched app-ads.txt. Variable lines, comments,
-/// blank lines and records with fewer than three fields are ignored; the
-/// value is a portfolio proxy, documented as such (the file lists ad systems,
-/// not apps).
+/// The number of distinct ad-system account ids a fetched app-ads.txt lists.
+///
+/// This is kept as public evidence about the file, but it is deliberately not
+/// the watch tier: one publisher routinely lists many account ids for one app,
+/// so the tier counts the distinct apps the subscriber names instead.
 pub fn app_ads_app_count(text: &str) -> u32 {
     let mut ids = std::collections::BTreeSet::new();
     for line in text.lines() {
@@ -349,7 +349,9 @@ impl StaticAppAdsProof {
         }
     }
 
-    /// Record `count` apps of evidence for `domain`.
+    /// Record `count` account ids for `domain` as test evidence. The watch
+    /// tier does not read this count; it is available to callers that still
+    /// inspect the account-id histogram.
     #[must_use]
     pub fn with_app_count(mut self, domain: &str, count: u32) -> Self {
         self.app_counts.insert(

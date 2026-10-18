@@ -1,3 +1,5 @@
+> **Superseded.** This document records the retired Next.js and Express dashboard authentication. The current model is the [console single sign-on and session model](../Console/SESSION_AUTH.md). It is kept for the record.
+
 # Website-to-Dashboard Authentication Integration
 
 This document explains how the marketing website seamlessly integrates with the customer dashboard (console).

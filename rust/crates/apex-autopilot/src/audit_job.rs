@@ -7,21 +7,23 @@
 //!
 //! AppLovin MAX, LevelPlay and AdMob all have a builder here, mirroring the
 //! console's `LiveAuditor` (`apex-api::live`) read for read: MAX pulls ad units
-//! and country revenue; LevelPlay pulls the per-unit instances (waterfall);
-//! AdMob pulls the mediation groups. All three run the same app-ads.txt check
+//! and country revenue; LevelPlay pulls the app's instances (waterfall) and
+//! its app-level revenue; AdMob pulls the mediation groups and its mediation
+//! revenue report. Every builder also fills `platform_totals_30d`, the evidence
+//! the monitoring tier is chosen from. All three run the same app-ads.txt check
 //! with the account's developer site and expected networks.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use apex_audit::{CountryRevenueRow, Snapshot};
+use apex_audit::{CountryRevenueRow, RevenueTotals, Snapshot};
 use apex_connectors::admob::AdmobClient;
 use apex_connectors::app_ads::AppAdsTxtFetcher;
 use apex_connectors::levelplay::LevelPlayClient;
 use apex_connectors::max::{MaxClient, MaxReportClient, MAX_REPORTING_BASE};
 use apex_connectors::snapshot::{
-    admob_snapshot, levelplay_snapshot, max_snapshot, PublisherContext,
+    admob_snapshot, levelplay_app_snapshot, max_snapshot, PublisherContext,
 };
 use apex_connectors::transport::Transport;
 use apex_core::PlatformError;
@@ -39,7 +41,9 @@ pub struct SnapshotAccount {
     pub developer_site: String,
     /// Networks the publisher should authorize in app-ads.txt.
     pub expected_networks: Vec<String>,
-    /// Ad unit ids to audit on platforms with a per-unit waterfall.
+    /// Ad unit ids the caller may enumerate for a per-unit waterfall read.
+    /// The audit path uses LevelPlay's app-scoped instances read, so it does
+    /// not need this list.
     pub ad_unit_ids: Vec<String>,
     /// Bidder accounts as apex knows them.
     pub bidder_accounts: Vec<apex_audit::BidderAccount>,
@@ -47,7 +51,7 @@ pub struct SnapshotAccount {
 
 impl SnapshotAccount {
     /// The publisher context shared by every builder. Reporting data is added
-    /// per platform (only MAX has a reporting read wired here).
+    /// per platform by each builder before the snapshot is assembled.
     fn context(&self) -> PublisherContext {
         PublisherContext {
             developer_site: Some(self.developer_site.clone()),
@@ -96,6 +100,9 @@ pub async fn max_account_snapshot(
                 })
             })
             .collect();
+        // The platform total is the exact sum of the same country rows the
+        // floor rules read: one reporting pull serves both.
+        context.platform_totals_30d = Some(sum_country_revenue(&context.country_revenue)?);
     }
     let management = MaxClient::new(api_key, management_base, transport.clone())?;
     let fetcher = AppAdsTxtFetcher::new(transport);
@@ -115,7 +122,7 @@ pub async fn levelplay_account_snapshot(
     account: &SnapshotAccount,
     now_unix_ms: i64,
 ) -> Result<Snapshot, PlatformError> {
-    let context = account.context();
+    let mut context = account.context();
     let client = LevelPlayClient::new(
         secret_key,
         refresh_token,
@@ -123,15 +130,19 @@ pub async fn levelplay_account_snapshot(
         base_url,
         Arc::clone(&transport),
     )?;
+    // The app-level 30-day revenue read is the same reporting call the monthly
+    // pass bills from; the audit stores it as the platform total so monitoring
+    // activation has real evidence. A failed read fails the refresh typed.
+    let (start, end) = last_30_complete_days(now_unix_ms);
+    let revenue_30d = client.app_revenue(&start, &end).await?;
+    context.platform_totals_30d = Some(RevenueTotals {
+        revenue_30d,
+        impressions_30d: 0,
+    });
     let fetcher = AppAdsTxtFetcher::new(transport);
-    levelplay_snapshot(
-        &client,
-        &fetcher,
-        &context,
-        &account.ad_unit_ids,
-        now_unix_ms,
-    )
-    .await
+    // The instances endpoint is app-scoped: one read, not one per configured
+    // unit (which would fetch and duplicate the same app rows N times).
+    levelplay_app_snapshot(&client, &fetcher, &context, now_unix_ms).await
 }
 
 /// Build an AdMob snapshot: the mediation groups from the management key and
@@ -145,8 +156,17 @@ pub async fn admob_account_snapshot(
     account: &SnapshotAccount,
     now_unix_ms: i64,
 ) -> Result<Snapshot, PlatformError> {
-    let context = account.context();
+    let mut context = account.context();
     let client = AdmobClient::new(access_token, account_id, base_url, Arc::clone(&transport))?;
+    // AdMob's platform total is its mediation report (estimated earnings over
+    // the last 30 complete days); the same read is the audit's revenue
+    // evidence. A failed report fails the refresh typed.
+    let (start, end) = last_30_complete_days(now_unix_ms);
+    let revenue_30d = client.mediation_revenue(&start, &end).await?;
+    context.platform_totals_30d = Some(RevenueTotals {
+        revenue_30d,
+        impressions_30d: 0,
+    });
     let fetcher = AppAdsTxtFetcher::new(transport);
     admob_snapshot(&client, &fetcher, &context, now_unix_ms).await
 }
@@ -214,6 +234,37 @@ pub async fn account_snapshot(
             "no snapshot builder for platform '{other}'"
         ))),
     }
+}
+
+/// The exact platform total from the MAX country rows: revenue and impressions
+/// are checked sums, so one malformed overflow fails the refresh typed instead
+/// of wrapping.
+fn sum_country_revenue(rows: &[CountryRevenueRow]) -> Result<RevenueTotals, PlatformError> {
+    let mut revenue_30d: i64 = 0;
+    let mut impressions_30d: u64 = 0;
+    for row in rows {
+        revenue_30d = revenue_30d
+            .checked_add(row.revenue_30d)
+            .ok_or_else(|| PlatformError::Validation("revenue total overflow".into()))?;
+        impressions_30d = impressions_30d
+            .checked_add(row.impressions_30d)
+            .ok_or_else(|| PlatformError::Validation("impressions total overflow".into()))?;
+    }
+    Ok(RevenueTotals {
+        revenue_30d,
+        impressions_30d,
+    })
+}
+
+/// The last 30 complete days, inclusive, in the MAX reporting convention: the
+/// day before `now` is the last complete day, and the window starts 30 days
+/// before today.
+fn last_30_complete_days(now_unix_ms: i64) -> (String, String) {
+    let today = now_unix_ms.div_euclid(86_400_000);
+    (
+        crate::calendar::format_day(today - 30),
+        crate::calendar::format_day(today - 1),
+    )
 }
 
 /// Build the snapshot for the audit job and record the refresh outcome: a
@@ -364,13 +415,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_max_platform_total_is_a_checked_sum() {
+        let rows = vec![
+            CountryRevenueRow {
+                country: "EE".into(),
+                ad_unit_id: "u1".into(),
+                revenue_30d: i64::MAX,
+                impressions_30d: u64::MAX,
+            },
+            CountryRevenueRow {
+                country: "US".into(),
+                ad_unit_id: "u1".into(),
+                revenue_30d: 1,
+                impressions_30d: 1,
+            },
+        ];
+        assert!(matches!(
+            sum_country_revenue(&rows),
+            Err(PlatformError::Validation(_))
+        ));
+        assert_eq!(sum_country_revenue(&[]).expect("zero").revenue_30d, 0);
+    }
+
     #[tokio::test]
     async fn the_audit_job_builds_a_snapshot_with_country_revenue() {
         let fake = Arc::new(Fake::default());
         // Reporting pull first, then the management list and app-ads.txt.
         fake.push(
             200,
-            r#"{"code":200,"results":[{"day":"2026-10-01","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"12.5","impressions":"100"}]}"#,
+            r#"{"code":200,"results":[
+                {"day":"2026-10-01","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"12.5","impressions":"100"},
+                {"day":"2026-10-02","country":"US","max_ad_unit_id":"u1","estimated_revenue":"2.5","impressions":"50"}
+            ]}"#,
         );
         fake.push(
             200,
@@ -394,8 +471,170 @@ mod tests {
         .await
         .expect("snapshot");
         assert_eq!(snapshot.ad_units.len(), 1);
-        assert_eq!(snapshot.country_revenue.len(), 1);
+        assert_eq!(snapshot.country_revenue.len(), 2);
         assert_eq!(snapshot.country_revenue[0].revenue_30d, 12_500_000);
+        // The platform total is the exact sum of the country rows the floor
+        // rules read, not a placeholder.
+        assert_eq!(snapshot.platform_totals_30d.revenue_30d, 15_000_000);
+        assert_eq!(snapshot.platform_totals_30d.impressions_30d, 150);
+    }
+
+    #[tokio::test]
+    async fn the_levelplay_audit_job_reads_the_app_revenue_into_the_platform_total() {
+        let fake = Arc::new(Fake::default());
+        // The app revenue call authenticates, then reads reporting; the
+        // management instances and app-ads check follow (the token is cached).
+        fake.push(200, r#""bearer-token""#);
+        fake.push(
+            200,
+            r#"{"code":200,"results":[
+                {"date":"2026-09-18","revenue":"600000.00"},
+                {"date":"2026-10-17","revenue":"5000.25"}
+            ]}"#,
+        );
+        fake.push(
+            200,
+            r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
+        );
+        fake.push(200, "admob.com, pub-9, DIRECT\n");
+        let account = SnapshotAccount {
+            developer_site: "studio.example.com".to_string(),
+            expected_networks: vec![],
+            ..SnapshotAccount::default()
+        };
+        let snapshot = levelplay_account_snapshot(
+            "secret",
+            "refresh",
+            "app-key",
+            "https://lp.example.test",
+            fake.clone(),
+            &account,
+            1_800_000_000_000,
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(snapshot.platform, apex_core::PlatformId::LevelPlay);
+        assert_eq!(
+            snapshot.waterfall.len(),
+            1,
+            "no unit list still reads instances"
+        );
+        assert_eq!(
+            snapshot.platform_totals_30d.revenue_30d, 605_000_250_000,
+            "$605,000.25 in micros"
+        );
+        assert_eq!(snapshot.platform_totals_30d.impressions_30d, 0);
+    }
+
+    #[tokio::test]
+    async fn the_levelplay_audit_job_reads_the_app_instances_once_for_many_units() {
+        // The instances endpoint is app-scoped; configured unit ids must not
+        // fan out into one identical read per unit (and duplicate waterfall
+        // rows / instance-price proposals).
+        let fake = Arc::new(Fake::default());
+        fake.push(200, r#""bearer-token""#);
+        fake.push(
+            200,
+            r#"{"code":200,"results":[{"date":"2026-10-17","revenue":"1.0"}]}"#,
+        );
+        fake.push(
+            200,
+            r#"{"instances":[{"instanceId":"e1","adapterNetwork":"admob","instanceName":"ADM_1","position":1,"price":3.2}]}"#,
+        );
+        fake.push(200, "admob.com, pub-9, DIRECT\n");
+        let account = SnapshotAccount {
+            developer_site: "studio.example.com".to_string(),
+            ad_unit_ids: vec!["u1".to_string(), "u2".to_string(), "u3".to_string()],
+            ..SnapshotAccount::default()
+        };
+        let snapshot = levelplay_account_snapshot(
+            "secret",
+            "refresh",
+            "app-key",
+            "https://lp.example.test",
+            fake.clone(),
+            &account,
+            1_800_000_000_000,
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(snapshot.waterfall.len(), 1, "one app read, one row");
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.operation == "listWaterfall")
+                .count(),
+            1,
+            "one app-scoped instances read regardless of configured units"
+        );
+        assert_eq!(seen.len(), 4, "auth, revenue, instances and app-ads");
+    }
+
+    #[tokio::test]
+    async fn the_admob_audit_job_reads_the_mediation_report_into_the_platform_total() {
+        let fake = Arc::new(Fake::default());
+        // The mediation report is the first read; the groups and app-ads check
+        // follow it.
+        fake.push(
+            200,
+            r#"{"header":{"currencyCode":"USD"},"rows":[
+                {"dimensionValues":{"DATE":{"value":"2026-09-18"}},"metricValues":{"ESTIMATED_EARNINGS":{"microsValue":"100000000000"}}}
+            ]}"#,
+        );
+        fake.push(
+            200,
+            r#"{"mediationGroups":[{"mediationGroupId":"g1","name":"Main","format":"interstitial","adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":2}]}]}"#,
+        );
+        fake.push(200, "google.com, pub-1, DIRECT\n");
+        let account = SnapshotAccount {
+            developer_site: "studio.example.com".to_string(),
+            expected_networks: vec!["google.com".to_string()],
+            ..SnapshotAccount::default()
+        };
+        let snapshot = admob_account_snapshot(
+            "token",
+            "pub-1234567890",
+            "https://admob.example.test",
+            fake.clone(),
+            &account,
+            1_800_000_000_000,
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(snapshot.platform, apex_core::PlatformId::Admob);
+        assert_eq!(snapshot.mediation_groups.len(), 1);
+        assert_eq!(
+            snapshot.platform_totals_30d.revenue_30d, 100_000_000_000,
+            "$100,000.00 in micros"
+        );
+        assert_eq!(snapshot.platform_totals_30d.impressions_30d, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_revenue_read_is_a_typed_audit_failure() {
+        // The mediation report is refused: the snapshot refresh (and therefore
+        // the audit) fails typed instead of recording a zero total.
+        let fake = Arc::new(Fake::default());
+        fake.push(500, "report unavailable");
+        let account = SnapshotAccount {
+            developer_site: "studio.example.com".to_string(),
+            expected_networks: vec![],
+            ..SnapshotAccount::default()
+        };
+        let error = admob_account_snapshot(
+            "token",
+            "pub-1234567890",
+            "https://admob.example.test",
+            fake,
+            &account,
+            1_800_000_000_000,
+        )
+        .await
+        .expect_err("the revenue read fails the refresh");
+        match error {
+            PlatformError::Http { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected a typed HTTP refusal, got {other:?}"),
+        }
     }
 
     #[tokio::test]

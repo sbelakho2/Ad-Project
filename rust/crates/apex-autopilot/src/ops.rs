@@ -446,6 +446,14 @@ fn key_of(action: &Action) -> String {
             ad_unit_id,
             entry_id,
         } => format!("remove:{ad_unit_id}:{entry_id}"),
+        Action::SetLevelplayInstancePrice {
+            instance_id,
+            price_micros,
+        } => format!("instance-price:{instance_id}:{price_micros}"),
+        Action::SetAdmobMediationFloor {
+            group_id,
+            floor_micros,
+        } => format!("mediation-floor:{group_id}:{floor_micros}"),
     }
 }
 

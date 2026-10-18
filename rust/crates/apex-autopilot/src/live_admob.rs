@@ -320,6 +320,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_mediation_floor_action_starts_the_group_ab_experiment() {
+        // The frozen Action variant maps to the existing mediation-group eCPM
+        // change; the adapter starts the v1beta experiment on that group.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "name": "accounts/pub-1234567890/mediationAbExperiments/exp-9",
+                "mediationGroupId": "g1",
+                "displayName": "autopilot-mf-g1-1-2",
+                "state": "RUNNING",
+                "variantLeader": null
+            }),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        let change = crate::plan::change_kind_of(&crate::model::Action::SetAdmobMediationFloor {
+            group_id: "g1".into(),
+            floor_micros: 1_200_000,
+        });
+        assert_eq!(
+            change,
+            ChangeKind::EcpmSet {
+                mediation_group_id: "g1".into(),
+                ad_unit_id: "g1".into(),
+                ecpm: 1_200_000,
+            }
+        );
+        let request = ExperimentRequest {
+            experiment_id: "autopilot-mf-g1-1-2".into(),
+            spec: spec(),
+            change,
+            prev_value: "{}".into(),
+        };
+        let id = adapter.start_experiment(&request).await.expect("start");
+        assert_eq!(id, "accounts/pub-1234567890/mediationAbExperiments/exp-9");
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert_eq!(
+            seen[0].url,
+            "https://admob.test/v1beta/accounts/pub-1234567890/mediationAbExperiments"
+        );
+        let body = match seen[0].body.as_ref().expect("body") {
+            HttpBody::Json(value) => value.clone(),
+            other => panic!("expected JSON body, got {other:?}"),
+        };
+        assert_eq!(body["mediationGroupId"], serde_json::json!("g1"));
+        assert_eq!(body["displayName"], serde_json::json!("autopilot-ecpm-g1"));
+    }
+
+    #[tokio::test]
     async fn a_non_ecpm_change_is_refused_before_any_call() {
         let transport = Arc::new(FakeTransport::default());
         let adapter = ops(Arc::clone(&transport), true);

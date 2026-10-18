@@ -132,9 +132,17 @@ impl Change {
 
 /// Diff the current findings against the previous ones by subject.
 pub fn diff_findings(previous: &[StoredFinding], current: &[StoredFinding]) -> Vec<Change> {
+    // Index once instead of scanning `previous` for every current finding:
+    // replaying a large stored baseline was O(n^2). The first occurrence of a
+    // duplicated subject wins, exactly like the previous `iter().find`.
+    let mut index: std::collections::HashMap<&str, &StoredFinding> =
+        std::collections::HashMap::with_capacity(previous.len());
+    for finding in previous {
+        index.entry(finding.subject.as_str()).or_insert(finding);
+    }
     let mut changes = Vec::new();
     for finding in current {
-        let Some(old) = previous.iter().find(|p| p.subject == finding.subject) else {
+        let Some(old) = index.get(finding.subject.as_str()).copied() else {
             changes.push(Change::New(finding.clone()));
             continue;
         };

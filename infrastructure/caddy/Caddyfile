@@ -1,8 +1,8 @@
-# Edge for the current product. Set APEX_DOMAIN (API host) and SITE_DOMAIN
-# (marketing host) in the environment; the defaults are placeholders for
-# local validation only. The operator plane is not on this edge: apex-control
-# runs on the control host and binds loopback there (infrastructure/README.md,
-# "Hosting split").
+# Edge for the current product. Set APEX_DOMAIN (API host), SITE_DOMAIN
+# (marketing host) and CONSOLE_DOMAIN (console host) in the environment; the
+# defaults are placeholders for local validation only. The operator plane is
+# not on this edge: apex-control runs on the control host and binds loopback
+# there (infrastructure/README.md, "Hosting split").
 #
 # The API never serves a publisher's ledger unauthenticated: `/v1/ledger/*`
 # and `/console/ledger` require that publisher's bearer token, and the routes
@@ -10,15 +10,26 @@
 # loopback-bound service, so nothing is reachable without a token.
 #
 # `/metrics` is operator-only: apex-api serves it on its loopback bind (the
-# control/localhost boundary scrapes it there) and the public API host below
-# refuses the path, so process internals are never published on the edge.
+# control/localhost boundary scrapes it there) and the public API and console
+# hosts below refuse the path, so process internals are never published on
+# the edge.
 #
-# One origin routing table:
+# Three public hosts plus the internal control host:
 # - the marketing host serves the static Zola site for GET pages, and proxies
 #   only three path families to apex-api: POST /free-audit (the request form),
-#   /audit-requested/* (the confirmation pages) and /console* (the publisher
-#   console). Everything else, including GET /free-audit, stays static.
+#   /audit-requested/* (the confirmation pages, which are apex-api HTML and
+#   load the design-system fonts from /assets/fonts/*) and /assets/fonts/*
+#   (the self-hosted WOFF2 faces for those pages). Everything else, including
+#   GET /free-audit and every /console path, stays static: the marketing host
+#   no longer serves /console.
 # - the API host proxies its whole origin to apex-api.
+# - the console host proxies its whole origin to apex-api, so `/` is the
+#   console overview, `/console/*` the console pages, `/assets/*` the fonts
+#   and styles, and `/favicon*`, `/watch*` and POST /free-audit reach the
+#   service. Set APEX_CONSOLE_URL to https://console.<domain> so emailed
+#   sign-in links land on the console origin.
+# - the internal control host runs apex-control on loopback and has no block
+#   here.
 
 {$SITE_DOMAIN:www.apexmediation.ee} {
 	encode gzip
@@ -46,10 +57,11 @@
 	@audit_requested path /audit-requested/*
 	reverse_proxy @audit_requested 127.0.0.1:8787
 
-	# The publisher console (`/console` is the change log, `/console/*` the
-	# console pages and mutations).
-	@console path /console /console/*
-	reverse_proxy @console 127.0.0.1:8787
+	# The design-system fonts those HTML pages load. The site's own faces
+	# live under /fonts/* and stay static; /assets/fonts/* only exists on
+	# apex-api and is the shared console/marketing stylesheet's font path.
+	@site_fonts path /assets/fonts/*
+	reverse_proxy @site_fonts 127.0.0.1:8787
 
 	root * /srv/site/public
 	file_server
@@ -61,6 +73,19 @@
 
 	# Metrics stay on the loopback/control boundary: refuse the public path
 	# before the catch-all proxy rather than publishing process internals.
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy 127.0.0.1:8787
+}
+
+{$CONSOLE_DOMAIN:console.apexmediation.ee} {
+	encode gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# The console overview is `/` of this origin; everything under it, from
+	# `/console/*` pages to `/assets/*`, `/favicon*`, `/watch*` and the
+	# POST /free-audit form, belongs to apex-api. Metrics stay operator-only.
 	@metrics path /metrics
 	respond @metrics 404
 

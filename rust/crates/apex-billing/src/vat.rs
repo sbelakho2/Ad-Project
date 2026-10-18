@@ -552,7 +552,6 @@ fn full_vat_number(country: &str, number: &str) -> String {
     }
 }
 
-
 /// Bound evidence by characters, never bytes, and never split a character.
 fn bounded_evidence(value: &str) -> String {
     value.chars().take(VIES_MAX_EVIDENCE_CHARS).collect()

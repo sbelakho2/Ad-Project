@@ -423,6 +423,12 @@ pub fn proposal_label(action: &crate::model::Action) -> (String, String) {
             "Waterfall entry removal".to_string(),
             "all countries".to_string(),
         ),
+        Action::SetLevelplayInstancePrice { .. } => {
+            ("Instance price".to_string(), "all countries".to_string())
+        }
+        Action::SetAdmobMediationFloor { .. } => {
+            ("Mediation floor".to_string(), "all countries".to_string())
+        }
     }
 }
 

@@ -43,7 +43,7 @@
 //! its own health; the day's plan is spread across the domains that may send
 //! (see [`crate::engine::plan`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::classify::ReplyClassifier;
 use crate::compose::{build_message, Sender};
@@ -332,9 +332,7 @@ fn import_outcomes_from_env(
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
     let out = crate::ops::import_outcomes(&text, snap);
-    for event in &out.events {
-        dir.put_event(event).map_err(|e| e.to_string())?;
-    }
+    dir.put_events(&out.events).map_err(|e| e.to_string())?;
     snap.events.extend(out.events.iter().cloned());
     snap.events.sort_by_key(Event::at);
     Ok(Some((path, out)))
@@ -399,7 +397,10 @@ fn ingest_maildir(maildir: &str, dir: &StateDir, now: UnixSecs) -> Result<String
     files.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
 
     let seen_text = std::fs::read_to_string(dir.root().join(INGEST_SEEN_FILE)).unwrap_or_default();
-    let mut seen: Vec<String> = seen_text
+    // A set, not a vector: a maildir with n already-seen files must cost
+    // n membership probes, not n^2 (the previous `Vec::contains` was
+    // quadratic for a large replay).
+    let mut seen: std::collections::HashSet<String> = seen_text
         .lines()
         .filter_map(|line| {
             let v = crate::json::parse(line).ok()?;
@@ -441,7 +442,7 @@ fn ingest_maildir(maildir: &str, dir: &StateDir, now: UnixSecs) -> Result<String
             ("at", crate::json::Value::num(now as f64)),
         ]))
         .map_err(|e| e.to_string())?;
-        seen.push(key);
+        seen.insert(key);
         processed += 1;
     }
     let mut out = format!(
@@ -507,6 +508,59 @@ pub fn mailer_from_env(env: &Env) -> Box<dyn Mailer> {
     }
 }
 
+// Contact-membership probes during discovery. The scaling test asserts one
+// probe per discovered address; the pre-fix `Vec::contains` cost one probe per
+// already-known contact and failed the linear bound.
+#[cfg(test)]
+thread_local! {
+    static CONTACT_COMPARES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_contact_compare() {
+    CONTACT_COMPARES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_contact_compares() {
+    CONTACT_COMPARES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn contact_compares() -> u64 {
+    CONTACT_COMPARES.with(std::cell::Cell::get)
+}
+
+/// The discovered-contact dedupe: an ordered vector (the output order) plus a
+/// set for membership, so checking a new address is one hash probe instead of
+/// a walk over every contact seen so far.
+#[derive(Debug, Default)]
+struct ContactAccumulator {
+    ordered: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl ContactAccumulator {
+    fn new(existing: impl IntoIterator<Item = String>) -> Self {
+        let ordered: Vec<String> = existing.into_iter().collect();
+        let seen = ordered.iter().cloned().collect();
+        Self { ordered, seen }
+    }
+
+    /// Record `email` when it is new, preserving discovery order. Returns
+    /// whether it was new.
+    fn insert(&mut self, email: &str) -> bool {
+        #[cfg(test)]
+        note_contact_compare();
+        if self.seen.insert(email.to_string()) {
+            self.ordered.push(email.to_string());
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Run one command. Returns the text to print.
 pub fn run(
     args: &[String],
@@ -533,15 +587,12 @@ pub fn run(
             } else {
                 crate::ops::import_leads(&text, &snap)
             };
-            for p in &out.publishers {
-                dir.put_publisher(p).map_err(io)?;
-            }
-            for c in &out.contacts {
-                dir.put_contact(c).map_err(io)?;
-            }
-            for e in &out.events {
-                dir.put_event(e).map_err(io)?;
-            }
+            // One durability barrier per file for the whole import: a crash
+            // leaves a prefix of whole records and the next import converges
+            // because the importer deduplicates against the store.
+            dir.put_publishers(&out.publishers).map_err(io)?;
+            dir.put_contacts(&out.contacts).map_err(io)?;
+            dir.put_events(&out.events).map_err(io)?;
             let mut msg = format!(
                 "imported {} publishers, {} contacts, {} events",
                 out.publishers.len(),
@@ -574,13 +625,12 @@ pub fn run(
                         .is_none_or(|t| now - t > 30 * crate::model::DAY)
             };
             let mut lines = Vec::new();
-            let mut existing: Vec<String> = snap.contacts.keys().cloned().collect();
+            let mut existing = ContactAccumulator::new(snap.contacts.keys().cloned());
             for p in snap.publishers.values().filter(|p| stale(p)).take(limit) {
                 let (updated, contacts, notes) = crate::ops::discover(p, fetcher, now);
                 dir.put_publisher(&updated).map_err(io)?;
                 for c in contacts {
-                    if !existing.contains(&c.email) {
-                        existing.push(c.email.clone());
+                    if existing.insert(&c.email) {
                         dir.put_contact(&c).map_err(io)?;
                     }
                 }
@@ -782,9 +832,8 @@ pub fn run(
             let snap = dir.load().map_err(io)?;
             let out = crate::ops::import_outcomes(&text, &snap);
             if !dry_run {
-                for event in &out.events {
-                    dir.put_event(event).map_err(io)?;
-                }
+                // The import's events are one durability unit: one barrier.
+                dir.put_events(&out.events).map_err(io)?;
             }
             let mut msg = format!(
                 "{} {} outcomes",
@@ -1514,5 +1563,50 @@ mod tests {
             "the bare reset writes the domain-free event"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ten_thousand_discovered_contacts_dedupe_linearly_and_preserve_order() {
+        const N: usize = 10_000;
+        reset_contact_compares();
+        let seeds: Vec<String> = (0..N).map(|i| format!("seed{i}@p.example")).collect();
+        let mut existing = ContactAccumulator::new(seeds.clone());
+
+        // Ten thousand new addresses, then the same ten thousand again as the
+        // duplicate rows a re-fetched app-ads.txt produces.
+        for i in 0..N {
+            assert!(existing.insert(&format!("new{i}@p.example")));
+        }
+        for i in 0..N {
+            assert!(!existing.insert(&format!("new{i}@p.example")));
+        }
+        // An address that was already in the snapshot is also a duplicate.
+        assert!(!existing.insert(&seeds[0]));
+
+        let expected: Vec<String> = seeds
+            .iter()
+            .cloned()
+            .chain((0..N).map(|i| format!("new{i}@p.example")))
+            .collect();
+        assert_eq!(
+            existing.ordered, expected,
+            "discovery order is the ordered vector's order"
+        );
+        assert_eq!(existing.seen.len(), 2 * N);
+        let probes = contact_compares();
+        println!(
+            "contact_dedupe contacts={} probes={probes} pre_fix_worst={}",
+            2 * N,
+            (2 * N) * (2 * N) / 2
+        );
+        assert_eq!(
+            probes,
+            2 * N as u64 + 1,
+            "one set membership probe per discovered address"
+        );
+        assert!(
+            probes < (N * N / 10) as u64,
+            "a Vec::contains scan is quadratic: {probes} probes for {N} contacts"
+        );
     }
 }

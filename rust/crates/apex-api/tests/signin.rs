@@ -84,13 +84,37 @@ fn build_app(
     warnings: &Arc<WarningLog>,
     with_operator_token: bool,
 ) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
+    build_app_with_base(
+        root,
+        clock_secs,
+        ttl_hours,
+        Some("https://console.example"),
+        mailer,
+        warnings,
+        with_operator_token,
+    )
+}
+
+/// The same wiring with an explicit console base: `None` exercises the
+/// documented disabled-links deployment.
+fn build_app_with_base(
+    root: &Path,
+    clock_secs: i64,
+    ttl_hours: i64,
+    public_base: Option<&str>,
+    mailer: Option<Arc<CaptureMailer>>,
+    warnings: &Arc<WarningLog>,
+    with_operator_token: bool,
+) -> (axum::Router, Arc<SigninService>, Arc<WorkspaceTokens>) {
     let leads = Arc::new(FileLeadStore::new(root.join("leads.jsonl")));
     let workspaces = Arc::new(WorkspaceTokens::open(root.join("tokens.json")));
     let mut signin = SigninService::open(root)
         .with_ttl_hours(ttl_hours)
-        .with_public_base("https://console.example")
         .with_workspaces(Arc::clone(&workspaces))
         .with_warnings(Arc::clone(warnings));
+    if let Some(base) = public_base {
+        signin = signin.with_public_base(base);
+    }
     if let Some(mailer) = mailer {
         let mailer: Arc<dyn NotificationSink> = mailer;
         signin = signin.with_mailer(mailer);
@@ -107,6 +131,8 @@ fn build_app(
     .with_app_ads_proof(Arc::new(StaticAppAdsProof::accepting([
         "studio.example",
         "arcade.example",
+        "digitalturbine.com",
+        "evil.example",
     ])));
     if with_operator_token {
         state = state.with_ledger_token("operator-pub", b"operator-token".to_vec());
@@ -136,6 +162,16 @@ fn https_post_form(uri: &str, body: &str) -> Request<Body> {
         .expect("request")
 }
 
+/// The sign-in POST that consumes `token`, optionally over the TLS signal.
+fn signin_post(token: &str, https: bool) -> Request<Body> {
+    let body = format!("token={token}");
+    if https {
+        https_post_form("/console/signin", &body)
+    } else {
+        post_form("/console/signin", &body)
+    }
+}
+
 /// The `name=value` pair of a `Set-Cookie` value.
 fn cookie_pair(set_cookie: &str) -> String {
     set_cookie
@@ -153,6 +189,17 @@ fn cookie_attributes(set_cookie: &str) -> String {
         .map(str::trim)
         .collect::<Vec<&str>>()
         .join("; ")
+}
+
+/// The sign-in URL carried by a mail, exactly as the recipient sees it.
+fn signin_link_from_mail(text: &str) -> String {
+    const MARK: &str = "Sign in to your Apex workspace:\n\n";
+    let start = text.find(MARK).expect("the mail carries the link") + MARK.len();
+    text[start..]
+        .split_whitespace()
+        .next()
+        .expect("the mail carries a URL")
+        .to_string()
 }
 
 /// The 32-hex token carried by the `/console/signin?token=` link in a mail.
@@ -230,7 +277,9 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     //    is untouched.
     let tokens_raw = std::fs::read_to_string(temp.path().join("tokens.json")).expect("tokens");
     let tokens: BTreeMap<String, String> = serde_json::from_str(&tokens_raw).expect("json");
-    let self_serve = tokens.get("northstar-studio").expect("the publisher entry");
+    let self_serve = tokens
+        .get("studio-example")
+        .expect("the domain-keyed publisher entry");
     assert_eq!(self_serve.len(), 64, "32 random bytes as hex");
     assert!(self_serve.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(
@@ -244,7 +293,7 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     let leads = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
     assert_eq!(leads.lines().count(), 1);
     assert!(
-        leads.contains("\"publisher\":\"northstar-studio\""),
+        leads.contains("\"publisher\":\"studio-example\""),
         "{leads}"
     );
     assert!(
@@ -257,7 +306,7 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     let rows = signin.store().read_rows().expect("rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].at, 1_700_000_000_000);
-    assert_eq!(rows[0].publisher, "northstar-studio");
+    assert_eq!(rows[0].publisher, "studio-example");
     assert_eq!(rows[0].expires_at, 1_700_000_000_000 + 72 * 3_600_000);
     assert_eq!(rows[0].used_at, None);
     let text = mailer.last_text();
@@ -268,10 +317,23 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     );
 
     // The mail carries the link, the expiry and the "if this wasn't you"
-    // line, and the link base is the configured public console URL.
+    // line. The link is exactly the configured public console origin plus
+    // the sign-in path and the 32-hex token parameter.
+    let link = signin_link_from_mail(&text);
+    assert_eq!(
+        link,
+        format!("https://console.example/console/signin?token={token}")
+    );
+    let after_scheme = link.strip_prefix("https://").expect("https scheme");
+    let (authority, path_query) = after_scheme.split_once('/').expect("path");
+    assert_eq!(authority, "console.example", "host");
+    let (path, query) = path_query.split_once('?').expect("token parameter");
+    assert_eq!(path, "console/signin", "path");
+    assert_eq!(query, format!("token={token}"), "parameter");
+    assert_eq!(token.len(), 32, "token shape: {token}");
     assert!(
-        text.contains("https://console.example/console/signin?token="),
-        "{text}"
+        token.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{token}"
     );
     assert!(text.contains("expires on"), "{text}");
     assert!(text.contains("If this wasn't you"), "{text}");
@@ -296,13 +358,13 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
     //    token passes authorization and the missing ledger is the honest 404.
     let wrong = send(
         &app,
-        get_with_bearer("/v1/ledger/northstar-studio", "not-the-token"),
+        get_with_bearer("/v1/ledger/studio-example", "not-the-token"),
     )
     .await;
     assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
     let authorized = send(
         &app,
-        get_with_bearer("/v1/ledger/northstar-studio", self_serve),
+        get_with_bearer("/v1/ledger/studio-example", self_serve),
     )
     .await;
     assert_eq!(
@@ -312,6 +374,49 @@ async fn free_audit_creates_the_workspace_and_a_hash_only_link_row() {
         authorized.body
     );
     assert_eq!(authorized.json()["error"], "not_found");
+}
+
+#[tokio::test]
+async fn without_a_console_base_the_audit_succeeds_but_no_link_is_created() {
+    let temp = TempDir::new("signin-disabled");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, workspaces) = build_app_with_base(
+        temp.path(),
+        1_700_000_000,
+        72,
+        None,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    // The saved-lead contract is unchanged: the free audit still accepts and
+    // redirects to the confirmation.
+    let reference = submit_audit(&app, FREE_AUDIT_BODY).await;
+    assert!(reference.starts_with("req_"), "{reference}");
+    assert!(workspaces.has_workspace("studio-example"));
+    assert!(temp.path().join("leads.jsonl").exists());
+
+    // Disabled links create no durable row and send no email.
+    assert!(
+        signin.store().read_rows().expect("rows").is_empty(),
+        "no link row is written without a console origin"
+    );
+    assert!(mailer.texts().is_empty(), "{:?}", mailer.texts());
+
+    // The operator warning names the missing variable exactly.
+    let lines = warnings.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == apex_api::signin::SIGNIN_LINKS_DISABLED_WARNING),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("token=")),
+        "the warning never carries a link: {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -330,11 +435,30 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
     submit_audit(&app, FREE_AUDIT_BODY).await;
     let token = token_from_mail(&mailer.last_text());
 
-    let response = send(
-        &app,
-        https_get(&format!("/console/signin?token={token}"), None),
-    )
-    .await;
+    // Three mail-scanner GETs render the landing page and consume nothing.
+    for _ in 0..3 {
+        let landing = send(
+            &app,
+            https_get(&format!("/console/signin?token={token}"), None),
+        )
+        .await;
+        assert_eq!(landing.status, StatusCode::OK, "{}", landing.body);
+        assert!(landing.body.contains("Sign in to your workspace."));
+        assert!(landing
+            .body
+            .contains("<form method=\"post\" action=\"/console/signin\">"));
+        assert!(landing
+            .body
+            .contains(&format!("name=\"token\" value=\"{token}\"")));
+        assert!(set_cookie(&landing).is_none(), "a GET never mints a cookie");
+        assert_eq!(
+            signin.store().read_rows().expect("rows")[0].used_at,
+            None,
+            "a GET never consumes the link"
+        );
+    }
+
+    let response = send(&app, signin_post(&token, true)).await;
     assert_eq!(response.status, StatusCode::SEE_OTHER, "{}", response.body);
     assert_eq!(
         response
@@ -350,7 +474,7 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
     );
     let cookie = set_cookie(&response).expect("the mint sets a cookie");
     assert!(cookie.contains(&format!("{}=", apex_api::SESSION_COOKIE)));
-    assert!(cookie.contains("Path=/console;"));
+    assert!(cookie.contains("Path=/;"));
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Lax"));
     assert!(cookie.contains("Max-Age=900"));
@@ -382,9 +506,14 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
     let pair = cookie_pair(&cookie);
     let overview = send(&app, get_with_cookie("/", &pair)).await;
     assert_eq!(overview.status, 200);
+    assert!(
+        overview.body.contains("<h1>Your account at a glance</h1>"),
+        "the redirect target is the console overview: {}",
+        overview.body
+    );
     let access = send(&app, get_with_cookie("/console/settings/access", &pair)).await;
     assert_eq!(access.status, 200, "{}", access.body);
-    assert!(access.body.contains("northstar-studio"), "{}", access.body);
+    assert!(access.body.contains("studio-example"), "{}", access.body);
 
     // A second link consumed without the proxy's TLS signal mints the same
     // cookie without `Secure`: the flag follows the request, exactly as the
@@ -396,15 +525,11 @@ async fn a_valid_link_mints_the_exchange_session_and_redirects_to_the_overview()
         .issue_link("bright-arcade", "b@arcade.example", 1_700_000_000_000)
         .await
         .expect("issue");
-    let plain = send(
-        &app,
-        get(&format!("/console/signin?token={}", second.token)),
-    )
-    .await;
+    let plain = send(&app, signin_post(&second.token, false)).await;
     assert_eq!(plain.status, StatusCode::SEE_OTHER);
     let plain_cookie = set_cookie(&plain).expect("plain cookie");
     assert!(!plain_cookie.contains("Secure"), "{plain_cookie}");
-    assert!(plain_cookie.contains("Path=/console;"), "{plain_cookie}");
+    assert!(plain_cookie.contains("Path=/;"), "{plain_cookie}");
     assert!(!plain.body.contains(&second.token));
 }
 
@@ -424,11 +549,7 @@ async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
     submit_audit(&app, FREE_AUDIT_BODY).await;
     let token = token_from_mail(&mailer.last_text());
 
-    let first = send(
-        &app,
-        https_get(&format!("/console/signin?token={token}"), None),
-    )
-    .await;
+    let first = send(&app, signin_post(&token, true)).await;
     assert_eq!(first.status, StatusCode::SEE_OTHER);
     let pair = cookie_pair(&set_cookie(&first).expect("cookie"));
 
@@ -438,11 +559,7 @@ async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
 
     // The second use is refused: the documented refusal page, `200`, no
     // cookie, no token anywhere in the response.
-    let second = send(
-        &app,
-        https_get(&format!("/console/signin?token={token}"), None),
-    )
-    .await;
+    let second = send(&app, signin_post(&token, true)).await;
     assert_eq!(second.status, 200);
     assert!(second.content_type().starts_with(HTML));
     assert!(second.body.contains(REFUSAL_COPY), "{}", second.body);
@@ -458,6 +575,18 @@ async fn a_used_link_refuses_a_second_mint_and_the_first_session_persists() {
         signin.store().read_rows().expect("rows")[0].used_at,
         Some(1_700_000_000_000)
     );
+
+    // A GET after the POST mints nothing and shows the refusal instead of a
+    // fresh button: the link is spent.
+    let after = send(
+        &app,
+        https_get(&format!("/console/signin?token={token}"), None),
+    )
+    .await;
+    assert_eq!(after.status, 200);
+    assert!(after.body.contains(REFUSAL_COPY), "{}", after.body);
+    assert!(!after.body.contains("<form"), "{}", after.body);
+    assert!(set_cookie(&after).is_none());
 
     // Semantics: single-use applies to minting only; the first session keeps
     // working for its own idle window.
@@ -531,7 +660,15 @@ async fn expired_unknown_and_malformed_links_are_refused_without_echoing_the_tok
     }
 
     // A wrong method on the path keeps the HTML 405 hint page.
-    let wrong_method = send(&app, post("/console/signin?token=x")).await;
+    let wrong_method = send(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri("/console/signin")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
     assert_eq!(wrong_method.status, StatusCode::METHOD_NOT_ALLOWED);
     assert!(wrong_method.body.contains("Method not allowed."));
 }
@@ -565,7 +702,7 @@ async fn without_an_email_sink_the_audit_succeeds_and_the_warning_is_recorded() 
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("not sent"), "{}", lines[0]);
     assert!(lines[0].contains("APEX_NOTIFY_SINK=email"), "{}", lines[0]);
-    assert!(lines[0].contains("northstar-studio"), "{}", lines[0]);
+    assert!(lines[0].contains("studio-example"), "{}", lines[0]);
     assert!(!lines[0].contains("token="), "{}", lines[0]);
 }
 
@@ -604,8 +741,8 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
 
     let rows = signin.store().read_rows().expect("rows");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].publisher, "northstar-studio");
-    assert_eq!(rows[1].publisher, "bright-arcade");
+    assert_eq!(rows[0].publisher, "studio-example");
+    assert_eq!(rows[1].publisher, "arcade-example");
     assert_ne!(rows[0].token_hash, rows[1].token_hash);
     assert!(!texts[0].contains(&bright_token), "no cross talk");
     assert!(!texts[1].contains(&northstar_token), "no cross talk");
@@ -616,37 +753,24 @@ async fn two_publishers_get_independent_links_and_their_own_sessions() {
     .expect("json");
     assert_eq!(tokens.len(), 2, "{tokens:?}");
     assert_ne!(
-        tokens.get("northstar-studio"),
-        tokens.get("bright-arcade"),
+        tokens.get("studio-example"),
+        tokens.get("arcade-example"),
         "independent workspace tokens"
     );
 
     // Both sign in; each session lands on its own workspace.
     let northstar_cookie = cookie_pair(
-        &set_cookie(
-            &send(
-                &app,
-                https_get(&format!("/console/signin?token={northstar_token}"), None),
-            )
-            .await,
-        )
-        .expect("northstar cookie"),
+        &set_cookie(&send(&app, signin_post(&northstar_token, true)).await)
+            .expect("northstar cookie"),
     );
     let bright_cookie = cookie_pair(
-        &set_cookie(
-            &send(
-                &app,
-                https_get(&format!("/console/signin?token={bright_token}"), None),
-            )
-            .await,
-        )
-        .expect("bright cookie"),
+        &set_cookie(&send(&app, signin_post(&bright_token, true)).await).expect("bright cookie"),
     );
     assert_ne!(northstar_cookie, bright_cookie, "distinct sessions");
 
     for (cookie, own, other) in [
-        (&northstar_cookie, "northstar-studio", "bright-arcade"),
-        (&bright_cookie, "bright-arcade", "northstar-studio"),
+        (&northstar_cookie, "studio-example", "arcade-example"),
+        (&bright_cookie, "arcade-example", "studio-example"),
     ] {
         let access = send(&app, get_with_cookie("/console/settings/access", cookie)).await;
         assert_eq!(access.status, 200, "{}", access.body);
@@ -679,13 +803,13 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     let rows_before = signin.store().read_rows().expect("rows").len();
     assert_eq!(mailer.texts().len(), 1);
 
-    // The same studio slug, a different address: the workspace exists, the
+    // The same proven domain, a different address: the workspace exists, the
     // address is not recorded, so nothing is stored or sent.
     let response = send(
         &app,
         post_form(
             "/free-audit",
-            "email=attacker%40evil.example&studio=Northstar+Studio&platforms=max",
+            "email=attacker%40studio.example&studio=Northstar+Studio&platforms=max",
         ),
     )
     .await;
@@ -710,7 +834,7 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("northstar-studio") && line.contains("recorded contact")),
+            .any(|line| line.contains("studio-example") && line.contains("recorded contact")),
         "{lines:?}"
     );
     assert!(
@@ -731,7 +855,7 @@ async fn an_existing_workspace_refuses_an_unrecorded_address_and_keeps_the_link_
     assert_eq!(rows.len(), rows_before + 1);
     assert_eq!(
         rows.iter()
-            .filter(|row| row.publisher == "northstar-studio")
+            .filter(|row| row.publisher == "studio-example")
             .count(),
         rows_before + 1
     );
@@ -778,7 +902,7 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
     .await;
     assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
     assert_eq!(counter.calls(), 0, "validation refuses before the fetch");
-    assert!(!workspaces.has_workspace("northstar-studio"));
+    assert!(!workspaces.has_workspace("studio-example"));
 
     // A new workspace needs the domain's app-ads.txt: exactly one fetch.
     let created = send(
@@ -795,8 +919,8 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
         1,
         "one guarded fetch for the new workspace"
     );
-    assert!(workspaces.has_workspace("northstar-studio"));
-    assert!(workspaces.contact_recorded("northstar-studio", "you@studio.example"));
+    assert!(workspaces.has_workspace("studio-example"));
+    assert!(workspaces.contact_recorded("studio-example", "you@studio.example"));
 
     // An existing workspace refuses an unrecorded address before any proof
     // work: the recorded contact list is the whole decision.
@@ -804,7 +928,7 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
         &app,
         post_form(
             "/free-audit",
-            "email=attacker%40evil.example&studio=Northstar+Studio&platforms=max",
+            "email=attacker%40studio.example&studio=Northstar+Studio&platforms=max",
         ),
     )
     .await;
@@ -814,7 +938,7 @@ async fn a_free_audit_fetches_the_ownership_proof_once_for_a_new_workspace() {
         1,
         "a refused existing workspace never fetches app-ads.txt"
     );
-    assert!(!workspaces.contact_recorded("northstar-studio", "attacker@evil.example"));
+    assert!(!workspaces.contact_recorded("studio-example", "attacker@studio.example"));
 
     // The recorded contact is accepted from the existing record, also with
     // no fetch.
@@ -867,12 +991,12 @@ async fn a_new_workspace_without_an_app_ads_proof_gets_no_link() {
         temp.path().join("leads.jsonl").exists(),
         "the lead is still stored"
     );
-    assert!(!workspaces.has_workspace("shadow-studio"));
+    assert!(!workspaces.has_workspace("unproven-example"));
     assert!(
         warnings
             .lines()
             .iter()
-            .any(|line| line.contains("shadow-studio") && line.contains("app-ads.txt")),
+            .any(|line| line.contains("unproven-example") && line.contains("app-ads.txt")),
         "{:?}",
         warnings.lines()
     );
@@ -914,4 +1038,91 @@ async fn signin_fails_closed_without_a_leads_root_or_when_the_store_is_unavailab
         .body
         .contains("This view is not available in this deployment."));
     assert!(set_cookie(&response).is_none());
+}
+
+#[tokio::test]
+async fn a_proven_domain_keys_the_workspace_and_each_studio_is_only_a_label() {
+    let temp = TempDir::new("signin-domain-key");
+    let warnings = Arc::new(WarningLog::default());
+    let mailer = Arc::new(CaptureMailer::default());
+    let (app, signin, workspaces) = build_app(
+        temp.path(),
+        1_700_000_000,
+        72,
+        Some(Arc::clone(&mailer)),
+        &warnings,
+        false,
+    );
+
+    // Two studio names behind one proven domain. The same recorded contact is
+    // accepted, and both human labels are kept on their lead rows.
+    submit_audit(
+        &app,
+        "email=founder%40digitalturbine.com&studio=Turbine+Games&platforms=max",
+    )
+    .await;
+    submit_audit(
+        &app,
+        "email=founder%40digitalturbine.com&studio=Turbine+Labs&platforms=admob",
+    )
+    .await;
+    // A different proven domain is a different workspace.
+    submit_audit(
+        &app,
+        "email=b%40arcade.example&studio=Bright+Arcade&platforms=admob",
+    )
+    .await;
+
+    let tokens: BTreeMap<String, String> = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("tokens.json")).expect("tokens"),
+    )
+    .expect("json");
+    assert_eq!(
+        tokens.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "arcade-example".to_string(),
+            "digitalturbine-com".to_string()
+        ],
+        "one token key per proven domain, in stable order"
+    );
+    assert!(
+        !tokens.contains_key("turbine-games") && !tokens.contains_key("turbine-labs"),
+        "a studio-name slug never becomes a workspace key: {tokens:?}"
+    );
+
+    let leads = std::fs::read_to_string(temp.path().join("leads.jsonl")).expect("leads");
+    let publishers: Vec<String> = leads
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("lead")["lead"]["publisher"]
+                .as_str()
+                .expect("publisher")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        publishers,
+        vec![
+            "digitalturbine-com".to_string(),
+            "digitalturbine-com".to_string(),
+            "arcade-example".to_string()
+        ],
+        "the lead contract carries the domain key"
+    );
+    for label in ["Turbine Games", "Turbine Labs"] {
+        assert!(
+            leads.contains(&format!("\"displayName\":\"{label}\"")),
+            "both studio labels are persisted: {leads}"
+        );
+    }
+
+    let rows = signin.store().read_rows().expect("rows");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].publisher, "digitalturbine-com");
+    assert_eq!(rows[1].publisher, "digitalturbine-com");
+    assert_eq!(rows[2].publisher, "arcade-example");
+    assert!(workspaces.has_workspace("digitalturbine-com"));
+    assert!(workspaces.has_workspace("arcade-example"));
+    assert!(!workspaces.has_workspace("turbine-games"));
+    assert!(warnings.lines().is_empty(), "{:?}", warnings.lines());
 }

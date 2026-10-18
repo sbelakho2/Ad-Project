@@ -762,7 +762,7 @@ async fn ledger_open_exchanges_the_token_for_an_httponly_session_cookie() {
     );
     let cookie = set_cookie(&response).expect("session cookie");
     assert!(cookie.starts_with("apex_ledger_session="), "{cookie}");
-    for attribute in ["HttpOnly", "SameSite=Lax", "Path=/console"] {
+    for attribute in ["HttpOnly", "SameSite=Lax", "Path=/"] {
         assert!(cookie.contains(attribute), "{cookie}");
     }
     assert!(!cookie.contains("Domain="), "host-only: {cookie}");
@@ -792,6 +792,79 @@ async fn ledger_open_exchanges_the_token_for_an_httponly_session_cookie() {
     assert_eq!(secure.status, 303);
     let cookie = set_cookie(&secure).expect("session cookie");
     assert!(cookie.ends_with("; Secure"), "{cookie}");
+}
+
+#[tokio::test]
+async fn session_cookie_path_reaches_the_overview_like_a_browser() {
+    let temp = TempDir::new("console-cookie-path");
+    write_standard_fixture(temp.path());
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let exchange = send(
+        &app,
+        post_form(
+            "/console/ledger",
+            &format!("publisher={PUBLISHER}&token={LEDGER_TOKEN}"),
+        ),
+    )
+    .await;
+    assert_eq!(exchange.status, 303, "{}", exchange.body);
+    let cookie = set_cookie(&exchange).expect("session cookie");
+    let path = cookie_path(&cookie);
+    assert_eq!(path, "/", "the session covers the whole console origin");
+    assert!(!cookie.contains("Domain="), "host-only: {cookie}");
+    let pair = cookie.split(';').next().expect("cookie pair").to_string();
+
+    // A cookie jar only sends the cookie when its Path matches. This is the
+    // exact browser rule that made `Path=/console` leave `/` unreachable.
+    let overview = send(
+        &app,
+        if cookie_path_matches(path, "/") {
+            get_with_cookie("/", &pair)
+        } else {
+            get("/")
+        },
+    )
+    .await;
+    assert_eq!(overview.status, 200, "{}", overview.body);
+    assert!(overview.body.contains("<h1>Your account at a glance</h1>"));
+
+    let ledger = send(
+        &app,
+        if cookie_path_matches(path, "/console/ledger") {
+            get_with_cookie("/console/ledger", &pair)
+        } else {
+            get("/console/ledger")
+        },
+    )
+    .await;
+    assert_eq!(ledger.status, 200, "{}", ledger.body);
+    assert!(ledger.body.contains("<h1>Signed change log</h1>"));
+
+    // The cookie is host-only, not path-only: another path on this host would
+    // receive it too (every route still enforces the session itself).
+    assert!(
+        cookie_path_matches(path, "/healthz"),
+        "a host-only cookie is sent to any path on the same host"
+    );
+}
+
+/// The `Path` attribute of a `Set-Cookie` value.
+fn cookie_path(cookie: &str) -> &str {
+    cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("Path="))
+        .expect("the cookie carries a Path")
+}
+
+/// RFC 6265 section 5.1.4 path-match.
+fn cookie_path_matches(cookie_path: &str, request_path: &str) -> bool {
+    if request_path == cookie_path {
+        return true;
+    }
+    if !request_path.starts_with(cookie_path) {
+        return false;
+    }
+    cookie_path.ends_with('/') || request_path.as_bytes()[cookie_path.len()] == b'/'
 }
 
 #[tokio::test]
@@ -932,6 +1005,98 @@ async fn ledger_session_lists_verified_records_with_human_labels() {
             .and_then(|value| value.to_str().ok()),
         Some("/console/ledger")
     );
+}
+
+#[tokio::test]
+async fn ledger_list_paginates_at_one_hundred_rows_with_stable_links() {
+    let temp = TempDir::new("console-ledger-pages");
+    write_snapshot(temp.path(), "admob", &minimal_snapshot(&["u1"]));
+    write_ledger(
+        temp.path(),
+        PUBLISHER,
+        &seed_keypair(7),
+        (0..2_000u64).map(change_record).collect(),
+    );
+    let app = router(file_state(temp.path(), pub1_keys()));
+    let cookie = open_ledger_session(&app).await;
+
+    // Page 1: exactly 100 data rows plus the header row, the total in the
+    // summary and a Next link that round-trips.
+    let first = send(&app, get_with_cookie("/console/ledger", &cookie)).await;
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert!(first.body.contains("2,000 records / Verified"));
+    assert!(first.body.contains("Showing 1-100 of 2,000 records"));
+    assert_eq!(first.body.matches("<tr>").count(), 101, "header + 100 rows");
+    assert!(first
+        .body
+        .contains("rel=\"next\" href=\"/console/ledger?page=2\""));
+    assert!(!first.body.contains("rel=\"prev\""));
+    assert!(first.body.contains("/console/ledger/records/0"));
+    assert!(!first.body.contains("/console/ledger/records/100"));
+
+    // The KPI stays the whole ledger total, not the page size.
+    let overview = send(&app, get_with_cookie("/", &cookie)).await;
+    assert_eq!(overview.status, 200, "{}", overview.body);
+    assert!(
+        overview.body.contains(">2000</a>"),
+        "the verified-records KPI is the total: {}",
+        overview.body
+    );
+
+    // Page 2 round-trips to both neighbours.
+    let second = send(&app, get_with_cookie("/console/ledger?page=2", &cookie)).await;
+    assert_eq!(second.status, 200, "{}", second.body);
+    assert!(second.body.contains("Showing 101-200 of 2,000 records"));
+    assert!(second
+        .body
+        .contains("rel=\"prev\" href=\"/console/ledger?page=1\""));
+    assert!(second
+        .body
+        .contains("rel=\"next\" href=\"/console/ledger?page=3\""));
+    assert_eq!(second.body.matches("<tr>").count(), 101);
+
+    // The last page has the remainder and no Next link.
+    let last = send(&app, get_with_cookie("/console/ledger?page=20", &cookie)).await;
+    assert_eq!(last.status, 200, "{}", last.body);
+    assert!(last.body.contains("Showing 1,901-2,000 of 2,000 records"));
+    assert!(last
+        .body
+        .contains("rel=\"prev\" href=\"/console/ledger?page=19\""));
+    assert!(!last.body.contains("rel=\"next\""));
+    assert!(last.body.contains("/console/ledger/records/1999"));
+    assert_eq!(last.body.matches("<tr>").count(), 101);
+
+    // Invalid pages are the typed 400 page: non-numeric, zero, past the last
+    // page, empty, and a duplicated key. The rejected value is never echoed
+    // and the recovery link is the stable first page.
+    for uri in [
+        "/console/ledger?page=abc",
+        "/console/ledger?page=0",
+        "/console/ledger?page=21",
+        "/console/ledger?page=",
+        "/console/ledger?page=2&page=3",
+    ] {
+        let bad = send(&app, get_with_cookie(uri, &cookie)).await;
+        assert_eq!(bad.status, 400, "{uri}: {}", bad.body);
+        assert!(bad.body.contains("Check the request."), "{uri}");
+        assert!(
+            bad.body.contains("href=\"/console/ledger?page=1\""),
+            "{uri}: {}",
+            bad.body
+        );
+        assert!(!bad.body.contains("page=abc"), "{uri}");
+        assert_single_h1(&bad.body, uri);
+    }
+
+    // The record detail route is unchanged and still addresses the whole
+    // chain, including the last record.
+    let detail = send(
+        &app,
+        get_with_cookie("/console/ledger/records/1999", &cookie),
+    )
+    .await;
+    assert_eq!(detail.status, 200, "{}", detail.body);
+    assert!(detail.body.contains("Record 1999 of 2000"));
 }
 
 #[tokio::test]
@@ -1467,14 +1632,9 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let outcomes_path = temp.path().join("sales").join("outcomes.jsonl");
     let state = file_state(temp.path(), pub1_keys())
         .with_watch(Arc::new(apex_watch::SubscriberStore::open(&watch_root)))
-        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)))
-        .with_app_ads_proof(Arc::new(
-            apex_api::app_ads_proof::StaticAppAdsProof::accepting(Vec::<String>::new())
-                .with_app_count("northstar.example", 12),
-        ));
+        .with_outcomes(Arc::new(apex_api::OutcomesAppender::new(&outcomes_path)));
     let app = router(state);
-    let body =
-        "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1";
+    let body = "domain=Northstar.Example&email=Founder%40northstar.example&accounts=admob.com+%3D+pub-1&apps=com.example.one%0Acom.example.two%0Acom.example.three%0Acom.example.four%0Acom.example.five%0Acom.example.six%0Acom.example.seven%0Acom.example.eight%0Acom.example.nine%0Acom.example.ten%0Acom.example.eleven%0Acom.example.twelve";
     let first = send(&app, post_form("/watch", body)).await;
     assert_eq!(first.status, 303, "{}", first.body);
     let location = first
@@ -1503,7 +1663,7 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
     let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("row");
     assert_eq!(row["domain"], "northstar.example");
     assert_eq!(row["email"], "Founder@northstar.example");
-    assert_eq!(row["tier"], "core", "the app-count evidence chose the tier");
+    assert_eq!(row["tier"], "core", "twelve distinct apps chose the tier");
     assert_eq!(row["status"], "pending", "no check runs before payment");
     assert_eq!(row["confirmed"], false);
     assert_eq!(row["accountIds"]["admob.com"], "pub-1");

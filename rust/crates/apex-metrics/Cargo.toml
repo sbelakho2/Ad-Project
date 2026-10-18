@@ -14,6 +14,9 @@ workspace = true
 # workspace can depend on them without dragging in a runtime.
 
 [dev-dependencies]
+# Test-only: the counting allocator proves the steady-state observation path
+# makes zero allocations. It is not a library dependency.
+stats_alloc = "0.1.10"
 # Only tests use a runtime: the in-flight guard's cancellation cleanup is
 # proven by aborting a real task.
 tokio = { version = "1", features = ["rt", "macros"] }
