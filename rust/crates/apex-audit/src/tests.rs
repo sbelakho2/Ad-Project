@@ -48,6 +48,7 @@ fn rich_snapshot() -> Snapshot {
     );
     snapshot.platform_totals_30d = totals(50_000_000, 1_000_000);
     snapshot.mediation_totals_30d = totals(45_000_000, 1_000_000);
+    snapshot.mediation_totals_reported = true;
     snapshot
 }
 
@@ -300,6 +301,7 @@ fn duplicate_ad_unit_ids_are_order_insensitive() {
     let mut first = empty_snapshot();
     first.platform_totals_30d = totals(10_000_000, 1_000);
     first.mediation_totals_30d = totals(10_000_000, 1_000);
+    first.mediation_totals_reported = true;
     first.ad_units = vec![enabled_unit.clone(), disabled_unit.clone()];
     first.country_revenue = vec![row("EE", "uA", 1_500_000, 10_000)];
 
@@ -325,6 +327,7 @@ fn identifiers_with_digit_runs_stay_out_of_the_parity_contract() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(10_000_000, 1_000);
     snapshot.mediation_totals_30d = totals(10_000_000, 1_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.bidder_accounts = vec![bidder("app 2", true, false)];
     snapshot.app_ads_txt = ads_txt(true, &["admob.com, pubA, DIRECT"], &["ads-7.example.com"]);
 
@@ -365,6 +368,7 @@ fn negative_one_sided_totals_do_not_break_parity() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(-5, 1_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 1_000);
+    snapshot.mediation_totals_reported = true;
     let report = run(&snapshot);
     for finding in &report.findings {
         let mut backed = Vec::new();
@@ -385,6 +389,7 @@ fn extreme_share_clamps_consistently_in_message_and_evidence() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1, 1);
     snapshot.mediation_totals_30d = totals(1, 1);
+    snapshot.mediation_totals_reported = true;
     snapshot.country_revenue = vec![row("EE", "uA", i64::MAX, 10_000)];
 
     let report = run(&snapshot);
@@ -412,6 +417,7 @@ fn zero_valued_floor_is_not_a_revenue_leak() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1_000_000, 200_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 0)])];
     snapshot.country_revenue = vec![
         row("EE", "uA", 0, 100_000),
@@ -432,6 +438,7 @@ fn overflow_unavailable_ecpm_reports_the_overflow_story() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1_000_000, 200_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1_000_000)])];
     // Pair impressions at the minimum keep the unit denominator small enough
     // that 11 x i64::MAX revenue overflows the i64 micros eCPM on conversion.
@@ -467,6 +474,7 @@ fn total_saturates_at_i64_max_without_wrap() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1_000_000, 1_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 1_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1), floor("DE", 1)])];
     snapshot.country_revenue = vec![
         row("EE", "uA", 0, u64::MAX),
@@ -501,6 +509,7 @@ fn digit_only_ad_unit_ids_stay_out_of_the_parity_contract() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1_000_000, 1_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 1_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.ad_units = vec![unit("1", true, vec![floor("EE", 1_000_000)])];
     snapshot.country_revenue = vec![row("EE", "1", 0, 100_000), row("US", "1", 5_000_000, 1_000)];
     let report = run(&snapshot);
@@ -533,6 +542,7 @@ fn negative_unit_ecpm_reports_the_negative_story() {
     let mut snapshot = empty_snapshot();
     snapshot.platform_totals_30d = totals(1_000_000, 200_000);
     snapshot.mediation_totals_30d = totals(1_000_000, 200_000);
+    snapshot.mediation_totals_reported = true;
     snapshot.ad_units = vec![unit("uA", true, vec![floor("EE", 1_000_000)])];
     snapshot.country_revenue = vec![
         row("EE", "uA", 0, 100_000),

@@ -534,6 +534,46 @@ async fn push_governance(
         .map_err(|error| error.to_string())
 }
 
+/// Serialize and atomically write a plan-state file with mode `0600`.
+///
+/// The bytes match `apex_billing::PlanState::save` (the runner and console
+/// read the same format), but the temporary file is created owner-only and
+/// fsynced before the rename, so the file is never world-readable even
+/// momentarily.
+fn write_plan_state_0600(
+    path: &std::path::Path,
+    plan: &apex_billing::PlanState,
+) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(plan)
+        .map_err(|error| format!("plan state could not be serialized: {error}"))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("plan state directory: {error}"))?;
+        }
+    }
+    let temp = path.with_extension("json.control-tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let write = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = options.open(&temp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    };
+    if let Err(error) = write() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("plan state: {error}"));
+    }
+    Ok(())
+}
+
 async fn execute_local(
     state: &ControlState,
     capability: Capability,
@@ -719,8 +759,21 @@ async fn execute_local(
                 apex_analytics::UtcMillis::from_unix_millis(now_ms).to_day_string();
             let mut plan = apex_billing::ManagedPlan::default().activate(revenue, &since);
             plan.tier = tier;
-            plan.save(&path)
-                .map_err(|error| format!("plan state: {error}"))?;
+            // Split-host: the console host's runner and billing view read
+            // the plan state there, so deliver the same document first.
+            push_governance(
+                state,
+                serde_json::json!({
+                    "kind": "managed_plan",
+                    "publisher": publisher,
+                    "state": plan,
+                }),
+            )
+            .await?;
+            // The shared plan-state file is read by the runner and console.
+            // `PlanState::save` is a plain write (umask-dependent), so this
+            // host writes the same bytes through an owner-only atomic rename.
+            write_plan_state_0600(&path, &plan)?;
             Ok(format!(
                 "Managed plan activated for {publisher} at {} micros/month from {since} ({}). The runner and console read the same plan state file.",
                 plan.monthly_fee_micros,
@@ -1046,5 +1099,31 @@ fn journal_entry(
         result_id: result_id.map(str::to_string),
         job_id: job_id.map(str::to_string),
         correlation_id: correlation.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_state_is_written_owner_only_and_atomically() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-plan-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("northstar.managed.json");
+        let plan = apex_billing::ManagedPlan::default().activate(2_000_000_000, "2026-10");
+        write_plan_state_0600(&path, &plan).expect("write");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("northstar") || text.contains("managed") || text.contains("tier"));
+        assert!(!dir.join("northstar.managed.json.control-tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

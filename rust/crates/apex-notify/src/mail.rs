@@ -84,11 +84,12 @@ pub(crate) fn compose(
     html: &str,
     dedup_key: &str,
     domain: &str,
+    list_unsubscribe: Option<&str>,
     now_unix_secs: i64,
 ) -> String {
     let hash = fnv1a64(dedup_key);
     let boundary = format!("apex-notify-{hash:016x}");
-    let headers = [
+    let mut headers = vec![
         format!("From: {from_header}"),
         format!("To: {to}"),
         format!("Subject: {subject}"),
@@ -97,6 +98,19 @@ pub(crate) fn compose(
         "MIME-Version: 1.0".to_string(),
         format!("Content-Type: multipart/alternative; boundary=\"{boundary}\""),
     ];
+    if let Some(url) = list_unsubscribe.map(str::trim).filter(|url| {
+        (url.starts_with("https://") || url.starts_with("http://"))
+            && !url.bytes().any(|byte| {
+                byte.is_ascii_whitespace()
+                    || byte == b'<'
+                    || byte == b'>'
+                    || byte == b'\r'
+                    || byte == b'\n'
+            })
+    }) {
+        headers.push(format!("List-Unsubscribe: <{url}>"));
+        headers.push("List-Unsubscribe-Post: List-Unsubscribe=One-Click".to_string());
+    }
     let mut raw = headers.join("\r\n");
     raw.push_str("\r\n\r\n");
     for (content_type, part) in [("text/plain", text), ("text/html", html)] {
@@ -114,6 +128,39 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn a_one_click_unsubscribe_url_becomes_both_rfc8058_headers() {
+        let raw = compose(
+            "Apex <hello@example.com>",
+            "ops@example.com",
+            "Subject",
+            "text",
+            "<p>html</p>",
+            "watch_alert:pub:hash",
+            "example.com",
+            Some("https://console.example/watch/cancel?token=abc"),
+            0,
+        );
+        assert!(raw.contains(
+            "\r\nList-Unsubscribe: <https://console.example/watch/cancel?token=abc>\r\n"
+        ));
+        assert!(raw.contains("\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"));
+        // A header-like URL is omitted, never injected.
+        let hostile = compose(
+            "Apex <hello@example.com>",
+            "ops@example.com",
+            "Subject",
+            "text",
+            "<p>html</p>",
+            "k",
+            "example.com",
+            Some("https://example.com/\r\nBcc: attacker@example.com"),
+            0,
+        );
+        assert!(!hostile.contains("Bcc:"));
+        assert!(!hostile.contains("List-Unsubscribe"));
+    }
 
     #[test]
     fn rfc5322_dates_match_the_sales_engine() {
@@ -134,6 +181,7 @@ mod tests {
             "<p>html body</p>\n",
             "guardrail_stop:exp_1",
             "apex-transactional.example",
+            None,
             0,
         );
         assert!(raw.starts_with(
@@ -161,6 +209,7 @@ mod tests {
             "<p>html body</p>\n",
             "guardrail_stop:exp_1",
             "apex-transactional.example",
+            None,
             1,
         );
         let message_id = |raw: &str| {
@@ -177,6 +226,7 @@ mod tests {
             "<p>html body</p>\n",
             "guardrail_stop:exp_2",
             "apex-transactional.example",
+            None,
             0,
         );
         assert_ne!(message_id(&raw), message_id(&other));

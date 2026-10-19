@@ -140,6 +140,11 @@ pub struct DeliveryMessage {
     pub dedup_key: String,
     /// The durable reference, when present.
     pub reference: Option<String>,
+    /// The absolute one-click unsubscribe URL, when the message has one.
+    /// Rendered as both `List-Unsubscribe` and the RFC 8058 one-click post
+    /// hint; absent on messages with no cancellation surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_unsubscribe: Option<String>,
 }
 
 impl DeliveryMessage {
@@ -153,6 +158,7 @@ impl DeliveryMessage {
             template_class: message.template_class,
             dedup_key: message.dedup_key.clone(),
             reference: message.reference.clone(),
+            list_unsubscribe: None,
         }
     }
 }
@@ -549,6 +555,7 @@ impl NotificationSink for EmailSink {
             &message.html,
             &message.dedup_key,
             domain,
+            message.list_unsubscribe.as_deref(),
             now_unix_secs,
         );
         let mut child = Command::new(&self.command)

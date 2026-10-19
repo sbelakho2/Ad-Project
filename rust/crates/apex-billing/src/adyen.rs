@@ -9,7 +9,9 @@
 //! the eight documented fields joined with `:`, in order:
 //! `pspReference`, `originalReference`, `merchantAccountCode`,
 //! `merchantReference`, `amount.value`, `amount.currency`, `eventCode`,
-//! `success`. Verification is per item and constant-time. There is no
+//! `success`. Each field is escaped before joining: `\` becomes `\\` and `:`
+//! becomes `\:` (Adyen's documented scheme; merchant references commonly
+//! contain colons). Verification is per item and constant-time. There is no
 //! timestamp in the scheme, so replay protection lives with the caller: it
 //! deduplicates on `eventCode` plus `pspReference`.
 //!
@@ -76,6 +78,51 @@ pub const MICROS_PER_MINOR_UNIT: i64 = 10_000;
 /// so an over-long reference is a local, typed error rather than a remote 422.
 pub const MAX_REFERENCE_LEN: usize = 80;
 
+/// Whether an HTTP status is an accepted Adyen success. Checkout
+/// `paymentLinks` answers `201 Created`; `/payments` answers `200 OK`. Both
+/// are successes, and treating a 201 as a failure used to discard a link
+/// Adyen had already created (and billed against on resume).
+fn is_success_status(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+/// The request-shaping invariants every Checkout call shares. The invoice
+/// builder already enforces them, but the client is public and the watch path
+/// constructs [`InvoiceLineItem`] directly, so a malformed item is refused
+/// locally instead of becoming a remote 422 (or, worse, a request Adyen
+/// accepts with a different meaning).
+fn validate_line_item(item: &InvoiceLineItem) -> Result<(), BillingError> {
+    if item.amount_minor_units <= 0 {
+        return Err(BillingError::Malformed(format!(
+            "invoice line seq {} has a non-positive amount {} minor units",
+            item.seq, item.amount_minor_units
+        )));
+    }
+    if item.currency.len() != 3 || !item.currency.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return Err(BillingError::Malformed(format!(
+            "invoice line seq {} has an invalid ISO currency {:?}",
+            item.seq, item.currency
+        )));
+    }
+    if item.reference.trim().is_empty()
+        || item.reference.len() > MAX_REFERENCE_LEN
+        || item.reference.chars().any(char::is_control)
+    {
+        return Err(BillingError::Malformed(format!(
+            "invoice line seq {} has an unusable Adyen reference (length {}, control characters or empty)",
+            item.seq,
+            item.reference.len()
+        )));
+    }
+    if item.shopper_reference.trim().is_empty() {
+        return Err(BillingError::Malformed(format!(
+            "invoice line seq {} has an empty shopperReference",
+            item.seq
+        )));
+    }
+    Ok(())
+}
+
 /// A webhook-signature refusal. No variant carries attacker-controlled data
 /// beyond lengths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -109,6 +156,11 @@ pub enum AdyenClientError {
     /// The merchant account was empty.
     #[error("adyen merchant account must not be empty")]
     EmptyMerchantAccount,
+
+    /// The Checkout base URL was empty: every request would be built against
+    /// a relative path and could reach the wrong origin.
+    #[error("adyen checkout base must not be empty")]
+    EmptyCheckoutBase,
 }
 
 /// Adyen endpoint client: Checkout API credentials plus the webhook HMAC key.
@@ -142,6 +194,7 @@ impl AdyenClient {
         let api_key = api_key.into();
         let merchant_account = merchant_account.into();
         let hmac_key = hmac_key.into();
+        let checkout_base = checkout_base.into();
         if api_key.is_empty() {
             return Err(AdyenClientError::EmptyApiKey);
         }
@@ -151,11 +204,14 @@ impl AdyenClient {
         if hmac_key.is_empty() {
             return Err(AdyenClientError::EmptyHmacKey);
         }
+        if checkout_base.trim().is_empty() {
+            return Err(AdyenClientError::EmptyCheckoutBase);
+        }
         Ok(Self {
             api_key,
             merchant_account,
             hmac_key,
-            checkout_base: checkout_base.into(),
+            checkout_base,
         })
     }
 
@@ -189,6 +245,7 @@ impl AdyenClient {
         transport: &dyn Transport,
         item: &InvoiceLineItem,
     ) -> Result<PaymentLinkResponse, BillingError> {
+        validate_line_item(item)?;
         let body = serde_json::json!({
             "reference": item.reference,
             "amount": {"value": item.amount_minor_units, "currency": item.currency},
@@ -237,7 +294,7 @@ impl AdyenClient {
                 }))
             }
         };
-        if response.status != 200 {
+        if !is_success_status(response.status) {
             let status = response.status;
             return Err(match status {
                 401 | 403 => BillingError::from(apex_core::PlatformError::Auth {
@@ -292,6 +349,7 @@ impl AdyenClient {
         item: &InvoiceLineItem,
         stored_payment_method_id: &str,
     ) -> Result<PaymentReceipt, BillingError> {
+        validate_line_item(item)?;
         if stored_payment_method_id.trim().is_empty() {
             return Err(BillingError::Malformed(
                 "stored payment method id must not be empty".to_string(),
@@ -341,7 +399,7 @@ impl AdyenClient {
                 }))
             }
         };
-        if response.status != 200 {
+        if !is_success_status(response.status) {
             let status = response.status;
             return Err(match status {
                 401 | 403 => BillingError::from(apex_core::PlatformError::Auth {
@@ -427,20 +485,37 @@ pub struct NotificationItem {
 
 impl NotificationItem {
     /// The exact string Adyen signs: the eight documented fields, colon
-    /// separated, in order.
+    /// separated, in order, with each field escaped (`\` -> `\\`, `:` ->
+    /// `\:`) exactly as Adyen's HMAC documentation specifies. Merchant
+    /// references contain colons, so signing the unescaped fields would
+    /// verify against a scheme Adyen never uses.
     pub fn signed_message(&self) -> String {
         format!(
             "{}:{}:{}:{}:{}:{}:{}:{}",
-            self.psp_reference,
-            self.original_reference,
-            self.merchant_account_code,
-            self.merchant_reference,
+            escape_signed_field(&self.psp_reference),
+            escape_signed_field(&self.original_reference),
+            escape_signed_field(&self.merchant_account_code),
+            escape_signed_field(&self.merchant_reference),
             self.amount_value,
-            self.amount_currency,
-            self.event_code,
-            self.success
+            escape_signed_field(&self.amount_currency),
+            escape_signed_field(&self.event_code),
+            escape_signed_field(&self.success)
         )
     }
+}
+
+/// Escape one field for Adyen's signed message: backslash first, then colon,
+/// so the escaping is unambiguous and reversible.
+fn escape_signed_field(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            ':' => escaped.push_str("\\:"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Parse the `notificationItems` envelope into items. Fails closed on any

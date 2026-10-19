@@ -70,10 +70,16 @@ pub const ADMOB_ENDPOINTS: [EndpointMeta; 6] = [
 pub const ADMOB_REVENUE_PER_VARIANT: bool = false;
 
 /// State of a mediation A/B experiment as AdMob reports it.
+///
+/// The documented v1beta enum is `RUNNING`, `ENDED`, `EXPIRED` (a stopped
+/// experiment is `ENDED`). `STOPPED` is accepted as a compatibility spelling
+/// for recorded fixtures that used it before the canonical enum was pinned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediationAbExperimentState {
     Running,
     Stopped,
+    Ended,
+    Expired,
 }
 
 /// The leader verdict AdMob publishes for a mediation A/B experiment.
@@ -85,12 +91,20 @@ pub enum MediationAbExperimentState {
 pub enum MediationAbVariantLeader {
     /// AdMob has not set a leader (e.g. the experiment is still running).
     Unspecified,
-    /// AdMob cannot determine a leader.
+    /// AdMob cannot determine a leader (legacy spelling `UNKNOWN`).
     Unknown,
     /// The control arm leads.
     Control,
-    /// The variant arm leads.
+    /// The variant/treatment arm leads.
     Variant,
+    /// The documented `TREATMENT` spelling (the variant arm leads).
+    Treatment,
+    /// Collected impressions are insufficient to determine a leader.
+    InsufficientData,
+    /// The experiment has not run long enough to call a leader.
+    TooEarlyToCall,
+    /// Neither variant is a decisive winner.
+    NoVariantLeader,
 }
 
 /// One mediation A/B experiment as the v1beta API reports it.
@@ -135,6 +149,12 @@ pub struct AdmobClient {
     /// billing path can both ask for the same 30-day window; the cache keeps
     /// that one platform read, exactly like LevelPlay's `app_revenue`.
     revenue: Mutex<BTreeMap<(String, String), i64>>,
+    /// Experiment id -> parent mediation group id, recorded when the
+    /// experiment is created. The documented `:stop` custom method is nested
+    /// under the mediation group; the adapter's ledger stores the resource
+    /// name but its stop path trims to the trailing id, so the mapping keeps
+    /// the stop call on the documented route for a live-created experiment.
+    experiments: Mutex<BTreeMap<String, String>>,
 }
 
 impl std::fmt::Debug for AdmobClient {
@@ -144,6 +164,127 @@ impl std::fmt::Debug for AdmobClient {
             .field("account_id", &self.account_id)
             .finish()
     }
+}
+
+/// Exchange a Google OAuth refresh token for a fresh AdMob access token.
+///
+/// AdMob access tokens expire after about an hour; the runner is a
+/// short-lived process per job, so exchanging once at startup is enough.
+pub async fn refresh_access_token(
+    transport: std::sync::Arc<dyn crate::transport::Transport>,
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<String, PlatformError> {
+    if token_url.trim().is_empty()
+        || client_id.trim().is_empty()
+        || client_secret.trim().is_empty()
+        || refresh_token.trim().is_empty()
+    {
+        return Err(PlatformError::Validation(
+            "AdMob token refresh requires the token URL, client id, client secret and refresh token"
+                .into(),
+        ));
+    }
+    let form = format!(
+        "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+        crate::encode_query_component(client_id),
+        crate::encode_query_component(client_secret),
+        crate::encode_query_component(refresh_token),
+    );
+    let request = crate::transport::HttpRequest {
+        platform: apex_core::PlatformId::Admob,
+        operation: "oauthRefresh".to_string(),
+        method: crate::transport::HttpMethod::Post,
+        url: token_url.to_string(),
+        headers: vec![(
+            "Content-Type".to_string(),
+            crate::transport::FORM_CONTENT_TYPE.to_string(),
+        )],
+        body: Some(crate::transport::HttpBody::Form(form)),
+        timeout_ms: 15_000,
+    };
+    let response = match transport.request(request).await {
+        Ok(response) => response,
+        Err(crate::transport::TransportError::Platform(error)) => return Err(error),
+        Err(error) => {
+            return Err(PlatformError::Network {
+                platform: apex_core::PlatformId::Admob,
+                operation: "oauthRefresh".to_string(),
+                detail: error.to_string(),
+            })
+        }
+    };
+    if !(200..300).contains(&response.status) {
+        return Err(match response.status {
+            401 | 403 => PlatformError::Auth {
+                platform: apex_core::PlatformId::Admob,
+                operation: "oauthRefresh".to_string(),
+                status: response.status,
+            },
+            429 => PlatformError::RateLimited {
+                platform: apex_core::PlatformId::Admob,
+                operation: "oauthRefresh".to_string(),
+                retry_after: None,
+            },
+            status => PlatformError::Http {
+                platform: apex_core::PlatformId::Admob,
+                operation: "oauthRefresh".to_string(),
+                status,
+            },
+        });
+    }
+    let data: serde_json::Value =
+        serde_json::from_slice(&response.body).map_err(|error| PlatformError::Schema {
+            platform: apex_core::PlatformId::Admob,
+            operation: "oauthRefresh".to_string(),
+            detail: format!("token response is not JSON: {error}"),
+        })?;
+    data.get("access_token")
+        .and_then(|value| value.as_str())
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| PlatformError::Schema {
+            platform: apex_core::PlatformId::Admob,
+            operation: "oauthRefresh".to_string(),
+            detail: "token response has no access_token".to_string(),
+        })
+}
+
+/// Synchronous wrapper for the runner builder, which is not async. The
+/// exchange runs on its own current-thread runtime; the caller's runtime is
+/// never entered from inside it.
+pub fn refresh_access_token_blocking(
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<String, PlatformError> {
+    let token_url = token_url.to_string();
+    let client_id = client_id.to_string();
+    let client_secret = client_secret.to_string();
+    let refresh_token = refresh_token.to_string();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| PlatformError::Validation(format!("token runtime: {error}")))?;
+        runtime.block_on(async move {
+            let transport = crate::transport::ReqwestTransport::new()
+                .map_err(|error| PlatformError::Validation(format!("token transport: {error}")))?;
+            refresh_access_token(
+                std::sync::Arc::new(transport),
+                &token_url,
+                &client_id,
+                &client_secret,
+                &refresh_token,
+            )
+            .await
+        })
+    })
+    .join()
+    .map_err(|_| PlatformError::Validation("token exchange thread panicked".to_string()))?
 }
 
 impl AdmobClient {
@@ -167,6 +308,7 @@ impl AdmobClient {
                 ("Authorization".into(), format!("Bearer {access_token}")),
             ),
             revenue: Mutex::new(BTreeMap::new()),
+            experiments: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -217,6 +359,31 @@ impl AdmobClient {
         ))
     }
 
+    /// Read one mediation group by id (the `getMediationGroup` endpoint the
+    /// capability table declares). The response uses the same resource shape
+    /// as the list, so both the canonical `mediationGroupLines` form and the
+    /// recorded legacy form parse through [`Self::parse_group`].
+    pub async fn get_mediation_group(
+        &self,
+        mediation_group_id: &str,
+    ) -> Result<MediationGroup, PlatformError> {
+        if mediation_group_id.trim().is_empty() {
+            return Err(PlatformError::Validation(
+                "AdMob getMediationGroup requires a mediation group id".into(),
+            ));
+        }
+        let path = format!(
+            "/v1beta/{}/mediationGroups/{}",
+            self.account_id,
+            crate::encode_query_component(mediation_group_id)
+        );
+        let data = self
+            .caller
+            .call("getMediationGroup", HttpMethod::Get, &path, None, None)
+            .await?;
+        self.parse_group(&data)
+    }
+
     fn parse_group(&self, item: &serde_json::Value) -> Result<MediationGroup, PlatformError> {
         let id = item
             .get("mediationGroupId")
@@ -227,45 +394,107 @@ impl AdmobClient {
         let name = item.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
             self.schema("listMediationGroups", format!("group missing name: {item}"))
         })?;
-        let mappings_raw = item
-            .get("adUnitMappings")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                self.schema(
-                    "listMediationGroups",
-                    format!("group missing adUnitMappings: {item}"),
-                )
-            })?;
-        let mut mappings = Vec::with_capacity(mappings_raw.len());
-        for m in mappings_raw {
-            let ad_unit_id = m.get("adUnitId").and_then(|v| v.as_str()).ok_or_else(|| {
-                self.schema(
-                    "listMediationGroups",
-                    format!("mapping missing adUnitId: {m}"),
-                )
-            })?;
-            let network = m.get("network").and_then(|v| v.as_str()).ok_or_else(|| {
-                self.schema(
-                    "listMediationGroups",
-                    format!("mapping missing network: {m}"),
-                )
-            })?;
-            let ecpm = m
-                .get("ecpm")
-                .or_else(|| m.get("eCPM"))
-                .and_then(crate::max::number_to_micros)
-                .ok_or_else(|| {
-                    self.schema("listMediationGroups", format!("mapping missing ecpm: {m}"))
+        // Recorded fixtures use the pre-v1beta `adUnitMappings` array; the
+        // documented v1beta resource carries a `mediationGroupLines` map keyed
+        // by line id, with `cpmMicros` as integer micros. Both are read into
+        // the same typed mapping list. A response with neither fails closed.
+        let mut mappings = Vec::new();
+        if let Some(mappings_raw) = item.get("adUnitMappings").and_then(|v| v.as_array()) {
+            mappings.reserve(mappings_raw.len());
+            for m in mappings_raw {
+                let ad_unit_id = m.get("adUnitId").and_then(|v| v.as_str()).ok_or_else(|| {
+                    self.schema(
+                        "listMediationGroups",
+                        format!("mapping missing adUnitId: {m}"),
+                    )
                 })?;
-            mappings.push(Mapping {
-                ad_unit_id: ad_unit_id.to_string(),
-                network: network.to_string(),
-                ecpm,
-            });
+                let network = m.get("network").and_then(|v| v.as_str()).ok_or_else(|| {
+                    self.schema(
+                        "listMediationGroups",
+                        format!("mapping missing network: {m}"),
+                    )
+                })?;
+                let ecpm = m
+                    .get("ecpm")
+                    .or_else(|| m.get("eCPM"))
+                    .and_then(crate::max::number_to_micros)
+                    .ok_or_else(|| {
+                        self.schema("listMediationGroups", format!("mapping missing ecpm: {m}"))
+                    })?;
+                mappings.push(Mapping {
+                    ad_unit_id: ad_unit_id.to_string(),
+                    network: network.to_string(),
+                    ecpm,
+                });
+            }
+        } else if let Some(lines) = item.get("mediationGroupLines").and_then(|v| v.as_object()) {
+            // Deterministic order: BTreeMap iteration by line id, then ad unit
+            // id. A line groups every unit that shares its cpmMicros.
+            for (line_id, line) in lines {
+                if line.get("state").and_then(|v| v.as_str()) == Some("REMOVED") {
+                    continue;
+                }
+                let network = line
+                    .get("network")
+                    .or_else(|| line.get("adSourceId"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        self.schema(
+                            "listMediationGroups",
+                            format!("line '{line_id}' missing network/adSourceId: {line}"),
+                        )
+                    })?;
+                let ecpm = match line.get("cpmMicros") {
+                    Some(raw) => parse_cpm_micros(raw).ok_or_else(|| {
+                        self.schema(
+                            "listMediationGroups",
+                            format!("line '{line_id}' has an invalid cpmMicros: {raw}"),
+                        )
+                    })?,
+                    None => line
+                        .get("ecpm")
+                        .or_else(|| line.get("eCPM"))
+                        .and_then(crate::max::number_to_micros)
+                        .ok_or_else(|| {
+                            self.schema(
+                                "listMediationGroups",
+                                format!("line '{line_id}' missing cpmMicros/ecpm: {line}"),
+                            )
+                        })?,
+                };
+                let units = line
+                    .get("adUnitMappings")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| {
+                        self.schema(
+                            "listMediationGroups",
+                            format!("line '{line_id}' missing adUnitMappings: {line}"),
+                        )
+                    })?;
+                for ad_unit_id in units.keys() {
+                    mappings.push(Mapping {
+                        ad_unit_id: ad_unit_id.clone(),
+                        network: network.to_string(),
+                        ecpm,
+                    });
+                }
+            }
+        } else {
+            return Err(self.schema(
+                "listMediationGroups",
+                format!("group missing adUnitMappings/mediationGroupLines: {item}"),
+            ));
         }
         // Missing 'format' defaults to banner for parity with the TypeScript
         // reference; an unknown string fails closed instead (the TS cast did not).
-        let format = match item.get("format").and_then(|v| v.as_str()) {
+        // The documented resource keeps the format under `targeting.format`;
+        // recorded fixtures keep it at the top level.
+        let format_raw = item.get("format").and_then(|v| v.as_str()).or_else(|| {
+            item.get("targeting")
+                .and_then(|targeting| targeting.get("format"))
+                .and_then(|v| v.as_str())
+        });
+        let format = match format_raw.map(str::to_ascii_lowercase).as_deref() {
             Some("banner") | None => AdFormat::Banner,
             Some("interstitial") => AdFormat::Interstitial,
             Some("rewarded") => AdFormat::Rewarded,
@@ -335,10 +564,14 @@ impl AdmobClient {
                 } else {
                     m.ecpm
                 };
+                // The wire eCPM is a currency amount ("1.75"), not integer
+                // micros. Writing the micros integer would read back as
+                // $1,750,000.00 on the next list (and the live API would see
+                // the same 10^6 inflation), so format it exactly.
                 serde_json::json!({
                     "adUnitId": m.ad_unit_id,
                     "network": m.network,
-                    "ecpm": value,
+                    "ecpm": format_ecpm(value),
                 })
             })
             .collect();
@@ -461,10 +694,59 @@ impl AdmobClient {
     /// `mediationAbExperiments` create). The returned typed experiment carries
     /// [`ADMOB_REVENUE_PER_VARIANT`] = `false`: AdMob publishes only a
     /// `variantLeader` verdict, never per-variant revenue.
+    /// The raw `mediationGroupLines` values for one group, in the documented
+    /// v1beta shape. The typed group drops fields (targeting, line ids), so a
+    /// treatment line must come from the raw document.
+    pub async fn mediation_group_lines(
+        &self,
+        mediation_group_id: &str,
+    ) -> Result<Vec<serde_json::Value>, PlatformError> {
+        let path = format!(
+            "/v1beta/{}/mediationGroups/{}",
+            self.account_id,
+            crate::encode_query_component(mediation_group_id)
+        );
+        let data = self
+            .caller
+            .call("getMediationGroup", HttpMethod::Get, &path, None, None)
+            .await?;
+        if let Some(lines) = data
+            .get("mediationGroupLines")
+            .and_then(|value| value.as_object())
+        {
+            let values: Vec<serde_json::Value> = lines.values().cloned().collect();
+            if !values.is_empty() {
+                return Ok(values);
+            }
+        }
+        // The legacy shape carries the mappings directly; wrap them so the
+        // treatment still names a real line.
+        if let Some(mappings) = data
+            .get("adUnitMappings")
+            .and_then(|value| value.as_array())
+        {
+            if !mappings.is_empty() {
+                return Ok(vec![serde_json::json!({
+                    "adUnitMappings": mappings,
+                    "cpmMicros": data
+                        .get("cpmMicros")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                })]);
+            }
+        }
+        Err(self.schema(
+            "getMediationGroup",
+            format!("mediation group '{mediation_group_id}' has no lines"),
+        ))
+    }
+
     pub async fn create_mediation_ab_experiment(
         &self,
         mediation_group_id: &str,
         display_name: &str,
+        treatment_lines: Option<&serde_json::Value>,
+        test_share: Option<u8>,
     ) -> Result<MediationAbExperiment, PlatformError> {
         if mediation_group_id.trim().is_empty() || display_name.trim().is_empty() {
             return Err(PlatformError::Validation(
@@ -472,40 +754,85 @@ impl AdmobClient {
                     .into(),
             ));
         }
-        let path = format!("/v1beta/{}/mediationAbExperiments", self.account_id);
+        // The documented v1beta resource nests the experiment under its
+        // mediation group and carries the treatment lines that serve the
+        // proposed change. The treatment percentage is the policy's test
+        // share expressed as an integer 1..=99.
+        let path = format!(
+            "/v1beta/{}/mediationGroups/{}/mediationAbExperiments",
+            self.account_id,
+            crate::encode_query_component(mediation_group_id)
+        );
+        let mut body = serde_json::json!({ "displayName": display_name });
+        if let Some(share) = test_share {
+            let percent = share.clamp(1, 99);
+            body["treatmentTrafficPercentage"] = serde_json::json!(percent.to_string());
+        }
+        if let Some(lines) = treatment_lines {
+            body["treatmentMediationLines"] = lines.clone();
+        }
         let data = self
             .caller
             .call(
                 "createMediationAbExperiment",
                 HttpMethod::Post,
                 &path,
-                Some(serde_json::json!({
-                    "mediationGroupId": mediation_group_id,
-                    "displayName": display_name,
-                })),
+                Some(body),
                 None,
             )
             .await?;
-        self.parse_experiment("createMediationAbExperiment", &data)
+        let experiment = self.parse_experiment("createMediationAbExperiment", &data)?;
+        // Remember which group owns the experiment so a later stop by bare id
+        // can address the documented nested `:stop` route.
+        if let Some(id) = experiment.name.rsplit('/').next() {
+            if let Ok(mut known) = self.experiments.lock() {
+                known.insert(id.to_string(), mediation_group_id.to_string());
+            }
+        }
+        Ok(experiment)
     }
 
-    /// Stop a mediation A/B experiment by its id (the v1beta `:stop` custom
-    /// method). The returned verdict is still only a `variantLeader`; see
-    /// [`Self::create_mediation_ab_experiment`] for the capability flag.
+    /// Stop a mediation A/B experiment (the v1beta `:stop` custom method).
+    ///
+    /// The documented route nests the experiment under its mediation group.
+    /// Callers pass either the full resource name (preferred) or the bare
+    /// experiment id; for a bare id the group learned at create time is used,
+    /// and only an experiment the client never created falls back to the
+    /// legacy collection path. The returned verdict is still only a
+    /// `variantLeader`; see [`Self::create_mediation_ab_experiment`].
     pub async fn stop_mediation_ab_experiment(
         &self,
         experiment_id: &str,
     ) -> Result<MediationAbExperiment, PlatformError> {
-        if experiment_id.trim().is_empty() {
+        let trimmed = experiment_id.trim();
+        if trimmed.is_empty() {
             return Err(PlatformError::Validation(
                 "AdMob stopMediationAbExperiment requires an experiment id".into(),
             ));
         }
-        let path = format!(
-            "/v1beta/{}/mediationAbExperiments/{}:stop",
-            self.account_id,
-            crate::encode_query_component(experiment_id)
-        );
+        let (group_id, short_id) = match experiment_route(trimmed) {
+            Some(route) => route,
+            None => (
+                self.experiments
+                    .lock()
+                    .ok()
+                    .and_then(|known| known.get(trimmed).cloned()),
+                trimmed.to_string(),
+            ),
+        };
+        let path = match group_id {
+            Some(group_id) => format!(
+                "/v1beta/{}/mediationGroups/{}/mediationAbExperiments/{}:stop",
+                self.account_id,
+                crate::encode_query_component(&group_id),
+                crate::encode_query_component(&short_id)
+            ),
+            None => format!(
+                "/v1beta/{}/mediationAbExperiments/{}:stop",
+                self.account_id,
+                crate::encode_query_component(&short_id)
+            ),
+        };
         let data = self
             .caller
             .call(
@@ -552,7 +879,11 @@ impl AdmobClient {
             })?;
         let state = match data.get("state").and_then(|v| v.as_str()) {
             Some("RUNNING") => MediationAbExperimentState::Running,
+            // The documented lifecycle is RUNNING -> ENDED -> EXPIRED; STOPPED
+            // remains readable for recorded fixtures.
             Some("STOPPED") => MediationAbExperimentState::Stopped,
+            Some("ENDED") => MediationAbExperimentState::Ended,
+            Some("EXPIRED") => MediationAbExperimentState::Expired,
             Some(other) => {
                 return Err(self.schema(operation, format!("unknown experiment state '{other}'")))
             }
@@ -563,8 +894,12 @@ impl AdmobClient {
             Some(serde_json::Value::String(raw)) => Some(match raw.as_str() {
                 "VARIANT_LEADER_UNSPECIFIED" => MediationAbVariantLeader::Unspecified,
                 "UNKNOWN" => MediationAbVariantLeader::Unknown,
+                "NO_VARIANT_LEADER" => MediationAbVariantLeader::NoVariantLeader,
                 "CONTROL" => MediationAbVariantLeader::Control,
                 "VARIANT" => MediationAbVariantLeader::Variant,
+                "TREATMENT" => MediationAbVariantLeader::Treatment,
+                "INSUFFICIENT_DATA" => MediationAbVariantLeader::InsufficientData,
+                "TOO_EARLY_TO_CALL" => MediationAbVariantLeader::TooEarlyToCall,
                 other => {
                     return Err(self.schema(operation, format!("unknown variantLeader '{other}'")))
                 }
@@ -586,9 +921,9 @@ impl AdmobClient {
     }
 }
 
-/// Parse `YYYY-MM-DD` into the `(year, month, day)` triple the AdMob report
-/// request body carries. A malformed date is a typed validation refusal before
-/// any request goes out.
+/// Parse a `YYYY-MM-DD` into the `(year, month, day)` triple the AdMob report
+/// request body carries. A malformed or impossible date (e.g. `2026-02-31`)
+/// is a typed validation refusal before any request goes out.
 fn report_date(date: &str, field: &str) -> Result<(i64, i64, i64), PlatformError> {
     let mut parts = date.split('-');
     let year_raw = parts.next();
@@ -604,9 +939,7 @@ fn report_date(date: &str, field: &str) -> Result<(i64, i64, i64), PlatformError
                 month.parse::<i64>(),
                 day.parse::<i64>(),
             ) {
-                (Ok(year), Ok(month), Ok(day))
-                    if (1..=12).contains(&month) && (1..=31).contains(&day) =>
-                {
+                (Ok(year), Ok(month), Ok(day)) if valid_calendar_date(year, month, day) => {
                     Some((year, month, day))
                 }
                 _ => None,
@@ -620,6 +953,71 @@ fn report_date(date: &str, field: &str) -> Result<(i64, i64, i64), PlatformError
             "AdMob mediationReport {field} '{date}' is not YYYY-MM-DD"
         ))),
     }
+}
+
+/// Whether `(year, month, day)` is a real Gregorian calendar date.
+fn valid_calendar_date(year: i64, month: i64, day: i64) -> bool {
+    if !(1..=12).contains(&month) || day < 1 {
+        return false;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    day <= days_in_month
+}
+
+/// Integer micros -> the exact decimal currency string the AdMob management
+/// API uses for an eCPM. `1_750_000` -> `"1.75"`.
+fn format_ecpm(micros: i64) -> String {
+    let whole = micros / 1_000_000;
+    let frac = (micros.abs() % 1_000_000) as u32;
+    if frac == 0 {
+        format!("{whole}")
+    } else {
+        format!("{whole}.{frac:06}")
+            .trim_end_matches('0')
+            .to_string()
+    }
+}
+
+/// Canonical `cpmMicros` is an integer string (the unit is micros). Bare
+/// numbers are accepted for recorded fixtures; negatives are refused.
+fn parse_cpm_micros(value: &serde_json::Value) -> Option<i64> {
+    if let Some(raw) = value.as_str() {
+        return raw.trim().parse::<i64>().ok().filter(|micros| *micros >= 0);
+    }
+    value.as_i64().filter(|micros| *micros >= 0)
+}
+
+/// Recover the mediation group and experiment id from a v1beta experiment
+/// resource name. The documented resource is
+/// `accounts/{publisher}/mediationGroups/{group}/mediationAbExperiment/{id}`;
+/// recordings also carry the plural collection segment.
+fn experiment_route(resource: &str) -> Option<(Option<String>, String)> {
+    let segments: Vec<&str> = resource.split('/').filter(|s| !s.is_empty()).collect();
+    for (index, segment) in segments.iter().enumerate() {
+        if *segment == "mediationGroups"
+            && segments.get(index + 2).is_some_and(|kind| {
+                matches!(*kind, "mediationAbExperiment" | "mediationAbExperiments")
+            })
+        {
+            let group = segments.get(index + 1)?.to_string();
+            let id = segments.get(index + 3)?.to_string();
+            return Some((Some(group), id));
+        }
+    }
+    if resource.contains('/') {
+        return resource
+            .rsplit('/')
+            .next()
+            .filter(|id| !id.is_empty())
+            .map(|id| (None, id.to_string()));
+    }
+    None
 }
 
 /// Parse one AdMob report metric value exactly into micros.

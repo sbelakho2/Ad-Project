@@ -140,7 +140,10 @@ impl SenderHealth {
             complaints: 0.0,
             hard_bounces: 0.0,
             cusum: 0.0,
-            cap: config.start_cap,
+            // A configured ceiling below the warm-up starting cap (for
+            // example APEX_SALES_DAILY_MAX=1) is the day's cap from the
+            // first send; warm-up never raises a cap past the ceiling.
+            cap: config.start_cap.min(config.max_cap),
             state: SenderState::Warming,
             paused_on: None,
         }
@@ -464,6 +467,32 @@ mod tests {
         assert_eq!(h.cap, 0);
         h.reset(&c);
         assert_eq!(h.state, SenderState::Warming);
+    }
+
+    #[test]
+    fn a_configured_ceiling_below_the_start_cap_is_the_first_day_cap() {
+        let c = HealthConfig {
+            start_cap: 20,
+            max_cap: 1,
+            ..HealthConfig::default()
+        };
+        let mut h = SenderHealth::new(&c);
+        assert_eq!(h.cap, 1, "the ceiling wins from the first send");
+        h.record_send();
+        h.end_day(0, 1, &c);
+        assert_eq!(h.cap, 1, "a full healthy day never raises past the ceiling");
+        let book = HealthBook::new(&c, &["one.example".to_string()]);
+        assert_eq!(book.total_cap(), 1);
+        let zero = HealthConfig {
+            start_cap: 20,
+            max_cap: 0,
+            ..HealthConfig::default()
+        };
+        assert_eq!(SenderHealth::new(&zero).cap, 0);
+        assert_eq!(
+            HealthBook::new(&zero, &["one.example".to_string()]).cap_left(),
+            0
+        );
     }
 
     #[test]

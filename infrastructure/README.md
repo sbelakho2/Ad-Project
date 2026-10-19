@@ -382,7 +382,7 @@ Public origins on the console host's Caddy edge:
 
 | origin | visibility | upstream | notes |
 |---|---|---|---|
-| marketing (`SITE_DOMAIN`) | public | `apex-api` for `POST /free-audit`, `/audit-requested/*` and `/assets/fonts/*` only | static Zola site; no `/console` path; access log |
+| marketing (`SITE_DOMAIN`) | public | `apex-api` for `POST /free-audit`, `/audit-requested/*`, `/assets/fonts/*` and `/assets/apex.css` only | static Zola site; no `/console` path; access log |
 | API (`APEX_DOMAIN`) | public | `apex-api` whole | `/metrics` refused |
 | console (`CONSOLE_DOMAIN`) | public | `apex-api` whole | console overview at `/`; `/console/*` pages; `/metrics` refused |
 

@@ -648,8 +648,9 @@ async fn lp_list_waterfall_and_fallback() {
         entries[1].price_ecpm, 1_100_000,
         "string decimals parse exactly"
     );
-    // The first call mints the bearer; the second carries it.
-    assert_eq!(mock.calls()[0].method, HttpMethod::Post);
+    // The first call mints the bearer; the second carries it. The documented
+    // bearer exchange is a GET with the two credential headers.
+    assert_eq!(mock.calls()[0].method, HttpMethod::Get);
     assert!(mock.calls()[0].url.ends_with("/partners/publisher/auth"));
     assert!(mock.calls()[1]
         .header("Authorization")
@@ -673,15 +674,156 @@ async fn lp_list_waterfall_and_fallback() {
         mock.calls()[1].url
     );
 
+    // A present but unparseable rate is still a typed refusal; an absent
+    // rate is the documented "no instance-level rate" state and maps to 0.
     let drift = Arc::new(MockTransport::scripted(vec![
         Ok(MockTransport::ok(200, Some(r#""bearer""#))),
         Ok(MockTransport::ok(
             200,
-            Some(r#"{"instances":[{"instanceId":"e","network":"x"}]}"#),
+            Some(r#"{"instances":[{"instanceId":"e","network":"x","rate":"not-a-rate"}]}"#),
         )),
     ]));
     let err = lp_client(drift).list_waterfall("u").await.unwrap_err();
     assert!(matches!(err, PlatformError::Schema { .. }));
+}
+
+#[tokio::test]
+async fn lp_v4_instances_read_numeric_ids_rate_and_network_name() {
+    // The documented Instances v4 GET is a bare array with numeric
+    // `instanceId`, `networkName` and an optional `rate` (not `price`).
+    let body = r#"[
+        {"instanceId":1072562,"instanceName":"Rewarded50","networkName":"unityAds",
+         "adFormat":"rewarded","isBidder":true,"groups":[101663],"isLive":true},
+        {"instanceId":1014428,"instanceName":"Default","networkName":"adManager",
+         "adFormat":"interstitial","isBidder":false,"rate":25}
+    ]"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-token""#))),
+        Ok(MockTransport::ok(200, Some(body))),
+    ]));
+    let entries = lp_client(mock.clone()).list_waterfall("").await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].entry_id, "1072562");
+    assert_eq!(entries[0].network, "unityAds");
+    assert_eq!(
+        entries[0].price_ecpm, 0,
+        "an absent instance-level rate is the documented no-rate state"
+    );
+    assert_eq!(entries[1].entry_id, "1014428");
+    assert_eq!(entries[1].network, "adManager");
+    assert_eq!(entries[1].price_ecpm, 25_000_000);
+    assert_eq!(
+        entries[1].position, 2,
+        "an absent position falls back to the row index"
+    );
+    assert_eq!(mock.calls()[0].method, HttpMethod::Get);
+    assert_eq!(mock.calls()[1].method, HttpMethod::Get);
+}
+
+#[tokio::test]
+async fn lp_reporting_v1_data_envelope_and_pagination() {
+    // The documented envelope is data/page/pageSize/totalResults. The first
+    // request stays byte-identical to the documented query; the continuation
+    // names the page and page size.
+    let page1 = r#"{"data":[
+        {"date":"2026-10-01","abTest":"A","revenue":12.5,"activeUsers":120}
+    ],"page":1,"pageSize":1,"totalResults":2}"#;
+    let page2 = r#"{"data":[
+        {"date":"2026-10-01","abTest":"B","revenue":13.25,"activeUsers":95}
+    ],"page":2,"pageSize":1,"totalResults":2}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(page1))),
+        Ok(MockTransport::ok(200, Some(page2))),
+    ]));
+    let rows = lp_client(mock.clone())
+        .ab_test_report("2026-10-01", "2026-10-14")
+        .await
+        .expect("rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].revenue, 12_500_000);
+    assert_eq!(rows[1].revenue, 13_250_000);
+    assert_eq!(rows[1].active_users, 95);
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 3, "auth plus two report pages");
+    assert_eq!(
+        calls[1].url,
+        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate=2026-10-01&endDate=2026-10-14"
+    );
+    assert_eq!(
+        calls[2].url,
+        "https://lp.test/levelPlay/reporting/v1?appKey=acct&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate=2026-10-01&endDate=2026-10-14&page=2&resultsPerPage=5000"
+    );
+}
+
+#[tokio::test]
+async fn lp_reporting_truncated_pagination_is_a_typed_refusal() {
+    // The server announces three rows but returns one and then an empty page:
+    // the client must refuse the short measurement, never report it complete.
+    let page1 = r#"{"data":[
+        {"date":"2026-10-01","abTest":"A","revenue":1.0,"activeUsers":10}
+    ],"page":1,"pageSize":1,"totalResults":3}"#;
+    let page2 = r#"{"data":[],"page":2,"pageSize":0,"totalResults":3}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer""#))),
+        Ok(MockTransport::ok(200, Some(page1))),
+        Ok(MockTransport::ok(200, Some(page2))),
+    ]));
+    let error = lp_client(mock)
+        .ab_test_report("2026-10-01", "2026-10-14")
+        .await
+        .expect_err("truncated");
+    match &error {
+        PlatformError::Schema { detail, .. } => {
+            assert!(detail.contains("pagination truncated"), "{detail}");
+            assert!(detail.contains("1 of 3"), "{detail}");
+        }
+        other => panic!("expected a typed Schema error, got {other:?}"),
+    }
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
+async fn lp_a_401_refreshes_the_bearer_once_and_retries_the_call() {
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(r#""bearer-one""#))),
+        Ok(MockTransport::status(401)),
+        Ok(MockTransport::ok(200, Some(r#""bearer-two""#))),
+        Ok(MockTransport::ok(
+            200,
+            Some(r#"{"instances":[{"instanceId":1,"networkName":"unityAds","rate":2}]}"#),
+        )),
+    ]));
+    let entries = lp_client(mock.clone()).list_waterfall("u1").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 4, "auth, 401, re-auth, retried read");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.url.ends_with("/partners/publisher/auth"))
+            .count(),
+        2,
+        "the dead token is re-minted exactly once"
+    );
+    assert_eq!(calls[1].header("Authorization"), Some("Bearer bearer-one"));
+    assert_eq!(calls[3].header("Authorization"), Some("Bearer bearer-two"));
+}
+
+#[tokio::test]
+async fn lp_auth_401_is_a_typed_auth_refusal() {
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::status(
+        401,
+    ))]));
+    let error = lp_client(mock)
+        .list_waterfall("u1")
+        .await
+        .expect_err("auth");
+    assert!(
+        matches!(error, PlatformError::Auth { status: 401, .. }),
+        "{error}"
+    );
+    assert!(!error.is_retryable());
 }
 
 #[tokio::test]
@@ -1005,14 +1147,9 @@ async fn lp_price_update_pins_body_and_key() {
         call.url,
         "https://lp.test/levelPlay/network/instances/v4/acct/"
     );
-    assert_eq!(
-        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["instanceId"],
-        "e1"
-    );
-    assert_eq!(
-        call.body.as_ref().and_then(HttpBody::as_json).unwrap()["price"],
-        2_345_000
-    );
+    let body = call.body.as_ref().and_then(HttpBody::as_json).unwrap();
+    assert_eq!(body[0]["instanceId"], "e1");
+    assert_eq!(body[0]["rate"], "2.345");
     assert_eq!(
         call.header("Idempotency-Key"),
         Some("levelplay-price:u1:e1:2.345")
@@ -1055,7 +1192,16 @@ async fn lp_create_and_remove_contract() {
     assert_eq!(mock.calls()[2].method, HttpMethod::Delete);
     assert_eq!(
         mock.calls()[2].url,
-        "https://lp.test/levelPlay/network/instances/v4/acct/?instanceId=e9"
+        "https://lp.test/levelPlay/network/instances/v4/acct/"
+    );
+    assert_eq!(
+        mock.calls()[2]
+            .body
+            .as_ref()
+            .and_then(HttpBody::as_json)
+            .cloned(),
+        Some(serde_json::json!({"ids": ["e9"]})),
+        "v4 deletes by an ids array in the body"
     );
     assert_eq!(
         mock.calls()[2].header("Idempotency-Key"),
@@ -1197,10 +1343,18 @@ async fn admob_update_mapping_is_read_modify_write_full_list() {
         .unwrap();
     assert_eq!(mappings.len(), 2, "FULL list written back");
     assert_eq!(
-        mappings[0]["ecpm"], 2_000_000,
-        "untouched mapping preserved"
+        mappings[0]["ecpm"], "2",
+        "untouched mapping preserved as a currency amount"
     );
-    assert_eq!(mappings[1]["ecpm"], 1_750_000);
+    assert_eq!(
+        mappings[1]["ecpm"], "1.75",
+        "the write is a currency amount, not integer micros"
+    );
+    assert_eq!(
+        crate::parse_decimal_micros(mappings[1]["ecpm"].as_str().expect("string")).unwrap(),
+        1_750_000,
+        "the written value reads back as the same micros"
+    );
     assert_eq!(
         patch.header("Idempotency-Key"),
         Some("admob-ecpm:g1:u2:1.75")
@@ -1422,7 +1576,7 @@ async fn admob_create_mediation_ab_experiment_recording_is_typed_and_verdict_onl
         Some(ADMOB_EXPERIMENT_CREATED),
     ))]));
     let experiment = admob_client(mock.clone())
-        .create_mediation_ab_experiment("g1", "Floor test")
+        .create_mediation_ab_experiment("g1", "Floor test", None, None)
         .await
         .expect("create");
     assert_eq!(
@@ -1448,14 +1602,17 @@ async fn admob_create_mediation_ab_experiment_recording_is_typed_and_verdict_onl
     assert_eq!(call.method, HttpMethod::Post);
     assert_eq!(
         call.url,
-        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationAbExperiments"
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiments"
     );
     let body = call
         .body
         .as_ref()
         .and_then(HttpBody::as_json)
         .expect("body");
-    assert_eq!(body["mediationGroupId"], "g1");
+    assert!(
+        body.get("mediationGroupId").is_none(),
+        "the nested route carries the group in the path"
+    );
     assert_eq!(body["displayName"], "Floor test");
 }
 
@@ -1502,7 +1659,7 @@ async fn admob_experiment_error_mapping_is_typed() {
         400,
     ))]));
     let err = admob_client(mock)
-        .create_mediation_ab_experiment("g1", "Floor test")
+        .create_mediation_ab_experiment("g1", "Floor test", None, None)
         .await
         .expect_err("must fail");
     assert!(
@@ -1538,11 +1695,15 @@ async fn admob_experiment_error_mapping_is_typed() {
     let mock = Arc::new(MockTransport::scripted(vec![]));
     let client = admob_client(mock.clone());
     assert!(matches!(
-        client.create_mediation_ab_experiment(" ", "d").await,
+        client
+            .create_mediation_ab_experiment(" ", "d", None, None)
+            .await,
         Err(PlatformError::Validation(_))
     ));
     assert!(matches!(
-        client.create_mediation_ab_experiment("g1", " ").await,
+        client
+            .create_mediation_ab_experiment("g1", " ", None, None)
+            .await,
         Err(PlatformError::Validation(_))
     ));
     assert!(matches!(
@@ -1550,6 +1711,206 @@ async fn admob_experiment_error_mapping_is_typed() {
         Err(PlatformError::Validation(_))
     ));
     assert!(mock.calls().is_empty(), "no request may go out");
+}
+
+#[tokio::test]
+async fn admob_get_mediation_group_reads_the_single_resource() {
+    let body = r#"{
+        "name":"accounts/pub-1234567890123456/mediationGroups/g1",
+        "mediationGroupId":"g1",
+        "displayName":"Main",
+        "format":"rewarded",
+        "adUnitMappings":[{"adUnitId":"u1","network":"admob","ecpm":"1.25"}]
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let group = admob_client(mock.clone())
+        .get_mediation_group("g1")
+        .await
+        .expect("group");
+    assert_eq!(group.mediation_group_id, "g1");
+    assert_eq!(group.format, apex_core::AdFormat::Rewarded);
+    assert_eq!(group.mappings[0].ecpm, 1_250_000);
+    assert_eq!(mock.calls()[0].method, HttpMethod::Get);
+    assert_eq!(
+        mock.calls()[0].url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1"
+    );
+    assert!(admob_client(Arc::new(MockTransport::scripted(vec![])))
+        .get_mediation_group(" ")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn admob_reads_the_documented_v1beta_mediation_group_lines() {
+    // The live v1beta resource carries `mediationGroupLines` (a map keyed by
+    // line id) with `cpmMicros` in micros and the format under `targeting`.
+    // Recorded legacy fixtures use `adUnitMappings`; both must parse to the
+    // same typed mapping with exact micros.
+    let body = r#"{"mediationGroups":[{
+        "name":"accounts/pub-1234567890123456/mediationGroups/g1",
+        "mediationGroupId":"g1",
+        "displayName":"Main",
+        "targeting":{"platform":"ANDROID","format":"INTERSTITIAL","adUnitIds":["u1","u2"]},
+        "mediationGroupLines":{
+            "line-1":{
+                "id":"1","displayName":"AdMob","adSourceId":"admob","network":"admob",
+                "cpmMode":"MANUAL","cpmMicros":"1750000",
+                "adUnitMappings":{"u1":"m1","u2":"m2"},
+                "state":"ENABLED","experimentVariant":"VARIANT_A"
+            },
+            "line-2":{
+                "id":"2","displayName":"Removed","adSourceId":"meta",
+                "cpmMicros":"9990000","adUnitMappings":{"u3":"m3"},"state":"REMOVED"
+            }
+        }
+    }]}"#;
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(body),
+    ))]));
+    let groups = admob_client(mock)
+        .list_mediation_groups()
+        .await
+        .expect("canonical groups");
+    assert_eq!(groups.len(), 1);
+    let group = &groups[0];
+    assert_eq!(group.format, apex_core::AdFormat::Interstitial);
+    assert_eq!(group.mappings.len(), 2, "removed line is not served");
+    assert_eq!(group.mappings[0].ad_unit_id, "u1");
+    assert_eq!(group.mappings[0].network, "admob");
+    assert_eq!(group.mappings[0].ecpm, 1_750_000);
+    assert_eq!(group.mappings[1].ecpm, 1_750_000);
+}
+
+#[tokio::test]
+async fn admob_experiment_accepts_the_documented_v1beta_enums() {
+    // v1beta documents RUNNING/ENDED/EXPIRED and CONTROL/TREATMENT/
+    // INSUFFICIENT_DATA/TOO_EARLY_TO_CALL/NO_VARIANT_LEADER. The legacy
+    // spellings stay readable for recordings.
+    for (state, leader, expected_state, expected_leader) in [
+        (
+            "ENDED",
+            "TREATMENT",
+            MediationAbExperimentState::Ended,
+            MediationAbVariantLeader::Treatment,
+        ),
+        (
+            "EXPIRED",
+            "NO_VARIANT_LEADER",
+            MediationAbExperimentState::Expired,
+            MediationAbVariantLeader::NoVariantLeader,
+        ),
+        (
+            "RUNNING",
+            "TOO_EARLY_TO_CALL",
+            MediationAbExperimentState::Running,
+            MediationAbVariantLeader::TooEarlyToCall,
+        ),
+        (
+            "RUNNING",
+            "INSUFFICIENT_DATA",
+            MediationAbExperimentState::Running,
+            MediationAbVariantLeader::InsufficientData,
+        ),
+    ] {
+        let body = serde_json::json!({
+            "name":"accounts/pub-1234567890123456/mediationAbExperiments/ab-1",
+            "mediationGroupId":"g1",
+            "displayName":"Floor test",
+            "state":state,
+            "variantLeader":leader,
+        })
+        .to_string();
+        let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+            200,
+            Some(&body),
+        ))]));
+        let experiment = admob_client(mock)
+            .stop_mediation_ab_experiment("ab-1")
+            .await
+            .expect("documented enums");
+        assert_eq!(experiment.state, expected_state, "{state}");
+        assert_eq!(experiment.variant_leader, Some(expected_leader), "{leader}");
+    }
+}
+
+#[tokio::test]
+async fn admob_report_rejects_impossible_calendar_dates_before_any_call() {
+    let mock = Arc::new(MockTransport::scripted(vec![]));
+    let client = admob_client(mock.clone());
+    for (start, end) in [
+        ("2026-02-31", "2026-03-01"),
+        ("2026-04-31", "2026-05-01"),
+        ("2025-02-29", "2025-03-01"),
+    ] {
+        let error = client
+            .mediation_revenue(start, end)
+            .await
+            .expect_err("date");
+        assert!(
+            matches!(error, PlatformError::Validation(_)),
+            "{start}: {error}"
+        );
+    }
+    assert!(
+        mock.calls().is_empty(),
+        "no request goes out for an impossible date"
+    );
+
+    // A real leap day is accepted.
+    let mock = Arc::new(MockTransport::scripted(vec![Ok(MockTransport::ok(
+        200,
+        Some(r#"{"rows":[]}"#),
+    ))]));
+    assert_eq!(
+        admob_client(mock)
+            .mediation_revenue("2024-02-29", "2024-03-01")
+            .await
+            .expect("leap day"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn admob_stop_by_bare_id_uses_the_group_remembered_at_create() {
+    let created = r#"{
+        "name":"accounts/pub-1234567890123456/mediationAbExperiments/ab-7",
+        "mediationGroupId":"g1",
+        "displayName":"Floor test",
+        "state":"RUNNING",
+        "variantLeader":null
+    }"#;
+    let stopped = r#"{
+        "name":"accounts/pub-1234567890123456/mediationAbExperiments/ab-7",
+        "mediationGroupId":"g1",
+        "displayName":"Floor test",
+        "state":"ENDED",
+        "variantLeader":"TREATMENT"
+    }"#;
+    let mock = Arc::new(MockTransport::scripted(vec![
+        Ok(MockTransport::ok(200, Some(created))),
+        Ok(MockTransport::ok(200, Some(stopped))),
+    ]));
+    let client = admob_client(mock.clone());
+    client
+        .create_mediation_ab_experiment("g1", "Floor test", None, None)
+        .await
+        .expect("create");
+    let experiment = client
+        .stop_mediation_ab_experiment("ab-7")
+        .await
+        .expect("stop");
+    assert_eq!(experiment.state, MediationAbExperimentState::Ended);
+    let calls = mock.calls();
+    assert_eq!(
+        calls[1].url,
+        "https://admob.test/v1beta/accounts/pub-1234567890123456/mediationGroups/g1/mediationAbExperiments/ab-7:stop",
+        "a known experiment stops on the documented nested route"
+    );
 }
 
 // ---------------- endpoint metadata ----------------

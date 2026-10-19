@@ -80,6 +80,11 @@ pub struct Config {
     /// Days to settle each funnel transition (interest→audit,
     /// audit→connected, connected→paid).
     pub funnel_window_days: [i64; 3],
+    /// Pin the local send hour (0–23) instead of letting the cadence model
+    /// choose one. `None` keeps the learned/default hour. Operators use it to
+    /// run a pass inside a chosen business hour; the run's one-hour early
+    /// window still applies.
+    pub send_hour: Option<u32>,
 }
 
 impl Config {
@@ -106,6 +111,7 @@ impl Config {
             complaint_cost: 200.0,
             settle_days: 14,
             funnel_window_days: [30, 30, 45],
+            send_hour: None,
         }
     }
 
@@ -853,7 +859,9 @@ pub fn plan(snap: &Snapshot, learned: &Learned, config: &Config, now: UnixSecs) 
         };
         let decision = decide(&input);
         let offset = offset_for(publisher, contact);
-        let hour = learned.send_time.choose_hour(&mut rng);
+        let hour = config
+            .send_hour
+            .unwrap_or_else(|| learned.send_time.choose_hour(&mut rng));
         let send_at = next_weekday_hour(now, offset, hour);
         let local_hour = u32::try_from(local_parts(send_at, offset).1).unwrap_or(hour);
         let (arm, rendered) = match chosen {
@@ -1114,6 +1122,24 @@ mod tests {
         assert_eq!(ranked_out, 20);
         // Plans are stable within a day.
         assert_eq!(plan(&s, &l, &c, NOW + 3600)[0].touch_id, items[0].touch_id);
+    }
+
+    #[test]
+    fn a_pinned_send_hour_replaces_the_cadence_choice() {
+        let s = snap(2);
+        let mut c = config();
+        c.send_hour = Some(14);
+        let l = learn(&s, &c, NOW);
+        let items = plan(&s, &l, &c, NOW);
+        assert!(!items.is_empty());
+        for item in &items {
+            // FI is +120 in the offset table; 14:00 local is 12:00 UTC.
+            assert_eq!(
+                crate::calendar::local_parts(item.send_at, 120).1,
+                14,
+                "the pinned local hour is used"
+            );
+        }
     }
 
     #[test]

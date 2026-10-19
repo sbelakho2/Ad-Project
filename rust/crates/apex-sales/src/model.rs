@@ -379,7 +379,22 @@ pub fn normalize_email(raw: &str) -> Option<String> {
         return None;
     }
     let (local, domain) = e.split_once('@')?;
-    if local.is_empty() || !is_domain(domain) {
+    // The local part is an RFC 5322 dot-atom. Refusing commas, angle
+    // brackets, quotes, parentheses and backslashes is what keeps an
+    // imported address from adding a second recipient or breaking out of
+    // the `To:` header: the same string is the envelope argument.
+    let local_ok = !local.is_empty()
+        && local.len() <= 64
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !local.contains("..")
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+-/=?^_`{|}~.".contains(c));
+    // `localhost` is a real local-delivery domain for the operator's own
+    // machine (the transport is the system MTA). Other single-label names
+    // stay refused: they are not public publisher addresses.
+    if !local_ok || !(is_domain(domain) || domain == "localhost") {
         return None;
     }
     if domain == "gmail.com" || domain == "googlemail.com" {
@@ -449,6 +464,11 @@ mod tests {
             normalize_email("j.doe+sales@GoogleMail.com"),
             Some("jdoe@gmail.com".into())
         );
+        // A local mailbox is deliverable through the system MTA.
+        assert_eq!(
+            normalize_email("Owner@LocalHost"),
+            Some("owner@localhost".into())
+        );
         for bad in [
             "",
             "no-at",
@@ -457,6 +477,20 @@ mod tests {
             "a@@c.de",
             "@c.de",
             "+x@gmail.com",
+            // Envelope/header injection shapes: a comma would add a second
+            // recipient to sendmail, and CR/LF/angle brackets would break
+            // out of the header.
+            "a,b@c.de",
+            "a<b@c.de",
+            "a>b@c.de",
+            "\"a\"@c.de",
+            "a(b)@c.de",
+            "a\\b@c.de",
+            "a\r\nBcc: victim@c.de",
+            "a\nBcc: victim@c.de",
+            ".a@c.de",
+            "a.@c.de",
+            "a..b@c.de",
         ] {
             assert_eq!(normalize_email(bad), None, "{bad}");
         }

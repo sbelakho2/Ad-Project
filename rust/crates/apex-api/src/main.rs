@@ -205,6 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let checkout_transport = ReqwestTransport::new().map_err(|error| {
                 format!("the Adyen checkout transport could not be built: {error}")
             })?;
+            // The checkout link POST must retry 429/5xx like every other
+            // provider call; a bare transport would fail the page instead.
+            let checkout_transport =
+                RetryTransport::new(Arc::new(checkout_transport), 2, Arc::new(TokioSleeper));
             state = state
                 .with_adyen(Arc::new(adyen))
                 .with_billing_transport(Arc::new(checkout_transport));

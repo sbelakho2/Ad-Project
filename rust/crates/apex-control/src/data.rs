@@ -975,9 +975,19 @@ impl DurableReader {
                     files.push((publisher, lines));
                 }
                 Err(reason) => {
+                    // A ledger with no configured key is not trusted input
+                    // for any aggregate read. Skipping it keeps one
+                    // unverified/foreign file from poisoning every durable
+                    // read (experiments, coverage, economics); the customer
+                    // inventory still shows it as `ledger unverified`.
+                    // A configured publisher that fails verification is a
+                    // real integrity failure and still aborts the read.
+                    if !self.ledger_keys.contains_key(&publisher) {
+                        continue;
+                    }
                     return Err(Unavailable::new(format!(
                         "the ledger {publisher} did not verify: {reason}"
-                    )))
+                    )));
                 }
             }
         }
@@ -2975,6 +2985,38 @@ mod tests {
             std::process::id(),
             crate::signing::random_hex_32()
         ))
+    }
+
+    #[test]
+    fn an_unverified_ledger_does_not_poison_aggregate_reads() {
+        let dir = unique("unverified-aggregate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let key = test_key();
+        write_records(
+            &dir.join("northstar.jsonl"),
+            &key,
+            vec![started(1_000, "exp_ok", "verified")],
+        );
+        // A foreign signer with no configured key: the inventory reports it,
+        // but every aggregate read must ignore it instead of failing.
+        let foreign = Keypair::from_bytes(&[8u8; 32]);
+        write_records(
+            &dir.join("unverified.jsonl"),
+            &foreign,
+            vec![lift(2_000, "{}")],
+        );
+        let reader = reader_for(&dir, &["northstar"], &key);
+        let experiments = reader
+            .experiments_shared()
+            .expect("verified aggregates read");
+        assert_eq!(experiments.len(), 1);
+        assert_eq!(experiments[0].experiment_id, "exp_ok");
+        let summaries = reader.publisher_summaries().expect("inventory");
+        assert!(summaries
+            .iter()
+            .any(|row| row.publisher == "unverified" && row.error.is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

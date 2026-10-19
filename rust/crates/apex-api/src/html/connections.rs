@@ -9,8 +9,8 @@
 
 use apex_core::PlatformId;
 use apex_ui::components::{
-    action_button, checkbox, csrf_hidden, data_table, details, field, form_error_summary, input,
-    kpi_card, kpi_row, notice, panel, Cell, EmptyState,
+    action_button, csrf_hidden, data_table, details, field, form_error_summary, input, kpi_card,
+    kpi_row, notice, panel, Cell, EmptyState,
 };
 use apex_ui::format::{date_short, or_not_available, utc_datetime};
 use apex_ui::status::StatusKind;
@@ -18,7 +18,7 @@ use apex_ui::status::StatusKind;
 use crate::connections::{CredentialState, PlatformState};
 use apex_vault::VaultEntryMeta;
 
-use super::{console_document, html_escape, ConsoleCtx};
+use super::{checkbox_with_value, console_document, html_escape, ConsoleCtx};
 
 /// The frozen introduction of the connection detail page.
 pub const INTRO_HEADING: &str = "Connect for the audit.";
@@ -543,9 +543,10 @@ fn disconnect_form(data: &ConnectionDetailData<'_>) -> String {
         html_escape(DISCONNECT_NOTE),
         data.platform.as_str(),
         csrf_hidden(csrf),
-        checkbox(
+        checkbox_with_value(
             "confirm",
             "confirm",
+            "yes",
             "Yes, disconnect this platform.",
             false
         ),
@@ -748,8 +749,8 @@ mod tests {
         assert!(html.contains("2 running tests are recorded for this platform."));
         assert!(html.contains("keep running until they are stopped"));
         assert!(
-            html.contains("name=\"confirm\""),
-            "the confirmation checkbox"
+            html.contains("name=\"confirm\" value=\"yes\""),
+            "the confirmation checkbox submits the value the handler accepts"
         );
         assert!(html.contains("Yes, disconnect this platform."));
 

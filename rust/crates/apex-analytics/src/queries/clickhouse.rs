@@ -469,6 +469,9 @@ impl AnalyticsReader for ClickHouseReader {
              WHERE object_type = {{object_type:String}} AND object_id = {{object_id:String}}\n\
              \x20 AND ({{publisher:String}} = '' OR publisher_id = {{publisher:String}})\n\
              \x20 AND ({{platform:String}} = '' OR platform = {{platform:String}})\n\
+             \x20 AND ({{currency:String}} = '' OR currency = {{currency:String}})\n\
+             \x20 AND ({{from:String}} = '' OR toDate(occurred_at_utc) >= toDateOrZero({{from:String}}))\n\
+             \x20 AND ({{to:String}} = '' OR toDate(occurred_at_utc) <= toDateOrZero({{to:String}}))\n\
              ORDER BY occurred_at_utc, source, event_id"
         );
         let mut parameters = Self::parameters(scope);

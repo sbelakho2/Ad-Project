@@ -1530,12 +1530,47 @@ impl DomainEvent {
     /// A deterministic identity derived from the event content. Producers
     /// with a durable identity (form id, job id, PSP key) pass it explicitly;
     /// this derivation still makes at-least-once replay deduplicate.
+    ///
+    /// Every fact-distinguishing envelope field is part of the hash, not
+    /// only the occurrence time, object identity and payload. Two real facts
+    /// can share all of those and differ only by tenant (`publisher_id`),
+    /// platform, object class, outcome or reason (for example a completed and
+    /// a failed `job_run` for the same job at the same instant). A derivation
+    /// that ignored those fields would assign both facts one
+    /// `(source, event_id)` key and the store would collapse one of them.
+    /// The deployment labels (`environment`, `service_version`) stay out on
+    /// purpose: a spooled event replayed under the labels it was built with
+    /// keeps its identity.
     pub fn derive_event_id(&self) -> String {
+        self.derive_event_id_with_extra(&[])
+    }
+
+    /// Derive the identity with extra bounded, already-sanitized material.
+    ///
+    /// The access-log parser stores a few sanitized facts on the row
+    /// (`referrer_host`, `campaign_code`, the query-key set) that are
+    /// deliberately not copied into the event payload, but two request lines
+    /// that differ only in those facts are still two rows. Folding them into
+    /// the identity keeps one event per line without putting the values in
+    /// the payload. Callers outside this crate cannot pass arbitrary
+    /// material: the only extra caller is the access-log parser, and every
+    /// value it passes has already passed the bounded sanitizer.
+    pub(crate) fn derive_event_id_with_extra(&self, extra: &[&str]) -> String {
         let mut hash = Fnv1a::new();
         hash.write_str(self.source.as_str());
         hash.write_str(self.event_type.as_str());
         hash.write_str(&self.occurred_at_utc.unix_millis().to_string());
+        hash.write_str(self.publisher_id.as_deref().unwrap_or(""));
+        hash.write_str(self.platform.as_deref().unwrap_or(""));
+        hash.write_str(self.object_type.as_deref().unwrap_or(""));
         hash.write_str(self.object_id.as_deref().unwrap_or(""));
+        hash.write_str(self.outcome.as_deref().unwrap_or(""));
+        hash.write_str(self.reason_code.as_deref().unwrap_or(""));
+        hash.write_str(self.correlation_id.as_deref().unwrap_or(""));
+        hash.write_str(self.causation_id.as_deref().unwrap_or(""));
+        for value in extra {
+            hash.write_str(value);
+        }
         hash.write_str(self.canonical_payload_json().as_ref());
         hash.finish_hex()
     }
@@ -2675,6 +2710,47 @@ mod tests {
             .build()
             .expect("explicit");
         assert_eq!(explicit.event_id, "job_daily_2026-10-15");
+
+        // Two facts that share the occurrence time, object identity and
+        // payload but differ by an envelope fact must not collapse onto one
+        // dedup key. The outcome is the common case: the same job can
+        // complete and fail in the same millisecond.
+        let completed = builder_for(EventType::JobRun)
+            .with_outcome("completed")
+            .build()
+            .expect("completed");
+        let failed = builder_for(EventType::JobRun)
+            .with_outcome("failed")
+            .build()
+            .expect("failed");
+        assert_ne!(
+            completed.event_id, failed.event_id,
+            "outcome must distinguish two job_run facts"
+        );
+        // Tenant and platform are equally fact-distinguishing: two
+        // publishers booking the same job identity at the same instant are
+        // two facts, not one.
+        let northstar = builder_for(EventType::JobRun)
+            .with_publisher_id("northstar")
+            .with_platform("applovin_max")
+            .build()
+            .expect("northstar");
+        let orbit = builder_for(EventType::JobRun)
+            .with_publisher_id("orbit")
+            .with_platform("applovin_max")
+            .build()
+            .expect("orbit");
+        assert_ne!(northstar.event_id, orbit.event_id);
+        // Object class and reason code also distinguish facts.
+        let incident_open = builder_for(EventType::JobRun)
+            .with_object("job", "job_daily")
+            .build()
+            .expect("job object");
+        let account_object = builder_for(EventType::JobRun)
+            .with_object("account", "job_daily")
+            .build()
+            .expect("account object");
+        assert_ne!(incident_open.event_id, account_object.event_id);
     }
 
     #[test]

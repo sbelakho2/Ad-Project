@@ -322,10 +322,12 @@ pub fn parse_line(
 /// the status, the bot classification and the KEYS of the campaign
 /// parameters that appeared. It never carries campaign values, the referrer
 /// host or the other query keys; those live only in the 30-day
-/// `request_logs` row. The event id is derived from exactly these bounded
-/// fields, so the parse path (which derives the row identity from this
-/// event) and a spool replay (which rebuilds the event from the row) agree
-/// on one stable id for one request line.
+/// `request_logs` row. The identity folds those sanitized row facts as well,
+/// so two lines at the same millisecond that differ only in a campaign value
+/// or referrer host remain two rows and two events, while none of those
+/// values enters the payload. The parse path (which derives the row identity
+/// from this event) and a spool replay (which rebuilds the event from the
+/// row) agree on one stable id for one request line.
 pub fn event_for_row(
     row: &RequestLogRow,
     defaults: &AccessLogDefaults,
@@ -347,7 +349,7 @@ pub fn event_for_row(
         },
         ..crate::envelope::EventPayload::default()
     };
-    DomainEvent::builder(EventType::PublicPageRequested, EventSource::AccessLog)
+    let mut event = DomainEvent::builder(EventType::PublicPageRequested, EventSource::AccessLog)
         .with_occurred_at(row.occurred_at_utc)
         .with_received_at(row.received_at_utc)
         .with_environment(row.environment.clone())
@@ -356,7 +358,18 @@ pub fn event_for_row(
         .with_outcome(row.status_class.clone())
         .with_payload(payload)
         .build()
-        .map_err(|error| AccessLogError::Validation(error.to_string()))
+        .map_err(|error| AccessLogError::Validation(error.to_string()))?;
+    // The payload deliberately carries only the bounded classification
+    // facts. The row also stores sanitized referrer/campaign/query-key
+    // facts; two lines at the same millisecond can differ only there, so
+    // fold them into the identity without copying them into the event.
+    let query_keys = row.query_keys.join(",");
+    event.event_id = event.derive_event_id_with_extra(&[
+        row.referrer_host.as_deref().unwrap_or(""),
+        row.campaign_code.as_deref().unwrap_or(""),
+        query_keys.as_str(),
+    ]);
+    Ok(event)
 }
 
 fn parse_timestamp(ts: Option<&serde_json::Value>) -> Result<UtcMillis, AccessLogError> {
@@ -407,6 +420,12 @@ pub fn normalize_route(path: &str) -> Option<String> {
         path
     };
     if KNOWN_ROUTES.contains(&trimmed) {
+        return Some(trimmed.to_string());
+    }
+    // The guides and rerun-kit index pages are real site routes (served at
+    // `/guides/` and `/rerun-kit/`); they are distinct from their slug and
+    // asset templates and must not collapse into `/unmatched`.
+    if trimmed == "/guides" || trimmed == "/rerun-kit" {
         return Some(trimmed.to_string());
     }
     if trimmed.starts_with("/guides/") {
@@ -608,8 +627,18 @@ mod tests {
             Some("/guides/{slug}")
         );
         assert_eq!(
+            normalize_route("/guides/").as_deref(),
+            Some("/guides"),
+            "the guides index is a real route, not unmatched"
+        );
+        assert_eq!(
             normalize_route("/rerun-kit/rerun.py").as_deref(),
             Some("/rerun-kit/{asset}")
+        );
+        assert_eq!(
+            normalize_route("/rerun-kit/").as_deref(),
+            Some("/rerun-kit"),
+            "the rerun-kit index is a real route, not unmatched"
         );
         assert_eq!(
             normalize_route("/../../etc/passwd").as_deref(),
@@ -710,6 +739,54 @@ mod tests {
             .expect("row");
         assert_eq!(first.event_id, second.event_id);
         assert_eq!(first.event_id.len(), 32);
+    }
+
+    #[test]
+    fn two_lines_at_the_same_millisecond_with_different_sanitized_facts_have_different_identities()
+    {
+        // Same ts, route, status, bot and campaign keys: only the sanitized
+        // campaign value and referrer host differ. These are two real
+        // requests, so they must not collapse onto one row/event identity.
+        let first = parse_line(
+            &line(
+                "/pricing?utm_campaign=launch",
+                200,
+                "Mozilla/5.0",
+                "https://news.example.com/a",
+            ),
+            &defaults(),
+        )
+        .expect("parse")
+        .expect("row");
+        let second = parse_line(
+            &line(
+                "/pricing?utm_campaign=spring",
+                200,
+                "Mozilla/5.0",
+                "https://news.example.com/a",
+            ),
+            &defaults(),
+        )
+        .expect("parse")
+        .expect("row");
+        assert_ne!(first.event_id, second.event_id);
+        let third = parse_line(
+            &line(
+                "/pricing?utm_campaign=launch",
+                200,
+                "Mozilla/5.0",
+                "https://other.example.net/a",
+            ),
+            &defaults(),
+        )
+        .expect("parse")
+        .expect("row");
+        assert_ne!(first.event_id, third.event_id);
+        // The payload still carries only the campaign KEYS: the values that
+        // distinguish the identities never enter the event.
+        let event = event_for_row(&first, &defaults()).expect("event");
+        assert_eq!(event.payload.campaign_code, None);
+        assert_eq!(event.payload.referrer_host, None);
     }
 
     #[test]

@@ -445,11 +445,19 @@ fn publish_unique(target: &Path, bytes: &[u8], label: &str) -> Result<Option<Fil
     let mut temp: Option<PathBuf> = None;
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let candidate = parent.join(format!("{name}.tmp-{}", temp_suffix()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            // The encrypted credential bundle and the observation record are
+            // both per-publisher secrets-adjacent state. Create the temp file
+            // with 0600 so the atomic rename publishes the final file with
+            // the same restrictive mode (instead of the process umask's
+            // world-readable default).
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
             Ok(mut file) => {
                 let written = file.write_all(bytes).and_then(|()| file.sync_all());
                 drop(file);
@@ -813,6 +821,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let store = VaultedConnectionStore::with_vault_key_hex(&dir, KEY).expect("store");
         (store, dir)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn published_credential_and_meta_files_are_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (store, dir) = temp_store("modes");
+        store.save_account("pub1", &account()).await.expect("save");
+        let mut meta = ConnectionMeta::default();
+        meta.set_platform(
+            "applovin_max",
+            PlatformState {
+                state: Some(CredentialState::Unvalidated),
+                validated_at_unix_ms: None,
+                reporting: None,
+                credential_fields: vec!["account_id".to_string()],
+                failure_class: None,
+            },
+        );
+        store.save_meta("pub1", &meta).await.expect("save meta");
+        for name in ["pub1.blob", "pub1.connections.json"] {
+            let mode = std::fs::metadata(dir.join(name))
+                .expect("published file")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name} must be 0600, got {mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

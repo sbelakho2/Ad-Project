@@ -1,0 +1,24 @@
+<clickhouse>
+    <listen_host>127.0.0.1</listen_host>
+    <http_port>18171</http_port>
+    <tcp_port>19071</tcp_port>
+    <path>/tmp/apex-max-sim-clickhouse/data/</path>
+    <tmp_path>/tmp/apex-max-sim-clickhouse/tmp/</tmp_path>
+    <user_files_path>/tmp/apex-max-sim-clickhouse/user_files/</user_files_path>
+    <access_control_path>/tmp/apex-max-sim-clickhouse/access/</access_control_path>
+    <format_schema_path>/tmp/apex-max-sim-clickhouse/format_schemas/</format_schema_path>
+    <max_server_memory_usage>2147483648</max_server_memory_usage>
+    <mark_cache_size>536870912</mark_cache_size>
+    <max_concurrent_queries>64</max_concurrent_queries>
+    <max_connections>512</max_connections>
+    <logger>
+        <level>warning</level>
+        <log>/tmp/apex-max-sim-clickhouse/clickhouse.log</log>
+        <errorlog>/tmp/apex-max-sim-clickhouse/clickhouse.err.log</errorlog>
+        <size>50M</size>
+        <count>2</count>
+    </logger>
+    <default_profile>default</default_profile>
+    <default_database>default</default_database>
+    <users_config>/Users/sabelakhoua/IdeaProjects/Ad-Project-1/tools/provider-sim/max/clickhouse-users.xml</users_config>
+</clickhouse>

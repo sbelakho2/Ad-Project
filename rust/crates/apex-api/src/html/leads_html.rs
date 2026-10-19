@@ -9,11 +9,11 @@
 //! the retry action.
 
 use apex_ui::components::{
-    checkbox, field, form_error_summary, input, notice, panel, select, split, textarea,
+    field, form_error_summary, input, notice, panel, select, split, textarea,
 };
 use apex_ui::status::StatusKind;
 
-use super::{html_escape, marketing_document, ConsoleCtx};
+use super::{checkbox_with_value, html_escape, marketing_document, ConsoleCtx};
 use crate::leads::{
     FreeAuditInvalid, FreeAuditRequest, FORM_SUMMARY, PLATFORM_CHOICES, REVENUE_BANDS,
     SUBMISSION_FAILURE_BODY, SUBMISSION_FAILURE_TITLE, TRY_AGAIN_LABEL,
@@ -84,9 +84,10 @@ pub fn render_request_page(ctx: &ConsoleCtx, state: &RequestPageState) -> String
     let platform_boxes = PLATFORM_CHOICES
         .iter()
         .map(|(name, label)| {
-            checkbox(
+            checkbox_with_value(
                 &format!("platform-{name}"),
                 "platforms",
+                name,
                 label,
                 request.platforms.iter().any(|chosen| chosen == name),
             )
@@ -268,7 +269,7 @@ mod tests {
         assert!(html.contains("<option value=\"$10,000 to $50,000\" selected>"));
         assert!(html.contains(">hello</textarea>"));
         assert!(html.contains(
-            "<input type=\"checkbox\" id=\"platform-admob\" name=\"platforms\" checked>"
+            "<input type=\"checkbox\" id=\"platform-admob\" name=\"platforms\" value=\"admob\" checked>"
         ));
         assert!(!html.contains("Your request was not confirmed."));
         assert!(html.contains(">Request the free audit</button>"));

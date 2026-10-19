@@ -1,9 +1,13 @@
 //! LevelPlay (Unity / ironSource) management client.
 //!
 //! Authentication is two-credential: a **secret key** and a **refresh token**
-//! are exchanged at `/partners/publisher/auth` for a short-lived bearer token,
-//! which every management call then carries. The token is cached and refreshed
-//! before it expires; a management call never mints a token per request.
+//! are exchanged at `/partners/publisher/auth` (a GET, per the documented
+//! bearer flow) for a bearer token valid for 24 hours, which every management
+//! call then carries. The token is cached and refreshed before it expires; a
+//! management call never mints a token per request. A 401 on a management call
+//! invalidates the cache and re-mints the token exactly once, so an early
+//! revocation or expiry costs one bounded retry instead of failing every
+//! subsequent call for the rest of the process.
 //!
 //! The read/write surface is the documented v4 Instances and Groups APIs, which
 //! take the app key **in the path**: instances at
@@ -12,16 +16,22 @@
 //! path segment, so a hostile key cannot forge path or query structure.
 //!
 //! Reporting reads the v1 API at `/levelPlay/reporting/v1` with the `date` and
-//! `abTest` breakdowns and the `revenue` and `activeUsers` metrics, shaped like
-//! the MAX reporting client (query-parameter request,
-//! `code`/`count`/`results` envelope, typed rows, fail-closed parsing). Revenue
-//! follows the MAX unit convention: the API's currency amount is parsed exactly
-//! into integer micros (1 unit = 1_000_000 micros), never a float.
+//! `abTest` breakdowns and the `revenue` and `activeUsers` metrics. The
+//! documented response is `data` rows with `page`/`pageSize`/`totalResults`;
+//! older deployments answered `code`/`count`/`results`, so both envelopes are
+//! accepted. When `totalResults` announces more rows than the first page, the
+//! client follows `page`/`resultsPerPage` to completion and refuses a truncated
+//! read typed. Revenue follows the MAX unit convention: the API's currency
+//! amount is parsed exactly into integer micros (1 unit = 1_000_000 micros),
+//! never a float.
 //!
 //! Parsing is tolerant of the field spellings the API has used across versions
-//! (`instanceId`/`id`, `instanceName`/`name`, `adapterNetwork`/`network`,
-//! `price`/`priceEcpm`/`floorPrice`) but never invents data: a missing required
-//! field is a typed refusal.
+//! (`instanceId`/`id`, `instanceName`/`name`, `networkName`/`adapterNetwork`/
+//! `network`, `rate`/`price`/`priceEcpm`/`floorPrice`) and of numeric or string
+//! identifiers. The documented v4 read uses numeric ids and `networkName`/
+//! `rate`, while older fixtures used strings and `price`; both are accepted.
+//! An absent instance-level `rate` means the instance has no configured rate
+//! and maps to zero, never to an invented price.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -44,10 +54,16 @@ pub const LEVELPLAY_GROUPS_V4: &str = "/levelPlay/groups/v4";
 /// The v1 Reporting API (query parameters carry the app key, breakdown and
 /// metric selection).
 pub const LEVELPLAY_REPORTING_V1: &str = "/levelPlay/reporting/v1";
-/// Bearer lifetime assumed for a freshly minted token, refreshed this many
-/// seconds before expiry.
-const TOKEN_LIFETIME_SECS: i64 = 1_800;
+/// Bearer lifetime documented for a freshly minted token (24 hours), refreshed
+/// this many seconds before expiry.
+const TOKEN_LIFETIME_SECS: i64 = 86_400;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 60;
+/// The documented reporting default page size; used only when following a
+/// `totalResults` continuation. The first request keeps the bare query the
+/// API documents (and that older deployments answer without paging).
+const REPORT_PAGE_SIZE: u64 = 5_000;
+/// A hard bound on report pages so a hostile `totalResults` cannot spin.
+const REPORT_MAX_PAGES: u64 = 1_000;
 
 pub const LEVELPLAY_ENDPOINTS: [EndpointMeta; 7] = [
     EndpointMeta::new(
@@ -186,7 +202,7 @@ impl LevelPlayClient {
         let request = HttpRequest {
             platform: PlatformId::LevelPlay,
             operation: "auth".to_string(),
-            method: HttpMethod::Post,
+            method: HttpMethod::Get,
             url: format!("{}{LEVELPLAY_AUTH_PATH}", self.base_url),
             headers: vec![
                 ("secretkey".into(), self.secret_key.clone()),
@@ -215,6 +231,13 @@ impl LevelPlayClient {
             }
         };
         if response.status != 200 {
+            if response.status == 401 || response.status == 403 {
+                return Err(PlatformError::Auth {
+                    platform: PlatformId::LevelPlay,
+                    operation: "auth".into(),
+                    status: response.status,
+                });
+            }
             return Err(PlatformError::Http {
                 platform: PlatformId::LevelPlay,
                 operation: "auth".into(),
@@ -242,6 +265,42 @@ impl LevelPlayClient {
         ))
     }
 
+    fn invalidate_token(&self) {
+        if let Ok(mut guard) = self.token.lock() {
+            *guard = None;
+        }
+    }
+
+    /// One management call with a single bounded refresh on a 401. The token
+    /// can be revoked or expire earlier than the documented lifetime; reusing
+    /// the dead cache would otherwise fail every later call in this process.
+    /// A second 401 propagates unchanged (bad credentials are not a retry
+    /// loop), and 403 is never refreshed because it is a permission refusal.
+    async fn call(
+        &self,
+        operation: &str,
+        method: HttpMethod,
+        path: &str,
+        body: Option<serde_json::Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<serde_json::Value, PlatformError> {
+        let caller = self.caller().await?;
+        match caller
+            .call(operation, method, path, body.clone(), idempotency_key)
+            .await
+        {
+            Err(PlatformError::Auth { status: 401, .. })
+            | Err(PlatformError::Http { status: 401, .. }) => {
+                self.invalidate_token();
+                let caller = self.caller().await?;
+                caller
+                    .call(operation, method, path, body, idempotency_key)
+                    .await
+            }
+            other => other,
+        }
+    }
+
     /// `/levelPlay/network/instances/v4/{appKey}/`, the app key percent-encoded
     /// as one path segment.
     fn instances_path(&self) -> String {
@@ -265,8 +324,7 @@ impl LevelPlayClient {
         &self,
         ad_unit_id: &str,
     ) -> Result<Vec<WaterfallEntry>, PlatformError> {
-        let caller = self.caller().await?;
-        let data = caller
+        let data = self
             .call(
                 "listWaterfall",
                 HttpMethod::Get,
@@ -279,29 +337,43 @@ impl LevelPlayClient {
             .ok_or_else(|| self.schema("listWaterfall", "response has no instances array"))?;
         let mut out = Vec::new();
         for (index, item) in items.iter().enumerate() {
+            // v4 returns numeric ids; older fixtures used strings.
             let instance_id =
-                first_str(item, &["instanceId", "id", "instance_id"]).ok_or_else(|| {
+                first_id(item, &["instanceId", "id", "instance_id"]).ok_or_else(|| {
                     self.schema("listWaterfall", format!("instance missing id: {item}"))
                 })?;
-            let network = first_str(item, &["adapterNetwork", "network", "adapter"])
-                .unwrap_or("unknown")
-                .to_string();
+            let network = first_str(
+                item,
+                &["networkName", "adapterNetwork", "network", "adapter"],
+            )
+            .unwrap_or("unknown")
+            .to_string();
             let instance_name = first_str(item, &["instanceName", "name"])
-                .unwrap_or(instance_id)
+                .unwrap_or(&instance_id)
                 .to_string();
-            let price = item
-                .get("price")
+            // v4's instance-level price is `rate`; `price`/`priceEcpm`/
+            // `floorPrice` are the spellings older fixtures used. An absent
+            // rate is the documented "no instance-level rate" state.
+            let price = match item
+                .get("rate")
+                .or_else(|| item.get("price"))
                 .or_else(|| item.get("priceEcpm"))
                 .or_else(|| item.get("floorPrice"))
-                .and_then(crate::max::number_to_string)
-                .and_then(|s| parse_decimal_micros(&s).ok())
-                .ok_or_else(|| {
-                    self.schema("listWaterfall", format!("instance price invalid: {item}"))
-                })?;
-            let position = item
-                .get("position")
-                .or_else(|| item.get("order"))
-                .and_then(|v| v.as_i64())
+            {
+                Some(value) if !value.is_null() => {
+                    let raw = crate::max::number_to_string(value).ok_or_else(|| {
+                        self.schema("listWaterfall", format!("instance rate invalid: {item}"))
+                    })?;
+                    parse_decimal_micros(&raw).map_err(|error| {
+                        self.schema(
+                            "listWaterfall",
+                            format!("instance rate '{raw}' invalid: {error}"),
+                        )
+                    })?
+                }
+                _ => 0,
+            };
+            let position = first_i64(item, &["position", "order"])
                 .unwrap_or_else(|| i64::try_from(index).unwrap_or(0) + 1);
             if position < 0 {
                 return Err(self.schema(
@@ -333,18 +405,19 @@ impl LevelPlayClient {
         price_ecpm: i64,
     ) -> Result<WaterfallEntry, PlatformError> {
         let price = validate_ecpm(price_ecpm)?;
-        let caller = self.caller().await?;
         let path = self.instances_path();
         let key = levelplay_price_key(ad_unit_id, entry_id, price);
-        caller
-            .call(
-                "updateEntryPrice",
-                HttpMethod::Put,
-                &path,
-                Some(serde_json::json!({ "instanceId": entry_id, "price": price })),
-                Some(&key),
-            )
-            .await?;
+        self.call(
+            "updateEntryPrice",
+            HttpMethod::Put,
+            &path,
+            Some(serde_json::json!([{
+                "instanceId": entry_id,
+                "rate": rate_units(price),
+            }])),
+            Some(&key),
+        )
+        .await?;
         Ok(WaterfallEntry {
             entry_id: entry_id.to_string(),
             ad_unit_id: ad_unit_id.to_string(),
@@ -366,26 +439,31 @@ impl LevelPlayClient {
             return Err(self.schema("createEntry", "network and instanceName are required"));
         }
         let price = validate_ecpm(price_ecpm)?;
-        let caller = self.caller().await?;
         let path = self.instances_path();
         let key = levelplay_create_key(ad_unit_id, network, instance_name, price);
-        let data = caller
+        let data = self
             .call(
                 "createEntry",
                 HttpMethod::Post,
                 &path,
-                Some(serde_json::json!({
+                Some(serde_json::json!([{
                     "instanceName": instance_name,
                     "adapterNetwork": network,
-                    "price": price,
-                })),
+                    "rate": rate_units(price),
+                }])),
                 Some(&key),
             )
             .await?;
-        let entry_id = first_str(&data, &["instanceId", "id", "instance_id"])
+        // v4 create answers an array of created instances; older fixtures
+        // answered one object. Both are accepted.
+        let entry_id = first_id(&data, &["instanceId", "id", "instance_id"])
+            .or_else(|| {
+                data.get(0)
+                    .and_then(|first| first_id(first, &["instanceId", "id", "instance_id"]))
+            })
             .filter(|s| !s.is_empty())
             .ok_or_else(|| self.schema("createEntry", "response missing the new instance id"))?;
-        Ok(entry_id.to_string())
+        Ok(entry_id)
     }
 
     pub async fn remove_entry(
@@ -393,16 +471,35 @@ impl LevelPlayClient {
         ad_unit_id: &str,
         entry_id: &str,
     ) -> Result<(), PlatformError> {
-        let caller = self.caller().await?;
-        let path = format!(
-            "{}?instanceId={}",
-            self.instances_path(),
-            crate::encode_query_component(entry_id)
-        );
+        let path = self.instances_path();
         let key = levelplay_remove_key(ad_unit_id, entry_id);
-        caller
-            .call("removeEntry", HttpMethod::Delete, &path, None, Some(&key))
-            .await?;
+        // v4 deletes by an `ids` array in the body; the old query form is not
+        // part of the documented contract.
+        self.call(
+            "removeEntry",
+            HttpMethod::Delete,
+            &path,
+            Some(serde_json::json!({ "ids": [entry_id] })),
+            Some(&key),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Delete mediation groups by id (v4). Ending a dashboard A/B test is
+    /// the documented way to stop its variant arm.
+    pub async fn delete_group(&self, group_id: &str) -> Result<(), PlatformError> {
+        if group_id.trim().is_empty() {
+            return Err(self.schema("deleteGroup", "group id is required"));
+        }
+        self.call(
+            "deleteGroup",
+            HttpMethod::Delete,
+            &self.groups_path(),
+            Some(serde_json::json!({ "ids": [group_id] })),
+            None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -410,10 +507,8 @@ impl LevelPlayClient {
     /// raw JSON: the audit reads `floorPrice` and `countriesRate` from each
     /// group.
     pub async fn list_groups(&self) -> Result<serde_json::Value, PlatformError> {
-        let caller = self.caller().await?;
         let path = self.groups_path();
-        caller
-            .call("listGroups", HttpMethod::Get, &path, None, None)
+        self.call("listGroups", HttpMethod::Get, &path, None, None)
             .await
     }
 
@@ -421,62 +516,121 @@ impl LevelPlayClient {
     /// window `[start_date, end_date]` (reporting v1, `date` and `abTest`
     /// breakdowns, `revenue` and `activeUsers` metrics).
     ///
-    /// The response follows the report envelope convention shared with the MAX
-    /// reporting client: an in-body `code` that must be 200, a `results` array
-    /// whose rows carry `date`, `abTest`, `revenue` and `activeUsers`. Revenue
-    /// is parsed exactly into micros; active users must be a whole number.
-    /// Anything missing or malformed is a typed refusal, never a silent zero.
+    /// The documented response is a `data` array with `page`, `pageSize` and
+    /// `totalResults`; older deployments answered `code`/`count`/`results`.
+    /// Both are accepted. When `totalResults` announces more rows than the
+    /// first page, every page is followed and a short read is a typed refusal.
+    /// Revenue is parsed exactly into micros; active users must be a whole
+    /// number. Anything missing or malformed is a typed refusal, never a
+    /// silent zero.
     ///
     /// The operation label stays `reportAbTestActiveUsers` (the bounded metric
-    /// vocabulary of the connector surface); the request itself now carries
-    /// both metrics and the date breakdown. The app key remains a
-    /// percent-encoded query value and the call stays a GET.
+    /// vocabulary of the connector surface); the request itself carries both
+    /// metrics and the date breakdown. The app key remains a percent-encoded
+    /// query value and the call stays a GET.
     pub async fn ab_test_report(
         &self,
         start_date: &str,
         end_date: &str,
     ) -> Result<Vec<AbTestReportRow>, PlatformError> {
-        let caller = self.caller().await?;
         let path = format!(
             "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=date,abTest&metrics=revenue,activeUsers&startDate={}&endDate={}",
             crate::encode_query_component(&self.app_key),
             crate::encode_query_component(start_date),
             crate::encode_query_component(end_date),
         );
-        let data = caller
-            .call(
-                "reportAbTestActiveUsers",
-                HttpMethod::Get,
-                &path,
-                None,
-                None,
-            )
-            .await?;
-        let code = data
-            .get("code")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(200);
-        if code != 200 {
-            return Err(PlatformError::Http {
-                platform: PlatformId::LevelPlay,
-                operation: "reportAbTestActiveUsers".into(),
-                status: u16::try_from(code).unwrap_or(500),
-            });
-        }
-        let results = data
-            .get("results")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                self.schema("reportAbTestActiveUsers", "response has no 'results' array")
-            })?;
+        let results = self.report_pages("reportAbTestActiveUsers", &path).await?;
         let mut out = Vec::with_capacity(results.len());
-        for row in results {
+        for row in &results {
             out.push(
                 parse_ab_test_report_row(row)
                     .map_err(|detail| self.schema("reportAbTestActiveUsers", detail))?,
             );
         }
         Ok(out)
+    }
+
+    /// Read every page of one reporting query. The first request is the bare
+    /// documented query; continuations append `page` and `resultsPerPage`.
+    /// `totalResults` is the completion contract: a server that truncates a
+    /// page (or ignores `page`) fails typed instead of returning a short
+    /// measurement as if it were complete.
+    async fn report_pages(
+        &self,
+        operation: &str,
+        base_path: &str,
+    ) -> Result<Vec<serde_json::Value>, PlatformError> {
+        let mut collected: Vec<serde_json::Value> = Vec::new();
+        let mut total: Option<usize> = None;
+        let mut page: u64 = 1;
+        loop {
+            let path = if page == 1 {
+                base_path.to_string()
+            } else {
+                format!("{base_path}&page={page}&resultsPerPage={REPORT_PAGE_SIZE}")
+            };
+            let data = self
+                .call(operation, HttpMethod::Get, &path, None, None)
+                .await?;
+            let code = data
+                .get("code")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(200);
+            if code != 200 {
+                return Err(PlatformError::Http {
+                    platform: PlatformId::LevelPlay,
+                    operation: operation.into(),
+                    status: u16::try_from(code).unwrap_or(500),
+                });
+            }
+            let rows = data
+                .get("results")
+                .or_else(|| data.get("data"))
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    self.schema(
+                        operation,
+                        "response has neither a 'data' nor a 'results' array",
+                    )
+                })?;
+            if let Some(announced) = data
+                .get("totalResults")
+                .and_then(crate::max::number_to_string)
+                .and_then(|raw| raw.parse::<usize>().ok())
+            {
+                total = Some(announced);
+            }
+            if rows.is_empty() {
+                break;
+            }
+            collected.extend(rows.iter().cloned());
+            let complete = total.is_none_or(|announced| collected.len() >= announced);
+            if complete {
+                break;
+            }
+            page = page
+                .checked_add(1)
+                .ok_or_else(|| self.schema(operation, "report pagination counter overflow"))?;
+            if page > REPORT_MAX_PAGES {
+                return Err(self.schema(
+                    operation,
+                    format!("report pagination exceeded {REPORT_MAX_PAGES} pages"),
+                ));
+            }
+        }
+        if let Some(announced) = total {
+            if collected.len() < announced {
+                return Err(self.schema(
+                    operation,
+                    format!(
+                        "report pagination truncated: read {} of {} announced rows",
+                        collected.len(),
+                        announced
+                    ),
+                ));
+            }
+        }
+        Ok(collected)
     }
 
     /// The app's reported revenue over the inclusive window
@@ -501,33 +655,15 @@ impl LevelPlayClient {
         {
             return Ok(total);
         }
-        let caller = self.caller().await?;
         let path = format!(
             "{LEVELPLAY_REPORTING_V1}?appKey={}&breakdowns=date&metrics=revenue&startDate={}&endDate={}",
             crate::encode_query_component(&self.app_key),
             crate::encode_query_component(start_date),
             crate::encode_query_component(end_date),
         );
-        let data = caller
-            .call("adUnitRevenue", HttpMethod::Get, &path, None, None)
-            .await?;
-        let code = data
-            .get("code")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(200);
-        if code != 200 {
-            return Err(PlatformError::Http {
-                platform: PlatformId::LevelPlay,
-                operation: "adUnitRevenue".into(),
-                status: u16::try_from(code).unwrap_or(500),
-            });
-        }
-        let results = data
-            .get("results")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| self.schema("adUnitRevenue", "response has no 'results' array"))?;
+        let results = self.report_pages("adUnitRevenue", &path).await?;
         let mut total: i64 = 0;
-        for row in results {
+        for row in &results {
             let revenue =
                 parse_report_revenue(row).map_err(|detail| self.schema("adUnitRevenue", detail))?;
             total = total
@@ -539,6 +675,18 @@ impl LevelPlayClient {
         }
         Ok(total)
     }
+}
+
+/// A micros price rendered as the documented v4 `rate` string in currency
+/// units (e.g. 2_400_000 -> "2.4"), without a trailing zero train.
+fn rate_units(price_micros: i64) -> String {
+    let whole = price_micros / 1_000_000;
+    let fraction = (price_micros % 1_000_000).abs();
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let digits = format!("{fraction:06}");
+    format!("{whole}.{}", digits.trim_end_matches('0'))
 }
 
 /// Parse a reporting `revenue` value exactly into micros. The metric is a
@@ -607,6 +755,28 @@ fn instances_array(data: &serde_json::Value) -> Option<&Vec<serde_json::Value>> 
 fn first_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(|v| v.as_str()))
+}
+
+/// An identifier as a string: the documented v4 API emits numbers, older
+/// fixtures emitted strings. Numeric ids are rendered exactly (no float path).
+fn first_id(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let field = value.get(*key)?;
+        if let Some(text) = field.as_str() {
+            return Some(text.to_string());
+        }
+        crate::max::number_to_string(field)
+    })
+}
+
+/// An integer field that may be a JSON number or a numeric string.
+fn first_i64(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        let field = value.get(*key)?;
+        field
+            .as_i64()
+            .or_else(|| field.as_str().and_then(|text| text.trim().parse().ok()))
+    })
 }
 
 fn now_unix_s() -> i64 {

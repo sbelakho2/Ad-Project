@@ -786,7 +786,11 @@ impl Runner {
                 .cloned()
                 .unwrap_or_else(|| range_end.clone());
             let attempt = 1u32;
-            if let Some(events) = self.events.as_ref() {
+            // An experiment that started today has no completed day to pull:
+            // the event range would be inverted, and the validator rightly
+            // refuses it. The pull still runs and returns an empty window.
+            let announce = range_start <= range_end;
+            if let Some(events) = self.events.as_ref().filter(|_| announce) {
                 events
                     .report_pull_started(
                         &job_id,
@@ -819,7 +823,8 @@ impl Runner {
             let days = match days {
                 Ok(days) => days,
                 Err(source) => {
-                    if let Some(events) = self.events.as_ref() {
+                    let announce = range_start <= range_end;
+                    if let Some(events) = self.events.as_ref().filter(|_| announce) {
                         events
                             .report_pull_failed(
                                 &job_id,
@@ -1491,6 +1496,37 @@ impl Runner {
             month: month.to_string(),
             ..MonthlyReport::default()
         };
+        // Monthly idempotency: the register is the authority for numbering.
+        // A retried pass for the same publisher and month returns the invoice
+        // that was already issued instead of billing the same period twice.
+        // This runs before any fee computation or ledger append, so a replay
+        // writes nothing at all.
+        let register_path = self
+            .register_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(apex_billing::DEFAULT_REGISTER_PATH));
+        // Only read a register that exists (or a configured path): an
+        // unconfigured deployment with no register must not create one just
+        // to discover it has nothing to replay.
+        let register_exists = self.register_path.is_some() || register_path.exists();
+        if let Some(existing) = if register_exists {
+            apex_billing::InvoiceRegister::open(&register_path)
+                .map_err(PlanError::Billing)?
+                .stored_invoice(publisher_id, month)
+                .map_err(PlanError::Billing)?
+        } else {
+            None
+        } {
+            report.invoice_reference = format!("INV-{month}-{publisher_id}");
+            report.invoice_number = Some(existing.number);
+            report.invoice_total_micros = existing.gross_micros;
+            report.rendered_invoice = Some(
+                existing
+                    .render_vat_invoice(&profile)
+                    .map_err(PlanError::Billing)?,
+            );
+            return Ok(report);
+        }
         for (scope, platform, change) in kept_changes(ledger)? {
             // The fee-eligibility gate of the lift engine: a kept change on a
             // platform whose API documents no per-variant measurement can

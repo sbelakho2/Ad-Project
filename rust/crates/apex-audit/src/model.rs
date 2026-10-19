@@ -28,6 +28,13 @@ pub struct Snapshot {
     pub app_ads_txt: AppAdsTxt,
     pub platform_totals_30d: RevenueTotals,
     pub mediation_totals_30d: RevenueTotals,
+    /// Whether the mediation-side total was actually reported by the
+    /// provider. Without it (the default), a zero `mediation_totals_30d` means
+    /// "not measured", never "zero revenue"; the gap rule must not fire on an
+    /// unknown value. This is a transient in-memory signal, not part of the
+    /// stored snapshot contract (the pinned snapshot digest must not change).
+    #[serde(skip)]
+    pub mediation_totals_reported: bool,
 }
 
 /// A network account as seen by the apex control plane and the platform.

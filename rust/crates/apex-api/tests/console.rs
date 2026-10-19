@@ -1731,15 +1731,23 @@ async fn watch_signup_stores_dedupes_and_appends_the_outcome_once() {
         "the id carries no personal data: {location}"
     );
 
-    // The stored subscriber row carries the normalized values.
+    // The stored subscriber row carries the normalized values; a second row
+    // rotates in the pending sign-up's cancel token.
     let stored = std::fs::read_to_string(watch_root.join("subscribers.jsonl")).expect("rows");
-    assert_eq!(stored.lines().count(), 1);
-    let row: serde_json::Value = serde_json::from_str(stored.trim()).expect("row");
+    let lines: Vec<&str> = stored.lines().collect();
+    assert_eq!(lines.len(), 2, "creation plus the cancel-token rotation");
+    let row: serde_json::Value = serde_json::from_str(lines[0]).expect("row");
     assert_eq!(row["domain"], "northstar.example");
     assert_eq!(row["email"], "Founder@northstar.example");
     assert_eq!(row["tier"], "core", "twelve distinct apps chose the tier");
     assert_eq!(row["status"], "pending", "no check runs before payment");
     assert_eq!(row["confirmed"], false);
+    let rotated: serde_json::Value = serde_json::from_str(lines[1]).expect("rotated row");
+    assert_eq!(rotated["id"], row["id"]);
+    assert!(
+        rotated["cancelTokenHash"].is_string(),
+        "the pending row carries a cancel capability hash"
+    );
     assert_eq!(row["accountIds"]["admob.com"], "pub-1");
     assert_eq!(row["id"], reference);
 

@@ -724,6 +724,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         };
         write_snapshot(&path, &snapshot).expect("write");
         let back: Snapshot = serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("read");

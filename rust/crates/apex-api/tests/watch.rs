@@ -20,7 +20,8 @@ use apex_notify::sink::{
     DeliveryMessage, DeliveryReceipt, DeliveryState, NotificationSink, SinkError,
 };
 use apex_watch::{Status, SubscriberStore, Tier};
-use axum::http::{header, StatusCode};
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
 use common::*;
 
 const HTML: &str = "text/html";
@@ -236,6 +237,54 @@ fn watch_webhook_with_merchant(merchant_reference: &str, psp_reference: &str) ->
             "NotificationRequestItem": {
                 "pspReference": item.psp_reference,
                 "originalReference": "",
+                "merchantAccountCode": item.merchant_account_code,
+                "merchantReference": item.merchant_reference,
+                "amount": {"value": item.amount_value, "currency": item.amount_currency},
+                "eventCode": item.event_code,
+                "success": item.success,
+                "paymentMethod": item.payment_method,
+                "additionalData": {
+                    "hmacSignature": item.hmac_signature,
+                    "storedPaymentMethodId": item.stored_payment_method_id
+                }
+            }
+        }]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A signed notification with every signed field chosen by the caller.
+#[allow(clippy::too_many_arguments)]
+fn signed_notification(
+    merchant_reference: &str,
+    psp_reference: &str,
+    event_code: &str,
+    success: &str,
+    amount_value: i64,
+    currency: &str,
+    merchant_account_code: &str,
+) -> Vec<u8> {
+    let mut item = NotificationItem {
+        psp_reference: psp_reference.to_string(),
+        original_reference: String::new(),
+        merchant_account_code: merchant_account_code.to_string(),
+        merchant_reference: merchant_reference.to_string(),
+        amount_value,
+        amount_currency: currency.to_string(),
+        event_code: event_code.to_string(),
+        success: success.to_string(),
+        hmac_signature: String::new(),
+        payment_method: "visa".to_string(),
+        stored_payment_method_id: "pm_watch_1".to_string(),
+    };
+    item.hmac_signature = sign_notification_item(WEBHOOK_HMAC_KEY, &item);
+    serde_json::json!({
+        "live": "false",
+        "notificationItems": [{
+            "NotificationRequestItem": {
+                "pspReference": item.psp_reference,
+                "originalReference": item.original_reference,
                 "merchantAccountCode": item.merchant_account_code,
                 "merchantReference": item.merchant_reference,
                 "amount": {"value": item.amount_value, "currency": item.amount_currency},
@@ -1186,4 +1235,283 @@ async fn subscriber_lookups_probe_one_indexed_row_at_every_size() {
             "subscribers={subscribers}: the recorded page uses the id index"
         );
     }
+}
+
+/// Cancellation is a real one-click surface: GET is inert, POST consumes the
+/// token once, a one-click POST with only the query token works, and unknown
+/// or spent links are 404 rather than a success page.
+#[tokio::test]
+async fn cancel_is_inert_on_get_and_single_use_on_post() {
+    let dir = TempDir::new("watch-cancel");
+    let (app, store, _mailer, _transport) = build_app(dir.path(), false);
+    let reference = submit_watch(
+        &app,
+        "domain=accounts.example&email=owner%40accounts.example&apps=com.example.one&accounts=google.com%20%3D%20pub-1",
+    )
+    .await;
+    let subscriber = store.get(&reference).unwrap().expect("subscriber");
+    let (raw, hash) = SubscriberStore::mint_cancel_token();
+    let mut updated = subscriber.clone();
+    updated.cancel_token_hash = hash;
+    store.update(&updated).unwrap();
+
+    // Two GETs are inert; the subscriber is still pending.
+    for _ in 0..2 {
+        let page = send(&app, get(&format!("/watch/cancel?token={raw}"))).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        assert!(
+            page.body.contains("Cancel your setup watch?"),
+            "{}",
+            page.body
+        );
+        assert_eq!(
+            store.get(&reference).unwrap().unwrap().status,
+            Status::Pending
+        );
+    }
+
+    // The POST consumes it once.
+    let canceled = send(&app, post_form("/watch/cancel", &format!("token={raw}"))).await;
+    assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+    assert!(canceled.body.contains("Your setup watch is cancelled."));
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Canceled
+    );
+
+    // Replay and unknown tokens are 404, never a success page.
+    for token in [raw.as_str(), "ffffffffffffffffffffffffffffffff"] {
+        let page = send(&app, get(&format!("/watch/cancel?token={token}"))).await;
+        assert_eq!(page.status, StatusCode::NOT_FOUND);
+        let posted = send(&app, post_form("/watch/cancel", &format!("token={token}"))).await;
+        assert_eq!(posted.status, StatusCode::NOT_FOUND);
+    }
+
+    // RFC 8058 one-click: POST with the token in the query and an empty body.
+    let second = submit_watch(
+        &app,
+        "domain=bigport.example&email=owner%40bigport.example&apps=com.example.two&accounts=google.com%20%3D%20pub-2",
+    )
+    .await;
+    let subscriber = store.get(&second).unwrap().expect("subscriber");
+    let (raw_two, hash_two) = SubscriberStore::mint_cancel_token();
+    let mut updated = subscriber;
+    updated.cancel_token_hash = hash_two;
+    store.update(&updated).unwrap();
+    let one_click = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/watch/cancel?token={raw_two}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(""))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(one_click.status, StatusCode::OK, "{}", one_click.body);
+    assert_eq!(
+        store.get(&second).unwrap().unwrap().status,
+        Status::Canceled
+    );
+}
+
+/// A filtered-out reference never renders a success-style page.
+#[tokio::test]
+async fn unknown_watch_references_are_honest_404s() {
+    let dir = TempDir::new("watch-invalid-ref");
+    let (app, _store, _mailer, _transport) = build_app(dir.path(), false);
+    for path in [
+        "/watch/requested?ref=sub_ffffffffffffffffffffffffffffffff",
+        "/watch/billing-profile/recorded?ref=sub_ffffffffffffffffffffffffffffffff",
+        "/watch/requested",
+    ] {
+        let page = send(&app, get(path)).await;
+        assert_eq!(page.status, StatusCode::NOT_FOUND, "{path}: {}", page.body);
+        assert!(
+            page.body.contains("This link is not valid or has expired."),
+            "{}",
+            page.body
+        );
+    }
+}
+
+#[tokio::test]
+async fn refund_and_chargeback_events_are_recorded_but_never_activate() {
+    let temp = TempDir::new("watch-refund-order");
+    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+    let reference = submit_watch(
+        &app,
+        "domain=refund.example&email=ops%40refund.example&apps=",
+    )
+    .await;
+    let merchant = format!("apex-watch:{reference}");
+    let rows_after_signup = row_count(&store);
+
+    // A validly signed REFUND arriving before the authorisation is accepted
+    // (Adyen retries out of order) but marks nothing paid.
+    let refund = signed_notification(
+        &merchant,
+        "psp-refund-before-auth",
+        "REFUND",
+        "true",
+        9_900,
+        "USD",
+        "ApexMerchant",
+    );
+    let response = send(&app, post_json("/v1/adyen/webhook", &refund)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json()["new"], 1);
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Pending,
+        "a refund is not a payment authorisation"
+    );
+
+    let chargeback = signed_notification(
+        &merchant,
+        "psp-chargeback-before-auth",
+        "CHARGEBACK",
+        "true",
+        9_900,
+        "USD",
+        "ApexMerchant",
+    );
+    let response = send(&app, post_json("/v1/adyen/webhook", &chargeback)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json()["new"], 1);
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Pending,
+        "a chargeback is not a payment authorisation"
+    );
+    assert_eq!(row_count(&store), rows_after_signup, "no activation row");
+
+    // The authorisation that arrives later is the only event that activates.
+    let auth = signed_notification(
+        &merchant,
+        "psp-auth-after-funds-events",
+        "AUTHORISATION",
+        "true",
+        9_900,
+        "USD",
+        "ApexMerchant",
+    );
+    let response = send(&app, post_json("/v1/adyen/webhook", &auth)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Active
+    );
+    let rows_after_activation = row_count(&store);
+    assert!(
+        rows_after_activation > rows_after_signup,
+        "activation appends the active row"
+    );
+
+    // Replayed funds events and a replayed authorisation change nothing.
+    for body in [&refund, &chargeback, &auth] {
+        let response = send(&app, post_json("/v1/adyen/webhook", body)).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.json()["new"], 0, "duplicate delivery is a no-op");
+    }
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Active
+    );
+    assert_eq!(row_count(&store), rows_after_activation, "no second row");
+}
+
+#[tokio::test]
+async fn authorisation_amount_and_currency_must_match_the_tier() {
+    let temp = TempDir::new("watch-amount");
+    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+    let reference = submit_watch(
+        &app,
+        "domain=amount.example&email=ops%40amount.example&apps=",
+    )
+    .await;
+    let merchant = format!("apex-watch:{reference}");
+
+    for (psp, amount, currency) in [
+        ("psp-underpaid", 100, "USD"),
+        ("psp-zero", 0, "USD"),
+        ("psp-wrong-currency", 9_900, "EUR"),
+    ] {
+        let body = signed_notification(
+            &merchant,
+            psp,
+            "AUTHORISATION",
+            "true",
+            amount,
+            currency,
+            "ApexMerchant",
+        );
+        let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        assert_eq!(response.json()["new"], 1, "the event is still recorded");
+        assert_eq!(
+            store.get(&reference).unwrap().unwrap().status,
+            Status::Pending,
+            "amount {amount} {currency} is not the $99 tier price"
+        );
+    }
+
+    let correct = signed_notification(
+        &merchant,
+        "psp-correct",
+        "AUTHORISATION",
+        "true",
+        9_900,
+        "USD",
+        "ApexMerchant",
+    );
+    let response = send(&app, post_json("/v1/adyen/webhook", &correct)).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Active
+    );
+}
+
+#[tokio::test]
+async fn a_signed_event_for_another_merchant_account_is_refused() {
+    let temp = TempDir::new("watch-merchant");
+    let (app, store, _mailer, _transport) = build_app(temp.path(), true);
+    let reference = submit_watch(
+        &app,
+        "domain=merchant.example&email=ops%40merchant.example&apps=",
+    )
+    .await;
+    let body = signed_notification(
+        &format!("apex-watch:{reference}"),
+        "psp-other-merchant",
+        "AUTHORISATION",
+        "true",
+        9_900,
+        "USD",
+        "OtherMerchant",
+    );
+    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        response.body
+    );
+    assert_eq!(response.json()["error"], "malformed_event");
+    assert_eq!(
+        store.get(&reference).unwrap().unwrap().status,
+        Status::Pending,
+        "the delivery is not recorded and does not activate"
+    );
+}
+
+#[tokio::test]
+async fn oversized_webhook_bodies_are_json_413() {
+    let temp = TempDir::new("watch-oversized");
+    let (app, _store, _mailer, _transport) = build_app(temp.path(), true);
+    let body = vec![b'x'; apex_api::MAX_BODY_BYTES + 1];
+    let response = send(&app, post_json("/v1/adyen/webhook", &body)).await;
+    assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.json(), serde_json::json!({"error": "bad_request"}));
 }

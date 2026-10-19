@@ -884,44 +884,107 @@ fn account_of(event: &DomainEvent) -> Option<String> {
     }
 }
 
-/// The stages each account has reached, from lifecycle events.
-fn reached_stages<'a>(
-    events: impl Iterator<Item = &'a DomainEvent>,
-    cohort_month: Option<i64>,
-) -> (
-    BTreeSet<String>,
-    BTreeMap<String, BTreeSet<String>>,
-    BTreeSet<String>,
-) {
-    let mut accepted_accounts: BTreeSet<String> = BTreeSet::new();
-    let mut reached: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut accepted_leads: BTreeSet<String> = BTreeSet::new();
-    for event in events {
-        if let Some(month) = cohort_month {
-            if event.occurred_at_utc.month_index() != month {
-                continue;
-            }
+/// Per-account acceptance and stage history across the whole scoped window.
+///
+/// A cohort is fixed by the month an account was **first** accepted; later
+/// stage movements belong to that cohort even when they happen in a
+/// following month. Restricting the stage fold to the cohort month (the
+/// previous shape) made every conversion after the calendar month boundary
+/// invisible, so a cohort accepted at the end of a month could never show
+/// the stages its 30-day follow-up horizon is meant to observe.
+struct CohortFold {
+    /// Distinct accepted lead identities per cohort month.
+    leads_by_month: BTreeMap<i64, BTreeSet<String>>,
+    /// Accounts whose first acceptance was in this month.
+    accounts_by_month: BTreeMap<i64, BTreeSet<String>>,
+    /// Stages reached after (or at) the account's first acceptance.
+    stages: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn cohort_fold<'a>(events: impl IntoIterator<Item = &'a DomainEvent>) -> CohortFold {
+    let events: Vec<&DomainEvent> = events.into_iter().collect();
+    // The first acceptance fixes the cohort. A replayed acceptance of the
+    // same account is a later fact but never moves the account to a second
+    // cohort.
+    let mut accepted_at: BTreeMap<String, (i64, UtcMillis)> = BTreeMap::new();
+    for event in &events {
+        if event.event_type != EventType::AuditRequestAccepted {
+            continue;
         }
-        match event.event_type {
-            EventType::AuditRequestAccepted => {
-                if let Some(lead_id) = event.payload.lead_id.clone() {
-                    accepted_leads.insert(lead_id);
-                }
-                if let Some(account) = account_of(event) {
-                    accepted_accounts.insert(account.clone());
-                    reached.entry(account).or_default();
-                }
+        if let Some(account) = account_of(event) {
+            let month = event.occurred_at_utc.month_index();
+            let entry = accepted_at
+                .entry(account)
+                .or_insert((month, event.occurred_at_utc));
+            if event.occurred_at_utc < entry.1 {
+                *entry = (month, event.occurred_at_utc);
             }
-            EventType::AccountStageChanged => {
-                if let Some(account) = account_of(event) {
-                    let stage = event.payload.next_stage.clone().unwrap_or_default();
-                    reached.entry(account).or_default().insert(stage);
-                }
-            }
-            _ => {}
         }
     }
-    (accepted_leads, reached, accepted_accounts)
+    let mut leads_by_month: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
+    let mut accounts_by_month: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
+    for event in &events {
+        if event.event_type != EventType::AuditRequestAccepted {
+            continue;
+        }
+        let month = event.occurred_at_utc.month_index();
+        if let Some(lead_id) = event.payload.lead_id.clone() {
+            leads_by_month.entry(month).or_default().insert(lead_id);
+        }
+        if let Some(account) = account_of(event) {
+            if accepted_at
+                .get(&account)
+                .is_some_and(|(cohort, _)| *cohort == month)
+            {
+                accounts_by_month.entry(month).or_default().insert(account);
+            }
+        }
+    }
+    let mut stages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for event in &events {
+        if event.event_type != EventType::AccountStageChanged {
+            continue;
+        }
+        let Some(account) = account_of(event) else {
+            continue;
+        };
+        let Some((_, accepted)) = accepted_at.get(&account) else {
+            continue;
+        };
+        // A stage movement before the account existed in the request table
+        // is not this cohort's progression.
+        if event.occurred_at_utc < *accepted {
+            continue;
+        }
+        if let Some(stage) = event.payload.next_stage.clone() {
+            stages.entry(account).or_default().insert(stage);
+        }
+    }
+    CohortFold {
+        leads_by_month,
+        accounts_by_month,
+        stages,
+    }
+}
+
+/// Count cohort accounts that reached `stage_index` or a later stage.
+fn reached_stage_count(
+    accounts: Option<&BTreeSet<String>>,
+    stages: &BTreeMap<String, BTreeSet<String>>,
+    stage_index: usize,
+) -> u64 {
+    accounts.map_or(0, |accounts| {
+        accounts
+            .iter()
+            .filter(|account| {
+                stages.get(*account).is_some_and(|reached| {
+                    reached
+                        .iter()
+                        .any(|stage| FUNNEL_STAGES[stage_index..].contains(&stage.as_str()))
+                })
+            })
+            .count() as u64
+    })
 }
 
 /// Format a [`UtcMillis::month_index`] key as its `YYYY-MM` label. The fold
@@ -951,9 +1014,9 @@ fn parse_month_index(label: &str) -> Option<i64> {
 
 /// Growth cohorts by request month.
 ///
-/// The scoped events are grouped by an integer month key once and each
-/// month's cohort folds only its own events; the previous shape formatted a
-/// `YYYY-MM` string per event. The label is rendered only when the row is
+/// The scoped events are folded once by account: the first acceptance fixes
+/// the cohort month and every later stage movement (inside the scoped
+/// window) belongs to that cohort. The label is rendered only when the row is
 /// emitted.
 pub fn growth_cohorts(scope: &QueryScope, events: &[DomainEvent]) -> Vec<GrowthCohortRow> {
     growth_cohorts_from(scope, events.iter())
@@ -966,50 +1029,33 @@ fn growth_cohorts_from<'a>(
     scope: &QueryScope,
     events: impl IntoIterator<Item = &'a DomainEvent>,
 ) -> Vec<GrowthCohortRow> {
-    let mut months: BTreeSet<i64> = BTreeSet::new();
-    let mut by_month: BTreeMap<i64, Vec<&DomainEvent>> = BTreeMap::new();
-    for event in events
-        .into_iter()
-        .filter(|event| event_in_scope(scope, event))
-    {
-        let month = event.occurred_at_utc.month_index();
-        if event.event_type == EventType::AuditRequestAccepted {
-            months.insert(month);
-        }
-        by_month.entry(month).or_default().push(event);
-    }
+    let fold = cohort_fold(
+        events
+            .into_iter()
+            .filter(|event| event_in_scope(scope, event)),
+    );
+    let mut months: BTreeSet<i64> = fold.leads_by_month.keys().copied().collect();
+    months.extend(fold.accounts_by_month.keys().copied());
     months
         .into_iter()
         .map(|month_key| {
             let month = format_month_index(month_key);
-            let month_events = by_month
-                .get(&month_key)
-                .map(|events| events.iter().copied())
-                .unwrap_or_default();
-            let (leads, reached, accounts) = reached_stages(month_events, None);
-            let stage_count = |index: usize| -> u64 {
-                accounts
-                    .iter()
-                    .filter(|account| {
-                        reached.get(*account).is_some_and(|stages| {
-                            stages
-                                .iter()
-                                .any(|stage| FUNNEL_STAGES[index..].contains(&stage.as_str()))
-                        })
-                    })
-                    .count() as u64
-            };
-            let qualified = stage_count(0);
+            let accounts = fold.accounts_by_month.get(&month_key);
+            let accepted_accounts = accounts.map_or(0, |accounts| accounts.len() as u64);
+            let qualified = reached_stage_count(accounts, &fold.stages, 0);
             GrowthCohortRow {
                 cohort_month: month.clone(),
-                accepted: leads.len() as u64,
-                accepted_accounts: accounts.len() as u64,
+                accepted: fold
+                    .leads_by_month
+                    .get(&month_key)
+                    .map_or(0, |leads| leads.len() as u64),
+                accepted_accounts,
                 qualified,
-                connected: stage_count(1),
-                audit_delivered: stage_count(2),
-                paid: stage_count(3),
+                connected: reached_stage_count(accounts, &fold.stages, 1),
+                audit_delivered: reached_stage_count(accounts, &fold.stages, 2),
+                paid: reached_stage_count(accounts, &fold.stages, 3),
                 mature: cohort_is_mature(&month, scope.as_of),
-                qualification_rate_bp: rate_basis_points(qualified, accounts.len() as u64),
+                qualification_rate_bp: rate_basis_points(qualified, accepted_accounts),
             }
         })
         .collect()
@@ -1025,41 +1071,30 @@ pub fn activation_funnel(
 }
 
 /// Borrowing fold behind [`activation_funnel`]: the scoped events are
-/// referenced, never deep-cloned.
+/// referenced, never deep-cloned. The funnel uses the same cohort fold as
+/// [`growth_cohorts`], so a stage movement after the cohort month still
+/// counts for the account's cohort.
 fn activation_funnel_from<'a>(
     scope: &QueryScope,
     events: impl IntoIterator<Item = &'a DomainEvent>,
     cohort_month: &str,
 ) -> ActivationFunnel {
-    let scoped: Vec<&DomainEvent> = events
-        .into_iter()
-        .filter(|event| event_in_scope(scope, event))
-        .collect();
-    let (_, reached, accounts) = match parse_month_index(cohort_month) {
-        Some(month) => reached_stages(scoped.iter().copied(), Some(month)),
-        // An unparseable label is not "every month": the previous string
-        // comparison matched nothing, and a `None` filter here would mean
-        // the opposite.
-        None => (BTreeSet::new(), BTreeMap::new(), BTreeSet::new()),
-    };
+    let fold = cohort_fold(
+        events
+            .into_iter()
+            .filter(|event| event_in_scope(scope, event)),
+    );
+    // An unparseable label is not "every month": no account belongs to it.
+    let accounts =
+        parse_month_index(cohort_month).and_then(|month| fold.accounts_by_month.get(&month));
     let mut stages = vec![FunnelStageRow {
         stage: "requested".to_string(),
-        accounts: accounts.len() as u64,
+        accounts: accounts.map_or(0, |accounts| accounts.len() as u64),
     }];
     for (index, stage) in FUNNEL_STAGES.iter().enumerate() {
-        let count = accounts
-            .iter()
-            .filter(|account| {
-                reached.get(*account).is_some_and(|stages| {
-                    stages
-                        .iter()
-                        .any(|candidate| FUNNEL_STAGES[index..].contains(&candidate.as_str()))
-                })
-            })
-            .count() as u64;
         stages.push(FunnelStageRow {
             stage: (*stage).to_string(),
-            accounts: count,
+            accounts: reached_stage_count(accounts, &fold.stages, index),
         });
     }
     ActivationFunnel {
@@ -1648,73 +1683,71 @@ mod tests {
         }
     }
 
-    /// The pre-optimization cohort fold: one full rescan of the scoped events
-    /// per month. Kept verbatim as the reference.
+    /// The reference cohort fold: for every accepted account it collects
+    /// the stages reached at or after its first acceptance, across the whole
+    /// scoped window, then counts per cohort month. Deliberately written
+    /// with owned sets and a scan per account, independent of the optimized
+    /// account-centric fold.
     fn growth_cohorts_naive(scope: &QueryScope, events: &[DomainEvent]) -> Vec<GrowthCohortRow> {
-        fn month_of_naive(event: &DomainEvent) -> Option<String> {
-            let day = event.occurred_at_utc.to_day_string();
-            day.get(..7).map(str::to_string)
-        }
-        fn reached_naive(
-            events: &[DomainEvent],
-            cohort_month: Option<&str>,
-        ) -> (
-            BTreeSet<String>,
-            BTreeMap<String, BTreeSet<String>>,
-            BTreeSet<String>,
-        ) {
-            let mut accepted_accounts: BTreeSet<String> = BTreeSet::new();
-            let mut reached: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            let mut accepted_leads: BTreeSet<String> = BTreeSet::new();
-            for event in events {
-                if let Some(month) = cohort_month {
-                    if month_of_naive(event) != Some(month.to_string()) {
-                        continue;
-                    }
-                }
-                match event.event_type {
-                    EventType::AuditRequestAccepted => {
-                        if let Some(lead_id) = event.payload.lead_id.clone() {
-                            accepted_leads.insert(lead_id);
-                        }
-                        if let Some(account) = account_of(event) {
-                            accepted_accounts.insert(account.clone());
-                            reached.entry(account).or_default();
-                        }
-                    }
-                    EventType::AccountStageChanged => {
-                        if let Some(account) = account_of(event) {
-                            let stage = event.payload.next_stage.clone().unwrap_or_default();
-                            reached.entry(account).or_default().insert(stage);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            (accepted_leads, reached, accepted_accounts)
-        }
-        let scoped: Vec<DomainEvent> = events
+        let scoped: Vec<&DomainEvent> = events
             .iter()
             .filter(|event| event_in_scope(scope, event))
-            .cloned()
             .collect();
-        let mut months: BTreeSet<String> = BTreeSet::new();
+        let mut first_accept: BTreeMap<String, (String, UtcMillis)> = BTreeMap::new();
+        let mut leads_by_month: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for event in &scoped {
-            if event.event_type == EventType::AuditRequestAccepted {
-                if let Some(month) = month_of_naive(event) {
-                    months.insert(month);
+            if event.event_type != EventType::AuditRequestAccepted {
+                continue;
+            }
+            let month = event.occurred_at_utc.to_day_string()[..7].to_string();
+            if let Some(lead_id) = event.payload.lead_id.clone() {
+                leads_by_month
+                    .entry(month.clone())
+                    .or_default()
+                    .insert(lead_id);
+            }
+            if let Some(account) = account_of(event) {
+                let entry = first_accept
+                    .entry(account)
+                    .or_insert((month.clone(), event.occurred_at_utc));
+                if event.occurred_at_utc < entry.1 {
+                    *entry = (month, event.occurred_at_utc);
                 }
             }
         }
-        months
+        let mut by_month: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (account, (month, _)) in &first_accept {
+            by_month
+                .entry(month.clone())
+                .or_default()
+                .insert(account.clone());
+        }
+        // A month can have accepted leads that resolved no account; it is
+        // still a cohort row (with zero accounts).
+        for month in leads_by_month.keys() {
+            by_month.entry(month.clone()).or_default();
+        }
+        by_month
             .into_iter()
-            .map(|month| {
-                let events: Vec<DomainEvent> = scoped
-                    .iter()
-                    .filter(|event| month_of_naive(event).as_deref() == Some(month.as_str()))
-                    .cloned()
-                    .collect();
-                let (leads, reached, accounts) = reached_naive(&events, None);
+            .map(|(month, accounts)| {
+                let mut reached: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+                for event in &scoped {
+                    if event.event_type != EventType::AccountStageChanged {
+                        continue;
+                    }
+                    let Some(account) = account_of(event) else {
+                        continue;
+                    };
+                    let Some((_, accepted_at)) = first_accept.get(&account) else {
+                        continue;
+                    };
+                    if event.occurred_at_utc >= *accepted_at {
+                        reached
+                            .entry(account)
+                            .or_default()
+                            .insert(event.payload.next_stage.clone().unwrap_or_default());
+                    }
+                }
                 let stage_count = |index: usize| -> u64 {
                     accounts
                         .iter()
@@ -1730,7 +1763,9 @@ mod tests {
                 let qualified = stage_count(0);
                 GrowthCohortRow {
                     cohort_month: month.clone(),
-                    accepted: leads.len() as u64,
+                    accepted: leads_by_month
+                        .get(&month)
+                        .map_or(0, |leads| leads.len() as u64),
                     accepted_accounts: accounts.len() as u64,
                     qualified,
                     connected: stage_count(1),
@@ -2009,5 +2044,54 @@ mod tests {
         let reference = growth_cohorts_naive(&scope, &events);
         assert_eq!(optimized, reference);
         assert!(optimized.len() > 1, "the fixture spans several months");
+    }
+
+    #[test]
+    fn a_stage_move_after_the_cohort_month_still_belongs_to_the_cohort() {
+        // Accepted on the last day of August, qualified in September: the
+        // account is an August cohort member and its September progression
+        // must be visible in both the cohort row and the funnel. The old
+        // same-month fold reported zero for both.
+        let accepted = {
+            let mut payload = payload_for(EventType::AuditRequestAccepted);
+            payload.lead_id = Some("lead_aug".into());
+            payload.account_id = Some("acct_aug".into());
+            valid_event_builder(EventType::AuditRequestAccepted)
+                .with_event_id("accepted_aug")
+                .with_occurred_at(UtcMillis::parse_rfc3339("2026-08-31T20:00:00Z").expect("time"))
+                .with_received_at(UtcMillis::parse_rfc3339("2026-08-31T20:00:00Z").expect("time"))
+                .with_object("account", "acct_aug")
+                .with_payload(payload)
+                .build()
+                .expect("accepted")
+        };
+        let qualified = {
+            let mut payload = payload_for(EventType::AccountStageChanged);
+            payload.account_id = Some("acct_aug".into());
+            payload.previous_stage = Some("audit_requested".into());
+            payload.next_stage = Some("qualified".into());
+            payload.owner = Some("lina".into());
+            payload.effective_at = Some("2026-09-02".into());
+            valid_event_builder(EventType::AccountStageChanged)
+                .with_event_id("qualified_sep")
+                .with_occurred_at(UtcMillis::parse_rfc3339("2026-09-02T09:00:00Z").expect("time"))
+                .with_received_at(UtcMillis::parse_rfc3339("2026-09-02T09:00:00Z").expect("time"))
+                .with_reason_code("stage_move")
+                .with_object("account", "acct_aug")
+                .with_payload(payload)
+                .build()
+                .expect("qualified")
+        };
+        let events = vec![accepted, qualified];
+        let cohorts = growth_cohorts(&scope_wide(), &events);
+        let august = cohorts
+            .iter()
+            .find(|row| row.cohort_month == "2026-08")
+            .expect("August cohort");
+        assert_eq!(august.accepted_accounts, 1);
+        assert_eq!(august.qualified, 1, "September qualification counts");
+        let funnel = activation_funnel(&scope_wide(), &events, "2026-08");
+        assert_eq!(funnel.stages[0].accounts, 1, "requested");
+        assert_eq!(funnel.stages[1].accounts, 1, "qualified");
     }
 }

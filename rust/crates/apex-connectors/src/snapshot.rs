@@ -198,6 +198,7 @@ fn finish(
         app_ads_txt,
         platform_totals_30d: context.platform_totals_30d.unwrap_or(ZERO_TOTALS),
         mediation_totals_30d: context.mediation_totals_30d.unwrap_or(ZERO_TOTALS),
+        mediation_totals_reported: context.mediation_totals_30d.is_some(),
     }
 }
 

@@ -200,6 +200,72 @@ pub struct ControlConfig {
 }
 
 impl ControlConfig {
+    /// Tighten the control plane's private files to mode `0600`.
+    ///
+    /// The append paths create new files owner-only, but a file provisioned
+    /// by an older build (or by an operator with a permissive umask) keeps
+    /// its old mode. The journal, operator file (TOTP secrets), replay state,
+    /// policy/intervention registers, effective policy, job files and plan
+    /// state are all restricted records. Startup tightens their mode and
+    /// refuses to run if a file cannot be inspected or restricted.
+    pub fn restrict_private_files(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut paths: Vec<PathBuf> = vec![
+                self.journal_path.clone(),
+                self.totp_state_path.clone(),
+                self.operations_path.clone(),
+                self.policies_path.clone(),
+                self.interventions_path.clone(),
+                self.effective_policy_path.clone(),
+            ];
+            if let Some(path) = &self.operators_path {
+                paths.push(path.clone());
+            }
+            if let Ok(entries) = std::fs::read_dir(&self.jobs_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                        paths.push(path);
+                    }
+                }
+            }
+            if let Ok(entries) = std::fs::read_dir(&self.connections_root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                        paths.push(path);
+                    }
+                }
+            }
+            for path in paths {
+                match std::fs::metadata(&path) {
+                    Ok(metadata) => {
+                        let mode = metadata.permissions().mode() & 0o777;
+                        if mode & 0o077 != 0 {
+                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                                .map_err(|error| {
+                                    format!(
+                                    "the private file {} could not be restricted to 0600: {error}",
+                                    path.display()
+                                )
+                                })?;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "the private file {} could not be inspected: {error}",
+                            path.display()
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Parse from environment-like lookups.
     pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let bind = lookup("APEX_CONTROL_BIND")
@@ -626,6 +692,60 @@ mod tests {
         assert!(config.clickhouse.is_none());
         assert!(config.jobs_remote.is_none());
         assert!(config.sync_marker.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_restricts_pre_existing_private_files_to_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "apex-control-modes-{}-{}",
+            std::process::id(),
+            crate::signing::random_hex_32()
+        ));
+        let jobs = dir.join("jobs");
+        let connections = dir.join("connections");
+        std::fs::create_dir_all(&jobs).expect("jobs");
+        std::fs::create_dir_all(&connections).expect("connections");
+        let paths = [
+            dir.join("operators.json"),
+            dir.join("journal.jsonl"),
+            dir.join("totp.json"),
+            dir.join("operations.json"),
+            dir.join("policies.jsonl"),
+            dir.join("interventions.jsonl"),
+            dir.join("effective.json"),
+            jobs.join("job.json"),
+            connections.join("publisher.managed.json"),
+        ];
+        for path in &paths {
+            std::fs::write(path, "{}").expect("write");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+        let config = ControlConfig::from_lookup(&lookup(&[
+            ("APEX_CONTROL_OPERATORS", paths[0].to_str().expect("path")),
+            ("APEX_CONTROL_JOURNAL", paths[1].to_str().expect("path")),
+            ("APEX_CONTROL_TOTP_STATE", paths[2].to_str().expect("path")),
+            ("APEX_CONTROL_OPERATIONS", paths[3].to_str().expect("path")),
+            ("APEX_CONTROL_POLICIES", paths[4].to_str().expect("path")),
+            (
+                "APEX_CONTROL_INTERVENTIONS",
+                paths[5].to_str().expect("path"),
+            ),
+            ("APEX_EFFECTIVE_POLICY", paths[6].to_str().expect("path")),
+            ("APEX_OPERATOR_JOBS_DIR", jobs.to_str().expect("path")),
+            (
+                "APEX_CONTROL_CONNECTIONS_ROOT",
+                connections.to_str().expect("path"),
+            ),
+        ]))
+        .expect("config");
+        config.restrict_private_files().expect("restrict");
+        for path in &paths {
+            let mode = std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -29,7 +29,9 @@ use crate::journal::{
 };
 use crate::login::PendingLogins;
 use crate::rate_limit::AttemptLimiter;
-use crate::session::OperatorSessions;
+use crate::session::{
+    OperatorSessions, DEFAULT_SESSION_CAPACITY, SESSION_ABSOLUTE_MS, SESSION_IDLE_MS,
+};
 use crate::versions::ObjectVersions;
 
 /// The build label stamped into release health and emitted events.
@@ -147,6 +149,36 @@ impl std::fmt::Debug for ControlState {
     }
 }
 
+/// The session store for this process.
+///
+/// Production uses the documented 30-minute idle and 8-hour absolute
+/// lifetimes. `APEX_CONTROL_SESSION_IDLE_SECONDS` and
+/// `APEX_CONTROL_SESSION_ABSOLUTE_SECONDS` exist so a live/regression
+/// scenario can observe expiry without waiting half an hour; a missing,
+/// non-numeric or non-positive value keeps the production default.
+fn session_store_from_env() -> OperatorSessions {
+    let idle_seconds =
+        env_positive_seconds("APEX_CONTROL_SESSION_IDLE_SECONDS", SESSION_IDLE_MS / 1_000);
+    let absolute_seconds = env_positive_seconds(
+        "APEX_CONTROL_SESSION_ABSOLUTE_SECONDS",
+        SESSION_ABSOLUTE_MS / 1_000,
+    );
+    OperatorSessions::new(
+        DEFAULT_SESSION_CAPACITY,
+        idle_seconds.saturating_mul(1_000),
+        absolute_seconds.saturating_mul(1_000),
+        crate::capabilities::STEP_UP_WINDOW_MS,
+    )
+}
+
+fn env_positive_seconds(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 impl ControlState {
     /// Build the state from a configuration and a read layer, applying the
     /// startup rules described on the module.
@@ -180,7 +212,7 @@ impl ControlState {
             None => JobTransport::local(config.jobs_dir.clone()),
         };
         Ok(Self {
-            sessions: Arc::new(OperatorSessions::bounded()),
+            sessions: Arc::new(session_store_from_env()),
             pending: Arc::new(PendingLogins::bounded()),
             limiter: Arc::new(AttemptLimiter::bounded()),
             totp_steps: Arc::new(crate::auth::UsedSteps::persistent(
@@ -325,6 +357,16 @@ impl ControlState {
             Err(poisoned) => poisoned.into_inner(),
         };
         index.entries().to_vec()
+    }
+
+    /// The newest `limit` journal entries from the index, without cloning the
+    /// whole history (the access page renders at most 200 rows).
+    pub fn journal_recent(&self, limit: usize) -> Vec<ActionJournalEntry> {
+        let index = match self.index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        index.recent(limit)
     }
 
     /// Remember a result id and its payload fingerprint for an idempotency

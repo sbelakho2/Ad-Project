@@ -737,6 +737,18 @@
             "rust/crates/apex-api/src/fonts.rs",
             "rust/crates/apex-api/src/routes.rs"
           ]
+        },
+        {
+          "path": "/watch/cancel",
+          "methods": [
+            "GET",
+            "POST"
+          ],
+          "sources": [
+            "rust/crates/apex-api/src/routes.rs",
+            "rust/crates/apex-api/src/html/watch_html.rs",
+            "rust/crates/apex-watch/src/store.rs"
+          ]
         }
       ],
       "fixture_pages": 62,

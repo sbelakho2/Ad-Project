@@ -28,9 +28,9 @@ use crate::webhook::verify_adyen_webhook;
 use apex_proof::{ChangeKind, Keypair, Ledger, LedgerRecord};
 
 const KEY: &[u8] = b"hmac-key";
-// base64(HMAC-SHA256(signed_message, KEY)) over the pinned item below,
-// computed independently of the crate.
-const PINNED_SIGNATURE: &str = "0go3p4FePtmEGTPKiahYDi0eiRXMcB4te4FZJhVRmDs=";
+// base64(HMAC-SHA256(escaped signed_message, KEY)) over the pinned item
+// below, computed independently of the crate with Python hmac.
+const PINNED_SIGNATURE: &str = "174CJOO/EAnl6hhFBvfk3jGpzsKUgGE6G7Av1c0JOr8=";
 
 fn pinned_item() -> NotificationItem {
     NotificationItem {
@@ -133,7 +133,68 @@ fn pinned_vector_verifies() {
 fn the_signed_message_is_the_eight_fields_in_order() {
     assert_eq!(
         pinned_item().signed_message(),
-        "PSP123::ApexMerchant:apex-fee:pub:exp:2026-10:12345:USD:AUTHORISATION:true"
+        r"PSP123::ApexMerchant:apex-fee\:pub\:exp\:2026-10:12345:USD:AUTHORISATION:true"
+    );
+}
+
+#[test]
+fn signed_fields_escape_backslash_before_colon() {
+    let mut item = pinned_item();
+    item.merchant_reference = r"apex-fee:back\slash:exp:2026-10".to_string();
+    assert_eq!(
+        item.signed_message(),
+        r"PSP123::ApexMerchant:apex-fee\:back\\slash\:exp\:2026-10:12345:USD:AUTHORISATION:true"
+    );
+    // The escaping is part of the signature: a digest over the unescaped
+    // fields does not verify.
+    let escaped = sign_notification_item(KEY, &item);
+    let mut unescaped = item.clone();
+    unescaped.hmac_signature = escaped;
+    verify_notification_item(KEY, &unescaped).expect("escaped digest verifies");
+    let raw = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}",
+        item.psp_reference,
+        item.original_reference,
+        item.merchant_account_code,
+        item.merchant_reference,
+        item.amount_value,
+        item.amount_currency,
+        item.event_code,
+        item.success
+    );
+    use hmac::Mac as _;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(KEY).expect("key");
+    mac.update(raw.as_bytes());
+    let raw_signature = {
+        let bytes = mac.finalize().into_bytes();
+        let mut out = String::new();
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TABLE[(triple >> 18) as usize & 63] as char);
+            out.push(TABLE[(triple >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[(triple >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[triple as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    };
+    let mut raw_item = item;
+    raw_item.hmac_signature = raw_signature;
+    assert_eq!(
+        verify_notification_item(KEY, &raw_item),
+        Err(AdyenHmacError::NoMatchingSignature),
+        "an unescaped digest must not verify"
     );
 }
 
@@ -265,6 +326,10 @@ fn client_refuses_empty_credentials() {
     assert_eq!(
         AdyenClient::new("k", "m", Vec::<u8>::new(), "https://x").unwrap_err(),
         AdyenClientError::EmptyHmacKey
+    );
+    assert_eq!(
+        AdyenClient::new("k", "m", KEY.to_vec(), "  ").unwrap_err(),
+        AdyenClientError::EmptyCheckoutBase
     );
     let ok = AdyenClient::new("k", "m", b" ".to_vec(), "https://x").expect("space is a key");
     assert_eq!(ok.api_key(), "k");
@@ -467,6 +532,91 @@ async fn malformed_success_bodies_fail_closed() {
             create_payment_links(&client(), transport.as_ref(), &invoice).await,
             Err(BillingError::Malformed(_x))
         ));
+    }
+}
+
+#[tokio::test]
+async fn checkout_created_201_is_accepted_for_links_and_payments() {
+    // Adyen answers POST /paymentLinks with 201 Created. Treating it as an
+    // error discarded a link Adyen had already created.
+    let link = MockTransport::ok(
+        201,
+        Some(r#"{"id":"PL-201","url":"https://checkout.example/PL-201"}"#),
+    );
+    let mock = MockTransport::new(vec![Ok(link)]);
+    let transport = retried(mock.clone());
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let item = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let created = client()
+        .create_payment_link(transport.as_ref(), &item)
+        .await
+        .expect("201 is a created link");
+    assert_eq!(created.id, "PL-201");
+
+    let charge = MockTransport::ok(
+        201,
+        Some(r#"{"pspReference":"PSP-201","resultCode":"Authorised"}"#),
+    );
+    let mock = MockTransport::new(vec![Ok(charge)]);
+    let transport = retried(mock.clone());
+    let receipt = client()
+        .charge_stored_payment_method(transport.as_ref(), &item, STORED_ID)
+        .await
+        .expect("201 is an accepted charge");
+    assert_eq!(receipt.psp_reference, "PSP-201");
+}
+
+#[tokio::test]
+async fn malformed_line_items_are_refused_before_any_request() {
+    let line = invoice_line(1, "exp-a", 1_250_000);
+    let valid = InvoiceLineItem::from_invoice_line(&line, "pub-1", "2026-10").expect("item");
+    let cases = [
+        InvoiceLineItem {
+            amount_minor_units: 0,
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            amount_minor_units: -1,
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            currency: "usd".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            currency: "US".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: String::new(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: "x".repeat(MAX_REFERENCE_LEN + 1),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            reference: "apex\u{0}fee".to_string(),
+            ..valid.clone()
+        },
+        InvoiceLineItem {
+            shopper_reference: "  ".to_string(),
+            ..valid.clone()
+        },
+    ];
+    for item in cases {
+        let mock = MockTransport::new(vec![]);
+        let transport = retried(mock.clone());
+        assert!(
+            matches!(
+                client()
+                    .create_payment_link(transport.as_ref(), &item)
+                    .await,
+                Err(BillingError::Malformed(_))
+            ),
+            "item must be refused locally: {item:?}"
+        );
+        assert!(mock.calls().is_empty(), "no request for {item:?}");
     }
 }
 

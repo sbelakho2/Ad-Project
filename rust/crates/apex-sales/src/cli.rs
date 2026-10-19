@@ -38,6 +38,7 @@
 //! | `APEX_SALES_LEGAL_FILE` | CSV `country,rule` (`opt_out`, `consent`, `review`; `*` = unknown) | built-in table |
 //! | `APEX_SALES_DAILY_MAX` | per-domain ceiling of the warm-up ramp (the engine's daily cap is the sum over domains) | `150` |
 //! | `APEX_SALES_FETCH_DELAY_MS` | politeness delay between fetches | `1000` |
+//! | `APEX_SALES_SEND_HOUR` | pin the recipient-local send hour (0–23); unset uses the cadence model | none |
 //!
 //! With several sending domains each identity carries its own daily cap and
 //! its own health; the day's plan is spread across the domains that may send
@@ -269,6 +270,15 @@ pub fn config_from_env(env: &Env) -> Result<Config, String> {
         config.health.max_cap = max
             .parse()
             .map_err(|_| "APEX_SALES_DAILY_MAX must be a whole number".to_string())?;
+    }
+    if let Some(hour) = var(env, "APEX_SALES_SEND_HOUR") {
+        let hour: u32 = hour
+            .parse()
+            .map_err(|_| "APEX_SALES_SEND_HOUR must be a whole number".to_string())?;
+        if hour > 23 {
+            return Err("APEX_SALES_SEND_HOUR must be between 0 and 23".into());
+        }
+        config.send_hour = Some(hour);
     }
     if let Some(path) = var(env, "APEX_SALES_LEGAL_FILE") {
         let text =
@@ -1785,6 +1795,84 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_does_not_resend_an_approved_touch() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct CountingMailer(AtomicUsize);
+        impl Mailer for CountingMailer {
+            fn send(&self, _msg: &crate::compose::Outgoing) -> Result<(), crate::io::MailError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("apex-sales-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let state = root.join("state");
+        let dir = StateDir::open(&state).unwrap();
+        let email = "maria@studio.example";
+        let mut publisher = crate::model::Publisher::new("studio.example", "Studio");
+        publisher.domain = Some("studio.example".into());
+        publisher.country = Some("GB".into());
+        publisher.apps.push(crate::model::App {
+            store: crate::model::Store::AppStore,
+            id: "42".into(),
+            name: "Tile Quest".into(),
+            genre: Some("Games".into()),
+            rating_count: Some(1_000_000),
+            free: Some(true),
+            days_since_update: Some(1),
+        });
+        publisher.evidence.push(crate::model::Evidence {
+            id: "e1".into(),
+            kind: crate::model::EvidenceKind::AppAdsTxt,
+            source: "https://studio.example/app-ads.txt".into(),
+            statement: "the file was not found".into(),
+            observed_at: NOW,
+        });
+        dir.put_publisher(&publisher).unwrap();
+        dir.put_contact(&crate::model::Contact {
+            email: email.into(),
+            name: Some("Maria".into()),
+            role: Some("CEO".into()),
+            publisher_key: "studio.example".into(),
+            kind: crate::model::ContactKind::Named,
+            source: "seed list".into(),
+            consent: false,
+        })
+        .unwrap();
+        let id = crate::engine::touch_id(email, 0, NOW.div_euclid(DAY));
+        dir.put_approval(&id, NOW).unwrap();
+
+        let mut e = env(&state, "approval");
+        e.insert("APEX_SALES_SEND_HOUR".into(), "18".into());
+        let mailer = CountingMailer::default();
+        let fetcher = MapFetcher::default();
+        // 17:00 UTC with a pinned 18:00 send hour: the touch is inside the
+        // run's one-hour window, so the first pass hands it over.
+        let run_now = NOW + 8 * 3600;
+        let first = run(&s(&["run"]), &e, run_now, &fetcher, &mailer).unwrap();
+        assert_eq!(first, "mode approval: sent 1, previews 0, waiting 0");
+        let second = run(&s(&["run"]), &e, run_now + 1, &fetcher, &mailer).unwrap();
+        assert_eq!(second, "mode approval: sent 0, previews 0, waiting 0");
+        assert_eq!(
+            mailer.0.load(Ordering::SeqCst),
+            1,
+            "a retry must not hand the same touch to the transport twice"
+        );
+        let events = std::fs::read_to_string(state.join("events.jsonl")).unwrap();
+        assert_eq!(
+            events
+                .lines()
+                .filter(|l| l.contains("\"type\":\"touch\""))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn many_approvals_use_one_set_probe_per_item_and_keep_membership_semantics() {
         const ITEMS: usize = 5_000;
         const APPROVALS: usize = 3_000;
@@ -1819,5 +1907,18 @@ mod tests {
             items.len(),
             approvals.len()
         );
+    }
+
+    #[test]
+    fn a_pinned_send_hour_is_validated_and_scheduled() {
+        let mut e = Env::new();
+        e.insert("APEX_SALES_SEND_HOUR".into(), "18".into());
+        assert_eq!(config_from_env(&e).unwrap().send_hour, Some(18));
+        e.insert("APEX_SALES_SEND_HOUR".into(), "24".into());
+        assert!(config_from_env(&e)
+            .unwrap_err()
+            .contains("between 0 and 23"));
+        e.insert("APEX_SALES_SEND_HOUR".into(), "noon".into());
+        assert!(config_from_env(&e).unwrap_err().contains("whole number"));
     }
 }

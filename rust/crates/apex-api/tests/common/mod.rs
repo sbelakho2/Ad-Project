@@ -38,8 +38,10 @@ pub const API_TOKEN: &str = "api-token-test";
 pub const WEBHOOK_HMAC_KEY: &[u8] = b"hmac_api_test";
 /// The same key in Adyen's wire form: lowercase hex of [`WEBHOOK_HMAC_KEY`].
 pub const WEBHOOK_HMAC_KEY_HEX: &str = "686d61635f6170695f74657374";
-/// base64(HMAC-SHA256 over the eight signed fields of the pinned item below).
-pub const WEBHOOK_SIGNATURE: &str = "DCVYHJK+/X/7a7OmfIVJTaIZylmJtM+z6OT1b5Ky/D0=";
+/// base64(HMAC-SHA256 over the eight escaped signed fields of the pinned item
+/// below), computed independently with Python `hmac` + base64. Adyen escapes
+/// `\` and `:` in each field before joining.
+pub const WEBHOOK_SIGNATURE: &str = "WZ1isMarXdYH6vGmJgqVxxJkmnMcJFh65s3/sDwBkRM=";
 
 /// The pinned `AUTHORISATION` notification item, in the envelope Adyen sends.
 pub fn webhook_body() -> Vec<u8> {

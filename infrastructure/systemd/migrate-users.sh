@@ -83,7 +83,7 @@ fi
 
 # --- service users ----------------------------------------------------------
 for user in $SERVICES; do
-    if getent passwd "$user" >/dev/null 2>&1; then
+    if user_exists "$user"; then
         summary_users="$summary_users $user(existing)"
         continue
     fi
@@ -171,7 +171,7 @@ summary_dirs="$summary_dirs (normalized $dir_count dirs, $file_count files)"
 summary_acl="skipped (setfacl unavailable)"
 if have setfacl; then
     logdir=$(dirname "$ACCESS_LOG")
-    if [ -d "$logdir" ] && getent passwd apex-ingest >/dev/null 2>&1; then
+    if [ -d "$logdir" ] && user_exists apex-ingest; then
         setfacl -m u:apex-ingest:x "$logdir"
         setfacl -d -m u:apex-ingest:r "$logdir"
         if [ -e "$ACCESS_LOG" ]; then

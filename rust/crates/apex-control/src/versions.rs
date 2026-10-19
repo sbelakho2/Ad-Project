@@ -80,7 +80,14 @@ pub struct ObjectVersions {
 }
 
 /// Default bound on tracked objects.
-pub const DEFAULT_VERSION_CAPACITY: usize = 4096;
+///
+/// The policies page renders one activation form per pending draft. At the
+/// documented 10k-policy reference size, a 4096-entry table evicted the
+/// first thousands of forms before the operator could submit them, so the
+/// default must comfortably cover a full 10k page (plus the other pages'
+/// forms). The table is still bounded, and eviction of a truly old object
+/// remains stale.
+pub const DEFAULT_VERSION_CAPACITY: usize = 65_536;
 
 impl ObjectVersions {
     /// A table with an explicit bound.
@@ -203,6 +210,25 @@ mod tests {
 
     fn state(owner: &str) -> serde_json::Value {
         serde_json::json!({"owner": owner, "state": "open"})
+    }
+
+    #[test]
+    fn the_default_table_covers_a_ten_thousand_policy_page() {
+        let versions = ObjectVersions::bounded();
+        let first_state = serde_json::json!({"pending": 10_000, "active": 0});
+        let first = versions.observe("policy:draft", &first_state);
+        for index in 0..10_000u32 {
+            let _ = versions.observe(
+                &format!("policy:pol_{index:012x}"),
+                &serde_json::json!({"version": 1, "state": "pending"}),
+            );
+        }
+        assert_eq!(versions.len(), 10_001);
+        assert_eq!(
+            versions.check("policy:draft", &first, &first_state),
+            VersionCheck::Match,
+            "the first form on a 10k-policy page is still current"
+        );
     }
 
     #[test]

@@ -66,6 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let config = ControlConfig::from_env()?;
+    if let Err(reason) = config.restrict_private_files() {
+        eprintln!("apex-control: refusing to start: {reason}");
+        std::process::exit(2);
+    }
     let analytics =
         AnalyticsSource::build(config.clickhouse.as_ref()).map_err(|error| error.reason)?;
     let durable = DurableReader::new(config.ledger_root.clone(), config.invoice_register.clone())

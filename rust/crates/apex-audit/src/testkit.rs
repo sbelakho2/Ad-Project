@@ -119,5 +119,6 @@ pub(crate) fn empty_snapshot() -> Snapshot {
         },
         platform_totals_30d: totals(0, 0),
         mediation_totals_30d: totals(0, 0),
+        mediation_totals_reported: false,
     }
 }

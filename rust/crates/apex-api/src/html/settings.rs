@@ -11,7 +11,7 @@
 //! everything else is read-only with the signed-order note.
 
 use apex_ui::components::{
-    action, action_button, checkbox, csrf_hidden, data_table, notice, panel, Cell, EmptyState,
+    action, action_button, csrf_hidden, data_table, notice, panel, Cell, EmptyState,
 };
 use apex_ui::format::{date_short, money_fixed, or_not_available, percent, utc_datetime};
 use apex_ui::status::StatusKind;
@@ -21,7 +21,7 @@ use crate::billing_view::{ManagedView, MonitoringView};
 use crate::connections::CredentialState;
 use crate::settings::{AccountView, MonitoringRow, PolicyView};
 
-use super::{console_document, html_escape, ConsoleCtx};
+use super::{checkbox_with_value, console_document, html_escape, ConsoleCtx};
 
 /// The frozen session note on the access page.
 pub const TOKEN_NOTE: &str = "The ledger access token is never stored in the browser. The session \
@@ -394,9 +394,10 @@ fn session_actions(data: &AccessPageData<'_>) -> String {
                         crate::proposals::ApprovalDecision::Declined,
                         &session.handle,
                     )),
-                    checkbox(
+                    checkbox_with_value(
                         &format!("confirm-revoke-{}", session.handle),
                         "confirm",
+                        "yes",
                         &format!("Yes, revoke session {}.", session.handle),
                         false
                     ),
@@ -709,9 +710,10 @@ fn monitoring_actions(data: &MonitoringPageData<'_>) -> String {
                      stays visible here."
                 ),
                 csrf_hidden(csrf),
-                checkbox(
+                checkbox_with_value(
                     "confirm-monitoring-cancel",
                     "confirm",
+                    "yes",
                     "Yes, cancel monitoring after this month.",
                     false
                 ),
@@ -841,9 +843,10 @@ fn managed_actions(data: &BillingSettingsPageData<'_>) -> String {
                      stays visible here."
                 ),
                 csrf_hidden(csrf),
-                checkbox(
+                checkbox_with_value(
                     "confirm-managed-cancel",
                     "confirm",
+                    "yes",
                     "Yes, cancel the managed plan after this month.",
                     false
                 ),
@@ -984,7 +987,10 @@ mod tests {
         assert!(html.contains("/console/settings/access/revoke"));
         assert!(html.contains("name=\"handle\" value=\"fedcba9876543210\""));
         assert!(html.contains("Revoke session fedcba9876543210"));
-        assert!(html.contains("name=\"confirm\""), "the revoke confirmation");
+        assert!(
+            html.contains("name=\"confirm\" value=\"yes\""),
+            "the revoke confirmation carries the accepted value"
+        );
         assert!(html.contains("Yes, revoke session fedcba9876543210."));
         assert!(html.contains("Session ids are never shown"));
     }
@@ -1198,8 +1204,8 @@ mod tests {
             "the cancel form carries the token"
         );
         assert!(
-            html.contains("name=\"confirm\""),
-            "the cancel form carries the confirmation checkbox"
+            html.contains("name=\"confirm\" value=\"yes\""),
+            "the cancel form carries the confirmation checkbox with the accepted value"
         );
         assert!(html.contains("Yes, cancel monitoring after this month."));
         assert!(html.contains("Cancel monitoring"));
@@ -1276,8 +1282,8 @@ mod tests {
         ));
         assert!(html.contains("name=\"csrf_token\""));
         assert!(
-            html.contains("name=\"confirm\""),
-            "the cancel form carries the confirmation checkbox"
+            html.contains("name=\"confirm\" value=\"yes\""),
+            "the cancel form carries the confirmation checkbox with the accepted value"
         );
         assert!(html.contains("Yes, cancel the managed plan after this month."));
         assert!(html.contains("Cancel managed plan"));

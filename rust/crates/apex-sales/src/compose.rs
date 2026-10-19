@@ -370,7 +370,12 @@ pub fn build_message(
     let https = sender
         .unsubscribe_url
         .as_ref()
-        .filter(|u| u.starts_with("https://"))
+        .filter(|u| {
+            u.starts_with("https://")
+                && !u
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
+        })
         .map(|u| format!("{u}{token}"));
     let mut headers = vec![
         format!("From: {} <{}>", encode_header(&sender.name), sender.email),
@@ -395,13 +400,21 @@ pub fn build_message(
         }
         None => "Reply \"unsubscribe\" and you will not hear from us again.".to_string(),
     };
+    // Display fields are operator configuration: flatten control characters
+    // so a name or address can never start a line that reads like a header
+    // even in the body.
+    let flat = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    };
     let footer = format!(
         "--\n{}, {}, {}\nYou are receiving this because {} is listed publicly as a contact for {}'s apps. {}",
-        sender.name,
-        sender.company,
-        sender.postal_address,
-        contact.email,
-        contact.publisher_key,
+        flat(&sender.name),
+        flat(&sender.company),
+        flat(&sender.postal_address),
+        flat(&contact.email),
+        flat(&contact.publisher_key),
         unsubscribe_line
     );
     let body = format!("{}\n\n{}", wrap(&rendered.body, 76), wrap(&footer, 76));
@@ -656,6 +669,27 @@ mod tests {
         assert!(!m.raw.replace("\r\n", "").contains('\n'), "CRLF only");
         assert!(m.raw.split("\r\n").all(|l| l.chars().count() <= 200));
         assert_eq!(m.message_id, "t-abc@apexmediation.ee");
+
+        // A hostile unsubscribe base cannot add a header line; the message
+        // falls back to the mailto path.
+        let mut hostile = sender();
+        hostile.unsubscribe_url =
+            Some("https://apexmediation.ee/u/\r\nBcc: victim@else.example".into());
+        let m = build_message(&r, &contact(), &hostile, "t-abc", 0, "tok");
+        assert!(!m.raw.contains("Bcc:"), "no injected header");
+        assert!(m.raw.contains("List-Unsubscribe: <mailto:"));
+
+        // A display name or subject with CR/LF is RFC 2047 encoded, never a
+        // header break.
+        let mut crlf_sender = sender();
+        crlf_sender.name = "Aaron\r\nBcc: victim@else.example".into();
+        let m = build_message(&r, &contact(), &crlf_sender, "t-abc", 0, "tok");
+        assert!(!m.raw.contains("\r\nBcc:"), "no injected header");
+        let mut injected = r.clone();
+        injected.subject = "Hi\r\nBcc: victim@else.example".into();
+        let m = build_message(&injected, &contact(), &sender(), "t-abc", 0, "tok");
+        assert!(!m.raw.contains("\r\nBcc:"), "no injected header");
+
         let mut plain = sender();
         plain.unsubscribe_url = None;
         let m = build_message(&r, &contact(), &plain, "t-abc", 0, "tok");

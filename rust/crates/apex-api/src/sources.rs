@@ -1278,6 +1278,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         };
         std::fs::create_dir_all(&dir).unwrap();
         let source = JsonFileAuditSource::new(&dir);
@@ -1343,6 +1344,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         }
     }
 

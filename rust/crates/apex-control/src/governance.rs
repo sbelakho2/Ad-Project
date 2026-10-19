@@ -305,7 +305,9 @@ impl GovernanceStore {
     /// Pending drafts that no later activation superseded.
     pub fn pending_policies(&self) -> Result<Vec<PolicyRecord>, GovernanceError> {
         let records = self.policy_records()?.records;
-        let activated: Vec<String> = records
+        // A set, not a Vec: a register with 10k drafts would otherwise compare
+        // every pending id against every active id (quadratic).
+        let activated: std::collections::HashSet<String> = records
             .iter()
             .filter(|record| record.state == "active")
             .map(|record| record.policy_id.clone())
@@ -426,14 +428,17 @@ fn append_jsonl<T: serde::Serialize>(
         reason: error.to_string(),
     })?;
     line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| GovernanceError::Write {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| GovernanceError::Write {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
     file.write_all(line.as_bytes())
         .and_then(|()| file.flush())
         .map_err(|error| GovernanceError::Write {
@@ -518,6 +523,45 @@ mod tests {
         let read = store.policy_records().expect("records");
         assert_eq!(read.records.len(), 2);
         assert_eq!(store.next_version().expect("version"), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_registers_are_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (store, dir) = store();
+        store
+            .append_intervention(&InterventionRecord::new(
+                "pause_scheduling",
+                None,
+                "all publishers",
+                "test",
+                "test",
+                "maya",
+                1_000,
+                "c-mode",
+            ))
+            .expect("append");
+        let draft = PolicyRecord::draft(
+            "maya",
+            1_000,
+            serde_json::json!({}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+            "test",
+            1,
+            "c-mode",
+        );
+        store.append_policy(&draft).expect("policy");
+        for name in ["interventions.jsonl", "policies.jsonl"] {
+            let mode = std::fs::metadata(dir.join(name))
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name} must be owner-only");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

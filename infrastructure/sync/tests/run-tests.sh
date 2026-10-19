@@ -1,10 +1,11 @@
 #!/bin/sh
-# Local test harness for infrastructure/sync/push.sh and pull.sh. Runs five
+# Local test harness for infrastructure/sync/push.sh and pull.sh. Runs seven
 # scenarios against the committed fake rclone shim (fake-rclone.sh) put on
 # PATH as `rclone`:
 #   1. success: push uploads the ledger, invoice, leads and signin objects
-#      plus the manifest last; pull verifies every object, installs it into
-#      the control paths and writes the marker; a dry run uploads nothing.
+#      under an immutable runs/<id>/ prefix plus the manifest last; pull
+#      verifies every object, installs it into the control paths and writes
+#      the marker; a dry run uploads nothing.
 #   2. hash mismatch: an object corrupted in transit (same size, one changed
 #      byte) makes pull refuse; the previous control copies and marker stay
 #      byte for byte untouched.
@@ -14,8 +15,16 @@
 #   5. batch scale: with dozens of objects the rclone invocation counts stay
 #      flat (one batched transfer per family, one staged download batch), and
 #      every installed file is byte-identical to its source.
+#   6. configuration errors: a local-path remote, a remote absent from the
+#      rclone configuration, rejected credentials, bad arguments and an
+#      unsafe source name all exit 2 and publish/install nothing.
+#   7. atomic generations: a mid-transfer source failure leaves the previous
+#      manifest live and its payload untouched, so pull still reconstructs
+#      the last complete generation byte for byte.
 # Invocation counts come from the shim's FAKE_RCLONE_COUNT file: assertions
-# are count-based, never wall-clock.
+# are count-based, never wall-clock. Read-only preflight and retention calls
+# (listremotes/lsd/lsf/purge) are not counted; counts describe the transfer
+# data plane.
 # Usage: sh infrastructure/sync/tests/run-tests.sh
 set -eu
 
@@ -51,14 +60,20 @@ fail() {
 
 remote="object-store:apex-sync"
 
-push_env() {
-    APEX_SYNC_REMOTE="$remote" \
+push_with_remote() {
+    target=$1
+    shift
+    APEX_SYNC_REMOTE="$target" \
     APEX_SYNC_LEDGER_ROOT="$console/.apex/ledgers" \
     APEX_SYNC_INVOICE_REGISTER="$console/.apex/billing/invoices.jsonl" \
     APEX_SYNC_LEADS_FILE="$console/.apex/leads.jsonl" \
     FAKE_RCLONE_ROOT="$bucket" \
     FAKE_RCLONE_COUNT="$count_file" \
     sh "$push_script" "$@"
+}
+
+push_env() {
+    push_with_remote "$remote" "$@"
 }
 
 pull_env() {
@@ -124,6 +139,18 @@ assert_absent() {
     [ ! -e "$1" ] || fail "expected nothing at: $1"
 }
 
+assert_exit() {
+    expected="$1"
+    label="$2"
+    shift 2
+    if "$@"; then
+        fail "$label must fail"
+    else
+        status=$?
+    fi
+    [ "$status" = "$expected" ] || fail "$label exited $status, expected $expected"
+}
+
 assert_marker() {
     APEX_TEST_MARKER="$marker_path" APEX_TEST_SOURCE="$1" python3 - <<'PY'
 import json
@@ -140,12 +167,14 @@ PY
 
 assert_manifest_matches_sources() {
     APEX_TEST_MANIFEST="$bucket/apex-sync/manifest.json" \
+    APEX_TEST_BUCKET="$bucket/apex-sync" \
     APEX_TEST_CONSOLE="$console" python3 - <<'PY'
 import hashlib
 import json
 import os
 
 console = os.environ["APEX_TEST_CONSOLE"]
+bucket = os.environ["APEX_TEST_BUCKET"]
 expected = {
     "ledger/acme.jsonl": f"{console}/.apex/ledgers/acme.jsonl",
     "ledger/globex.jsonl": f"{console}/.apex/ledgers/globex.jsonl",
@@ -164,9 +193,18 @@ for key, path in expected.items():
     entry = entries[key]
     if entry["size"] != len(data) or entry["sha256"] != hashlib.sha256(data).hexdigest():
         raise SystemExit(f"manifest entry does not match the source: {key}")
+    obj = entry.get("object")
+    if not isinstance(obj, str) or not obj.startswith("runs/"):
+        raise SystemExit(f"manifest entry has no immutable run object: {key}")
+    if "/".join(obj.split("/")[2:]) != key:
+        raise SystemExit(f"manifest object does not end in the logical key: {obj}")
+    with open(os.path.join(bucket, obj), "rb") as handle:
+        remote_data = handle.read()
+    if remote_data != data:
+        raise SystemExit(f"remote object bytes differ from the source: {obj}")
 if not isinstance(manifest.get("created_at_unix_ms"), int):
     raise SystemExit("manifest created_at_unix_ms is not an integer")
-print(f"manifest verified: {len(entries)} entries against the console sources")
+print(f"manifest verified: {len(entries)} entries, object and source bytes match")
 PY
 }
 
@@ -175,25 +213,38 @@ new_sandbox success
 : > "$count_file"
 push_env
 assert_call_count 4
-echo "push used 4 batched rclone call(s): ledger copy, invoice, leads batch, manifest"
+echo "push used 4 batched rclone transfer call(s): ledger copy, invoice, leads batch, manifest"
 assert_manifest_matches_sources
-for object in ledger/acme.jsonl ledger/globex.jsonl invoices/invoices.jsonl leads/leads.jsonl leads/signin.jsonl; do
-    [ -f "$bucket/apex-sync/$object" ] || fail "missing bucket object: $object"
-done
+payload=$(find "$bucket/apex-sync/runs" -type f | wc -l | tr -d ' ')
+[ "$payload" = "5" ] || fail "expected 5 payload objects in runs/, found $payload"
+assert_absent "$bucket/apex-sync/ledger"
+echo "payload lives only under an immutable runs/<id>/ prefix (no mutable ledger/ keys)"
 
 bucket="$sandbox/bucket-dry"
 : > "$count_file"
 push_env --dry-run
 assert_call_count 4
 assert_absent "$bucket"
-echo "dry run uploaded nothing (same 4 batched call shape)"
+echo "dry run uploaded nothing (same 4 batched transfer shape)"
 bucket="$sandbox/bucket"
 
 : > "$count_file"
 pull_env
 assert_call_count 2
-echo "pull used 2 batched rclone call(s): manifest, staged download batch"
+echo "pull used 2 batched rclone transfer call(s): manifest, staged download batch"
 assert_marker "ledger|invoices|leads"
+APEX_TEST_MARKER="$marker_path" APEX_TEST_DATA="$control/.apex/ledgers/acme.jsonl" python3 - <<'PY'
+import os
+import stat
+
+for label, path, expected in (
+    ("marker", os.environ["APEX_TEST_MARKER"], 0o640),
+    ("installed ledger", os.environ["APEX_TEST_DATA"], 0o660),
+):
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode != expected:
+        raise SystemExit(f"{label} mode is {mode:o}, expected {expected:o}")
+PY
 assert_file_eq "$console/.apex/ledgers/acme.jsonl" "$control/.apex/ledgers/acme.jsonl"
 assert_file_eq "$console/.apex/ledgers/globex.jsonl" "$control/.apex/ledgers/globex.jsonl"
 assert_file_eq "$console/.apex/billing/invoices.jsonl" "$control/.apex/billing/invoices.jsonl"
@@ -265,7 +316,7 @@ done
 : > "$count_file"
 push_env >/dev/null
 assert_call_count 4
-bucket_objects=$(find "$bucket/apex-sync/ledger" -type f | wc -l | tr -d ' ')
+bucket_objects=$(find "$bucket/apex-sync/runs" -path '*/ledger/*' -type f | wc -l | tr -d ' ')
 [ "$bucket_objects" = "66" ] || fail "expected 66 uploaded ledger objects, found $bucket_objects"
 : > "$count_file"
 pull_env >/dev/null
@@ -278,7 +329,65 @@ for source_file in "$console/.apex/ledgers"/*.jsonl; do
     installed=$((installed + 1))
 done
 [ "$installed" = "66" ] || fail "expected 66 installed ledger files, found $installed"
-echo "scenario 5 (batch scale): PASS: 66 ledger objects through 4 push and 2 pull rclone calls"
+echo "scenario 5 (batch scale): PASS: 66 ledger objects through 4 push and 2 pull transfer calls"
 
 echo
-echo "run-tests: 5 scenarios PASS"
+echo "== scenario 6: configuration and validation errors =="
+new_sandbox config-errors
+assert_exit 2 "local-path remote" push_with_remote "$sandbox/local-remote"
+assert_absent "$sandbox/local-remote"
+assert_absent "$bucket"
+echo "local-path remote rejected with exit 2, nothing written"
+
+FAKE_RCLONE_REMOTES="other-remote"
+export FAKE_RCLONE_REMOTES
+assert_exit 2 "unknown remote" push_with_remote "$remote"
+unset FAKE_RCLONE_REMOTES
+assert_absent "$bucket"
+echo "remote absent from the rclone configuration rejected with exit 2"
+
+push_env >/dev/null
+cp "$bucket/apex-sync/manifest.json" "$sandbox/manifest-before.json"
+printf '{"publisher":"acme","amount_micros":999}\n' > "$console/.apex/ledgers/acme.jsonl"
+FAKE_RCLONE_BAD_CREDS="1"
+export FAKE_RCLONE_BAD_CREDS
+assert_exit 2 "bad credentials push" push_env
+assert_exit 2 "bad credentials pull" pull_env
+unset FAKE_RCLONE_BAD_CREDS
+assert_file_eq "$sandbox/manifest-before.json" "$bucket/apex-sync/manifest.json"
+echo "rejected credentials exit 2 on both sides; the live manifest is unchanged"
+
+assert_exit 2 "push bad argument" sh "$push_script" --bogus
+assert_exit 2 "pull bad argument" sh "$pull_script" extra
+
+printf '{"publisher":"bad name"}\n' > "$console/.apex/ledgers/bad name.jsonl"
+assert_exit 2 "unsafe source name" push_env
+assert_file_eq "$sandbox/manifest-before.json" "$bucket/apex-sync/manifest.json"
+rm -f "$console/.apex/ledgers/bad name.jsonl"
+echo "bad arguments and an unsafe nested/space source name exit 2 without publishing"
+echo "scenario 6 (configuration errors): PASS"
+
+echo
+echo "== scenario 7: a mid-transfer failure keeps the previous generation =="
+new_sandbox atomic-run
+push_env >/dev/null
+pull_env >/dev/null
+cp "$bucket/apex-sync/manifest.json" "$sandbox/manifest-v1.json"
+cp "$console/.apex/ledgers/acme.jsonl" "$sandbox/acme-v1.jsonl"
+printf '{"publisher":"acme","amount_micros":777}\n' > "$console/.apex/ledgers/acme.jsonl"
+printf '{"publisher":"explode"}\n' > "$console/.apex/ledgers/zz-fail.jsonl"
+FAKE_RCLONE_FAIL="zz-fail.jsonl"
+export FAKE_RCLONE_FAIL
+assert_exit 1 "mid-transfer failure" push_env
+unset FAKE_RCLONE_FAIL
+echo "push failed during the payload transfer (exit 1)"
+assert_file_eq "$sandbox/manifest-v1.json" "$bucket/apex-sync/manifest.json"
+echo "the previous manifest is byte-identical after the failed push"
+pull_env >/dev/null
+assert_file_eq "$sandbox/acme-v1.jsonl" "$control/.apex/ledgers/acme.jsonl"
+assert_marker "ledger|invoices|leads"
+echo "pull still reconstructed the previous generation byte for byte"
+echo "scenario 7 (atomic generations): PASS"
+
+echo
+echo "run-tests: 7 scenarios PASS"

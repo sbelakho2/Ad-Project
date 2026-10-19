@@ -14,6 +14,11 @@
 //!    under the confidence threshold the reply is `Unclear` and goes to a
 //!    person.
 //!
+//! Multipart bodies are decoded before any rule runs: base64 and
+//! quoted-printable transfer encodings are undone, text/plain parts win over
+//! text/html, and HTML is stripped to its words. A real mail client's reply
+//! is read as text, not as transport bytes.
+//!
 //! Quoted history (`>` lines and everything after an "On … wrote:" line)
 //! is removed first, so our own words never vote.
 
@@ -289,7 +294,11 @@ impl ReplyClassifier {
                 rationale: "automatic reply headers".into(),
             };
         }
-        let fresh = strip_quoted(&body);
+        // Decode MIME before any phrase test: a real reply is usually
+        // multipart/alternative with base64 or quoted-printable parts, and
+        // the opt-out rule must see the words, not the transport encoding.
+        let decoded = mime_text(&headers, &body).unwrap_or(body);
+        let fresh = strip_quoted(&decoded);
         let lower = fresh.to_lowercase();
         if let Some(p) = OPT_OUT_PHRASES.iter().find(|p| lower.contains(*p)) {
             return Classification {
@@ -373,9 +382,292 @@ pub fn strip_quoted(body: &str) -> String {
     out.join("\n")
 }
 
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+/// A parameter of a `Content-Type` header value, unquoted.
+fn content_type_param(value: &str, name: &str) -> Option<String> {
+    value.split(';').skip(1).find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().trim_matches('"').to_string())
+    })
+}
+
+/// The readable text of a message body: text/plain parts first, text/html
+/// stripped to text when no plain part exists, MIME transfer encoding
+/// decoded. Returns `None` for a multipart message with no text parts.
+fn mime_text(headers: &[(String, String)], body: &str) -> Option<String> {
+    mime_text_depth(headers, body, 0)
+}
+
+fn mime_text_depth(headers: &[(String, String)], body: &str, depth: usize) -> Option<String> {
+    if depth > 5 {
+        return None;
+    }
+    let content_type = header_value(headers, "content-type").unwrap_or("text/plain");
+    let lower = content_type.to_ascii_lowercase();
+    if lower.starts_with("multipart/") {
+        let boundary = content_type_param(content_type, "boundary")?;
+        let mut plain = String::new();
+        let mut html = String::new();
+        for part in split_multipart(body, &boundary) {
+            let (part_headers, part_body) = split_message(part);
+            let part_type = header_value(&part_headers, "content-type")
+                .unwrap_or("text/plain")
+                .to_ascii_lowercase();
+            let Some(text) = mime_text_depth(&part_headers, &part_body, depth + 1) else {
+                continue;
+            };
+            if part_type.contains("text/html") {
+                html.push_str(&text);
+                html.push('\n');
+            } else {
+                plain.push_str(&text);
+                plain.push('\n');
+            }
+        }
+        if !plain.trim().is_empty() {
+            Some(plain)
+        } else if !html.trim().is_empty() {
+            Some(html)
+        } else {
+            None
+        }
+    } else {
+        let decoded = decode_transfer(body, header_value(headers, "content-transfer-encoding"));
+        if lower.contains("text/html") {
+            Some(strip_html(&decoded))
+        } else {
+            Some(decoded)
+        }
+    }
+}
+
+/// Split a multipart body on its boundary lines. The preamble and the
+/// closing `--boundary--` marker are dropped.
+fn split_multipart<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
+    let marker = format!("--{boundary}");
+    let mut parts = Vec::new();
+    for chunk in body.split(&marker).skip(1) {
+        if chunk.starts_with("--") {
+            break;
+        }
+        let chunk = chunk
+            .strip_prefix("\r\n")
+            .or_else(|| chunk.strip_prefix('\n'))
+            .unwrap_or(chunk);
+        parts.push(chunk);
+    }
+    parts
+}
+
+fn b64_digit(byte: u8) -> Option<u32> {
+    match byte {
+        b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+        b'a'..=b'z' => Some(u32::from(byte - b'a') + 26),
+        b'0'..=b'9' => Some(u32::from(byte - b'0') + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decode standard base64, tolerating whitespace and missing padding.
+fn base64_decode(value: &str) -> Option<String> {
+    let mut out = Vec::new();
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in value.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            break;
+        }
+        let digit = b64_digit(byte)?;
+        buffer = (buffer << 6) | digit;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buffer >> bits) & 0xff) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn qp_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode quoted-printable, including soft line breaks.
+fn quoted_printable_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'=' {
+            if bytes.get(index + 1) == Some(&b'\n') {
+                index += 2;
+                continue;
+            }
+            if bytes.get(index + 1) == Some(&b'\r') && bytes.get(index + 2) == Some(&b'\n') {
+                index += 3;
+                continue;
+            }
+            if let (Some(high), Some(low)) = (
+                bytes.get(index + 1).copied().and_then(qp_hex),
+                bytes.get(index + 2).copied().and_then(qp_hex),
+            ) {
+                out.push(high << 4 | low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn decode_transfer(body: &str, encoding: Option<&str>) -> String {
+    match encoding
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "base64" => base64_decode(body).unwrap_or_else(|| body.to_string()),
+        "quoted-printable" => quoted_printable_decode(body),
+        _ => body.to_string(),
+    }
+}
+
+/// Strip HTML tags, script/style bodies and the common entities so the
+/// naive Bayes layer reads words, not markup.
+fn strip_html(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut text = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        let rest = &lower[index..];
+        if rest.starts_with("<script") || rest.starts_with("<style") {
+            let tag = if rest.starts_with("<script") {
+                "</script"
+            } else {
+                "</style"
+            };
+            match lower[index..].find(tag) {
+                Some(offset) => {
+                    index += offset + tag.len();
+                    if let Some(close) = value[index..].find('>') {
+                        index += close + 1;
+                    }
+                }
+                None => break,
+            }
+            continue;
+        }
+        if value[index..].starts_with('<') {
+            match value[index..].find('>') {
+                Some(close) => {
+                    index += close + 1;
+                    text.push(' ');
+                }
+                None => break,
+            }
+            continue;
+        }
+        let next = value[index..]
+            .char_indices()
+            .nth(1)
+            .map_or(value.len(), |(i, _)| index + i);
+        text.push_str(&value[index..next]);
+        index = next;
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multipart_base64_and_quoted_printable_bodies_are_decoded_first() {
+        let c = ReplyClassifier::default();
+        let base64 = "From: Maria <maria@studio.example>\n\
+Content-Type: multipart/alternative; boundary=\"b1\"\n\
+MIME-Version: 1.0\n\
+\n\
+--b1\n\
+Content-Type: text/plain; charset=utf-8\n\
+Content-Transfer-Encoding: base64\n\
+\n\
+WWVzLCBwbGVhc2UgcnVuIHRoZSBmcmVlIHJlYWQtb25seSBhdWRpdC4=\n\
+--b1\n\
+Content-Type: text/html; charset=utf-8\n\
+Content-Transfer-Encoding: quoted-printable\n\
+\n\
+<html><body><p>Yes, please run the free audit.</p></body></html>\n\
+--b1--\n";
+        assert_eq!(
+            c.classify(base64).outcome,
+            Outcome::Reply(ReplyClass::Positive),
+            "base64 multipart text is read as words"
+        );
+
+        let opt_out = "From: Maria <maria@studio.example>\n\
+Content-Type: text/plain; charset=utf-8\n\
+Content-Transfer-Encoding: quoted-printable\n\
+\n\
+Please =75nsubscribe me from this list.\n";
+        assert_eq!(
+            c.classify(opt_out).outcome,
+            Outcome::Reply(ReplyClass::OptOut),
+            "quoted-printable opt-out is read as words"
+        );
+
+        let html_only = "From: Maria <maria@studio.example>\n\
+Content-Type: text/html; charset=utf-8\n\
+\n\
+<html><head><style>.x{color:red}</style><script>var x=1;</script></head>\
+<body><p>Not interested, no thank you.</p></body></html>\n";
+        assert_eq!(
+            c.classify(html_only).outcome,
+            Outcome::Reply(ReplyClass::NotInterested)
+        );
+    }
+
+    #[test]
+    fn transfer_decoders_handle_vectors_and_soft_breaks() {
+        assert_eq!(base64_decode("Zm9vYmFy").as_deref(), Some("foobar"));
+        assert_eq!(base64_decode("Zm9v\nYmFy").as_deref(), Some("foobar"));
+        assert_eq!(base64_decode("Zm8=").as_deref(), Some("fo"));
+        assert_eq!(base64_decode("!!").as_deref(), None);
+        assert_eq!(
+            quoted_printable_decode("Please =75nsubscribe=\r\n now"),
+            "Please unsubscribe now"
+        );
+        assert_eq!(quoted_printable_decode("a=20b"), "a b");
+        assert_eq!(strip_html("<p>Hi &amp; bye</p><br>"), " Hi & bye  ");
+    }
 
     #[test]
     fn transport_signals_decide_bounces_and_autoreplies() {

@@ -441,6 +441,7 @@ pub fn router(state: AppState) -> Router {
         .route("/watch", get(watch_redirect).post(watch_submit))
         .route("/watch/", get(watch_page))
         .route("/watch/requested", get(watch_requested))
+        .route("/watch/cancel", get(watch_cancel).post(watch_cancel_submit))
         .route(
             "/watch/confirm",
             get(watch_confirm).post(watch_confirm_submit),
@@ -862,7 +863,7 @@ fn authorize_operator_jobs(headers: &HeaderMap, expected: &str) -> Result<(), Ap
 /// pause or policy change must land here, not only in the control host's
 /// local register.
 async fn operator_governance(
-    State(state): State<AppState>,
+    State(state_app): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -956,6 +957,63 @@ async fn operator_governance(
             )
                 .into_response()
         }
+        Some("managed_plan") => {
+            let publisher = request
+                .get("publisher")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|publisher| is_valid_publisher(publisher));
+            let Some(publisher) = publisher else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_request"})),
+                )
+                    .into_response();
+            };
+            let state = match request
+                .get("state")
+                .cloned()
+                .map(serde_json::from_value::<apex_billing::PlanState>)
+            {
+                Some(Ok(state)) => state,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "bad_request"})),
+                    )
+                        .into_response()
+                }
+            };
+            if state.plan != apex_billing::PlanId::Managed {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "bad_request"})),
+                )
+                    .into_response();
+            }
+            let Some(root) = connection_root(&state_app) else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "not_configured"})),
+                )
+                    .into_response();
+            };
+            let path =
+                apex_billing::PlanState::path_for(root, publisher, apex_billing::PlanId::Managed);
+            if let Err(error) = write_plan_state_atomically(&path, &state) {
+                tracing::error!(%error, path = %path.display(), "managed plan state could not be written");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal"})),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"applied": true, "kind": "managed_plan"})),
+            )
+                .into_response()
+        }
         Some("policy") => {
             let policy = match request
                 .get("policy")
@@ -992,7 +1050,6 @@ async fn operator_governance(
                 )
                     .into_response();
             }
-            let _ = state;
             (
                 StatusCode::OK,
                 Json(json!({"applied": true, "kind": "policy"})),
@@ -1024,6 +1081,45 @@ fn append_governance_line(path: &std::path::Path, line: &str) -> std::io::Result
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_data()
+}
+
+/// Write one publisher's plan state atomically with mode 0600, the same bytes
+/// and path the console and runner read.
+fn write_plan_state_atomically(
+    path: &std::path::Path,
+    state: &apex_billing::PlanState,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(state)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let temp = path.with_file_name(format!(
+        ".{}.{}.{nanos}.tmp",
+        path.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("plan"),
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options.open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
 }
 
 /// Write the effective policy atomically so the runner never reads a torn
@@ -1330,6 +1426,21 @@ async fn adyen_webhook(
     let Some(store) = &state.collection else {
         return Err(ApiError::CollectionStoreNotConfigured);
     };
+    // A configured client names one merchant account. An event signed with
+    // the endpoint's key but naming another account is not a payment for this
+    // deployment: refuse the delivery rather than record or activate it.
+    if let Some(client) = &state.adyen {
+        for item in &items {
+            if item.merchant_account_code != client.merchant_account() {
+                tracing::warn!(
+                    merchant_account = %item.merchant_account_code,
+                    expected = %client.merchant_account(),
+                    "adyen delivery names another merchant account"
+                );
+                return Err(ApiError::BadRequest("malformed_event"));
+            }
+        }
+    }
     // Record every accepted item; a replay of an already-recorded
     // (eventCode, pspReference) is accepted but not counted again.
     let now_unix_ms = state.clock.now_unix_s().saturating_mul(1000);
@@ -1345,10 +1456,12 @@ async fn adyen_webhook(
                     success = %item.success,
                     "adyen collection event recorded"
                 );
-                // The frozen sales outcome for an accepted payment event:
-                // success=true only, the psp reference as the ref. Best
-                // effort; the recorded event stands regardless.
-                if item.success.eq_ignore_ascii_case("true") {
+                // A successful AUTHORISATION is the only event that means
+                // money was collected and the watch may start. REFUND,
+                // CHARGEBACK, DISPUTE and NOTIFICATION_OF_CHARGEBACK are
+                // validly signed and recorded, but they must never activate a
+                // subscriber or append a `paid` outcome.
+                if is_successful_authorisation(item) {
                     if let Some(publisher) = event.publisher_id() {
                         append_outcome(&state, publisher, "paid", &item.psp_reference);
                     }
@@ -1365,12 +1478,17 @@ async fn adyen_webhook(
                 return Err(ApiError::Internal("collection_record_failed".into()));
             }
         }
-        // A successful watch payment switches the pending subscriber on.
-        // `activate` is idempotent, so a replayed notification (the collection
-        // store already answers `Ok(false)`) never appends a second row.
-        if item.success.eq_ignore_ascii_case("true") {
+        // A successful AUTHORISATION switches the pending subscriber on.
+        // `activate` is idempotent, so a replayed notification (the
+        // collection store already answers `Ok(false)`) never appends a
+        // second row. Refund/chargeback events are recorded above and ignored
+        // here.
+        if is_successful_authorisation(item) {
             activate_watch_subscriber(&state, item, now_unix_ms);
         }
+    }
+    if let Some(path) = &state.collection_log_path {
+        restrict_state_file(path);
     }
     Ok(Json(
         json!({ "received": true, "items": items.len(), "new": new_items }),
@@ -1392,6 +1510,14 @@ fn watch_reference_from_merchant(merchant_reference: &str) -> Option<&str> {
         return (!reference.is_empty() && is_subscriber_id(reference)).then_some(reference);
     }
     is_subscriber_id(merchant_reference).then_some(merchant_reference)
+}
+
+/// Whether an item is a successful payment authorisation. Adyen sends the
+/// same `success: "true"` on refunds, chargebacks and dispute notifications;
+/// only `AUTHORISATION` collected the first payment.
+fn is_successful_authorisation(item: &apex_billing::adyen::NotificationItem) -> bool {
+    item.event_code.eq_ignore_ascii_case("AUTHORISATION")
+        && item.success.eq_ignore_ascii_case("true")
 }
 
 /// Activate the pending setup-watch subscriber named by a successful Adyen
@@ -1417,6 +1543,32 @@ fn activate_watch_subscriber(
     // One indexed read serves both the stored-card check and the outcome
     // publisher; it never clones or scans the whole subscriber set.
     let recorded = find_subscriber(store, reference);
+    // The signed amount and currency must name the tier price this subscriber
+    // was quoted. A valid HMAC proves Adyen signed the event, not that it is
+    // the payment this row expected; a mismatched amount must not switch the
+    // watch on.
+    if let Some(subscriber) = &recorded {
+        let expected_micros = match subscriber.tier {
+            apex_watch::Tier::Normal => apex_billing::WATCH_PRICE_MICROS,
+            apex_watch::Tier::Core => apex_billing::WATCH_CORE_PRICE_MICROS,
+        };
+        let expected_minor_units = expected_micros / MICROS_PER_ADYEN_MINOR_UNIT;
+        if item.amount_value != expected_minor_units
+            || !item
+                .amount_currency
+                .eq_ignore_ascii_case(apex_billing::PLAN_CURRENCY)
+        {
+            tracing::warn!(
+                reference,
+                amount = item.amount_value,
+                currency = %item.amount_currency,
+                expected_amount = expected_minor_units,
+                expected_currency = apex_billing::PLAN_CURRENCY,
+                "watch payment amount or currency does not match the subscriber tier"
+            );
+            return;
+        }
+    }
     let recorded_card = recorded
         .as_ref()
         .and_then(|subscriber| subscriber.stored_payment_method_id.clone());
@@ -3691,6 +3843,19 @@ fn current_period(as_of_unix_ms: i64) -> String {
     apex_analytics::UtcMillis::from_unix_millis(as_of_unix_ms).to_day_string()[..7].to_string()
 }
 
+/// Plan and collection files hold per-publisher commercial facts. The billing
+/// crate writes them with the process umask, which is commonly 0644; tighten
+/// the files this server owns to the same 0600 the other state files use.
+fn restrict_state_file(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// `GET /console/settings/monitoring`.
 async fn console_settings_monitoring(
     State(state): State<AppState>,
@@ -3793,6 +3958,7 @@ async fn console_settings_monitoring_cancel(
             "/console/settings/monitoring",
         );
     }
+    restrict_state_file(&path);
     Redirect::to("/console/settings/monitoring").into_response()
 }
 
@@ -3871,6 +4037,7 @@ async fn console_settings_billing_managed_cancel(
             "/console/settings/billing",
         );
     }
+    restrict_state_file(&path);
     Redirect::to("/console/settings/billing").into_response()
 }
 
@@ -4357,9 +4524,12 @@ fn record_workspace_refusal(
         refusal.reason(),
         refusal
     );
-    tracing::warn!("{message}");
-    if let Some(signin) = &state.signin {
-        signin.record_warning(message);
+    // `record_warning` already emits the line through `tracing::warn!`; only
+    // log here when no sign-in service is configured to carry it, so one
+    // refusal produces exactly one operator log line.
+    match &state.signin {
+        Some(signin) => signin.record_warning(message),
+        None => tracing::warn!("{message}"),
     }
 }
 
@@ -4567,7 +4737,28 @@ async fn watch_submit(State(state): State<AppState>, body: Bytes) -> Response {
             // subscriber log just to look the row up again.
             let publisher = watch_publisher_for_domain(&values.domain);
             append_outcome(&state, &publisher, "watch_signup", &outcome.reference);
-            send_watch_confirmation(&state, &values.email, &outcome, checkout.as_deref()).await;
+            // Mint the cancel capability now so a pending sign-up can be
+            // stopped before payment; only the hash is stored.
+            let (cancel_raw, cancel_hash) = apex_watch::SubscriberStore::mint_cancel_token();
+            let cancel_token = match store.get(&outcome.reference) {
+                Ok(Some(mut subscriber)) => {
+                    subscriber.cancel_token_hash = cancel_hash;
+                    if store.update(&subscriber).is_ok() {
+                        Some(cancel_raw)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            send_watch_confirmation(
+                &state,
+                &values.email,
+                &outcome,
+                checkout.as_deref(),
+                cancel_token.as_deref(),
+            )
+            .await;
             Redirect::to(&format!("/watch/requested?ref={}", outcome.reference)).into_response()
         }
         Err(error) => {
@@ -4665,6 +4856,7 @@ async fn send_watch_confirmation(
     email: &str,
     outcome: &apex_watch::model::PendingOutcome,
     checkout_url: Option<&str>,
+    cancel_token: Option<&str>,
 ) {
     let Some(signin) = &state.signin else {
         tracing::warn!(
@@ -4680,15 +4872,116 @@ async fn send_watch_confirmation(
             &outcome.reference,
             &outcome.confirmation_token,
             checkout_url,
+            cancel_token,
             expires,
         )
         .await;
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct WatchCancelParams {
+    #[serde(default, rename = "token")]
+    token: Option<String>,
+}
+
+/// `GET /watch/cancel?token=`: inert confirmation. The token is never
+/// consumed here, so a scanner cannot cancel a customer's watch.
+async fn watch_cancel(
+    State(state): State<AppState>,
+    params: Result<Query<WatchCancelParams>, QueryRejection>,
+) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let token = match params {
+        Ok(Query(params)) => params.token,
+        Err(_) => None,
+    };
+    let token = token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| apex_watch::store::is_confirmation_token(token));
+    let Some(token) = token else {
+        return page(
+            StatusCode::NOT_FOUND,
+            watch_html::render_cancel_refused(&ctx),
+        );
+    };
+    match store.find_by_cancel_token(token) {
+        Ok(Some(_)) => page(StatusCode::OK, watch_html::render_cancel_form(&ctx, token)),
+        Ok(None) => page(
+            StatusCode::NOT_FOUND,
+            watch_html::render_cancel_refused(&ctx),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "cancel lookup failed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errors::internal(&ctx, &error.to_string()),
+            )
+        }
+    }
+}
+
+/// `POST /watch/cancel`: consume the token (form body or, for RFC 8058
+/// one-click unsubscribe, the query string with an empty body).
+async fn watch_cancel_submit(
+    State(state): State<AppState>,
+    params: Result<Query<WatchCancelParams>, QueryRejection>,
+    body: Bytes,
+) -> Response {
+    let ctx = ConsoleCtx::from_env();
+    let Some(store) = &state.watch else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            errors::not_configured(&ctx),
+        );
+    };
+    let from_query = match params {
+        Ok(Query(params)) => params.token,
+        Err(_) => None,
+    };
+    let from_body = leads::parse_form(&body)
+        .ok()
+        .and_then(|fields| fields.get("token").cloned());
+    let token = from_body
+        .as_deref()
+        .or(from_query.as_deref())
+        .map(str::trim)
+        .filter(|token| apex_watch::store::is_confirmation_token(token));
+    let Some(token) = token else {
+        return page(
+            StatusCode::BAD_REQUEST,
+            watch_html::render_cancel_refused(&ctx),
+        );
+    };
+    match store.cancel(token, now_unix_ms(&state)) {
+        Ok(Some(subscriber)) => page(
+            StatusCode::OK,
+            watch_html::render_cancel_done(&ctx, &subscriber.domain),
+        ),
+        Ok(None) => page(
+            StatusCode::NOT_FOUND,
+            watch_html::render_cancel_refused(&ctx),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "cancel failed");
+            page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                errors::internal(&ctx, &error.to_string()),
+            )
+        }
+    }
+}
+
 async fn watch_requested(
     State(state): State<AppState>,
     params: Result<Query<RequestedParams>, QueryRejection>,
-) -> Html<String> {
+) -> Response {
     let ctx = ConsoleCtx::from_env();
     let reference = match params {
         Ok(Query(params)) => params.reference,
@@ -4701,6 +4994,12 @@ async fn watch_requested(
             .as_ref()
             .and_then(|store| find_subscriber(store, reference))
     });
+    if subscriber.is_none() {
+        return page(
+            StatusCode::NOT_FOUND,
+            watch_html::render_reference_not_found(&ctx),
+        );
+    }
     let checkout = subscriber
         .as_ref()
         .and_then(|subscriber| subscriber.payment_link.clone())
@@ -4715,12 +5014,10 @@ async fn watch_requested(
         apex_watch::model::Tier::Normal => "standard ($99 per month)",
         apex_watch::model::Tier::Core => "core ($199 per month)",
     });
-    Html(watch_html::render_confirmation(
-        &ctx,
-        reference.as_deref(),
-        checkout.as_deref(),
-        tier,
-    ))
+    page(
+        StatusCode::OK,
+        watch_html::render_confirmation(&ctx, reference.as_deref(), checkout.as_deref(), tier),
+    )
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -4845,7 +5142,7 @@ struct BillingProfileRecordedParams {
 async fn watch_billing_profile_recorded(
     State(state): State<AppState>,
     params: Result<Query<BillingProfileRecordedParams>, QueryRejection>,
-) -> Html<String> {
+) -> Response {
     let ctx = ConsoleCtx::from_env();
     let reference = match params {
         Ok(Query(params)) => params.reference,
@@ -4864,12 +5161,21 @@ async fn watch_billing_profile_recorded(
     let invoice_number = subscriber
         .as_ref()
         .and_then(|subscriber| subscriber.first_invoice_number);
-    Html(watch_html::render_billing_profile_recorded(
-        &ctx,
-        reference.as_deref().unwrap_or_default(),
-        active,
-        invoice_number,
-    ))
+    if subscriber.is_none() {
+        return page(
+            StatusCode::NOT_FOUND,
+            watch_html::render_reference_not_found(&ctx),
+        );
+    }
+    page(
+        StatusCode::OK,
+        watch_html::render_billing_profile_recorded(
+            &ctx,
+            reference.as_deref().unwrap_or_default(),
+            active,
+            invoice_number,
+        ),
+    )
 }
 
 /// Parse and validate the billing-profile form. Every refusal carries the

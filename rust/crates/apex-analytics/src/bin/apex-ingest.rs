@@ -839,7 +839,9 @@ async fn run_with_store<S: EventStore>(
         // replay keeps those lines spooled and is reported, never dropped.
         match writer.replay(&defaults).await {
             Ok(replayed) if replayed.replayed > 0 || replayed.corrupt > 0 => {
-                println!(
+                // Progress goes to stderr so `--json` keeps stdout a single
+                // parseable JSON object even when a spool was drained.
+                eprintln!(
                     "spool replay: {} delivered, {} corrupt lines preserved to {}.dead",
                     replayed.replayed,
                     replayed.corrupt,

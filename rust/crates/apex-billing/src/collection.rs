@@ -129,6 +129,10 @@ pub trait CollectionStore: Send + Sync + std::fmt::Debug {
 pub struct FileCollectionStore {
     path: PathBuf,
     seen: Mutex<HashSet<String>>,
+    /// Serializes the line append (not just the replay index). Two concurrent
+    /// webhook deliveries used to write the JSON and the newline separately,
+    /// which could concatenate two events on one line and corrupt the log.
+    append: Mutex<()>,
 }
 
 impl FileCollectionStore {
@@ -155,17 +159,39 @@ impl FileCollectionStore {
         Ok(Self {
             path,
             seen: Mutex::new(seen),
+            append: Mutex::new(()),
         })
     }
 
     fn append_line(&self, line: &str) -> Result<(), BillingError> {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
+        // One write of the whole record (including the newline), serialized
+        // inside the process. O_APPEND keeps each write at EOF across
+        // processes; a single write keeps a record from being interleaved.
+        let _guard = self
+            .append
+            .lock()
+            .map_err(|_| BillingError::Malformed("collection append lock poisoned".into()))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        // The log carries provider references and stored payment identifiers:
+        // never leave it readable by other local users, even when the file
+        // pre-dates this writer.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut record = String::with_capacity(line.len() + 1);
+        record.push_str(line);
+        record.push('\n');
+        file.write_all(record.as_bytes())?;
         Ok(())
     }
 }
@@ -177,14 +203,22 @@ impl CollectionStore for FileCollectionStore {
             .seen
             .lock()
             .map_err(|_| BillingError::Malformed("collection index poisoned".into()))?;
-        if !seen.insert(key) {
+        if !seen.insert(key.clone()) {
             return Ok(false);
         }
         drop(seen);
         let line = serde_json::to_string(event).map_err(|error| {
             BillingError::Malformed(format!("collection serialization: {error}"))
         })?;
-        self.append_line(&line)?;
+        if let Err(error) = self.append_line(&line) {
+            // The event was not persisted: release the dedup key so the
+            // provider's retry can record it instead of being answered as a
+            // replay of an event that never reached the log.
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.remove(&key);
+            }
+            return Err(error);
+        }
         Ok(true)
     }
 
@@ -231,6 +265,64 @@ mod tests {
         assert!(!reopened.record(&event("psp-1")).unwrap());
         let contents = std::fs::read_to_string(dir.join("coll.jsonl")).unwrap();
         assert_eq!(contents.lines().count(), 2, "one line per new event");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_appends_keep_one_valid_json_record_per_line() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("apex-coll-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("coll.jsonl");
+        let store = Arc::new(FileCollectionStore::open(&path).expect("open"));
+        let mut workers = Vec::new();
+        for worker in 0..16 {
+            let store = Arc::clone(&store);
+            workers.push(std::thread::spawn(move || {
+                for index in 0..25 {
+                    store
+                        .record(&event(&format!("psp-{worker}-{index}")))
+                        .expect("record");
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("join");
+        }
+        let raw = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 16 * 25, "one line per event");
+        for line in &lines {
+            let parsed: CollectionEvent = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("corrupt line {line:?}: {error}"));
+            assert!(!parsed.psp_reference.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_append_releases_the_replay_key_for_the_providers_retry() {
+        let dir = std::env::temp_dir().join(format!("apex-coll-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("coll.jsonl");
+        let store = FileCollectionStore::open(&path).expect("open");
+        // Make the log path an unwritable target (a directory) so the append
+        // fails after the replay key was claimed.
+        std::fs::create_dir_all(&path).expect("blocking directory");
+        let error = store.record(&event("psp-retry")).expect_err("append fails");
+        assert!(matches!(error, BillingError::Malformed(_)), "{error:?}");
+        assert!(
+            !store.seen("AUTHORISATION:psp-retry").unwrap(),
+            "the unpersisted event must not look like a replay"
+        );
+
+        // Remove the obstruction: the provider's retry is recorded exactly
+        // once, and the next replay is a no-op.
+        std::fs::remove_dir(&path).expect("remove blocking directory");
+        assert!(store.record(&event("psp-retry")).unwrap(), "retry records");
+        assert!(!store.record(&event("psp-retry")).unwrap(), "replay");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

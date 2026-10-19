@@ -134,6 +134,41 @@ def has_file_server(handlers):
     return any(handler.get("handler") == "file_server" for handler in handlers)
 
 
+def error_routes_for(host):
+    """The server-level error routes attached to `host`, if any."""
+    for server in servers().values():
+        for route in server.get("errors", {}).get("routes", []):
+            hosts = [h for m in route.get("match", []) for h in m.get("host", [])]
+            if host in hosts:
+                return route
+    return None
+
+
+def serves_404_page(host):
+    """Whether the host's error route rewrites a 404 to the built 404.html."""
+    route = error_routes_for(host)
+    if route is None:
+        return False
+    found_rewrite = False
+    found_file_server = False
+
+    def walk(value):
+        nonlocal found_rewrite, found_file_server
+        if isinstance(value, dict):
+            if value.get("handler") == "rewrite" and value.get("uri") == "/404.html":
+                found_rewrite = True
+            if value.get("handler") == "file_server":
+                found_file_server = True
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(route)
+    return found_rewrite and found_file_server
+
+
 def refuses_with_404(handlers):
     return any(
         handler.get("handler") in {"respond", "static_response"}
@@ -198,6 +233,12 @@ if site is not None:
     check(
         has_file_server(handlers_for(site, "GET", "/pricing")),
         "marketing pages must be served by the static file server",
+    )
+    # A missing marketing path must serve the built 404.html with status 404,
+    # not Caddy's empty default response.
+    check(
+        serves_404_page("www.edge.test"),
+        "the marketing host must serve the built /404.html for a missing path",
     )
     # The confirmation pages reach apex-api.
     check(

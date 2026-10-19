@@ -23,8 +23,18 @@ const WARN_GAP_BP: i128 = 200; // 2.00%
 const CRITICAL_GAP_BP: i128 = 1000; // 10.00%
 
 pub fn check(snapshot: &Snapshot) -> Vec<Finding> {
+    // A missing mediation report is not a zero total: comparing a real
+    // platform total against an unmeasured zero would report a permanent
+    // 100% gap. The provider must actually report the second side.
     let platform = snapshot.platform_totals_30d.revenue_30d;
     let mediation = snapshot.mediation_totals_30d.revenue_30d;
+    // Unknown is not zero: skip when the provider never reported a mediation
+    // total (the flag is transient and absent on stored snapshots) and the
+    // value is the default zero. A nonzero total is itself evidence it was
+    // measured; an explicitly reported zero (flag set) still compares.
+    if !snapshot.mediation_totals_reported && mediation <= 0 && platform > 0 {
+        return Vec::new();
+    }
     let denominator = platform.max(mediation);
     if denominator <= 0 {
         return Vec::new();
@@ -74,6 +84,7 @@ mod tests {
         let mut snapshot = empty_snapshot();
         snapshot.platform_totals_30d = totals(platform, 100_000);
         snapshot.mediation_totals_30d = totals(mediation, 100_000);
+        snapshot.mediation_totals_reported = true;
         snapshot
     }
 

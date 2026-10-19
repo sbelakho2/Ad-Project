@@ -129,6 +129,14 @@ pub fn render(meta: &PageMeta, data: &FinanceData) -> String {
                 &format!("The fee read is not available: {reason}"),
                 None,
             ));
+            // The month series comes from the verified ledger and the invoice
+            // register, not from the analytics fee read. An absent analytics
+            // store must not hide economics the durable sources can prove.
+            if let Some(live) = &data.live_economics {
+                body.push_str(&render_live_economics(live));
+            } else if let Some(analytics) = &data.analytics {
+                body.push_str(&render_analytics(analytics));
+            }
         }
         Ok(rows) => {
             let all_totals = totals(rows);
@@ -763,6 +771,43 @@ mod tests {
         let counted = rows.len();
         let bucketed = 1 + 1 + 1 + 2; // estimated+pending / invoiced / paid / held
         assert_eq!(counted, bucketed);
+    }
+
+    #[test]
+    fn live_economics_render_even_when_the_fee_read_is_unavailable() {
+        let month = LiveEconomicsMonth {
+            month: "2026-10".to_string(),
+            currency: "USD".to_string(),
+            net_micros: 2_100_000_000,
+            gross_micros: 2_520_000_000,
+            credits_micros: None,
+            ledger_fee_micros: 2_000_000_000,
+            ledger_fee_records: 1,
+            invoice_records: 2,
+        };
+        let data = FinanceData {
+            fee_rows: Err("no analytics store is configured".to_string()),
+            currency: None,
+            analytics: None,
+            live_economics: Some(Ok(vec![month])),
+        };
+        let meta = PageMeta {
+            environment: "TEST".to_string(),
+            as_of_ms: 1_792_000_000_000,
+            operator: Some("sam".to_string()),
+            role: Some(crate::capabilities::Role::Finance),
+            fixtures: false,
+            csrf: "a".repeat(32),
+        };
+        let html = render(&meta, &data);
+        assert!(html.contains("The fee read is not available"));
+        assert!(html.contains("Service economics"));
+        assert!(
+            html.contains("USD 2,000.00"),
+            "verified ledger fee is visible"
+        );
+        assert!(html.contains("USD 2,100.00"), "net is visible");
+        assert!(html.contains("USD 2,520.00"), "gross is visible");
     }
 
     #[test]

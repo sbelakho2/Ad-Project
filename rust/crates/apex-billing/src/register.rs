@@ -288,6 +288,42 @@ impl InvoiceRegister {
             .copied())
     }
 
+    /// The already-issued invoice for `(publisher, year_month)`, when the
+    /// register holds one. The register is the authority for numbering, so a
+    /// retried monthly pass can return the issued document (and its number)
+    /// instead of allocating a second number for the same period.
+    pub fn stored_invoice(
+        &self,
+        publisher_id: &str,
+        year_month: &str,
+    ) -> Result<Option<Invoice>, BillingError> {
+        let _guard = self.lock()?;
+        self.refresh_locked()?;
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(BillingError::RegisterCorrupt {
+                    detail: format!("{} could not be read: {error}", self.path.display()),
+                })
+            }
+        };
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let value: serde_json::Value =
+                serde_json::from_str(line).map_err(|error| BillingError::RegisterCorrupt {
+                    detail: format!("register line is not JSON: {error}"),
+                })?;
+            let invoice: Invoice =
+                serde_json::from_value(value).map_err(|error| BillingError::RegisterCorrupt {
+                    detail: format!("register line is not an invoice: {error}"),
+                })?;
+            if invoice.publisher_id == publisher_id && invoice.period.year_month == year_month {
+                return Ok(Some(invoice));
+            }
+        }
+        Ok(None)
+    }
+
     /// Assign the next gapless number to `invoice` and append it to the
     /// register in one atomic step. The invoice must be issue-ready: a draft
     /// without an applied VAT treatment or a customer profile is refused

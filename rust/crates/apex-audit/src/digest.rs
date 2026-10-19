@@ -91,6 +91,7 @@ mod tests {
         snapshot.country_revenue = vec![testkit::row("EE", "u1", 0, 50_000)];
         snapshot.platform_totals_30d = testkit::totals(10_000_000, 100_000);
         snapshot.mediation_totals_30d = testkit::totals(10_000_000, 100_000);
+        snapshot.mediation_totals_reported = true;
         snapshot.app_ads_txt =
             testkit::ads_txt(true, &["admob.com, pub-1, DIRECT"], &["admob.com"]);
         assert_eq!(
@@ -116,6 +117,7 @@ mod extra_sensitivity_tests {
             let mut s = empty_snapshot();
             s.platform_totals_30d = totals(1_000_000, 1_000);
             s.mediation_totals_30d = totals(1_000_000, 1_000);
+            s.mediation_totals_reported = true;
             s.ad_units = vec![unit("u1", true, vec![])];
             s.waterfall = vec![waterfall_entry("e1", "u1", "admob")];
             s.mediation_groups = vec![mediation_group("g1", &["admob"], "u1")];
@@ -162,6 +164,7 @@ mod extra_sensitivity_tests {
         let mut s = empty_snapshot();
         s.platform_totals_30d = totals(1, 1);
         s.mediation_totals_30d = totals(1, 1);
+        s.mediation_totals_reported = true;
         let report: AuditReport = crate::engine::run(&s);
         assert_eq!(report.snapshot_digest, digest_of(&s));
     }

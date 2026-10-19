@@ -1246,7 +1246,10 @@ async fn access(State(state): State<ControlState>, headers: HeaderMap) -> Respon
         Err(response) => return *response,
     };
     let meta = meta(&state, Some(&session));
-    let history = state.journal_entries();
+    // The page renders the 200 newest rows and the 20 newest review forms.
+    // Cloning the whole index (100k entries in the performance scenario)
+    // per request is avoidable work with no visible effect.
+    let history = state.journal_recent(200);
     let sessions = state.sessions.list(state.now_ms());
     let can_revoke = session.role.allows(Capability::SessionRevoke);
     let mut revoke_forms = Vec::new();
@@ -1650,7 +1653,11 @@ async fn login_code_submit(
             }
             redirect(
                 next.as_deref().unwrap_or("/control/"),
-                Some(session::session_cookie(&opened.id, secure)),
+                Some(session::session_cookie_for_idle(
+                    &opened.id,
+                    secure,
+                    state.sessions.idle_ms(),
+                )),
             )
         }
     }
@@ -1662,6 +1669,15 @@ async fn logout(
     body: axum::body::Bytes,
 ) -> Response {
     let meta = meta(&state, None);
+    // Every state-changing POST shares the same-origin guard, not only the
+    // two sign-in steps. A cross-site form can carry no session cookie under
+    // SameSite=Lax, and no request reached from another origin executes here.
+    if !login_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(&meta, Some("Cross-origin sign-out is not allowed.")),
+        );
+    }
     let fields = parse_form(&body).unwrap_or_default();
     let Some(view) = session_id_from_headers(&state, &headers) else {
         return redirect("/control/login", None);
@@ -1720,6 +1736,14 @@ async fn action_submit(
         Err(response) => return *response,
     };
     let meta = meta(&state, Some(&session));
+    // Same-origin guard before CSRF/capability handling: a cross-site POST
+    // is refused even if a token leaks, and it writes no journal row.
+    if !login_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(&meta, Some("Cross-origin actions are not allowed.")),
+        );
+    }
     let Some(capability) = Capability::parse(&kind) else {
         return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
@@ -1855,6 +1879,12 @@ async fn action_result(
     let Some(entry) = state.indexed_result(&id) else {
         return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
     };
+    // The route's kind is part of the result identity. Rendering a result
+    // under another capability would mislabel the recorded action (the
+    // journal is the authoritative record), so a mismatched kind is 404.
+    if entry.capability != kind {
+        return html_response(StatusCode::NOT_FOUND, pages::errors::not_found(&meta));
+    }
     let (state_outcome, job_state) = match entry.job_id.as_deref() {
         Some(job_id) => match state.jobs.read(job_id).await {
             Ok(crate::jobs::JobRead::Parsed(job)) => {

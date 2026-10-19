@@ -554,8 +554,15 @@ pub fn compute_report_day_projections(report_days: &[ReportDayRow]) -> ReportDay
                     currency,
                     revenue_micros: accumulator.revenue_micros,
                     impressions: accumulator.impressions,
+                    // An account that reported a final row that day is not a
+                    // provisional-only account, even if it also has a
+                    // provisional row for the same day (a re-pull can leave
+                    // both until the replacing fold collapses them).
                     final_accounts: accumulator.final_accounts.len() as u32,
-                    provisional_accounts: accumulator.provisional_accounts.len() as u32,
+                    provisional_accounts: accumulator
+                        .provisional_accounts
+                        .difference(&accumulator.final_accounts)
+                        .count() as u32,
                 },
             )
             .collect(),
@@ -844,13 +851,22 @@ pub fn rebuild_sql(
         ProjectionName::PlatformDaily => format!(
             "INSERT INTO {db}.platform_daily\n\
              SELECT platform, day, currency,\n\
-             \x20   toInt64(sum(revenue_micros)) AS revenue_micros,\n\
-             \x20   if(countIf(impressions IS NULL) = 0, toNullable(sum(impressions)), NULL) AS impressions,\n\
-             \x20   toUInt32(uniqExactIf(platform_account_id, finality = 'final')) AS final_accounts,\n\
-             \x20   toUInt32(uniqExactIf(platform_account_id, finality = 'provisional')) AS provisional_accounts,\n\
+             \x20   toInt64(sum(account_revenue)) AS revenue_micros,\n\
+             \x20   if(sum(missing_impressions) = 0, toNullable(sum(account_impressions)), NULL) AS impressions,\n\
+             \x20   toUInt32(countIf(has_final)) AS final_accounts,\n\
+             \x20   toUInt32(countIf(has_provisional AND NOT has_final)) AS provisional_accounts,\n\
              \x20   {as_of_version} AS as_of_version\n\
-             FROM {db}.report_days AS report FINAL\n\
-             WHERE report.revenue_micros IS NOT NULL AND report.currency IS NOT NULL\n\
+             FROM (\n\
+             \x20   SELECT platform, day, currency, platform_account_id,\n\
+             \x20       sum(revenue_micros) AS account_revenue,\n\
+             \x20       sum(impressions) AS account_impressions,\n\
+             \x20       countIf(impressions IS NULL) AS missing_impressions,\n\
+             \x20       countIf(finality = 'final') > 0 AS has_final,\n\
+             \x20       countIf(finality = 'provisional') > 0 AS has_provisional\n\
+             \x20   FROM {db}.report_days AS report FINAL\n\
+             \x20   WHERE report.revenue_micros IS NOT NULL AND report.currency IS NOT NULL\n\
+             \x20   GROUP BY platform, day, currency, platform_account_id\n\
+             ) AS account\n\
              GROUP BY platform, day, currency"
         ),
         ProjectionName::LifecycleCohorts => format!(
@@ -1407,6 +1423,30 @@ mod tests {
     }
 
     #[test]
+    fn an_account_with_a_final_row_is_not_a_provisional_only_account() {
+        // The same account reports both a final and a (re-pulled)
+        // provisional row for the day: the final row wins, so the account is
+        // not counted as "only provisional". The revenue still adds up.
+        let mut days = known_value_report_days();
+        let mut provisional = days[0].clone();
+        provisional.finality = "provisional".into();
+        provisional.revenue_micros = Some(1_000_000);
+        provisional.impressions = Some(1);
+        days.push(provisional);
+        let rows = compute_platform_daily(&days);
+        let oct_01 = rows
+            .iter()
+            .find(|row| row.day == "2026-10-01")
+            .expect("row");
+        assert_eq!(oct_01.final_accounts, 1);
+        assert_eq!(
+            oct_01.provisional_accounts, 0,
+            "an account with a final row that day is not provisional-only"
+        );
+        assert_eq!(oct_01.revenue_micros, 5_151_000_000);
+    }
+
+    #[test]
     fn lifecycle_cohorts_group_by_first_seen_month() {
         let accounts = vec![
             AccountRow {
@@ -1849,7 +1889,10 @@ mod tests {
             sql.contains("WHERE report.revenue_micros IS NOT NULL AND report.currency IS NOT NULL")
         );
         let sql = rebuild_sql("db", ProjectionName::PlatformDaily, 7).expect("sql");
-        assert!(sql.contains("uniqExactIf(platform_account_id, finality = 'final')"));
+        assert!(sql.contains("countIf(finality = 'final') > 0 AS has_final"));
+        assert!(sql.contains(
+            "toUInt32(countIf(has_provisional AND NOT has_final)) AS provisional_accounts"
+        ));
         let sql = rebuild_sql("db", ProjectionName::LifecycleCohorts, 7).expect("sql");
         assert!(sql.contains("FROM db.accounts FINAL"));
         let sql = rebuild_sql("db", ProjectionName::OperatorQueues, 7).expect("sql");
@@ -2078,7 +2121,11 @@ mod tests {
                     revenue_micros: accumulator.revenue_micros,
                     impressions: accumulator.impressions,
                     final_accounts: accumulator.final_accounts.len() as u32,
-                    provisional_accounts: accumulator.provisional_accounts.len() as u32,
+                    provisional_accounts: accumulator
+                        .provisional_accounts
+                        .iter()
+                        .filter(|account| !accumulator.final_accounts.contains(account))
+                        .count() as u32,
                 },
             )
             .collect()

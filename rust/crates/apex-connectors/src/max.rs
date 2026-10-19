@@ -30,6 +30,19 @@ pub const MAX_MANAGEMENT_BASE: &str = "https://o.applovin.com/mediation/v1";
 /// Reporting API base from the public documentation.
 pub const MAX_REPORTING_BASE: &str = "https://r.applovin.com";
 
+/// One page of the management list (`limit`) and the reporting API. The
+/// documented reporting maximum is 1000; the management list accepts a
+/// `limit`/`offset` pair and can otherwise time out or answer 500 on a large
+/// account.
+const PAGE_LIMIT: usize = 1000;
+/// Hard bound on pagination loops: a server that ignores `offset` must fail
+/// typed instead of looping forever.
+const MAX_PAGES: usize = 10_000;
+/// The documented reporting API request window (inclusive days). Larger
+/// requests are split into this-sized windows instead of being refused by the
+/// provider.
+pub const MAX_REPORT_WINDOW_DAYS: i64 = 45;
+
 /// All management writes are doc-matched but not yet confirmed against a live
 /// sandbox, so they stay `VerifyLive`: the autopilot refuses writes until the
 /// operator adds the endpoint to the verified list.
@@ -115,23 +128,66 @@ impl MaxClient {
 
     /// List ad units. The response is a top-level array; `bid_floors` only
     /// arrive when `with_floors` is requested via the `fields` parameter.
+    ///
+    /// The documented endpoint paginates with `limit`/`offset` and warns that
+    /// a large account can time out or answer `500` without them. Pagination
+    /// is therefore explicit; a server that repeats a page fails typed rather
+    /// than duplicating ad units or looping forever.
     pub async fn list_ad_units(&self, with_floors: bool) -> Result<Vec<AdUnit>, PlatformError> {
-        let path = if with_floors {
-            "/ad_units?fields=bid_floors".to_string()
-        } else {
-            "/ad_units".to_string()
-        };
-        let data = self
-            .caller
-            .call("listAdUnits", HttpMethod::Get, &path, None, None)
-            .await?;
-        let units = data.as_array().ok_or_else(|| {
-            self.schema(
-                "listAdUnits",
-                "response is not a top-level array of ad units",
-            )
-        })?;
-        units.iter().map(|item| self.parse_ad_unit(item)).collect()
+        let mut units = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut offset = 0usize;
+        for _ in 0..MAX_PAGES {
+            let mut path = format!("/ad_units?limit={PAGE_LIMIT}&offset={offset}");
+            if with_floors {
+                path.push_str("&fields=bid_floors");
+            }
+            let data = self
+                .caller
+                .call("listAdUnits", HttpMethod::Get, &path, None, None)
+                .await?;
+            let page = data.as_array().ok_or_else(|| {
+                self.schema(
+                    "listAdUnits",
+                    "response is not a top-level array of ad units",
+                )
+            })?;
+            if page.len() > PAGE_LIMIT {
+                return Err(self.schema(
+                    "listAdUnits",
+                    format!(
+                        "page returned {} ad units, above the {PAGE_LIMIT} requested limit",
+                        page.len()
+                    ),
+                ));
+            }
+            if page.is_empty() {
+                return Ok(units);
+            }
+            for item in page {
+                let unit = self.parse_ad_unit(item)?;
+                if !ids.insert(unit.platform_unit_id.clone()) {
+                    return Err(self.schema(
+                        "listAdUnits",
+                        format!(
+                            "pagination repeated ad unit '{}' at offset {offset}; the server is not advancing",
+                            unit.platform_unit_id
+                        ),
+                    ));
+                }
+                units.push(unit);
+            }
+            offset = offset
+                .checked_add(page.len())
+                .ok_or_else(|| self.schema("listAdUnits", "pagination offset overflowed usize"))?;
+            if page.len() < PAGE_LIMIT {
+                return Ok(units);
+            }
+        }
+        Err(self.schema(
+            "listAdUnits",
+            format!("pagination exceeded {MAX_PAGES} pages"),
+        ))
     }
 
     /// Read one ad unit, including its floors.
@@ -448,7 +504,7 @@ impl MaxReportClient {
         Ok(Self {
             transport,
             report_key: report_key.to_string(),
-            base_url: base_url.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
 
@@ -462,16 +518,65 @@ impl MaxReportClient {
         columns: &[&str],
         filter: Option<(&str, &str)>,
     ) -> Result<Vec<ReportRow>, PlatformError> {
+        if columns.is_empty() {
+            return Err(PlatformError::Validation(
+                "MAX maxReport requires at least one column".into(),
+            ));
+        }
+        let columns = columns.join(",");
+        let windows = report_windows(start, end)?;
+        // A provider that accepts the whole range is asked once. Only when it
+        // refuses the request because the span exceeds the documented 45-day
+        // window do we split and retry the exact same query in windows. This
+        // keeps the common short-range path one request while never sending a
+        // range the provider documents as invalid more than once.
+        if windows.len() > 1 {
+            let probe = self
+                .fetch_window(start, end, &columns, filter, true)
+                .await?;
+            if !probe.window_too_long {
+                return Ok(probe.rows);
+            }
+        }
+        let mut collected: Vec<ReportRow> = Vec::new();
+        for (window_start, window_end) in windows {
+            let outcome = self
+                .fetch_window(&window_start, &window_end, &columns, filter, false)
+                .await?;
+            collected.extend(outcome.rows);
+        }
+        Ok(collected)
+    }
+
+    /// Fetch one inclusive window, following `count`/`limit`/`offset` until
+    /// the provider reports the window complete. When `probe` is set the
+    /// caller is testing whether the provider accepts a range longer than the
+    /// documented window; a 400 then means "split it" rather than a failure.
+    async fn fetch_window(
+        &self,
+        window_start: &str,
+        window_end: &str,
+        columns: &str,
+        filter: Option<(&str, &str)>,
+        probe: bool,
+    ) -> Result<FetchOutcome, PlatformError> {
         let mut collected: Vec<ReportRow> = Vec::new();
         let mut offset = 0usize;
-        loop {
+        let mut window_collected = 0usize;
+        // `count` is documented as "the number of results returned", but some
+        // deployments report the total for the whole query. Treat it as a
+        // total only when it exceeds the page length, and otherwise page on
+        // the page length itself.
+        let mut claimed_total: Option<usize> = None;
+        let mut previous_page: Option<String> = None;
+        for _ in 0..MAX_PAGES {
             let mut url = format!(
-                "{}/maxReport?api_key={}&columns={}&start={}&end={}&format=json&limit=1000&offset={offset}",
+                "{}/maxReport?api_key={}&columns={}&start={}&end={}&format=json&limit={PAGE_LIMIT}&offset={offset}",
                 self.base_url,
                 encode_query(&self.report_key),
-                encode_query(&columns.join(",")),
-                encode_query(start),
-                encode_query(end),
+                encode_query(columns),
+                encode_query(window_start),
+                encode_query(window_end),
             );
             if let Some((column, value)) = filter {
                 url.push_str(&format!(
@@ -491,7 +596,15 @@ impl MaxReportClient {
             };
             let response = match self.transport.request(request).await {
                 Ok(r) => r,
-                Err(crate::transport::TransportError::Platform(e)) => return Err(e),
+                Err(crate::transport::TransportError::Platform(e)) => {
+                    if probe && matches!(&e, PlatformError::Http { status: 400, .. }) {
+                        return Ok(FetchOutcome {
+                            rows: Vec::new(),
+                            window_too_long: true,
+                        });
+                    }
+                    return Err(e);
+                }
                 Err(crate::transport::TransportError::Network(detail)) => {
                     return Err(PlatformError::Network {
                         platform: PlatformId::AppLovinMax,
@@ -508,11 +621,13 @@ impl MaxReportClient {
                 }
             };
             if response.status != 200 {
-                return Err(PlatformError::Http {
-                    platform: PlatformId::AppLovinMax,
-                    operation: "maxReport".into(),
-                    status: response.status,
-                });
+                if probe && response.status == 400 {
+                    return Ok(FetchOutcome {
+                        rows: Vec::new(),
+                        window_too_long: true,
+                    });
+                }
+                return Err(report_status_error(response.status));
             }
             let parsed: serde_json::Value =
                 serde_json::from_slice(&response.body).map_err(|e| PlatformError::Schema {
@@ -522,19 +637,64 @@ impl MaxReportClient {
                 })?;
             let code = parsed.get("code").and_then(|v| v.as_u64()).unwrap_or(200);
             if code != 200 {
-                return Err(PlatformError::Http {
-                    platform: PlatformId::AppLovinMax,
-                    operation: "maxReport".into(),
-                    status: u16::try_from(code).unwrap_or(500),
-                });
+                if probe && code == 400 {
+                    return Ok(FetchOutcome {
+                        rows: Vec::new(),
+                        window_too_long: true,
+                    });
+                }
+                let status = u16::try_from(code).unwrap_or(500);
+                return Err(report_status_error(status));
             }
-            let count = parsed.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let results = parsed
                 .get("results")
                 .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for row in &results {
+                .ok_or_else(|| PlatformError::Schema {
+                    platform: PlatformId::AppLovinMax,
+                    operation: "maxReport".into(),
+                    detail: "response has no results array".into(),
+                })?;
+            if results.len() > PAGE_LIMIT {
+                return Err(PlatformError::Schema {
+                    platform: PlatformId::AppLovinMax,
+                    operation: "maxReport".into(),
+                    detail: format!(
+                        "page returned {} results, above the {PAGE_LIMIT} requested limit",
+                        results.len()
+                    ),
+                });
+            }
+            let count = parsed.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if count > results.len() {
+                claimed_total = Some(count);
+            }
+            let page_len = results.len();
+            if page_len == 0 {
+                if let Some(total) = claimed_total {
+                    if window_collected < total {
+                        return Err(PlatformError::Schema {
+                            platform: PlatformId::AppLovinMax,
+                            operation: "maxReport".into(),
+                            detail: format!(
+                                "pagination truncated for {window_start}..{window_end}: collected {window_collected} of {total} rows before the provider returned an empty page"
+                            ),
+                        });
+                    }
+                }
+                break;
+            }
+            let signature = serde_json::to_string(results).unwrap_or_default();
+            if previous_page.as_deref() == Some(signature.as_str()) {
+                return Err(PlatformError::Schema {
+                    platform: PlatformId::AppLovinMax,
+                    operation: "maxReport".into(),
+                    detail: format!(
+                        "pagination repeated the same {page_len}-row page at offset {offset}"
+                    ),
+                });
+            }
+            previous_page = Some(signature);
+            for row in results {
                 collected.push(
                     parse_report_row(row).map_err(|detail| PlatformError::Schema {
                         platform: PlatformId::AppLovinMax,
@@ -543,12 +703,27 @@ impl MaxReportClient {
                     })?,
                 );
             }
-            if collected.len() >= count || results.is_empty() {
+            window_collected += page_len;
+            if let Some(total) = claimed_total {
+                if window_collected >= total {
+                    break;
+                }
+            }
+            if page_len < PAGE_LIMIT && claimed_total.is_none() {
                 break;
             }
-            offset += results.len();
+            offset = offset
+                .checked_add(page_len)
+                .ok_or_else(|| PlatformError::Schema {
+                    platform: PlatformId::AppLovinMax,
+                    operation: "maxReport".into(),
+                    detail: "pagination offset overflowed usize".into(),
+                })?;
         }
-        Ok(collected)
+        Ok(FetchOutcome {
+            rows: collected,
+            window_too_long: false,
+        })
     }
 
     /// Revenue rows by country and ad unit for the audit floor rules.
@@ -582,7 +757,39 @@ impl MaxReportClient {
         let today = now_unix_ms.div_euclid(86_400_000);
         let start = format_day(today - 30);
         let end = format_day(today - 1);
-        self.country_ad_unit_rows(&start, &end).await
+        let rows = self.country_ad_unit_rows(&start, &end).await?;
+        // The reporting API groups by every requested dimension (here: day),
+        // so the same country/ad-unit pair arrives once per day. The audit
+        // consumes one 30-day total per pair; returning the daily rows would
+        // make it treat each day as a separate 30-day observation and double
+        // count the floor rules. Fold checked, so an overflowing total fails
+        // typed instead of wrapping.
+        let mut totals: std::collections::BTreeMap<(Option<String>, Option<String>), (i64, u64)> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let entry = totals
+                .entry((row.country, row.ad_unit_id))
+                .or_insert((0, 0));
+            entry.0 = entry.0.checked_add(row.revenue).ok_or_else(|| {
+                PlatformError::Validation("MAX 30-day revenue total overflow".into())
+            })?;
+            entry.1 = entry.1.checked_add(row.impressions).ok_or_else(|| {
+                PlatformError::Validation("MAX 30-day impressions total overflow".into())
+            })?;
+        }
+        Ok(totals
+            .into_iter()
+            .map(
+                |((country, ad_unit_id), (revenue, impressions))| ReportRow {
+                    day: end.clone(),
+                    country,
+                    ad_unit_id,
+                    test_group: None,
+                    revenue,
+                    impressions,
+                },
+            )
+            .collect())
     }
 
     /// Total reported revenue of one ad unit over `[start, end]`, in micros.
@@ -641,13 +848,103 @@ impl MaxReportClient {
 
     /// Platform-wide totals for the window.
     pub async fn totals(&self, start: &str, end: &str) -> Result<(i64, u64), PlatformError> {
+        // `day` is requested because the shared row parser requires it even
+        // when the caller only sums the metrics. Requesting only the two
+        // numeric columns made the provider return rows the parser rejected.
         let rows = self
-            .rows(start, end, &["estimated_revenue", "impressions"], None)
+            .rows(
+                start,
+                end,
+                &["day", "estimated_revenue", "impressions"],
+                None,
+            )
             .await?;
         let revenue: i64 = rows.iter().map(|r| r.revenue).sum();
         let impressions: u64 = rows.iter().map(|r| r.impressions).sum();
         Ok((revenue, impressions))
     }
+}
+
+/// One window's fetch result. `window_too_long` is set only for the probe
+/// request that tests a range above the documented 45-day limit.
+struct FetchOutcome {
+    rows: Vec<ReportRow>,
+    window_too_long: bool,
+}
+
+/// Classify a reporting-API status the same way the retry transport does, so
+/// a client built without the retry wrapper never turns a credential refusal
+/// or a rate limit into a generic HTTP error.
+fn report_status_error(status: u16) -> PlatformError {
+    if status == 401 || status == 403 {
+        return PlatformError::Auth {
+            platform: PlatformId::AppLovinMax,
+            operation: "maxReport".into(),
+            status,
+        };
+    }
+    if status == 429 {
+        return PlatformError::RateLimited {
+            platform: PlatformId::AppLovinMax,
+            operation: "maxReport".into(),
+            retry_after: None,
+        };
+    }
+    PlatformError::Http {
+        platform: PlatformId::AppLovinMax,
+        operation: "maxReport".into(),
+        status,
+    }
+}
+
+/// Split `[start, end]` into inclusive windows no longer than the documented
+/// 45-day reporting limit. Invalid or reversed dates are a typed validation
+/// error before any request is sent.
+fn report_windows(start: &str, end: &str) -> Result<Vec<(String, String)>, PlatformError> {
+    let start_day = parse_day(start).ok_or_else(|| {
+        PlatformError::Validation(format!("MAX maxReport start '{start}' is not YYYY-MM-DD"))
+    })?;
+    let end_day = parse_day(end).ok_or_else(|| {
+        PlatformError::Validation(format!("MAX maxReport end '{end}' is not YYYY-MM-DD"))
+    })?;
+    if end_day < start_day {
+        return Err(PlatformError::Validation(format!(
+            "MAX maxReport end '{end}' is before start '{start}'"
+        )));
+    }
+    let mut windows = Vec::new();
+    let mut cursor = start_day;
+    while cursor <= end_day {
+        let window_end = (cursor + MAX_REPORT_WINDOW_DAYS - 1).min(end_day);
+        windows.push((format_day(cursor), format_day(window_end)));
+        cursor = window_end + 1;
+    }
+    Ok(windows)
+}
+
+/// `YYYY-MM-DD` -> day number since the Unix epoch, strict enough to reject
+/// impossible dates (the civil-to-days inverse of [`format_day`]).
+fn parse_day(text: &str) -> Option<i64> {
+    let mut parts = text.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    // Round-trip catches e.g. 2026-02-30, which would otherwise roll over.
+    (format_day(days) == text).then_some(days)
 }
 
 fn parse_report_row(row: &serde_json::Value) -> Result<ReportRow, String> {
@@ -1034,6 +1331,405 @@ mod tests {
             calls[0].url
         );
         assert!(calls[1].url.contains("offset=2"), "{}", calls[1].url);
+    }
+
+    #[tokio::test]
+    async fn list_ad_units_follows_limit_and_offset_until_a_short_page() {
+        let mut first = Vec::new();
+        for index in 0..PAGE_LIMIT {
+            first.push(serde_json::json!({
+                "id": format!("u{index:04}"),
+                "name": "Banner",
+                "platform": "ios",
+                "package_name": "com.x",
+                "ad_format": "BANNER"
+            }));
+        }
+        let page1 = serde_json::to_string(&first).expect("page one");
+        let page2 = r#"[{"id":"last","name":"Rewarded","platform":"android","package_name":"com.y","ad_format":"REWARD"}]"#;
+        let transport = Scripted::new(vec![ok(&page1), ok(page2)]);
+        let units = client(transport.clone())
+            .list_ad_units(false)
+            .await
+            .expect("paginated units");
+        assert_eq!(units.len(), PAGE_LIMIT + 1);
+        assert_eq!(units.last().expect("last").platform_unit_id, "last");
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls[0].url.contains("limit=1000&offset=0"),
+            "{}",
+            calls[0].url
+        );
+        assert!(
+            calls[1].url.contains("limit=1000&offset=1000"),
+            "{}",
+            calls[1].url
+        );
+    }
+
+    #[tokio::test]
+    async fn list_ad_units_fails_typed_when_pagination_does_not_advance() {
+        let mut page = Vec::new();
+        for index in 0..PAGE_LIMIT {
+            page.push(serde_json::json!({
+                "id": format!("u{index:04}"),
+                "name": "Banner",
+                "platform": "ios",
+                "package_name": "com.x",
+                "ad_format": "BANNER"
+            }));
+        }
+        let body = serde_json::to_string(&page).expect("page");
+        let transport = Scripted::new(vec![ok(&body), ok(&body)]);
+        let error = client(transport)
+            .list_ad_units(false)
+            .await
+            .expect_err("a repeated page is not a complete list");
+        assert!(
+            matches!(error, PlatformError::Schema { .. }),
+            "unexpected {error:?}"
+        );
+        assert!(error.to_string().contains("not advancing"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn list_ad_units_reports_a_response_above_the_requested_page_size() {
+        let mut page = Vec::new();
+        for index in 0..=PAGE_LIMIT {
+            page.push(serde_json::json!({
+                "id": format!("u{index:04}"),
+                "name": "Banner",
+                "platform": "ios",
+                "package_name": "com.x",
+                "ad_format": "BANNER"
+            }));
+        }
+        let body = serde_json::to_string(&page).expect("page");
+        let transport = Scripted::new(vec![ok(&body)]);
+        let error = client(transport)
+            .list_ad_units(false)
+            .await
+            .expect_err("oversized page");
+        assert!(error.to_string().contains("requested limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn report_pagination_uses_the_documented_page_sized_count() {
+        // The docs define `count` as "the number of results returned"; a
+        // short page is the end even when count equals the page size.
+        let page = r#"{"code":200,"count":1,"results":[
+            {"day":"2026-10-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"1.00","impressions":"10"}
+        ]}"#;
+        let transport = Scripted::new(vec![ok(page)]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let rows = report
+            .country_ad_unit_rows("2026-10-01", "2026-10-01")
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn report_pagination_fails_typed_when_the_provider_truncates() {
+        let page1 = r#"{"code":200,"count":5,"results":[
+            {"day":"2026-10-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"1.00","impressions":"10"},
+            {"day":"2026-10-02","country":"US","max_ad_unit_id":"u1","estimated_revenue":"2.00","impressions":"20"}
+        ]}"#;
+        let page2 = r#"{"code":200,"count":5,"results":[]}"#;
+        let transport = Scripted::new(vec![ok(page1), ok(page2)]);
+        let report =
+            MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+        let error = report
+            .country_ad_unit_rows("2026-10-01", "2026-10-02")
+            .await
+            .expect_err("a truncated report must not look complete");
+        assert!(
+            matches!(error, PlatformError::Schema { .. }),
+            "unexpected {error:?}"
+        );
+        assert!(error.to_string().contains("truncated"), "{error}");
+        assert!(error.to_string().contains("collected 2 of 5"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn report_pagination_fails_typed_on_a_repeated_page_without_a_total() {
+        let mut results = Vec::new();
+        for index in 0..PAGE_LIMIT {
+            results.push(serde_json::json!({
+                "day": "2026-10-01",
+                "country": "US",
+                "max_ad_unit_id": "u1",
+                "estimated_revenue": "1.00",
+                "impressions": "10",
+                "row": index
+            }));
+        }
+        let page = serde_json::to_string(&serde_json::json!({
+            "code": 200,
+            "count": PAGE_LIMIT,
+            "results": results
+        }))
+        .expect("page");
+        let transport = Scripted::new(vec![ok(&page), ok(&page)]);
+        let report =
+            MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+        let error = report
+            .country_ad_unit_rows("2026-10-01", "2026-10-02")
+            .await
+            .expect_err("a repeated page");
+        assert!(error.to_string().contains("repeated"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn thirty_day_country_revenue_folds_daily_rows_per_pair() {
+        let page = r#"{"code":200,"count":4,"results":[
+            {"day":"2026-10-01","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"1.50","impressions":"10"},
+            {"day":"2026-10-02","country":"EE","max_ad_unit_id":"u1","estimated_revenue":"2.25","impressions":"15"},
+            {"day":"2026-10-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"4.00","impressions":"40"},
+            {"day":"2026-10-01","country":"EE","max_ad_unit_id":"u2","estimated_revenue":"9.00","impressions":"90"}
+        ]}"#;
+        let transport = Scripted::new(vec![ok(page)]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let now = 1_791_000_000_000_i64; // 2026-10-03 UTC
+        let rows = report.country_revenue_30d(now).await.expect("rows");
+        assert_eq!(rows.len(), 3, "one row per country/ad-unit pair");
+        let ee_u1 = rows
+            .iter()
+            .find(|row| {
+                row.country.as_deref() == Some("EE") && row.ad_unit_id.as_deref() == Some("u1")
+            })
+            .expect("EE u1");
+        assert_eq!(ee_u1.revenue, 3_750_000);
+        assert_eq!(ee_u1.impressions, 25);
+        let us_u1 = rows
+            .iter()
+            .find(|row| {
+                row.country.as_deref() == Some("US") && row.ad_unit_id.as_deref() == Some("u1")
+            })
+            .expect("US u1");
+        assert_eq!(us_u1.revenue, 4_000_000);
+        assert_eq!(us_u1.impressions, 40);
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert!(
+            calls[0].url.contains("start=2026-09-03"),
+            "{}",
+            calls[0].url
+        );
+        assert!(calls[0].url.contains("end=2026-10-02"), "{}", calls[0].url);
+    }
+
+    #[tokio::test]
+    async fn a_long_range_is_probed_and_split_only_after_a_400() {
+        let refused = Ok(HttpResponse {
+            status: 400,
+            headers: vec![],
+            body: b"request window is 60 days; the API allows 45".to_vec(),
+        });
+        let first = ok(r#"{"code":200,"count":1,"results":[
+                {"day":"2026-01-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"1.00","impressions":"10"}
+            ]}"#);
+        let second = ok(r#"{"code":200,"count":1,"results":[
+                {"day":"2026-02-20","country":"US","max_ad_unit_id":"u1","estimated_revenue":"2.00","impressions":"20"}
+            ]}"#);
+        let transport = Scripted::new(vec![refused, first, second]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let rows = report
+            .country_ad_unit_rows("2026-01-01", "2026-03-01")
+            .await
+            .expect("split rows");
+        assert_eq!(rows.len(), 2);
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert_eq!(calls.len(), 3, "probe, then one request per 45-day window");
+        assert!(
+            calls[0].url.contains("start=2026-01-01"),
+            "{}",
+            calls[0].url
+        );
+        assert!(calls[0].url.contains("end=2026-03-01"), "{}", calls[0].url);
+        assert!(calls[1].url.contains("end=2026-02-14"), "{}", calls[1].url);
+        assert!(
+            calls[2].url.contains("start=2026-02-15"),
+            "{}",
+            calls[2].url
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_accepts_the_long_range_is_asked_once() {
+        let transport = Scripted::new(vec![ok(r#"{"code":200,"count":1,"results":[
+                {"day":"2026-01-01","country":"US","max_ad_unit_id":"u1","estimated_revenue":"1.00","impressions":"10"}
+            ]}"#)]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let rows = report
+            .country_ad_unit_rows("2026-01-01", "2026-03-01")
+            .await
+            .expect("long range");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn report_windows_split_the_documented_45_day_limit() {
+        let windows = report_windows("2026-01-01", "2026-03-01").expect("windows");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0], ("2026-01-01".into(), "2026-02-14".into()));
+        assert_eq!(windows[1], ("2026-02-15".into(), "2026-03-01".into()));
+        for (start, end) in &windows {
+            let span = parse_day(end).expect("end") - parse_day(start).expect("start") + 1;
+            assert!(
+                span <= MAX_REPORT_WINDOW_DAYS,
+                "{start}..{end} is {span} days"
+            );
+        }
+        assert!(report_windows("2026-03-01", "2026-01-01").is_err());
+        assert!(report_windows("2026-02-30", "2026-03-01").is_err());
+    }
+
+    #[tokio::test]
+    async fn totals_requests_the_day_column_its_parser_requires() {
+        let transport = Scripted::new(vec![ok(r#"{"code":200,"count":1,"results":[
+                {"day":"2026-10-01","estimated_revenue":"1.50","impressions":"10"}
+            ]}"#)]);
+        let report = MaxReportClient::new("report-key", "https://r.test", transport.clone())
+            .expect("report");
+        let totals = report
+            .totals("2026-10-01", "2026-10-01")
+            .await
+            .expect("totals");
+        assert_eq!(totals, (1_500_000, 10));
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert!(
+            calls[0]
+                .url
+                .contains("columns=day%2Cestimated_revenue%2Cimpressions"),
+            "{}",
+            calls[0].url
+        );
+    }
+
+    #[tokio::test]
+    async fn report_statuses_keep_auth_and_rate_limit_classification() {
+        for (status, expected) in [(401, "auth"), (403, "auth"), (429, "rate")] {
+            let transport = Scripted::new(vec![Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body: Vec::new(),
+            })]);
+            let report =
+                MaxReportClient::new("report-key", "https://r.test", transport).expect("report");
+            let error = report
+                .totals("2026-10-01", "2026-10-01")
+                .await
+                .expect_err("status error");
+            match (&error, expected) {
+                (PlatformError::Auth { status: seen, .. }, "auth") if *seen == status => {}
+                (PlatformError::RateLimited { .. }, "rate") => {}
+                _ => panic!("{status} classified as {error:?}"),
+            }
+            assert!(!error.is_retryable() || expected == "rate");
+        }
+    }
+
+    #[tokio::test]
+    async fn ids_and_keys_are_percent_encoded_in_paths_and_queries() {
+        let unit = r#"{"id":"u/1 ?","name":"B","platform":"ios","package_name":"com.x","ad_format":"BANNER"}"#;
+        let transport = Scripted::new(vec![ok(unit)]);
+        let client = MaxClient::new("key", "https://api.test", transport.clone()).expect("client");
+        let _ = client.get_ad_unit("u/1 ?").await.expect("unit");
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert!(
+            calls[0].url.contains("/ad_unit/u%2F1%20%3F"),
+            "{}",
+            calls[0].url
+        );
+
+        let transport = Scripted::new(vec![ok(r#"{"code":200,"count":0,"results":[]}"#)]);
+        let report = MaxReportClient::new("key with & space", "https://r.test/", transport.clone())
+            .expect("report");
+        let _ = report
+            .totals("2026-10-01", "2026-10-01")
+            .await
+            .expect("empty totals");
+        let calls = transport.calls.lock().map(|c| c.clone()).unwrap();
+        assert!(
+            calls[0].url.starts_with("https://r.test/maxReport?"),
+            "{}",
+            calls[0].url
+        );
+        assert!(
+            calls[0].url.contains("api_key=key%20with%20%26%20space"),
+            "{}",
+            calls[0].url
+        );
+    }
+
+    /// Live promotion driver for the provider simulator. Ignored by default:
+    /// run it with `MAX_SIM_BASE`/`MAX_SIM_API_KEY` and `--ignored` after a
+    /// real `apex-runner cycle` has created an experiment. It uses the real
+    /// [`MaxClient`] promoted through `ReqwestTransport`, then the next audit
+    /// reads the promoted floors from the management API.
+    /// Live floor-write driver: read the unit, replace the whole floor list
+    /// through the real [`MaxClient::update_floors`], and read it back. Run
+    /// with `MAX_SIM_BASE`/`MAX_SIM_API_KEY` and `--ignored`; the simulator's
+    /// state file is the external proof of the write.
+    #[tokio::test]
+    async fn live_update_floors_is_visible_on_the_next_read() {
+        if std::env::var_os("MAX_SIM_BASE").is_none() {
+            eprintln!("skipping live MAX driver: set MAX_SIM_BASE and MAX_SIM_API_KEY");
+            return;
+        }
+        let base = std::env::var("MAX_SIM_BASE").expect("MAX_SIM_BASE");
+        let key = std::env::var("MAX_SIM_API_KEY").expect("MAX_SIM_API_KEY");
+        let unit_id = std::env::var("MAX_SIM_UNIT").unwrap_or_else(|_| "rw_demo_01".into());
+        let target: i64 = std::env::var("MAX_SIM_FLOOR")
+            .unwrap_or_else(|_| "1750000".into())
+            .parse()
+            .expect("MAX_SIM_FLOOR micros");
+        let transport: Arc<dyn Transport> =
+            Arc::new(crate::transport::ReqwestTransport::new().expect("reqwest transport"));
+        let client = MaxClient::new(&key, &base, transport).expect("client");
+        let unit = client.get_ad_unit(&unit_id).await.expect("unit");
+        let mut floors = unit.country_floors.clone().unwrap_or_default();
+        assert!(!floors.is_empty(), "the simulator unit has floors");
+        floors[0].floor_ecpm = target;
+        let updated = client
+            .update_floors(&unit, &floors)
+            .await
+            .expect("floor write");
+        assert_eq!(
+            updated.country_floors.as_ref().expect("written floors")[0].floor_ecpm,
+            target
+        );
+        let reread = client.get_ad_unit(&unit_id).await.expect("reread");
+        assert_eq!(
+            reread.country_floors.as_ref().expect("reread floors")[0].floor_ecpm,
+            target
+        );
+    }
+
+    #[tokio::test]
+    async fn live_promote_the_simulator_experiment() {
+        if std::env::var_os("MAX_SIM_BASE").is_none() {
+            eprintln!("skipping live MAX driver: set MAX_SIM_BASE and MAX_SIM_API_KEY");
+            return;
+        }
+        let base = std::env::var("MAX_SIM_BASE").expect("MAX_SIM_BASE");
+        let key = std::env::var("MAX_SIM_API_KEY").expect("MAX_SIM_API_KEY");
+        let unit = std::env::var("MAX_SIM_UNIT").unwrap_or_else(|_| "rw_demo_01".into());
+        let transport: Arc<dyn Transport> =
+            Arc::new(crate::transport::ReqwestTransport::new().expect("reqwest transport"));
+        let client = MaxClient::new(&key, &base, transport).expect("client");
+        let running = client.get_experiment(&unit).await.expect("experiment");
+        assert_eq!(running.state, ExperimentState::Running);
+        client.promote_experiment(&unit).await.expect("promote");
+        let promoted = client.get_experiment(&unit).await.expect("experiment");
+        assert_eq!(promoted.state, ExperimentState::Completed);
     }
 
     #[test]

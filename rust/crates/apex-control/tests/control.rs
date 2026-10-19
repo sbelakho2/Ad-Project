@@ -970,6 +970,93 @@ async fn csrf_failure_is_refused_without_a_journal_entry() {
 }
 
 #[tokio::test]
+async fn cross_origin_action_and_logout_posts_are_refused_before_any_effect() {
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let before = harness.state.journal.read().expect("journal").entries.len();
+    let form = form_for(
+        &harness.state,
+        &signed,
+        Capability::IncidentAcknowledge,
+        "inc_018",
+        "0f0e0000000000000000000000000001",
+    )
+    .await;
+    let (status, _, _, html) = post_with_headers(
+        &app,
+        "/control/actions/incident_acknowledge",
+        Some(&signed.cookie),
+        &form,
+        &[("origin", "https://evil.example")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    assert_eq!(
+        harness.state.journal.read().expect("journal").entries.len(),
+        before,
+        "a cross-origin action writes nothing"
+    );
+
+    let (_, page) = get(&app, "/control/", Some(&signed.cookie)).await;
+    let csrf = hidden_value(&page, "csrf_token");
+    let (status, _, _, html) = post_with_headers(
+        &app,
+        "/control/logout",
+        Some(&signed.cookie),
+        &format!("csrf_token={csrf}"),
+        &[("origin", "https://evil.example")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{html}");
+    let (status, _) = get(&app, "/control/", Some(&signed.cookie)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the session survives a refused sign-out"
+    );
+}
+
+#[tokio::test]
+async fn a_result_page_under_the_wrong_capability_is_404() {
+    let harness = harness();
+    let app = app(&harness);
+    let signed = open_session(&harness.state, "maya", Role::Operator);
+    let form = form_for(
+        &harness.state,
+        &signed,
+        Capability::RetryRead,
+        "northstar:applovin_max:acct_northstar_max_01",
+        "1de00000000000000000000000000002",
+    )
+    .await;
+    let (status, location, _, _) = post(
+        &app,
+        "/control/actions/retry_read",
+        Some(&signed.cookie),
+        &form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let location = location.expect("location");
+    let result_id = location.rsplit('/').next().expect("result id");
+    let (status, _) = get(
+        &app,
+        &format!("/control/actions/incident_acknowledge/result/{result_id}"),
+        Some(&signed.cookie),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the kind is part of the identity"
+    );
+    let (status, body) = get(&app, &location, Some(&signed.cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(result_id));
+}
+
+#[tokio::test]
 async fn duplicate_submits_return_the_same_result_with_one_journal_entry_and_one_job() {
     let harness = harness();
     let app = app(&harness);

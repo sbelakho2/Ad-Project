@@ -18,10 +18,10 @@
 # - the marketing host serves the static Zola site for GET pages, and proxies
 #   only three path families to apex-api: POST /free-audit (the request form),
 #   /audit-requested/* (the confirmation pages, which are apex-api HTML and
-#   load the design-system fonts from /assets/fonts/*) and /assets/fonts/*
-#   (the self-hosted WOFF2 faces for those pages). Everything else, including
-#   GET /free-audit and every /console path, stays static: the marketing host
-#   no longer serves /console.
+#   load /assets/apex.css and its self-hosted WOFF2 faces from
+#   /assets/fonts/*), and the two asset families /assets/apex.css and
+#   /assets/fonts/*. Everything else, including GET /free-audit and every
+#   /console path, stays static: the marketing host no longer serves /console.
 # - the API host proxies its whole origin to apex-api.
 # - the console host proxies its whole origin to apex-api, so `/` is the
 #   console overview, `/console/*` the console pages, `/assets/*` the fonts
@@ -71,6 +71,16 @@
 
 	root * /srv/site/public
 	file_server
+
+	# Serve the site's own 404 page (Zola writes 404.html) with status 404
+	# instead of Caddy's empty default response.
+	handle_errors {
+		@not_found expression {http.error.status_code} == 404
+		handle @not_found {
+			rewrite * /404.html
+			file_server
+		}
+	}
 }
 
 {$APEX_DOMAIN:api.apexmediation.ee} {

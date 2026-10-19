@@ -1021,6 +1021,64 @@ async fn actions_require_the_session_csrf_token() {
 }
 
 #[tokio::test]
+async fn actions_reject_cross_origin_even_with_a_valid_csrf_token() {
+    let harness = harness_with_token(Some(TOKEN));
+    seed_demo(&harness.dir);
+    let app = harness.app();
+    let cookie = harness.sign_in().await;
+    let csrf = harness.csrf(&cookie);
+    let form = format!(
+        "target=maria%40studio.example&reason=opt_out&idempotency_key={}&csrf_token={csrf}",
+        "d".repeat(32)
+    );
+
+    let events_before = std::fs::read(harness.dir.join("events.jsonl")).unwrap_or_default();
+    let cross = [
+        ("host", "sales.example"),
+        ("origin", "https://evil.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+    let (status, _cookie, _location, body) =
+        post(&app, "/actions/suppress", Some(&cookie), &form, &cross).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("Cross-origin form submission"));
+    assert_eq!(
+        std::fs::read(harness.dir.join("events.jsonl")).unwrap_or_default(),
+        events_before,
+        "nothing written"
+    );
+
+    // A preview hint is refused as well, even without an Origin header.
+    let (status, _cookie, _location, _body) = post(
+        &app,
+        "/actions/suppress",
+        Some(&cookie),
+        &form,
+        &[("host", "sales.example"), ("sec-fetch-site", "cross-site")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        std::fs::read(harness.dir.join("events.jsonl")).unwrap_or_default(),
+        events_before,
+        "nothing written"
+    );
+
+    // The matching origin is accepted and writes the event.
+    let same = [
+        ("host", "sales.example"),
+        ("origin", "https://sales.example"),
+        ("x-forwarded-proto", "https"),
+    ];
+    let (status, _cookie, _location, body) =
+        post(&app, "/actions/suppress", Some(&cookie), &form, &same).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    assert!(std::fs::read_to_string(harness.dir.join("events.jsonl"))
+        .unwrap()
+        .contains("\"outcome\":\"unsubscribe\""));
+}
+
+#[tokio::test]
 async fn suppress_writes_the_implied_event_through_the_web() {
     let harness = harness_with_token(Some(TOKEN));
     seed_demo(&harness.dir);

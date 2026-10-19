@@ -498,8 +498,15 @@ def adyen_sign(hmac_key_hex, item):
     the eight documented fields colon-joined, in order (mirrors
     apex_billing::adyen::NotificationItem::signed_message)."""
     key = bytes.fromhex(hmac_key_hex)
+
+    def escape(value):
+        # Adyen escapes backslashes then colons inside every field before
+        # joining, so a merchant reference containing ':' signs correctly.
+        return str(value).replace("\\", "\\\\").replace(":", "\\:")
+
     message = ":".join(
-        [
+        escape(field)
+        for field in [
             item["pspReference"],
             item.get("originalReference", ""),
             item["merchantAccountCode"],
@@ -2819,6 +2826,7 @@ class Harness:
             "APEX_CONTROL_BIND": "127.0.0.1:%d" % port,
             "APEX_CONTROL_OPERATORS": os.path.join(work, "operators.json"),
             "APEX_CONTROL_JOURNAL": os.path.join(work, "journal.jsonl"),
+            "APEX_CONTROL_TOTP_STATE": os.path.join(work, "totp-steps.json"),
             "APEX_OPERATOR_JOBS_DIR": os.path.join(work, "jobs"),
             "APEX_CONTROL_LEDGER_ROOT": os.path.join(work, "ledgers"),
             "APEX_CONTROL_INVOICE_REGISTER": os.path.join(work, "invoices.jsonl"),
@@ -3242,9 +3250,9 @@ class Harness:
                 "/audit-requested/": ({200}, None, True),
                 "/watch": ({303}, None, False),
                 "/watch/": ({200}, None, True),
-                "/watch/requested": ({200}, None, True),
+                "/watch/requested": ({404}, None, True),
                 "/watch/confirm": ({400}, None, False),
-                "/watch/billing-profile/recorded": ({200}, None, True),
+                "/watch/billing-profile/recorded": ({404}, None, True),
                 "/healthz": ({200}, None, False),
                 "/favicon.ico": ({200}, None, False),
                 "/favicon.svg": ({200}, None, False),
@@ -3518,9 +3526,13 @@ class Harness:
                     problems.append("expected exactly one h1, found %d" % h1)
                 if "<title" not in body:
                     problems.append("missing <title>")
-                # The pinned confirmation copy on the setup-watch receipt.
-                if template == "/watch/requested" and "Your watch is requested." not in body:
-                    problems.append("the confirmation page does not carry its pinned copy")
+                # A valid receipt carries the pinned confirmation copy; an
+                # unknown reference is an honest 404, never a success page.
+                if template == "/watch/requested":
+                    if final.status == 404 and "This link is not valid or has expired." not in body:
+                        problems.append("the invalid-reference page is not the honest 404 copy")
+                    elif final.status == 200 and "Your watch is requested." not in body:
+                        problems.append("the confirmation page does not carry its pinned copy")
             if problems:
                 detail += "; " + "; ".join(problems)
             self.cell(cell_id, not problems, detail, "GET %s (anonymous%s)" % (url, " + session" if session_statuses else ""))
@@ -4887,10 +4899,12 @@ class Harness:
                             problems.append("%s -> %s" % (payload, error))
                             continue
                         accepted = resp.status in (400, 404, 303, 401)
+                        # A 200 is only honest when it is the generic
+                        # invalid-reference page, never a recorded success.
                         if resp.status == 200 and (
-                            "Your billing details are recorded." in resp.text
+                            "Your billing details are recorded." not in resp.text
                         ):
-                            accepted = True
+                            accepted = False
                         if not accepted:
                             problems.append(
                                 "%s -> HTTP %d (neither a typed refusal nor the honest recorded page)"

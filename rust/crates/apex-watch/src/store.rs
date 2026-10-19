@@ -447,7 +447,11 @@ impl Folded {
         for &index in indexes {
             probes += 1;
             let subscriber = &self.subscribers[index];
-            if subscriber.is_active() && constant_time_eq(hash, &subscriber.cancel_token_hash) {
+            // A pending sign-up is cancellable too: its owner must be able to
+            // stop the watch before confirming or paying.
+            if matches!(subscriber.status, Status::Active | Status::Pending)
+                && constant_time_eq(hash, &subscriber.cancel_token_hash)
+            {
                 return (Some(index), probes);
             }
         }
@@ -631,6 +635,7 @@ impl SubscriberStore {
             .as_ref()
             .map(|state| state.subscribers.clone())
             .unwrap_or_default();
+        restrict_mode(&self.subscribers_path())?;
         let stamp = Self::inspect(&self.subscribers_path())?;
         let (covered_bytes, covered_ino, covered_ctime, covered_ctime_nsec) = match stamp {
             Some(stamp) => (
@@ -1406,8 +1411,37 @@ impl SubscriberStore {
         self.append(&mut cached, &subscriber)
     }
 
-    /// Cancel with a presented plaintext token: the first active subscriber
-    /// whose stored hash matches is cancelled (a new row records the
+    /// Mint a fresh plaintext cancel token and its stored hash. The raw value
+    /// is returned once (for the alert footer / unsubscribe header) and only
+    /// the hash is ever written.
+    pub fn mint_cancel_token() -> (String, String) {
+        // The cancel token keeps the 32-hex (128-bit) capability shape the
+        // CLI, the HTTP validator and the stored hash all agree on.
+        let raw = random_hex(16);
+        let hash = sha256_hex(&raw);
+        (raw, hash)
+    }
+
+    /// The active subscriber a plaintext cancel token names, without changing
+    /// anything (the cancel GET page is inert).
+    pub fn find_by_cancel_token(&self, token: &str) -> Result<Option<Subscriber>, WatchError> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        let presented = sha256_hex(token);
+        let _guard = self.lock()?;
+        let mut cached = self.fold_lock()?;
+        self.refresh(&mut cached)?;
+        Ok(cached.as_ref().and_then(|state| {
+            let (index, probes) = state.find_cancel(&presented);
+            self.observe_row_probes(probes);
+            index.map(|index| state.subscribers[index].clone())
+        }))
+    }
+
+    /// Cancel with a presented plaintext token: the first active or pending
+    /// subscriber whose stored hash matches is cancelled (a new row records the
     /// cancellation; nothing is deleted). `None` means no active subscriber
     /// matches the token.
     pub fn cancel(&self, token: &str, now_ms: i64) -> Result<Option<Subscriber>, WatchError> {
@@ -1505,6 +1539,22 @@ impl SubscriberStore {
         let mut file = options.open(&path).map_err(|error| WatchError::Io {
             detail: format!("{} could not be opened: {error}", path.display()),
         })?;
+        // `mode(0o600)` only applies when the file is created. A restored or
+        // externally-created log may be world-readable, and it carries
+        // subscriber emails and token hashes; make the store's own log
+        // owner-only every time it writes it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| WatchError::Io {
+                    detail: format!(
+                        "{} could not be restricted to mode 0600: {error}",
+                        path.display()
+                    ),
+                },
+            )?;
+        }
         file.write_all(lines.as_bytes())
             .map_err(|error| WatchError::Io {
                 detail: format!("{} could not be appended to: {error}", path.display()),
@@ -1694,6 +1744,28 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WatchError> {
     })
 }
 
+/// Restrict a state file that already exists to owner-only mode. A missing
+/// file is left for the atomic writer to create with mode 0600.
+#[cfg(unix)]
+fn restrict_mode(path: &Path) -> Result<(), WatchError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(WatchError::Io {
+            detail: format!(
+                "{} could not be restricted to mode 0600: {error}",
+                path.display()
+            ),
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_mode(_path: &Path) -> Result<(), WatchError> {
+    Ok(())
+}
+
 /// Whether the file after our append is exactly the file before it plus the
 /// bytes we wrote. A concurrent external append between the stamp and our
 /// write makes the length (or the inode) disagree, so the cached fold is
@@ -1828,6 +1900,31 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "subscribers.jsonl");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restored_world_readable_log_is_restricted_on_the_next_write() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        let row = row("sub_restore", "restore.example", "a@x.example", 10);
+        write_rows(&store.subscribers_path(), std::slice::from_ref(&row));
+        std::fs::set_permissions(
+            store.subscribers_path(),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let mut updated = row;
+        updated.last_check_at = Some(20);
+        store.update(&updated).expect("update");
+        let mode = std::fs::metadata(store.subscribers_path())
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the log carries subscriber data");
     }
 
     #[test]

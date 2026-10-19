@@ -262,6 +262,56 @@ pub fn render_email_confirmation_refused(ctx: &ConsoleCtx) -> String {
     marketing_document(ctx, "Confirmation link refused", body)
 }
 
+/// The cancel page path.
+pub const CANCEL_PATH: &str = "/watch/cancel";
+
+/// Render the inert cancel confirmation (the token is the capability; GET
+/// never cancels, matching mail-scanner safety).
+pub fn render_cancel_form(ctx: &ConsoleCtx, token: &str) -> String {
+    let body = format!(
+        "<h1>Cancel your setup watch?</h1>\
+         <p>Cancelling stops the daily checks and every alert for this watch.</p>\
+         <form method=\"post\" action=\"{}\" class=\"form\">\
+         <input type=\"hidden\" name=\"token\" value=\"{}\">\
+         <div class=\"form-actions\">\
+         <button class=\"action action-primary\" type=\"submit\">Cancel this watch</button>\
+         <a class=\"action action-secondary\" href=\"/watch/\">Keep watching</a>\
+         </div></form>",
+        CANCEL_PATH,
+        html_escape(token)
+    );
+    marketing_document(ctx, "Cancel watch", &body)
+}
+
+/// Render the cancelled state.
+pub fn render_cancel_done(ctx: &ConsoleCtx, domain: &str) -> String {
+    let body = format!(
+        "<h1>Your setup watch is cancelled.</h1>\
+         <p>No further checks or alerts will be sent for {}. The cancellation is recorded.</p>\
+         <p><a class=\"action action-secondary\" href=\"/watch/\">Start another watch</a></p>",
+        html_escape(domain)
+    );
+    marketing_document(ctx, "Watch cancelled", &body)
+}
+
+/// Render the refusal state for an unknown, used or expired cancel token.
+pub fn render_cancel_refused(ctx: &ConsoleCtx) -> String {
+    let body = "<h1>This cancellation link is no longer valid.</h1>\
+                <p>The watch was already cancelled, the link expired, or it never existed.</p>\
+                <p><a class=\"action action-secondary\" href=\"/watch/\">Back to the setup watch</a></p>";
+    marketing_document(ctx, "Cancellation link refused", body)
+}
+
+/// A generic invalid-reference page: never claims a filtered-out reference
+/// was requested or recorded.
+pub fn render_reference_not_found(ctx: &ConsoleCtx) -> String {
+    let body = "<h1>This link is not valid or has expired.</h1>\
+                <p>The reference is unknown or no longer active. A fresh sign-up starts a new \
+                watch and sends its own links.</p>\
+                <p><a class=\"action action-secondary\" href=\"/watch/\">Start a new watch</a></p>";
+    marketing_document(ctx, "Link not found", body)
+}
+
 /// The billing-profile form action.
 pub const BILLING_PROFILE_ACTION: &str = "/watch/billing-profile";
 /// The stable result page the form redirects to.

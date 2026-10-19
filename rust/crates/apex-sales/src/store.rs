@@ -41,6 +41,31 @@ use crate::policy::SuppressionReason;
 /// barrier.
 pub const GROUP_COMMIT_SYNC_EVERY: u64 = 50;
 
+/// Make a state file owner-only. The history holds contact addresses,
+/// replies and decisions, so it is never group- or world-readable.
+fn restrict_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Make the state directory owner-only.
+fn restrict_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// A group-commit appender for one append-only JSON-lines file.
 ///
 /// Each record is written with a plain `write` and no `fsync`. A durability
@@ -84,6 +109,7 @@ impl GroupCommit {
                 .read(true)
                 .append(true)
                 .open(&self.path)?;
+            restrict_file(&self.path)?;
             // Heal a torn tail left by an earlier crash so this record is not
             // glued to the previous one.
             let mut needs_newline = false;
@@ -493,6 +519,7 @@ impl StateDir {
     pub fn open(root: impl Into<PathBuf>) -> std::io::Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)?;
+        restrict_dir(&root)?;
         Ok(Self {
             root,
             syncs: Arc::new(AtomicU64::new(0)),
@@ -537,6 +564,7 @@ impl StateDir {
             .read(true)
             .append(true)
             .open(self.root.join(file))?;
+        restrict_file(&self.root.join(file))?;
         let mut needs_newline = false;
         if f.metadata()?.len() > 0 {
             f.seek(SeekFrom::End(-1))?;
@@ -864,11 +892,38 @@ mod tests {
             writer.finish().unwrap();
             let expected = (count as u64).div_ceil(GROUP_COMMIT_SYNC_EVERY);
             assert_eq!(store.sync_count(), expected, "sends={count} barriers");
+            println!("group_commit sends={count} barriers={expected}");
             let snapshot = store.load().unwrap();
             assert_eq!(snapshot.events.len(), count);
             assert_eq!(snapshot.skipped_lines, 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_directory_and_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir("state-mode");
+        let store = StateDir::open(&dir).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "the state directory is owner-only");
+        store
+            .put_publisher(&sample_publisher())
+            .expect("publisher write");
+        store.put_event(&health_reset(1)).expect("event write");
+        let mut grouped = store.group_commit("approvals.jsonl", GROUP_COMMIT_SYNC_EVERY);
+        grouped
+            .append(&Value::object(vec![(
+                "touchId",
+                Value::str("t0123456789abcdef"),
+            )]))
+            .expect("group-commit write");
+        grouped.finish().expect("group-commit finish");
+        for name in ["publishers.jsonl", "events.jsonl", "approvals.jsonl"] {
+            assert_eq!(mode(&dir.join(name)), 0o600, "{name} is owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -66,8 +66,24 @@ fn register_open_count() -> u64 {
 fn open_register(path: &Path) -> Result<InvoiceRegister, apex_billing::BillingError> {
     #[cfg(test)]
     REGISTER_OPENS.with(|count| count.set(count.get() + 1));
-    InvoiceRegister::open(path)
+    let register = InvoiceRegister::open(path)?;
+    // The register holds the customer's legal name and VAT number. The
+    // billing crate creates it with the process umask; the watch owns this
+    // path, so keep it owner-only from the first issue onward.
+    restrict_register(path);
+    Ok(register)
 }
+
+/// Make an existing invoice register owner-only. A missing file is created
+/// by the first issue and restricted by [`restrict_register`]'s next call.
+#[cfg(unix)]
+fn restrict_register(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_register(_path: &Path) {}
 
 /// One issued invoice line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,8 +101,16 @@ pub struct IssuedInvoice {
     pub gross_micros: i64,
     /// The rendered VAT document.
     pub document: String,
-    /// Whether the stored card was charged for this invoice.
+    /// Whether the stored card was charged for this invoice. This is never
+    /// true without a PSP receipt: the first payment's invoice is reported
+    /// through [`Self::paid_by_first_payment`] instead, so a deployment with
+    /// no checkout credentials cannot claim a charge it never made.
     pub charged: bool,
+    /// Whether the accepted first payment (collected by the payment link)
+    /// covers this invoice. The first invoice is paid by that payment, not by
+    /// a stored-card charge, so it is never reported as `charged`.
+    #[serde(default)]
+    pub paid_by_first_payment: bool,
     /// The deterministic charge reference, when a charge was attempted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charge_reference: Option<String>,
@@ -448,7 +472,10 @@ pub async fn run_bill(
         // and persists the invoice, then the lawful document renders from
         // the numbered invoice. This stays serial so numbering is ordered.
         let number = match register.issue(&mut prepared) {
-            Ok(number) => number,
+            Ok(number) => {
+                restrict_register(deps.register_path);
+                number
+            }
             Err(error) => {
                 outcomes[index].refused = Some(RefusedInvoice {
                     publisher: publisher.to_string(),
@@ -493,6 +520,7 @@ pub async fn run_bill(
                 gross_micros: prepared.gross_micros,
                 document,
                 charged: false,
+                paid_by_first_payment: false,
                 charge_reference: Some(reference),
                 psp_reference: None,
                 charge_error: None,
@@ -837,7 +865,8 @@ async fn issue_first_invoice_with_register(
                 .first_invoice_document
                 .clone()
                 .unwrap_or_default(),
-            charged: true,
+            charged: false,
+            paid_by_first_payment: true,
             charge_reference: subscriber.last_charge_reference.clone(),
             psp_reference: None,
             charge_error: None,
@@ -878,6 +907,7 @@ async fn issue_first_invoice_with_register(
         .with_customer(customer)
         .apply_vat_treatment_with_vies(deps.seller, deps.vies)?;
     let number = register.issue(&mut prepared)?;
+    restrict_register(deps.register_path);
     let document = prepared.render_vat_invoice(deps.seller)?;
     let reference = format!("watch:{}:{month}", subscriber.id);
     let mut updated = subscriber.clone();
@@ -902,7 +932,8 @@ async fn issue_first_invoice_with_register(
         net_micros: prepared.total_micros,
         gross_micros: prepared.gross_micros,
         document,
-        charged: true,
+        charged: false,
+        paid_by_first_payment: true,
         charge_reference: Some(reference),
         psp_reference: None,
         charge_error: None,
@@ -1131,7 +1162,11 @@ mod tests {
                 .await
                 .expect("first invoice");
         assert_eq!(first_invoice.number, 1, "the register starts at one");
-        assert!(first_invoice.charged, "the first payment was accepted");
+        assert!(
+            !first_invoice.charged,
+            "a first payment is not a stored-card charge"
+        );
+        assert!(first_invoice.paid_by_first_payment);
         assert!(first_invoice.document.contains("VAT invoice No. 1"));
         assert_eq!(first_invoice.net_micros, 99_000_000);
         assert_eq!(first_invoice.gross_micros, 118_800_000);
@@ -1286,7 +1321,8 @@ mod tests {
         assert_eq!(report.refused.len(), 0, "{:#?}", report.refused);
         assert_eq!(report.issued.len(), 1);
         assert_eq!(report.issued[0].number, 1);
-        assert!(report.issued[0].charged);
+        assert!(!report.issued[0].charged, "no stored-card charge ran");
+        assert!(report.issued[0].paid_by_first_payment);
         assert_eq!(report.issued[0].net_micros, 99_000_000);
         assert_eq!(
             report.charged.len(),

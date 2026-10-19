@@ -158,7 +158,7 @@ fn critical_findings() -> Vec<apex_audit::Finding> {
 
 /// A snapshot whose only finding is a Warning (3% reporting gap).
 fn warning_only_findings() -> Vec<apex_audit::Finding> {
-    let snapshot = snapshot_from(json!({
+    let mut snapshot = snapshot_from(json!({
         "platform": "admob",
         "fetchedAtUnixMs": 1_700_000_000_000i64,
         "adUnits": [],
@@ -170,6 +170,9 @@ fn warning_only_findings() -> Vec<apex_audit::Finding> {
         "platformTotals30d": { "revenue30d": 10_000_000, "impressions30d": 10_000 },
         "mediationTotals30d": { "revenue30d": 9_700_000, "impressions30d": 10_000 }
     }));
+    // The fixture measures both sides of the gap; the flag is a transient
+    // in-memory signal (it is not part of the stored snapshot contract).
+    snapshot.mediation_totals_reported = true;
     let report = run_audit(&snapshot);
     assert!(report
         .findings

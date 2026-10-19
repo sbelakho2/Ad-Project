@@ -666,16 +666,25 @@ async fn webhook_without_configuration_is_503() {
 #[tokio::test]
 async fn webhook_valid_signature_is_200() {
     let temp = TempDir::new("webhook-200");
-    let store = Arc::new(
-        apex_billing::FileCollectionStore::open(&temp.path().join("collection.jsonl"))
-            .expect("store"),
-    );
+    let collection_path = temp.path().join("collection.jsonl");
+    let store = Arc::new(apex_billing::FileCollectionStore::open(&collection_path).expect("store"));
     let state = file_state(temp.path(), pub1_keys())
         .with_adyen_hmac_key(WEBHOOK_HMAC_KEY.to_vec())
-        .with_collection(store);
+        .with_collection(store)
+        .with_collection_log_path(&collection_path);
     let app = router(state);
     let response = send(&app, post_json("/v1/adyen/webhook", &webhook_body())).await;
     assert_eq!(response.status, 200, "{}", response.body);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&collection_path)
+            .expect("collection log")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "collection log must be 0600, got {mode:o}");
+    }
     assert_eq!(
         response.json(),
         json!({"received": true, "items": 1, "new": 1})

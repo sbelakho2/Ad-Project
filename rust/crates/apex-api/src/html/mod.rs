@@ -188,6 +188,30 @@ pub fn deployment_is_read_only() -> bool {
     crate::cycle::READ_ONLY_MODE == "read_only"
 }
 
+/// A checkbox whose submitted value is explicit.
+///
+/// The shared design-system checkbox renders no `value` attribute, so a
+/// browser submits the default `on`. Every form in this crate that reads a
+/// checkbox (the free-audit platform choice and the confirmation gates that
+/// compare against `yes`) needs a real value; without one the rendered form
+/// could never pass its own server validation.
+pub fn checkbox_with_value(
+    id: &str,
+    name: &str,
+    value: &str,
+    label: &str,
+    checked: bool,
+) -> String {
+    format!(
+        "<label class=\"checkbox\"><input type=\"checkbox\" id=\"{}\" name=\"{}\" value=\"{}\"{}> {}</label>",
+        html_escape(id),
+        html_escape(name),
+        html_escape(value),
+        if checked { " checked" } else { "" },
+        html_escape(label)
+    )
+}
+
 /// Render a full publisher-console document around `body` with the
 /// `Workspace / <area>` breadcrumb.
 pub fn console_document(ctx: &ConsoleCtx, title: &str, area: &str, body: &str) -> String {

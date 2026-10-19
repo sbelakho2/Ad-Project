@@ -96,7 +96,9 @@ impl PlatformOps for AdmobPlatformOps {
     /// resource name is the platform experiment id the ledger pins.
     async fn start_experiment(&self, request: &ExperimentRequest) -> Result<String, PlatformError> {
         let ChangeKind::EcpmSet {
-            mediation_group_id, ..
+            mediation_group_id,
+            ad_unit_id,
+            ecpm,
         } = &request.change
         else {
             return Err(self.schema(
@@ -104,9 +106,61 @@ impl PlatformOps for AdmobPlatformOps {
                 "an AdMob experiment carries a mediation-group eCPM change only",
             ));
         };
+        // The treatment arm must serve the changed line: take the raw line
+        // that contains the target mapping and set its cpmMicros, then send
+        // it as the documented treatmentMediationLines input.
+        let lines = self
+            .management
+            .mediation_group_lines(mediation_group_id)
+            .await?;
+        let mut treatment_line = None;
+        // A group-scoped floor (the frozen Action variant names the group)
+        // applies to the group's first line; a mapping-scoped change must
+        // match its ad unit.
+        if ad_unit_id == mediation_group_id {
+            if let Some(line) = lines.first().cloned() {
+                let mut line = line;
+                line["cpmMicros"] = serde_json::json!(ecpm.to_string());
+                treatment_line = Some(line);
+            }
+        }
+        for line in lines {
+            if treatment_line.is_some() {
+                break;
+            }
+            let contains = line
+                .get("adUnitMappings")
+                .and_then(|value| value.as_array())
+                .is_some_and(|mappings| {
+                    mappings.iter().any(|mapping| {
+                        mapping.get("adUnitId").and_then(|value| value.as_str())
+                            == Some(ad_unit_id.as_str())
+                    })
+                });
+            if contains {
+                let mut line = line;
+                line["cpmMicros"] = serde_json::json!(ecpm.to_string());
+                treatment_line = Some(line);
+                break;
+            }
+        }
+        let Some(line) = treatment_line else {
+            return Err(self.schema(
+                "startExperiment",
+                format!(
+                    "mediation group '{mediation_group_id}' has no line for ad unit '{ad_unit_id}'"
+                ),
+            ));
+        };
+        let treatment = serde_json::json!([{ "mediationGroupLine": line }]);
         let experiment = self
             .management
-            .create_mediation_ab_experiment(mediation_group_id, &request.spec.name)
+            .create_mediation_ab_experiment(
+                mediation_group_id,
+                &request.spec.name,
+                Some(&treatment),
+                Some(request.spec.test_group_allocation),
+            )
             .await?;
         Ok(experiment.name)
     }
@@ -283,6 +337,19 @@ mod tests {
         transport.push(
             200,
             serde_json::json!({
+                "mediationGroupId": "g1",
+                "name": "accounts/pub-1234567890/mediationGroups/g1",
+                "mediationGroupLines": {
+                    "l1": {
+                        "adUnitMappings": [{"adUnitId": "u2", "network": "facebook"}],
+                        "cpmMicros": "1500000"
+                    }
+                }
+            }),
+        );
+        transport.push(
+            200,
+            serde_json::json!({
                 "name": "accounts/pub-1234567890/mediationAbExperiments/exp-7",
                 "mediationGroupId": "g1",
                 "displayName": "autopilot-ecpm-g1",
@@ -305,18 +372,24 @@ mod tests {
         let id = adapter.start_experiment(&request).await.expect("start");
         assert_eq!(id, "accounts/pub-1234567890/mediationAbExperiments/exp-7");
         let seen = transport.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert_eq!(seen.len(), 2, "group read then experiment create");
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert_eq!(seen[1].method, HttpMethod::Post);
         assert_eq!(
-            seen[0].url,
-            "https://admob.test/v1beta/accounts/pub-1234567890/mediationAbExperiments"
+            seen[1].url,
+            "https://admob.test/v1beta/accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiments"
         );
-        let body = match seen[0].body.as_ref().expect("body") {
+        let body = match seen[1].body.as_ref().expect("body") {
             HttpBody::Json(value) => value.clone(),
             other => panic!("expected JSON body, got {other:?}"),
         };
-        assert_eq!(body["mediationGroupId"], serde_json::json!("g1"));
         assert_eq!(body["displayName"], serde_json::json!("autopilot-ecpm-g1"));
+        assert_eq!(body["treatmentTrafficPercentage"], serde_json::json!("50"));
+        assert_eq!(
+            body["treatmentMediationLines"][0]["mediationGroupLine"]["cpmMicros"],
+            serde_json::json!("1750000"),
+            "the treatment arm carries the proposed eCPM"
+        );
     }
 
     #[tokio::test]
@@ -324,6 +397,19 @@ mod tests {
         // The frozen Action variant maps to the existing mediation-group eCPM
         // change; the adapter starts the v1beta experiment on that group.
         let transport = Arc::new(FakeTransport::default());
+        transport.push(
+            200,
+            serde_json::json!({
+                "mediationGroupId": "g1",
+                "name": "accounts/pub-1234567890/mediationGroups/g1",
+                "mediationGroupLines": {
+                    "l1": {
+                        "adUnitMappings": [{"adUnitId": "u2", "network": "facebook"}],
+                        "cpmMicros": "1500000"
+                    }
+                }
+            }),
+        );
         transport.push(
             200,
             serde_json::json!({
@@ -356,17 +442,21 @@ mod tests {
         let id = adapter.start_experiment(&request).await.expect("start");
         assert_eq!(id, "accounts/pub-1234567890/mediationAbExperiments/exp-9");
         let seen = transport.seen.lock().unwrap();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert_eq!(seen.len(), 2, "group read then experiment create");
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert_eq!(seen[1].method, HttpMethod::Post);
         assert_eq!(
-            seen[0].url,
-            "https://admob.test/v1beta/accounts/pub-1234567890/mediationAbExperiments"
+            seen[1].url,
+            "https://admob.test/v1beta/accounts/pub-1234567890/mediationGroups/g1/mediationAbExperiments"
         );
-        let body = match seen[0].body.as_ref().expect("body") {
+        let body = match seen[1].body.as_ref().expect("body") {
             HttpBody::Json(value) => value.clone(),
             other => panic!("expected JSON body, got {other:?}"),
         };
-        assert_eq!(body["mediationGroupId"], serde_json::json!("g1"));
+        assert_eq!(
+            body["treatmentMediationLines"][0]["mediationGroupLine"]["cpmMicros"],
+            serde_json::json!("1200000")
+        );
         assert_eq!(body["displayName"], serde_json::json!("autopilot-ecpm-g1"));
     }
 

@@ -14,6 +14,13 @@ SupplementaryGroups=apex
 # writable path under the state root.
 WorkingDirectory=/var/lib/apex
 EnvironmentFile=/etc/apex/sync.env
+# The bucket credentials stay in a root-owned 0600 rclone.conf; systemd
+# copies it into the unit's credential directory, which the service user
+# can read (the scripts prefer CREDENTIALS_DIRECTORY/rclone.conf).
+LoadCredential=rclone.conf:/etc/apex/rclone.conf
+# rclone resolves its plugin cache through the passwd home (/nonexistent
+# here); PrivateTmp gives the unit a writable /tmp for that cache.
+Environment=XDG_CACHE_HOME=/tmp
 ExecStart=/usr/local/bin/apex-sync-push
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -855,9 +855,10 @@ impl ClickHouseStore {
 
     /// Delete projection rows of superseded as-of versions (all below
     /// `published_version`) so staged and replaced versions cannot
-    /// accumulate. The publish path issues one mutation per projection
-    /// concurrently and awaits every one, so a failed prune surfaces before
-    /// the publish is called done.
+    /// accumulate, and delete the matching superseded rows from the shared
+    /// `projection_versions` bookkeeping table. The publish path issues both
+    /// mutations per projection concurrently and awaits every one, so a
+    /// failed prune surfaces before the publish is called done.
     async fn prune_superseded_versions(
         &self,
         projection_name: &str,
@@ -871,13 +872,27 @@ impl ClickHouseStore {
                 "unknown projection '{projection_name}'"
             )));
         };
-        let statement = format!(
+        // The projection name is from the closed enum, never user input.
+        let projection_statement = format!(
             "ALTER TABLE {}.{} DELETE WHERE as_of_version < {published_version} \
              SETTINGS mutations_sync = 1",
             self.config.database,
             name.table_name()
         );
-        self.execute_statement(&statement).await.map(|_| ())
+        self.execute_statement(&projection_statement).await?;
+        // Version rows are keyed by (projection_name, as_of_version), so the
+        // general projection delete above never touches them. Without this
+        // second delete every rebuild/publish cycle would leave one dead
+        // bookkeeping row per projection forever, and `projection_versions`
+        // reads (`projection_versions`, `publish_batch`) would grow with the
+        // entire history.
+        let version_statement = format!(
+            "ALTER TABLE {}.projection_versions DELETE WHERE projection_name = '{}' \
+             AND as_of_version < {published_version} SETTINGS mutations_sync = 1",
+            self.config.database,
+            name.as_str()
+        );
+        self.execute_statement(&version_statement).await.map(|_| ())
     }
 
     /// Migrate legacy staged-table shapes in place.
@@ -2777,13 +2792,26 @@ mod tests {
             .iter()
             .filter(|statement| statement.contains("ALTER TABLE") && statement.contains("DELETE"))
             .collect();
-        assert_eq!(prunes.len(), ProjectionName::ALL.len(), "{recorded:#?}");
+        assert_eq!(
+            prunes.len(),
+            ProjectionName::ALL.len() * 2,
+            "one data prune and one bookkeeping prune per projection: {recorded:#?}"
+        );
         for name in ProjectionName::ALL {
             assert!(
-                prunes
-                    .iter()
-                    .any(|statement| statement.contains(name.table_name())),
-                "missing prune for {}: {recorded:#?}",
+                prunes.iter().any(|statement| {
+                    statement.contains("DELETE")
+                        && statement.contains(&format!(".{} ", name.table_name()))
+                }),
+                "missing data prune for {}: {recorded:#?}",
+                name.table_name()
+            );
+            assert!(
+                prunes.iter().any(|statement| {
+                    statement.contains("projection_versions")
+                        && statement.contains(&format!("projection_name = '{}'", name.as_str()))
+                }),
+                "missing version-row prune for {}: {recorded:#?}",
                 name.table_name()
             );
         }
@@ -2813,13 +2841,20 @@ mod tests {
 
         let _ = store.execute_statement("APEX_TEST_STOP").await;
         let recorded = handle.join().expect("recording server");
-        assert_eq!(
+        assert!(
             recorded
                 .iter()
-                .filter(|statement| statement.contains("ALTER TABLE"))
-                .count(),
-            ProjectionName::ALL.len(),
-            "every prune is still awaited, so the failure is not raced away: {recorded:#?}"
+                .any(|statement| statement.contains("ALTER TABLE")
+                    && statement.contains("platform_daily")),
+            "the failing prune must have been attempted: {recorded:#?}"
+        );
+        assert!(
+            !recorded.iter().any(|statement| {
+                statement.contains("projection_versions")
+                    && statement.contains("DELETE")
+                    && statement.contains("platform_daily")
+            }),
+            "a failed data prune must not proceed to its bookkeeping prune: {recorded:#?}"
         );
     }
 

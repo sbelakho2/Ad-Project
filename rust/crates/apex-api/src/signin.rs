@@ -905,6 +905,14 @@ pub fn workspace_key_for_claim(
 
 /// Whether `email` is a single usable address (the same minimal shape the
 /// lead form accepts, plus a dotted domain).
+///
+/// This is the *syntactic* check. It deliberately does not require the email
+/// domain to be a public internet domain: an operator may provision a
+/// workspace for a local mailbox (`name@buildbox.local`) and record that
+/// address as a contact. A new workspace still needs the public app-ads.txt
+/// proof, whose own domain normalizer refuses reserved suffixes, so accepting
+/// a local domain here cannot create a workspace; it only lets an
+/// already-recorded contact receive its one-time link.
 pub fn is_recordable_email(email: &str) -> bool {
     let email = email.trim();
     if email.len() < 6 || email.len() > 320 || email.contains(char::is_whitespace) {
@@ -914,12 +922,22 @@ pub fn is_recordable_email(email: &str) -> bool {
         return false;
     };
     !local.is_empty()
+        && !local.contains('@')
         && domain.contains('.')
+        && domain.len() <= 253
         && !domain.starts_with('.')
         && !domain.ends_with('.')
         && !domain.contains("..")
         && !domain.contains('@')
-        && apex_watch::normalize_domain(domain).is_ok()
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 /// A new-workspace ownership proof source: fetch the creating email domain's
@@ -1520,6 +1538,11 @@ impl SigninService {
         self.link_at(WATCH_CONFIRM_PATH, token)
     }
 
+    /// The absolute one-click cancel link for a pending or active watch.
+    pub fn watch_cancel_link(&self, token: &str) -> Result<String, ApiError> {
+        self.link_at("/watch/cancel", token)
+    }
+
     fn link_at(&self, path: &str, token: &str) -> Result<String, ApiError> {
         let Some(base) = &self.public_base else {
             return Err(ApiError::MissingBase);
@@ -1537,6 +1560,7 @@ impl SigninService {
         reference: &str,
         token: &str,
         checkout_url: Option<&str>,
+        cancel_token: Option<&str>,
         expires_at_unix_ms: i64,
     ) {
         let link = match self.watch_confirm_link(token) {
@@ -1553,23 +1577,29 @@ impl SigninService {
             Some(url) => format!("Complete the checkout: {url}"),
             None => "We will email a payment link before the watch starts.".to_string(),
         };
+        let cancel_url = cancel_token.and_then(|token| self.watch_cancel_link(token).ok());
         let Some(mailer) = &self.mailer else {
             self.warnings.record(format!(
                 "setup-watch confirmation for '{reference}' was created but not sent: set {SINK_ENV}=email (with {FROM_ENV}) to deliver it (expires {expires})"
             ));
             return;
         };
+        let cancel_line = cancel_url
+            .as_deref()
+            .map(|url| format!("\nTo cancel this sign-up: {url}\n"))
+            .unwrap_or_default();
         let text = format!(
-            "Confirm your Apex setup watch:\n\n{link}\n\nThis link can be used once and expires on {expires}.\n{payment_line}\n{SIGNIN_EMAIL_WRONG_PERSON}"
+            "Confirm your Apex setup watch:\n\n{link}\n\nThis link can be used once and expires on {expires}.\n{payment_line}\n{cancel_line}\n{SIGNIN_EMAIL_WRONG_PERSON}"
         );
         let message = DeliveryMessage {
             to: email.to_string(),
             subject: WATCH_CONFIRM_SUBJECT.to_string(),
-            html: watch_confirm_email_html(&link, &expires, &payment_line),
+            html: watch_confirm_email_html(&link, &expires, &payment_line, cancel_url.as_deref()),
             text,
             template_class: TemplateClass::ReportingAccess,
             dedup_key: format!("watch_confirm:{reference}"),
             reference: None,
+            list_unsubscribe: cancel_url.clone(),
         };
         match mailer.send(&message).await {
             Ok(receipt) => tracing::info!(
@@ -1669,6 +1699,7 @@ impl SigninService {
             template_class: TemplateClass::ReportingAccess,
             dedup_key: format!("signin_link:{}", created.token_hash),
             reference: None,
+            list_unsubscribe: None,
         };
         match mailer.send(&message).await {
             Ok(receipt) => tracing::info!(
@@ -1706,14 +1737,25 @@ fn signin_email_html(link: &str, expires: &str) -> String {
 }
 
 /// The minimal HTML twin of the plain-text setup-watch confirmation email.
-fn watch_confirm_email_html(link: &str, expires: &str, payment_line: &str) -> String {
+fn watch_confirm_email_html(
+    link: &str,
+    expires: &str,
+    payment_line: &str,
+    cancel_url: Option<&str>,
+) -> String {
     let href = crate::html_escape(link);
+    let cancel = cancel_url
+        .map(|url| {
+            let url = crate::html_escape(url);
+            format!("<p><a href=\"{url}\">Cancel this sign-up</a></p>")
+        })
+        .unwrap_or_default();
     format!(
         "<p>Confirm your Apex setup watch:</p>\
          <p><a href=\"{href}\">{href}</a></p>\
          <p>This link can be used once and expires on {expires}.</p>\
          <p>{}</p>\
-         <p>{}</p>",
+         <p>{}</p>{cancel}",
         crate::html_escape(payment_line),
         crate::html_escape(SIGNIN_EMAIL_WRONG_PERSON)
     )
@@ -2387,6 +2429,47 @@ mod tests {
             Err(WorkspaceRefusal::InvalidEmail)
         ));
         assert!(!workspaces.has_workspace("valid-pub"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_seeded_local_mailbox_contact_claims_without_a_public_proof() {
+        // Regression: a local/self-hosted mailbox (`buildbox.local`) could
+        // never sign in because the recordable-email check required the
+        // public-domain normalizer, which reserves `.local`. The syntactic
+        // check accepts it; a new workspace still needs the public proof.
+        assert!(is_recordable_email("owner@BuildBox.local"));
+        assert!(is_recordable_email("owner@studio.example"));
+        assert!(!is_recordable_email("owner@-bad.example"));
+        assert!(!is_recordable_email("owner@bad..example"));
+        assert!(!is_recordable_email("owner@localhost"));
+        assert!(!is_recordable_email("not-an-email"));
+
+        let root = temp_root("workspace-local-mailbox");
+        let path = root.join("tokens.json");
+        std::fs::write(&path, r#"{"buildbox-local":"local-token"}"#).expect("token file");
+        let records = format!(
+            "{}{}",
+            path.display(),
+            crate::signin::WORKSPACES_FILE_SUFFIX
+        );
+        std::fs::write(
+            &records,
+            r#"{"buildbox-local":{"ownerEmail":"owner@buildbox.local","contacts":["owner@buildbox.local"],"domain":"buildbox.local"}}"#,
+        )
+        .expect("ownership sidecar");
+        let workspaces = WorkspaceTokens::open(&path);
+        let ensured = workspaces
+            .ensure("buildbox-local", "Owner@BuildBox.local", false)
+            .expect("a recorded local contact claims without a proof");
+        assert!(!ensured.created);
+        assert_eq!(ensured.token, "local-token");
+        assert!(workspaces.contact_recorded("buildbox-local", "owner@buildbox.local"));
+        // A different address is still refused, even on the same local domain.
+        assert!(matches!(
+            workspaces.ensure("buildbox-local", "other@buildbox.local", true),
+            Err(WorkspaceRefusal::UnknownContact { .. })
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

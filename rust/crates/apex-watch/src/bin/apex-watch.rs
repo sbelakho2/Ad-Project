@@ -211,6 +211,8 @@ async fn bill(month_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>>
             issued.gross_micros,
             if issued.charged {
                 " (charged to the stored card)"
+            } else if issued.paid_by_first_payment {
+                " (covered by the accepted first payment)"
             } else {
                 " (unpaid)"
             }

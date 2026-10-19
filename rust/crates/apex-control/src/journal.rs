@@ -224,6 +224,8 @@ impl RememberedResult {
 pub struct IndexedResult {
     /// Result page id (`res_<12 hex>`).
     pub result_id: String,
+    /// The capability that produced this result.
+    pub capability: String,
     /// Journal outcome.
     pub outcome: String,
     /// Durable job id, when one exists.
@@ -284,6 +286,7 @@ impl JournalIndex {
                 .entry(result_id.clone())
                 .or_insert_with(|| IndexedResult {
                     result_id: result_id.clone(),
+                    capability: entry.capability.clone(),
                     outcome: entry.outcome.clone(),
                     job_id: entry.job_id.clone(),
                     reason: entry.reason.clone(),
@@ -333,6 +336,14 @@ impl JournalIndex {
     /// The journal entries in file order (the access history).
     pub fn entries(&self) -> &[ActionJournalEntry] {
         &self.entries
+    }
+
+    /// The newest `limit` entries in file order, cloned without copying the
+    /// whole history. A 100k-entry journal must not be cloned per page read
+    /// just to render the bounded access table.
+    pub fn recent(&self, limit: usize) -> Vec<ActionJournalEntry> {
+        let start = self.entries.len().saturating_sub(limit);
+        self.entries[start..].to_vec()
     }
 
     /// Number of indexed results.
@@ -503,6 +514,21 @@ mod tests {
         let remembered = index.result_for(key).expect("remembered");
         assert_eq!(remembered.result_id, "res_1");
         assert!(remembered.matches("sha256:anything"));
+    }
+
+    #[test]
+    fn recent_returns_only_the_requested_tail() {
+        let entries = vec![
+            entry("key-1", Some("res_1")),
+            entry("key-2", Some("res_2")),
+            entry("key-3", Some("res_3")),
+        ];
+        let index = JournalIndex::from_entries(&entries);
+        let recent = index.recent(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].result_id.as_deref(), Some("res_2"));
+        assert_eq!(recent[1].result_id.as_deref(), Some("res_3"));
+        assert_eq!(index.recent(10).len(), 3);
     }
 
     #[test]

@@ -415,8 +415,32 @@ fn build_publisher_runner(
             std::sync::Arc::new(ops)
         }
         crate::registry::ADMOB_WIRE => {
+            // AdMob access tokens expire after about an hour. A runner job is
+            // a short-lived process, so exchanging the refresh token once at
+            // startup is enough; without client credentials the stored access
+            // token is used as before.
+            let access_token = match (
+                credentials.refresh_token.as_deref(),
+                env_nonempty(env, "APEX_ADMOB_CLIENT_ID"),
+                env_nonempty(env, "APEX_ADMOB_CLIENT_SECRET"),
+            ) {
+                (Some(refresh), Some(client_id), Some(client_secret)) => {
+                    let token_url = env_nonempty(env, "APEX_ADMOB_OAUTH_TOKEN_URL")
+                        .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string());
+                    apex_connectors::admob::refresh_access_token_blocking(
+                        &token_url,
+                        &client_id,
+                        &client_secret,
+                        refresh,
+                    )
+                    .map_err(|error| {
+                        format!("{}: admob token refresh: {error}", registered.publisher)
+                    })?
+                }
+                _ => credentials.api_key.clone(),
+            };
             let ops = crate::live_admob::AdmobPlatformOps::new(
-                &credentials.api_key,
+                &access_token,
                 &credentials.account_id,
                 &credentials.base_url,
                 std::sync::Arc::clone(&transport),
@@ -1255,6 +1279,11 @@ pub async fn audit_fleet_snapshots(
                     now_unix_ms,
                 )
                 .await;
+        }
+        // The per-publisher handle shares the process-wide batching buffer;
+        // flush it before the next publisher (and before the process exits).
+        if let Some(events) = &events {
+            events.flush().await;
         }
         publishers.push(AuditPublisherReport {
             publisher: registered.publisher.clone(),
@@ -4426,6 +4455,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         };
         let (covered, expected, missing) = audit_coverage(&empty);
         assert_eq!((covered, expected), (0, 5));
@@ -4585,6 +4615,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         };
         std::fs::write(&snapshot_path, serde_json::to_string(&snapshot).unwrap()).unwrap();
         let runner = golden_runner()
@@ -5311,6 +5342,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         };
         crate::write_snapshot(path, &snapshot).expect("snapshot");
     }

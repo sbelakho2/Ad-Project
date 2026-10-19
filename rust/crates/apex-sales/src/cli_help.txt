@@ -41,6 +41,10 @@ either, APEX_SALES_FROM and friends define the one sender exactly as before.
 APEX_SALES_WATCH_CHECKOUT_URL (https) enables the Setup Watch offer variant
 and its per-publisher checkout link; without it the variant is never served.
 
+APEX_SALES_SEND_HOUR (0-23) pins the recipient-local send hour; leave it
+unset to let the cadence model choose. A run sends touches scheduled within
+the next hour.
+
 Configuration is read from APEX_SALES_* environment variables; see the
 crate documentation. The default mode is shadow: nothing is sent until
 APEX_SALES_MODE is approval or autonomous.

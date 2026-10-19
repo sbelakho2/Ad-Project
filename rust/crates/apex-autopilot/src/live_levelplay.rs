@@ -132,9 +132,9 @@ impl LevelPlayPlatformOps {
                 "no abTest \"B\" group exists; the publisher must start the dashboard A/B test first",
             )),
             groups => {
-                let ids: Vec<&str> = groups
+                let ids: Vec<String> = groups
                     .iter()
-                    .filter_map(|group| group.get("groupId").and_then(serde_json::Value::as_str))
+                    .filter_map(|group| group.get("groupId").and_then(Self::id_string))
                     .collect();
                 Err(self.schema(
                     "startExperiment",
@@ -156,6 +156,35 @@ impl LevelPlayPlatformOps {
         Ok(groups.clone())
     }
 
+    /// A platform id that may be a JSON string or number, rendered as the
+    /// string the deterministic experiment name and ledger use.
+    fn id_string(value: &serde_json::Value) -> Option<String> {
+        value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| value.as_i64().map(|number| number.to_string()))
+            .or_else(|| value.as_u64().map(|number| number.to_string()))
+    }
+
+    /// The variant-arm instance that mirrors `network`/`name` from the live
+    /// waterfall. The B group must own a distinct instance row; writing the
+    /// control's id would change both arms.
+    fn variant_member_id(group_b: &serde_json::Value, network: &str, name: &str) -> Option<String> {
+        group_b
+            .get("instances")
+            .and_then(|value| value.as_array())
+            .and_then(|members| {
+                members.iter().find(|member| {
+                    member.get("networkName").and_then(|value| value.as_str()) == Some(network)
+                        && (member.get("name").and_then(|value| value.as_str()) == Some(name)
+                            || member.get("instanceName").and_then(|value| value.as_str())
+                                == Some(name))
+                })
+            })
+            .and_then(|member| member.get("id"))
+            .and_then(Self::id_string)
+    }
+
     /// The group's configuration without its identity fields: everything a
     /// second arm must mirror for an A/A read to be honest.
     fn arm_configuration(group: &serde_json::Value) -> serde_json::Value {
@@ -164,37 +193,6 @@ impl LevelPlayPlatformOps {
             object.remove(key);
         }
         serde_json::Value::Object(object)
-    }
-
-    /// Refuse an entry-targeting write when the group advertises its members
-    /// and the target is not one of them: the runner changes variant-group
-    /// entries only.
-    fn require_entry_in_group(
-        &self,
-        group: &serde_json::Value,
-        entry_id: &str,
-    ) -> Result<(), PlatformError> {
-        let Some(instances) = group.get("instances").and_then(serde_json::Value::as_array) else {
-            return Ok(());
-        };
-        let member = instances.iter().any(|instance| {
-            ["instanceId", "id", "instance_id"].iter().any(|key| {
-                instance
-                    .get(*key)
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| id == entry_id)
-            })
-        });
-        if member {
-            Ok(())
-        } else {
-            Err(self.schema(
-                "startExperiment",
-                format!(
-                    "entry '{entry_id}' is not an instance of the abTest \"B\" group; only variant-group entries may change"
-                ),
-            ))
-        }
     }
 }
 
@@ -227,7 +225,7 @@ impl PlatformOps for LevelPlayPlatformOps {
         let group_b = self.group_b().await?;
         let group_id = group_b
             .get("groupId")
-            .and_then(serde_json::Value::as_str)
+            .and_then(Self::id_string)
             .filter(|id| !id.is_empty())
             .ok_or_else(|| self.schema("startExperiment", "group B missing its groupId"))?
             .to_string();
@@ -237,9 +235,30 @@ impl PlatformOps for LevelPlayPlatformOps {
                 entry_id,
                 price_ecpm,
             } => {
-                self.require_entry_in_group(&group_b, entry_id)?;
+                let live = self
+                    .management
+                    .list_waterfall("")
+                    .await?
+                    .into_iter()
+                    .find(|entry| entry.entry_id == *entry_id)
+                    .ok_or_else(|| {
+                        self.schema(
+                            "startExperiment",
+                            format!("live waterfall has no entry '{entry_id}'"),
+                        )
+                    })?;
+                let variant_id =
+                    Self::variant_member_id(&group_b, &live.network, &live.instance_name)
+                        .ok_or_else(|| {
+                            self.schema(
+                                "startExperiment",
+                                format!(
+                            "the variant group has no distinct instance mirroring '{entry_id}'"
+                        ),
+                            )
+                        })?;
                 self.management
-                    .update_entry_price(ad_unit_id, entry_id, *price_ecpm)
+                    .update_entry_price(ad_unit_id, &variant_id, *price_ecpm)
                     .await?;
             }
             ChangeKind::WaterfallEntryCreated {
@@ -256,12 +275,38 @@ impl PlatformOps for LevelPlayPlatformOps {
                 ad_unit_id,
                 entry_id,
             } => {
-                self.require_entry_in_group(&group_b, entry_id)?;
-                self.management.remove_entry(ad_unit_id, entry_id).await?;
+                let live = self
+                    .management
+                    .list_waterfall("")
+                    .await?
+                    .into_iter()
+                    .find(|entry| entry.entry_id == *entry_id)
+                    .ok_or_else(|| {
+                        self.schema(
+                            "startExperiment",
+                            format!("live waterfall has no entry '{entry_id}'"),
+                        )
+                    })?;
+                let variant_id =
+                    Self::variant_member_id(&group_b, &live.network, &live.instance_name)
+                        .ok_or_else(|| {
+                            self.schema(
+                                "startExperiment",
+                                format!(
+                            "the variant group has no distinct instance mirroring '{entry_id}'"
+                        ),
+                            )
+                        })?;
+                self.management
+                    .remove_entry(ad_unit_id, &variant_id)
+                    .await?;
             }
             _ => unreachable!("the change kind was checked above"),
         }
-        Ok(group_id)
+        // The handle must be unique per proposal: the B group is shared by
+        // every experiment on the app, so the pre-registered name rides with
+        // it and `experiment` splits it back off.
+        Ok(format!("{group_id}::{}", request.experiment_id))
     }
 
     fn change_in_test_arm(&self) -> bool {
@@ -307,9 +352,9 @@ impl PlatformOps for LevelPlayPlatformOps {
         }
         variant
             .get("groupId")
-            .and_then(serde_json::Value::as_str)
+            .and_then(Self::id_string)
             .filter(|id| !id.is_empty())
-            .map(str::to_string)
+            .map(|id| format!("{id}::{}", _spec.name))
             .ok_or_else(|| self.schema("startNullExperiment", "group B missing its groupId"))
     }
 
@@ -322,8 +367,12 @@ impl PlatformOps for LevelPlayPlatformOps {
         let data = self.management.list_groups().await?;
         let groups = Self::groups_array(&data)
             .ok_or_else(|| self.schema("experiment", "response has no groups array"))?;
+        let group_id = experiment_id
+            .split_once("::")
+            .map(|(group, _)| group)
+            .unwrap_or(experiment_id);
         let running = groups.iter().any(|group| {
-            group.get("groupId").and_then(serde_json::Value::as_str) == Some(experiment_id)
+            group.get("groupId").and_then(Self::id_string).as_deref() == Some(group_id)
                 && Self::is_ab_group(group, "B")
         });
         Ok(ExperimentResult {
@@ -365,15 +414,30 @@ impl PlatformOps for LevelPlayPlatformOps {
         self.management.app_revenue(start, end).await
     }
 
-    /// The groups list, canonically encoded: any publisher change to the A/B
-    /// configuration (including ending the test by removing group B) is an
-    /// edit and voids the experiment rather than keeping a stale test.
-    async fn current_settings(&self, _ad_unit_id: &str) -> Result<String, PlatformError> {
-        let data = self.management.list_groups().await?;
-        let groups = Self::groups_array(&data)
-            .ok_or_else(|| self.schema("current_settings", "response has no groups array"))?;
-        serde_json::to_string(groups).map_err(|error| {
-            self.schema("current_settings", format!("groups not encodable: {error}"))
+    /// The live instance's price in the exact shape the pre-registration
+    /// pinned (`{"priceEcpm": <micros>, "<entry id>": <micros>}`). The runner
+    /// mutates group B, so reading the live waterfall is the control-arm
+    /// comparison: a publisher edit to the live instance voids the
+    /// experiment, while the test arm's own write does not.
+    async fn current_settings(&self, ad_unit_id: &str) -> Result<String, PlatformError> {
+        let entries = self.management.list_waterfall("").await?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.entry_id == ad_unit_id)
+            .ok_or_else(|| {
+                self.schema(
+                    "current_settings",
+                    format!("live waterfall has no entry '{ad_unit_id}'"),
+                )
+            })?;
+        let mut previous = serde_json::Map::new();
+        previous.insert("priceEcpm".to_string(), serde_json::json!(entry.price_ecpm));
+        previous.insert(entry.entry_id.clone(), serde_json::json!(entry.price_ecpm));
+        serde_json::to_string(&previous).map_err(|error| {
+            self.schema(
+                "current_settings",
+                format!("instance price not encodable: {error}"),
+            )
         })
     }
 
@@ -386,13 +450,21 @@ impl PlatformOps for LevelPlayPlatformOps {
         ))
     }
 
-    /// LevelPlay has no documented stop/deprecate API either: the publisher
-    /// ends the dashboard A/B test.
-    async fn deprecate_experiment(&self, _experiment_id: &str) -> Result<(), PlatformError> {
-        Err(self.schema(
-            "deprecateExperiment",
-            "LevelPlay ends the dashboard A/B test in the publisher dashboard; no deprecate API is documented",
-        ))
+    /// Ending the dashboard A/B test is deleting its variant group, which the
+    /// documented v4 groups API supports. The experiment handle carries the
+    /// group id before `::`.
+    async fn deprecate_experiment(&self, experiment_id: &str) -> Result<(), PlatformError> {
+        let group_id = experiment_id
+            .split_once("::")
+            .map(|(group, _)| group)
+            .filter(|group| !group.is_empty())
+            .ok_or_else(|| {
+                self.schema(
+                    "deprecateExperiment",
+                    format!("experiment '{experiment_id}' does not carry a variant group id"),
+                )
+            })?;
+        self.management.delete_group(group_id).await
     }
 
     async fn apply(&self, _action: &crate::model::Action, _id: &str) -> Result<(), PlatformError> {
@@ -781,7 +853,20 @@ mod tests {
         transport.push(200, auth());
         transport.push(
             200,
-            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+            groups_report(serde_json::json!([{
+                "id": "i-b",
+                "name": "High",
+                "networkName": "admob"
+            }])),
+        );
+        transport.push(
+            200,
+            serde_json::json!([{
+                "instanceId": "i1",
+                "instanceName": "High",
+                "networkName": "admob",
+                "rate": "2.0"
+            }]),
         );
         transport.push(200, serde_json::json!({}));
         let adapter = ops(Arc::clone(&transport), true);
@@ -798,11 +883,18 @@ mod tests {
             prev_value: "{}".into(),
         };
         let id = adapter.start_experiment(&request).await.expect("start");
-        assert_eq!(id, "g-b", "the variant group is the experiment handle");
+        assert!(
+            id.starts_with("g-b::"),
+            "a unique handle per proposal: {id}"
+        );
 
         {
             let seen = transport.seen.lock().unwrap();
-            assert_eq!(seen.len(), 3, "auth, groups read and exactly one write");
+            assert_eq!(
+                seen.len(),
+                4,
+                "auth, groups, live instances and exactly one write"
+            );
             // The groups read matches the connector's recorded shape.
             assert_eq!(seen[1].method, HttpMethod::Get);
             assert_eq!(seen[1].url, "https://lp.test/levelPlay/groups/v4/acct");
@@ -815,9 +907,9 @@ mod tests {
                 Some("Bearer bearer")
             );
             // The single write is the connector's recorded instances call.
-            assert_eq!(seen[2].method, HttpMethod::Put);
+            assert_eq!(seen[3].method, HttpMethod::Put);
             assert_eq!(
-                seen[2].url,
+                seen[3].url,
                 "https://lp.test/levelPlay/network/instances/v4/acct/"
             );
             assert!(
@@ -825,13 +917,13 @@ mod tests {
                 "the control group is never addressed: {:?}",
                 seen.iter().map(|request| &request.url).collect::<Vec<_>>()
             );
-            let body = match seen[2].body.as_ref().expect("body") {
+            let body = match seen[3].body.as_ref().expect("body") {
                 HttpBody::Json(value) => value.clone(),
                 other => panic!("expected JSON body, got {other:?}"),
             };
             assert_eq!(
                 body,
-                serde_json::json!({"instanceId": "i1", "price": 2_500_000})
+                serde_json::json!([{"instanceId": "i-b", "rate": "2.5"}])
             );
         }
 
@@ -841,6 +933,15 @@ mod tests {
         transport.push(
             200,
             groups_report(serde_json::json!([{"instanceId": "i1"}])),
+        );
+        transport.push(
+            200,
+            serde_json::json!([{
+                "instanceId": "i1",
+                "instanceName": "High",
+                "networkName": "admob",
+                "rate": "2.0"
+            }]),
         );
         let adapter = ops(Arc::clone(&transport), true);
         let request = ExperimentRequest {
@@ -861,8 +962,8 @@ mod tests {
         assert!(error.to_string().contains("i9"), "{error}");
         assert_eq!(
             transport.seen.lock().unwrap().len(),
-            2,
-            "the groups read is the last call: no write"
+            3,
+            "groups and the live waterfall were read: no write"
         );
 
         // No variant group at all: refused, no write either.
@@ -909,7 +1010,20 @@ mod tests {
         transport.push(200, auth());
         transport.push(
             200,
-            groups_report(serde_json::json!([{"instanceId": "i1"}])),
+            groups_report(serde_json::json!([{
+                "id": "i-b",
+                "name": "High",
+                "networkName": "admob"
+            }])),
+        );
+        transport.push(
+            200,
+            serde_json::json!([{
+                "instanceId": "i1",
+                "instanceName": "High",
+                "networkName": "admob",
+                "rate": "2.0"
+            }]),
         );
         transport.push(200, serde_json::json!({}));
         let adapter = ops(Arc::clone(&transport), true);
@@ -933,21 +1047,25 @@ mod tests {
             prev_value: "{}".into(),
         };
         let id = adapter.start_experiment(&request).await.expect("start");
-        assert_eq!(id, "g-b");
+        assert!(id.starts_with("g-b::"));
         let seen = transport.seen.lock().unwrap();
-        assert_eq!(seen.len(), 3, "auth, groups read and exactly one write");
-        assert_eq!(seen[2].method, HttpMethod::Put);
         assert_eq!(
-            seen[2].url,
+            seen.len(),
+            4,
+            "auth, groups, live instances and exactly one write"
+        );
+        assert_eq!(seen[3].method, HttpMethod::Put);
+        assert_eq!(
+            seen[3].url,
             "https://lp.test/levelPlay/network/instances/v4/acct/"
         );
-        let body = match seen[2].body.as_ref().expect("body") {
+        let body = match seen[3].body.as_ref().expect("body") {
             HttpBody::Json(value) => value.clone(),
             other => panic!("expected JSON body, got {other:?}"),
         };
         assert_eq!(
             body,
-            serde_json::json!({"instanceId": "i1", "price": 2_400_000})
+            serde_json::json!([{"instanceId": "i-b", "rate": "2.4"}])
         );
     }
 
@@ -970,7 +1088,7 @@ mod tests {
             prev_value: "{}".into(),
         };
         let id = adapter.start_experiment(&request).await.expect("start");
-        assert_eq!(id, "g-b");
+        assert!(id.starts_with("g-b::"));
         let seen = transport.seen.lock().unwrap();
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[2].method, HttpMethod::Post);
@@ -980,11 +1098,11 @@ mod tests {
         };
         assert_eq!(
             body,
-            serde_json::json!({
+            serde_json::json!([{
                 "instanceName": "admob_b",
                 "adapterNetwork": "admob",
-                "price": 1_250_000
-            })
+                "rate": "1.25"
+            }])
         );
     }
 
@@ -1011,13 +1129,38 @@ mod tests {
         let result = adapter.experiment("g-b").await.expect("read");
         assert_eq!(result.state, ExperimentState::Stopped);
 
-        // The dashboard-only outcomes refuse instead of fabricating an API:
-        // promote and deprecate make no call at all.
+        // Promotion is dashboard-only; a bare experiment id cannot name a
+        // variant group to delete. Both refuse without a call.
         let transport = Arc::new(FakeTransport::default());
         let adapter = ops(Arc::clone(&transport), true);
         assert!(adapter.promote_experiment("g-b").await.is_err());
         assert!(adapter.deprecate_experiment("g-b").await.is_err());
         assert!(transport.seen.lock().unwrap().is_empty());
+
+        // A real handle ends the test by deleting the documented variant
+        // group, so settlement is not left unresolved.
+        let transport = Arc::new(FakeTransport::default());
+        transport.push(200, auth());
+        transport.push(
+            200,
+            serde_json::json!({"groups": [{"groupId": "g-a", "abTest": "A"}]}),
+        );
+        let adapter = ops(Arc::clone(&transport), true);
+        adapter
+            .deprecate_experiment("g-b::experiment-1")
+            .await
+            .expect("stop");
+        {
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "auth + delete");
+            assert_eq!(seen[1].method, HttpMethod::Delete);
+            assert!(seen[1].url.contains("/levelPlay/groups/v4/acct"));
+            let body = match seen[1].body.as_ref().expect("body") {
+                HttpBody::Json(value) => value.clone(),
+                other => panic!("expected JSON body, got {other:?}"),
+            };
+            assert_eq!(body, serde_json::json!({"ids": ["g-b"]}));
+        }
 
         assert!(adapter.change_in_test_arm());
         assert!(adapter.call_log().is_empty());
@@ -1042,22 +1185,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_settings_encode_the_groups_and_scope_revenue_reads_the_app_report() {
+    async fn current_settings_encode_the_live_instance_price() {
         let transport = Arc::new(FakeTransport::default());
+        let instances = serde_json::json!([{
+            "instanceId": "i1",
+            "adUnit": "u1",
+            "instanceName": "i1",
+            "networkName": "admob",
+            "rate": "2.5"
+        }]);
         transport.push(200, auth());
-        transport.push(
-            200,
-            groups_report(serde_json::json!([{"instanceId": "i1"}])),
-        );
+        transport.push(200, instances.clone());
         let adapter = ops(Arc::clone(&transport), true);
-        let settings = adapter.current_settings("u1").await.expect("settings");
-        assert!(settings.contains("g-a"));
-        assert!(settings.contains("g-b"));
+        let settings = adapter.current_settings("i1").await.expect("settings");
+        let value: serde_json::Value = serde_json::from_str(&settings).expect("json");
+        assert_eq!(value["priceEcpm"], serde_json::json!(2_500_000));
+        assert_eq!(value["i1"], serde_json::json!(2_500_000));
         // Reading again returns the same canonical encoding.
-        transport.push(
-            200,
-            groups_report(serde_json::json!([{"instanceId": "i1"}])),
-        );
+        transport.push(200, instances);
         assert_eq!(settings, settings_from(&adapter).await);
         // The monthly pass's scope revenue is the app-level revenue report,
         // summed exactly into micros.
@@ -1081,7 +1226,7 @@ mod tests {
     }
 
     async fn settings_from(adapter: &LevelPlayPlatformOps) -> String {
-        adapter.current_settings("u1").await.expect("settings")
+        adapter.current_settings("i1").await.expect("settings")
     }
 
     #[tokio::test]
@@ -1114,7 +1259,10 @@ mod tests {
         transport.push(200, identical);
         let adapter = ops(Arc::clone(&transport), true);
         let id = adapter.start_null_experiment(&spec()).await.expect("adopt");
-        assert_eq!(id, "g-b", "the variant group is the null experiment handle");
+        assert!(
+            id.starts_with("g-b::"),
+            "a unique null-experiment handle: {id}"
+        );
         assert_eq!(
             transport.seen.lock().unwrap().len(),
             2,

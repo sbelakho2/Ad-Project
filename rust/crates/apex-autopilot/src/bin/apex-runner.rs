@@ -349,6 +349,11 @@ async fn run_job(
             );
             println!("Run reference: {run_reference}");
         }
+        // The audit path emits into the batching emitter; without this flush
+        // the audit_completed family is lost when the process exits.
+        if let Some(events) = &audit_events {
+            events.flush().await;
+        }
         return Ok(false);
     }
 

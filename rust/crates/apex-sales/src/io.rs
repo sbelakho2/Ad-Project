@@ -263,8 +263,17 @@ impl Mailer for OutboxMailer {
                 }
             })
             .collect();
-        std::fs::write(self.dir.join(format!("{name}.eml")), &msg.raw)
-            .map_err(|e| MailError(e.to_string()))
+        let path = self.dir.join(format!("{name}.eml"));
+        std::fs::write(&path, &msg.raw).map_err(|e| MailError(e.to_string()))?;
+        // A preview carries the recipient's address and the message body:
+        // owner-only, like the engine state.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| MailError(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -324,6 +333,16 @@ mod tests {
         };
         m.send(&msg).unwrap();
         assert!(dir.join("t1_apex_example.eml").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("t1_apex_example.eml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "a preview with an address is owner-only");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

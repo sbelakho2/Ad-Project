@@ -326,6 +326,7 @@ mod tests {
                 revenue_30d: 0,
                 impressions_30d: 0,
             },
+            mediation_totals_reported: false,
         }
     }
 

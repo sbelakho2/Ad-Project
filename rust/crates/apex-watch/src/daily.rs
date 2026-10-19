@@ -590,14 +590,23 @@ async fn apply_check(
         report.not_modified += 1;
     }
 
+    let mut rotated_cancel_hash: Option<String> = None;
     if changes.is_empty() {
         report.unchanged += 1;
     } else {
+        // A fresh single-use cancel token travels with the alert; the old
+        // one stops matching as soon as the alert is accepted.
+        let (cancel_raw, cancel_hash) = crate::store::SubscriberStore::mint_cancel_token();
+        let cancel_url = deps
+            .watch_page_url
+            .as_deref()
+            .and_then(|url| cancel_link(url, &cancel_raw));
         match send_alert(
             subscriber,
             &current,
             &changes,
             deps.watch_page_url.as_deref(),
+            cancel_url.as_deref(),
             deps.sink,
         )
         .await
@@ -605,12 +614,18 @@ async fn apply_check(
             Ok(()) => {
                 entry.alerted = true;
                 report.alerted += 1;
+                // Only a delivered alert rotates the token; a failed send
+                // leaves the previous cancel link usable.
+                rotated_cancel_hash = Some(cancel_hash);
             }
             Err(detail) => entry.alert_error = Some(detail),
         }
     }
 
     let mut updated = subscriber.clone();
+    if let Some(hash) = rotated_cancel_hash {
+        updated.cancel_token_hash = hash;
+    }
     updated.last_check_at = Some(now_ms);
     if changes.is_empty() || entry.alerted {
         updated.last_findings = Some(current.clone());
@@ -647,11 +662,22 @@ fn rule_findings(present: bool, lines: Vec<String>) -> Vec<StoredFinding> {
             revenue_30d: 0,
             impressions_30d: 0,
         },
+        mediation_totals_reported: false,
     };
     apex_audit::rules::app_ads_txt::check(&snapshot)
         .iter()
         .map(StoredFinding::from_rule)
         .collect()
+}
+
+/// The absolute cancel URL derived from the configured watch page URL.
+fn cancel_link(watch_page_url: &str, token: &str) -> Option<String> {
+    let trimmed = watch_page_url.trim_end_matches('/');
+    let base = trimmed.strip_suffix("/watch").unwrap_or(trimmed);
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/watch/cancel?token={token}"))
 }
 
 /// Compose and send the one alert for this transition.
@@ -660,6 +686,7 @@ async fn send_alert(
     current: &[StoredFinding],
     changes: &[crate::findings::Change],
     watch_page_url: Option<&str>,
+    cancel_url: Option<&str>,
     sink: &dyn NotificationSink,
 ) -> Result<(), String> {
     let domain = &subscriber.domain;
@@ -674,6 +701,9 @@ async fn send_alert(
     text.push('\n');
     if let Some(url) = watch_page_url {
         text.push_str(&format!("\n{WATCH_PAGE_PREFIX} {url}\n"));
+    }
+    if let Some(url) = cancel_url {
+        text.push_str(&format!("\nCancel your setup watch: {url}\n"));
     }
     text.push_str(&format!("\n{UNSUBSCRIBE_NOTE}\n"));
 
@@ -693,6 +723,12 @@ async fn send_alert(
             escape(url)
         ));
     }
+    if let Some(url) = cancel_url {
+        html.push_str(&format!(
+            "<p><a href=\"{}\">Cancel your setup watch</a></p>",
+            escape(url)
+        ));
+    }
     html.push_str(&format!("<p>{}</p>", escape(UNSUBSCRIBE_NOTE)));
 
     let message = DeliveryMessage {
@@ -707,6 +743,7 @@ async fn send_alert(
             findings_hash(current)
         ),
         reference: Some(subscriber.id.clone()),
+        list_unsubscribe: cancel_url.map(str::to_string),
     };
     sink.send(&message)
         .await

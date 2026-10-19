@@ -126,6 +126,12 @@ impl OperatorSessions {
         )
     }
 
+    /// The configured idle lifetime in milliseconds (the cookie `Max-Age`
+    /// must agree with the server-side expiry).
+    pub fn idle_ms(&self) -> i64 {
+        self.idle_ms
+    }
+
     /// Issue a session after both factors verified. Prunes expired entries
     /// and evicts the least recently used session when at capacity.
     pub fn open(
@@ -343,9 +349,17 @@ impl Inner {
 /// attribute. The cookie is host-only, `HttpOnly`, `SameSite=Lax` and scoped
 /// to `/control` so no customer surface ever sees it.
 pub fn session_cookie(id: &str, secure: bool) -> String {
+    session_cookie_for_idle(id, secure, SESSION_IDLE_MS)
+}
+
+/// The `Set-Cookie` value for a session with an explicit idle lifetime. The
+/// cookie's `Max-Age` is the same bound the store enforces server-side, so a
+/// deployment that configures a shorter idle window does not hand out a
+/// cookie that claims a longer one.
+pub fn session_cookie_for_idle(id: &str, secure: bool, idle_ms: i64) -> String {
+    let max_age = idle_ms.max(1).saturating_add(999) / 1_000;
     let mut cookie = format!(
-        "{SESSION_COOKIE}={id}; Path={SESSION_PATH}; Max-Age={}; HttpOnly; SameSite=Lax",
-        SESSION_IDLE_MS / 1000
+        "{SESSION_COOKIE}={id}; Path={SESSION_PATH}; Max-Age={max_age}; HttpOnly; SameSite=Lax"
     );
     if secure {
         cookie.push_str("; Secure");

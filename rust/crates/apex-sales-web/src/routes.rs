@@ -392,12 +392,15 @@ fn normalized_authority(value: &str, default_port: u16) -> Option<(String, u16)>
     ))
 }
 
-/// Login-CSRF guard for the session-minting `/login` POST.
+/// Same-origin guard for every state-changing POST (`/login`, `/logout` and
+/// `/actions/{kind}`).
 ///
 /// Absent `Origin` (tests, curl) is allowed. A present `Origin` must name the
 /// same authority as the request's `Host`, must be `https` over TLS, and a
-/// `Sec-Fetch-Site: cross-site` hint is always refused.
-fn login_origin_allowed(headers: &HeaderMap) -> bool {
+/// `Sec-Fetch-Site: cross-site` hint is always refused. The per-session CSRF
+/// token still protects the action forms; this is the independent origin
+/// check the browser also supplies.
+fn same_origin_allowed(headers: &HeaderMap) -> bool {
     if headers
         .get("sec-fetch-site")
         .and_then(|value| value.to_str().ok())
@@ -454,7 +457,7 @@ async fn login_submit(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !login_origin_allowed(&headers) {
+    if !same_origin_allowed(&headers) {
         let location = location(&state);
         return html_response(
             StatusCode::FORBIDDEN,
@@ -508,6 +511,16 @@ async fn logout(
     let Some(view) = session_id_from_headers(&state, &headers) else {
         return redirect("/login", None);
     };
+    if !same_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(
+                state.now_secs(),
+                &location(&state),
+                "Cross-origin sign-out is not allowed; the session was not closed.",
+            ),
+        );
+    }
     let fields = actions::parse_form(&body).unwrap_or_default();
     let csrf = fields.get("csrf_token").cloned().unwrap_or_default();
     if !crate::signing::constant_time_eq(csrf.as_bytes(), view.csrf.as_bytes()) {
@@ -547,6 +560,16 @@ async fn action_submit(
         Ok(session) => session,
         Err(response) => return *response,
     };
+    if !same_origin_allowed(&headers) {
+        return html_response(
+            StatusCode::FORBIDDEN,
+            pages::errors::bad_request(
+                state.now_secs(),
+                &location(&state),
+                "Cross-origin form submission is not allowed; nothing was written.",
+            ),
+        );
+    }
     let Some(kind) = ActionKind::parse(&kind) else {
         return html_response(
             StatusCode::NOT_FOUND,

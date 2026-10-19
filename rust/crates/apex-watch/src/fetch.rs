@@ -452,12 +452,25 @@ fn parse_header_json(header_json: &str) -> (Option<String>, Option<String>) {
         object
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .and_then(|(_, value)| value.as_str())
+            .and_then(|(_, value)| header_text(value))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     };
     (find("etag"), find("last-modified"))
+}
+
+/// The header value in one `%{header_json}` entry. curl emits every header as
+/// an array (`{"etag":["\"v2\""]}`) because a response may repeat a header;
+/// some scripts and older emitters use a bare string. Both shapes describe
+/// the same first value, so accept either instead of silently dropping every
+/// real validator and making the conditional GET unconditional.
+fn header_text(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => Some(text.as_str()),
+        serde_json::Value::Array(values) => values.iter().find_map(serde_json::Value::as_str),
+        _ => None,
+    }
 }
 
 /// What one successful `app-ads.txt` read produced.
@@ -834,7 +847,7 @@ mod tests {
     #[test]
     fn curl_output_reads_validators_and_a_304_from_header_json() {
         let stdout = format!(
-            "{STATUS_MARKER}304||{{\"etag\":\"\\\"v2\\\"\",\"last-modified\":\"Tue, 01 Oct 2026 10:00:00 GMT\",\"content-length\":\"0\"}}"
+            "{STATUS_MARKER}304||{{\"etag\":[\"\\\"v2\\\"\"],\"last-modified\":[\"Tue, 01 Oct 2026 10:00:00 GMT\"],\"content-length\":[\"0\"]}}"
         );
         let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
         assert_eq!(fetched.status, 304);
@@ -854,6 +867,36 @@ mod tests {
         let stdout = format!("{STATUS_MARKER}200|url|not-json");
         let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
         assert_eq!(fetched.etag, None);
+        assert_eq!(fetched.last_modified, None);
+    }
+
+    #[test]
+    fn curl_output_reads_the_array_shaped_header_json_curl_actually_emits() {
+        // curl 8.7.1 `%{header_json}` wraps each header in an array (a
+        // response may repeat one). The old parser only accepted a bare
+        // string, so real ETag/Last-Modified values were dropped and every
+        // check was unconditional.
+        let stdout = format!(
+            "{STATUS_MARKER}200||{{\"etag\":[\"\\\"be3d7c549c9518113747f7c27293319d\\\"\"],\"last-modified\":[\"Tue, 13 Oct 2026 19:08:26 GMT\"],\"content-length\":[\"38575\"]}}"
+        );
+        let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
+        assert_eq!(
+            fetched.etag.as_deref(),
+            Some("\"be3d7c549c9518113747f7c27293319d\"")
+        );
+        assert_eq!(
+            fetched.last_modified.as_deref(),
+            Some("Tue, 13 Oct 2026 19:08:26 GMT")
+        );
+        assert!(!fetched.validators().is_empty());
+
+        // The first value of a repeated header is the one conditional GETs
+        // send back; a non-string entry is ignored.
+        let stdout = format!(
+            "{STATUS_MARKER}304||{{\"etag\":[\"\\\"v2\\\"\",\"\\\"v1\\\"\"],\"last-modified\":[42]}}"
+        );
+        let fetched = parse_curl_output(stdout.as_bytes(), 64).unwrap();
+        assert_eq!(fetched.etag.as_deref(), Some("\"v2\""));
         assert_eq!(fetched.last_modified, None);
     }
 

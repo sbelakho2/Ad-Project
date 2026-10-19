@@ -413,10 +413,30 @@ impl JobStore {
             path: final_path.display().to_string(),
             reason: format!("serializing the job failed: {error}"),
         })?;
-        std::fs::write(&temp_path, body).map_err(|error| JobError::Write {
-            path: temp_path.display().to_string(),
-            reason: error.to_string(),
-        })?;
+        // The job file carries the raw idempotency key and the target's
+        // operator-supplied payload; it is a restricted record, so the
+        // temporary file is created owner-only before the atomic rename
+        // (a plain write would inherit the umask and could be world-readable).
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        {
+            let mut file = options.open(&temp_path).map_err(|error| JobError::Write {
+                path: temp_path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+            use std::io::Write as _;
+            file.write_all(body.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|error| JobError::Write {
+                    path: temp_path.display().to_string(),
+                    reason: error.to_string(),
+                })?;
+        }
         std::fs::rename(&temp_path, &final_path).map_err(|error| JobError::Write {
             path: final_path.display().to_string(),
             reason: format!("atomic rename failed: {error}"),
@@ -1032,6 +1052,12 @@ mod tests {
         assert_eq!(written.job(), &job);
         let path = store.dir().join(format!("{}.json", job.job_id));
         assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a job file is owner-only");
+        }
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
             Some(format!("{}.json", job.job_id).as_str())

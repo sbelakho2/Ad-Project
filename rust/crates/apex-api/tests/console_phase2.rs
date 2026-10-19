@@ -1468,8 +1468,8 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         .contains("Cancels any time; the plan stops after the current month"));
     assert!(page.body.contains("/console/settings/monitoring/cancel"));
     assert!(
-        page.body.contains("name=\"confirm\""),
-        "the cancel form renders the confirmation checkbox"
+        page.body.contains("name=\"confirm\" value=\"yes\""),
+        "the cancel form renders the confirmation checkbox with the accepted value"
     );
     let csrf = common::extract_csrf(&page.body);
     let unconfirmed = send(
@@ -1504,6 +1504,16 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         .expect("kept");
     assert!(state.cancelled(), "cancelled-not-deleted");
     assert!(state.stops_after.is_some(), "the stop period is recorded");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&state_path)
+            .expect("state file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "plan state must be 0600, got {mode:o}");
+    }
     let detail = send(
         &router,
         get_with_cookie("/console/settings/monitoring", &cookie),
@@ -1546,8 +1556,8 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
     assert!(billing.body.contains("$5,000.00"), "{}", billing.body);
     assert!(billing.body.contains("Cancel managed plan"));
     assert!(
-        billing.body.contains("name=\"confirm\""),
-        "the cancel form renders the confirmation checkbox"
+        billing.body.contains("name=\"confirm\" value=\"yes\""),
+        "the cancel form renders the confirmation checkbox with the accepted value"
     );
     let csrf = common::extract_csrf(&billing.body);
     let unconfirmed = send(
@@ -1582,6 +1592,16 @@ async fn policy_and_monitoring_pages_show_recorded_values_and_settings_links() {
         .expect("kept");
     assert!(managed.cancelled());
     assert!(managed.stops_after.is_some());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&managed_path)
+            .expect("state file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "plan state must be 0600, got {mode:o}");
+    }
 }
 
 #[tokio::test]

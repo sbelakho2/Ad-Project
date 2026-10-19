@@ -583,3 +583,89 @@ async fn governance_receiver_writes_the_pause_register_and_the_effective_policy(
     std::env::remove_var(INTERVENTIONS_ENV);
     std::env::remove_var(POLICY_ENV);
 }
+
+/// The split-host managed-plan channel writes the same plan-state file the
+/// console and runner read, atomically and owner-only.
+#[tokio::test]
+async fn governance_managed_plan_is_written_for_the_console_and_runner() {
+    let dir = TempDir::new("governance-managed-plan");
+    let _env = with_jobs_env(Some("gov-token"), Some(&dir.path));
+    let plan = apex_billing::ManagedPlan::default().activate(2_500_000_000, "2026-10");
+    let store = apex_api::connections::VaultedConnectionStore::with_vault_key_hex(
+        &dir.path,
+        &"11".repeat(32),
+    )
+    .expect("vault store");
+    let app = router(
+        AppState::new(
+            std::sync::Arc::new(apex_api::JsonFileAuditSource::new(std::env::temp_dir())),
+            std::sync::Arc::new(apex_api::FileLedgerSource::new(
+                std::env::temp_dir(),
+                std::collections::HashMap::new(),
+            )),
+        )
+        .with_connection_store(std::sync::Arc::new(store)),
+    );
+    let body = serde_json::json!({
+        "kind": "managed_plan",
+        "publisher": "northstar",
+        "state": plan,
+    });
+    let (status, response) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+
+    let view = apex_api::billing_view::plan_state_view(
+        Some(&dir.path),
+        "northstar",
+        apex_billing::PlanId::Managed,
+    )
+    .expect("readable");
+    assert_eq!(
+        view.map(|state| state.plan),
+        Some(apex_billing::PlanId::Managed)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path.join("northstar.managed.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // A publisher with path characters is refused and writes nothing.
+    let hostile = serde_json::json!({
+        "kind": "managed_plan",
+        "publisher": "../etc",
+        "state": plan,
+    });
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/v1/operator/governance")
+            .header(header::AUTHORIZATION, "Bearer gov-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&hostile).unwrap()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
